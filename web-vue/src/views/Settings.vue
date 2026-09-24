@@ -35,7 +35,7 @@
               :image-poll-timeout-field="imagePollTimeoutField"
               :image-stream-timeout-field="imageStreamTimeoutField"
               :image-account-concurrency-field="imageAccountConcurrencyField"
-              :image-timeout-retry-field="imageTimeoutRetryField"
+              :image-task-timeout-field="imageTaskTimeoutField"
               :proxy-busy="proxyBusy"
               :proxy-test-result="proxyTestResult"
               @clear-proxy-test-result="proxyTestResult = null"
@@ -471,13 +471,13 @@ const imageAccountConcurrencyField = useNumberSettingField(
   },
   { integer: true, min: 1, fallback: 3 },
 )
-const imageTimeoutRetryField = useNumberSettingField(
-  () => localSettings.value?.image_timeout_retry_secs ?? 30,
+const imageTaskTimeoutField = useNumberSettingField(
+  () => localSettings.value?.image_task_timeout_secs ?? 600,
   (value) => {
     if (!localSettings.value) return
-    localSettings.value.image_timeout_retry_secs = value
+    localSettings.value.image_task_timeout_secs = value
   },
-  { integer: true, min: 1, fallback: 30 },
+  { integer: true, min: 60, max: 900, fallback: 600 },
 )
 const imageSettleSecondsField = useNumberSettingField(
   () => localSettings.value?.image_settle_secs ?? 5,

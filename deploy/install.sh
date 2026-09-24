@@ -592,7 +592,7 @@ write_default_config_json() {
   "image_check_before_hit_enabled": false,
   "image_settle_secs": 2,
   "auto_relogin_after_refresh": false,
-  "image_timeout_retry_secs": 30
+  "image_task_timeout_secs": 600
 }
 EOF
 

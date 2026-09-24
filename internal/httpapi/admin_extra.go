@@ -30,21 +30,22 @@ import (
 // in the same volume layout and do not need an additional database.
 
 type imageTaskState struct {
-	ID         string           `json:"id"`
-	OwnerID    string           `json:"-"`
-	Status     string           `json:"status"`
-	Mode       string           `json:"mode"`
-	Model      string           `json:"model"`
-	N          int              `json:"n"`
-	Size       string           `json:"size,omitempty"`
-	Quality    string           `json:"quality,omitempty"`
-	Prompt     string           `json:"-"`
-	Images     [][]byte         `json:"-"`
-	ImageNames []string         `json:"-"`
-	Data       []map[string]any `json:"data,omitempty"`
-	Error      string           `json:"error,omitempty"`
-	CreatedAt  string           `json:"created_at"`
-	UpdatedAt  string           `json:"updated_at"`
+	ID          string           `json:"id"`
+	OwnerID     string           `json:"owner_id"`
+	RequestHash string           `json:"request_hash,omitempty"`
+	Status      string           `json:"status"`
+	Mode        string           `json:"mode"`
+	Model       string           `json:"model"`
+	N           int              `json:"n"`
+	Size        string           `json:"size,omitempty"`
+	Quality     string           `json:"quality,omitempty"`
+	Prompt      string           `json:"-"`
+	Images      [][]byte         `json:"-"`
+	ImageNames  []string         `json:"-"`
+	Data        []map[string]any `json:"data,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	CreatedAt   string           `json:"created_at"`
+	UpdatedAt   string           `json:"updated_at"`
 }
 
 type editableFileTaskState struct {
@@ -582,7 +583,7 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 				if id == "" {
 					continue
 				}
-				task, ok := s.imageTasks[id]
+				task, ok := s.imageTasks[imageTaskKey(owner, id)]
 				if !ok || task.OwnerID != owner {
 					missing = append(missing, id)
 				} else {
@@ -619,15 +620,7 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		owner := s.authIdentity(r)
 		task := &imageTaskState{ID: body.ClientTaskID, OwnerID: owner, Status: "queued", Mode: "generate", Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, Prompt: body.Prompt, CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
-		s.imageTaskMu.Lock()
-		if previous := s.imageTasks[task.ID]; previous != nil && previous.OwnerID == owner {
-			task = previous
-		} else {
-			s.imageTasks[task.ID] = task
-			go s.runImageTask(task, r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
-		}
-		s.imageTaskMu.Unlock()
-		writeJSON(w, 202, imageTaskPublic(task))
+		s.submitImageTask(w, r, task)
 	default:
 		writeError(w, 405, "method not allowed", "invalid_request_error")
 	}
@@ -638,11 +631,15 @@ func (s *Server) imageTaskByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/image-tasks/"), "/")
+	if r.Method != http.MethodGet && !(r.Method == http.MethodPost && strings.HasSuffix(path, "/resume-poll")) {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
 	if strings.HasSuffix(path, "/resume-poll") {
 		path = strings.TrimSuffix(path, "/resume-poll")
 	}
 	s.imageTaskMu.RLock()
-	task, ok := s.imageTasks[path]
+	task, ok := s.imageTasks[imageTaskKey(s.authIdentity(r), path)]
 	var copyTask *imageTaskState
 	if ok {
 		copyValue := *task
@@ -675,10 +672,15 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]), "application/json") {
+		s.imageTaskJSONEdits(w, r)
+		return
+	}
 	if err := r.ParseMultipartForm(112 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid multipart form", "invalid_request_error")
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	clientID := strings.TrimSpace(r.FormValue("client_task_id"))
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
 	if clientID == "" || prompt == "" {
@@ -719,19 +721,25 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	owner := s.authIdentity(r)
 	now := time.Now().UTC().Format(time.RFC3339)
-	task := &imageTaskState{ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: "1024x1024", Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, CreatedAt: now, UpdatedAt: now}
-	s.imageTaskMu.Lock()
-	if previous := s.imageTasks[clientID]; previous != nil && previous.OwnerID == owner {
-		task = previous
-	} else {
-		s.imageTasks[clientID] = task
-		go s.runImageTask(task, r.Header.Get("Authorization"), r.Header.Get("X-API-Key"))
-	}
-	s.imageTaskMu.Unlock()
-	writeJSON(w, http.StatusAccepted, imageTaskPublic(task))
+	task := &imageTaskState{ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: firstNonEmpty(r.FormValue("size"), "1024x1024"), Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, CreatedAt: now, UpdatedAt: now}
+	s.submitImageTask(w, r, task)
 }
 
-func (s *Server) runImageTask(task *imageTaskState, authHeader, apiKey string) {
+func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHeader, apiKey string) {
+	defer func() {
+		if recover() != nil {
+			s.finishImageTaskError(task, "image task execution failed")
+		}
+	}()
+	s.imageTaskMu.Lock()
+	task.Status = "running"
+	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	err := s.saveImageTaskLocked(task)
+	s.imageTaskMu.Unlock()
+	if err != nil {
+		s.finishImageTaskError(task, "could not persist image task state")
+		return
+	}
 	var req *http.Request
 	var target string
 	var body io.Reader
@@ -743,6 +751,7 @@ func (s *Server) runImageTask(task *imageTaskState, authHeader, apiKey string) {
 		_ = writer.WriteField("prompt", task.Prompt)
 		_ = writer.WriteField("n", fmt.Sprint(task.N))
 		_ = writer.WriteField("size", task.Size)
+		_ = writer.WriteField("quality", task.Quality)
 		_ = writer.WriteField("response_format", "url")
 		for index, raw := range task.Images {
 			name := "image.png"
@@ -761,7 +770,7 @@ func (s *Server) runImageTask(task *imageTaskState, authHeader, apiKey string) {
 		contentType = writer.FormDataContentType()
 		target = "http://internal/v1/images/edits"
 	} else {
-		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "response_format": "url"})
+		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "quality": task.Quality, "response_format": "url"})
 		body = bytes.NewReader(raw)
 		target = "http://internal/v1/images/generations"
 	}
@@ -774,22 +783,38 @@ func (s *Server) runImageTask(task *imageTaskState, authHeader, apiKey string) {
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
+	req = req.WithContext(context.WithValue(ctx, imageTaskLogContextKey{}, imageTaskLogContext{
+		CallID: "image-task-" + imageTaskKey(task.OwnerID, task.ID),
+		TaskID: task.ID,
+	}))
 	recorder := &responseCapture{header: make(http.Header)}
-	s.imageGenerations(recorder, req)
+	// Monitor the execution, not the 202 acknowledgement or polling requests.
+	// The shared monitor supplies account identity, timings, outputs and errors.
+	if task.Mode == "edit" {
+		s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageEdits))
+	} else {
+		s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageGenerations))
+	}
 	s.imageTaskMu.Lock()
 	defer s.imageTaskMu.Unlock()
+	defer s.persistFinishedImageTaskLocked(task)
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	if recorder.status >= 200 && recorder.status < 300 {
 		var result map[string]any
 		if json.Unmarshal(recorder.body.Bytes(), &result) == nil {
 			if data, ok := result["data"].([]any); ok {
 				for _, value := range data {
-					if item, ok := value.(map[string]any); ok {
+					if item, ok := value.(map[string]any); ok && (stringValue(item["url"]) != "" || stringValue(item["b64_json"]) != "") {
 						task.Data = append(task.Data, item)
 					}
 				}
 			}
-			task.Status = "success"
+			if len(task.Data) == 0 {
+				task.Status = "error"
+				task.Error = "image response contained no images"
+			} else {
+				task.Status = "success"
+			}
 		} else {
 			task.Status = "error"
 			task.Error = "invalid image response"
@@ -817,6 +842,7 @@ func (s *Server) finishImageTaskError(task *imageTaskState, message string) {
 	task.Status = "error"
 	task.Error = message
 	task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	s.persistFinishedImageTaskLocked(task)
 }
 
 func imageTaskPublic(task *imageTaskState) map[string]any {

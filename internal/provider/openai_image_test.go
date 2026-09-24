@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
@@ -458,7 +459,13 @@ func TestOpenAIImageGenerationDownloadsAssistantOutputInsteadOfEchoedReference(t
 	referenceID := "file_00000000111111111111111111111111"
 	generatedID := "file_00000000222222222222222222222222"
 	referenceBytes := onePixelPNG(t)
-	generatedBytes := []byte("generated-image-output")
+	var output bytes.Buffer
+	outputImage := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	outputImage.Set(1, 1, color.RGBA{R: 255, A: 255})
+	if err := png.Encode(&output, outputImage); err != nil {
+		t.Fatal(err)
+	}
+	generatedBytes := output.Bytes()
 	var referenceDownloads atomic.Int32
 	var generatedDownloads atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -753,4 +760,92 @@ func serverURL(r *http.Request) string {
 		return "http://127.0.0.1"
 	}
 	return value
+}
+
+func TestOpenAIImageDownloadsValidateActualBytes(t *testing.T) {
+	valid := onePixelPNG(t)
+	for _, tc := range []struct {
+		name, declared string
+		raw            []byte
+		wantError      bool
+	}{
+		{"png-mislabeled", "application/octet-stream", valid, false},
+		{"storage-busy", "image/png", []byte("\xef\xbb\xbf<?xml version=\"1.0\"?><Error><Code>ServerBusy</Code><Message>secret signed URL</Message></Error>"), true},
+		{"html-as-png", "image/png", []byte("<html>error</html>"), true},
+		{"truncated-png", "image/png", valid[:len(valid)-15], true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{tc.declared}}, Body: io.NopCloser(bytes.NewReader(tc.raw))}
+			client := NewOpenAIImage("https://example.invalid", nil, nil, time.Second)
+			raw, mime, err := client.readImageDownloadResponse(context.Background(), accounts.Account{}, response)
+			if tc.wantError {
+				if err == nil || len(raw) != 0 || mime != "" {
+					t.Fatalf("invalid image accepted: mime=%s error=%v", mime, err)
+				}
+				if strings.Contains(err.Error(), "secret") {
+					t.Fatal("upstream error body leaked")
+				}
+				dir := t.TempDir()
+				_, _, err = client.Resolve(context.Background(), accounts.Account{}, ImageResult{Base64: base64.StdEncoding.EncodeToString(tc.raw), MIME: "image/png"}, "url", dir, "")
+				if !IsImageDownloadError(err) {
+					t.Fatalf("invalid Resolve error: %v", err)
+				}
+				entries, _ := os.ReadDir(dir)
+				if len(entries) != 0 {
+					t.Fatal("invalid image persisted")
+				}
+			} else if err != nil || mime != "image/png" || !bytes.Equal(raw, valid) {
+				t.Fatalf("valid PNG rejected or mislabeled: %s %v", mime, err)
+			}
+		})
+	}
+}
+
+func TestOpenAIImageTerminalMessageErrors(t *testing.T) {
+	const reason = "非常抱歉，生成的图片可能违反了关于潜在欺诈或诈骗活动的防护限制。如果你认为此判断有误，请重试或修改提示语。"
+	fixture := func(role string, flagged any, end bool, text string) map[string]any {
+		return map[string]any{"author": map[string]any{"role": role}, "metadata": map[string]any{"is_error": flagged},
+			"status": "finished_successfully", "end_turn": end, "content": map[string]any{"content_type": "text", "parts": []any{text}}}
+	}
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"successful-message-with-error-flag", map[string]any{"mapping": map[string]any{"leaf": map[string]any{"message": fixture("assistant", true, true, reason)}}}, reason},
+		{"stream-message", map[string]any{"message": fixture("assistant", true, true, reason)}, reason},
+		{"tool-error", fixture("tool", true, true, "Image quota exceeded"), "Image quota exceeded"},
+		{"empty-final-error", fixture("assistant", true, true, ""), "without a description"},
+		{"false-flag", fixture("assistant", false, true, reason), ""},
+		{"string-flag-not-trusted", fixture("assistant", "false", true, reason), ""},
+		{"user-text-is-not-error", fixture("user", true, true, reason), ""},
+		{"normal-completed-reply", fixture("assistant", false, true, "Generating an image"), ""},
+		{"false-error-field", map[string]any{"error": false}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := openAIImageTerminalError(tc.value)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("unexpected failure: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !IsImageTerminalError(err) {
+				t.Fatalf("terminal reason missing: %v", err)
+			}
+			var upstream *protocol.UpstreamError
+			if !errors.As(err, &upstream) || upstream.Status != 422 {
+				t.Fatalf("wrong upstream failure type: %v", err)
+			}
+		})
+	}
+	unfinished := fixture("assistant", true, false, "")
+	unfinished["status"] = "in_progress"
+	if err := openAIImageTerminalError(unfinished); err != nil {
+		t.Fatalf("did not wait for streaming error description: %v", err)
+	}
+	long := truncateOpenAIImageReason(strings.Repeat("错误原因", 100))
+	if !utf8.ValidString(long) || len([]rune(long)) != 161 {
+		t.Fatalf("invalid bounded Unicode reason: %q", long)
+	}
 }

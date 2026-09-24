@@ -12,6 +12,7 @@ import (
 // period has elapsed, so newly generated files are never removed mid-request.
 func (s *Server) imageRetentionScheduler() {
 	cleanup := func() {
+		s.cleanupExpiredImageTasks()
 		removed, bytes := s.cleanupExpiredImages()
 		if removed > 0 {
 			log.Printf("image retention cleanup removed %d files (%d bytes)", removed, bytes)

@@ -130,7 +130,7 @@ func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, reques
 
 func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest) {
 	started := time.Now()
-	imageContext, cancelImageRequest := context.WithTimeout(r.Context(), imageRequestTotalTimeout(s.cfg.RequestTimeout))
+	imageContext, cancelImageRequest := s.imageTaskContext(r.Context())
 	defer cancelImageRequest()
 	releaseSlot, err := s.acquireImageSlot(imageContext, r)
 	if err != nil {

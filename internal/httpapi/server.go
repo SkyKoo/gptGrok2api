@@ -67,6 +67,7 @@ type Server struct {
 	videoJobs          map[string]*videoJob
 	imageTaskMu        sync.RWMutex
 	imageTasks         map[string]*imageTaskState
+	imageTaskLoadErr   error
 	imageSlots         chan struct{}
 	fileTaskMu         sync.RWMutex
 	fileTasks          map[string]*editableFileTaskState
@@ -142,6 +143,7 @@ func New(cfg config.Config) *Server {
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)
 	server.loadEditableFileTasks()
+	server.loadImageTasks()
 	server.chatProvider.SetProxyManager(proxyManager)
 	server.consoleProvider.SetProxyManager(proxyManager)
 	server.mediaProvider.SetProxyManager(proxyManager)
@@ -442,6 +444,13 @@ func (s *Server) shouldMonitorRequest(r *http.Request) bool {
 func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	modelName, summary, requestShape := monitorRequestShape(r)
 	id := newChatID()
+	if task, ok := r.Context().Value(imageTaskLogContextKey{}).(imageTaskLogContext); ok {
+		id = task.CallID
+		if shape, ok := requestShape.(map[string]any); ok {
+			shape["client_task_id"] = task.TaskID
+			shape["async"] = true
+		}
+	}
 	s.monitor.start(id, r.URL.Path, modelName, summary)
 	proxySnapshot := s.proxyManager.Snapshot()
 	meta := map[string]any{"model": modelName, "endpoint": r.URL.Path, "has_proxy": boolValue(proxySnapshot["proxy_configured"], false), "egress_mode": stringValue(proxySnapshot["mode"])}
@@ -1789,11 +1798,20 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
+		configValue["image_task_timeout_secs"] = configuredImageTaskTimeoutSeconds(configValue)
 		writeJSON(w, http.StatusOK, map[string]any{"runtime": "go", "config": configValue})
 	case http.MethodPost:
 		var updates map[string]any
 		if !decodeJSON(w, r, &updates) {
 			return
+		}
+		if value, exists := updates["image_task_timeout_secs"]; exists {
+			seconds, err := parseImageTaskTimeoutSeconds(value)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+				return
+			}
+			updates["image_task_timeout_secs"] = seconds
 		}
 		current, err := s.store.Config()
 		if err != nil {
@@ -1803,6 +1821,7 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		for key, value := range updates {
 			current[key] = value
 		}
+		current["image_task_timeout_secs"] = configuredImageTaskTimeoutSeconds(current)
 		if err := s.store.ReplaceConfig(current); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return

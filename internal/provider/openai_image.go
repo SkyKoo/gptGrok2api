@@ -8,10 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"html"
 	"image"
+	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
@@ -30,6 +32,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"golang.org/x/crypto/sha3"
+	_ "golang.org/x/image/webp"
 )
 
 // OpenAIImage implements the authenticated ChatGPT Web image flow. It is kept
@@ -265,7 +268,7 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 	}
 	if len(results) == 0 {
 		if lastDownloadErr != nil {
-			return nil, lastDownloadErr
+			return nil, &imageDownloadError{err: lastDownloadErr}
 		}
 		return nil, fmt.Errorf("OpenAI image generation returned no downloadable files")
 	}
@@ -348,13 +351,22 @@ func (o *OpenAIImage) Resolve(ctx context.Context, account accounts.Account, ima
 	if err != nil {
 		return nil, "", fmt.Errorf("decode OpenAI image: %w", err)
 	}
+	mimeType, err := validatedImageMIME(raw)
+	if err != nil {
+		return nil, "", &imageDownloadError{err: err}
+	}
 	if err := ensureDir(imageDir); err != nil {
 		return nil, "", err
 	}
 	id := randomMediaID()
 	ext := ".png"
-	if strings.EqualFold(image.MIME, "image/jpeg") {
+	switch mimeType {
+	case "image/jpeg":
 		ext = ".jpg"
+	case "image/webp":
+		ext = ".webp"
+	case "image/gif":
+		ext = ".gif"
 	}
 	if err := writeMediaFile(imageDir, id, ext, raw); err != nil {
 		return nil, "", err
@@ -561,14 +573,21 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	defer response.Body.Close()
 	conversationID := ""
 	fileIDs := []string{}
+	var terminalErr error
 	err = scanOpenAISSE(response.Body, func(raw []byte) bool {
 		var value any
 		if json.Unmarshal(raw, &value) != nil {
 			return false
 		}
+		if terminalErr = openAIImageTerminalError(value); terminalErr != nil {
+			return true
+		}
 		collectOpenAIImageRefs(value, &conversationID, &fileIDs)
 		return false
 	})
+	if terminalErr != nil {
+		return "", nil, terminalErr
+	}
 	if err != nil {
 		return "", nil, err
 	}
@@ -576,16 +595,7 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 }
 
 func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Account, conversationID string) ([]string, error) {
-	timeout := o.RequestTimeout
-	if timeout <= 0 {
-		timeout = openAIImageDefaultPollTimeout
-	}
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-	deadline := time.Now().Add(timeout)
+	deadline := o.imagePollDeadline(ctx)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		value, err := o.pollConversationOnce(ctx, account, conversationID)
@@ -681,18 +691,38 @@ func openAIImagePollErrorSummary(err error) string {
 	}
 }
 
+// Explicit upstream terminal failures must reach the caller without generating
+// again on another account, even when retryable HTTP statuses are customized.
+type imageTerminalError struct{ err error }
+
+func (e *imageTerminalError) Error() string { return e.err.Error() }
+func (e *imageTerminalError) Unwrap() error { return e.err }
+func IsImageTerminalError(err error) bool {
+	var terminal *imageTerminalError
+	return errors.As(err, &terminal)
+}
+
 func openAIImageTerminalError(value any) error {
 	reason := openAIImageTerminalReason(value)
 	if reason == "" {
 		return nil
 	}
 	message := "OpenAI image generation stopped by upstream: " + reason
-	return &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}
+	return &imageTerminalError{err: &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}}
 }
 
 func openAIImageTerminalReason(value any) string {
 	switch typed := value.(type) {
 	case map[string]any:
+		if author, ok := typed["author"].(map[string]any); ok {
+			switch stringValue(author["role"]) {
+			case "user", "system", "developer":
+				return ""
+			}
+		}
+		if reason := openAIImageMessageError(typed); reason != "" {
+			return reason
+		}
 		for key, item := range typed {
 			normalizedKey := strings.ToLower(strings.TrimSpace(key))
 			text := strings.ToLower(strings.TrimSpace(stringValue(item)))
@@ -712,7 +742,7 @@ func openAIImageTerminalReason(value any) string {
 					if message := firstStringValue(details, "message", "code", "type"); message != "" {
 						return truncateOpenAIImageReason(message)
 					}
-				} else if message := strings.TrimSpace(stringValue(item)); message != "" {
+				} else if message, ok := item.(string); ok && strings.TrimSpace(message) != "" {
 					return truncateOpenAIImageReason(message)
 				}
 			}
@@ -732,10 +762,50 @@ func openAIImageTerminalReason(value any) string {
 	return ""
 }
 
+// ChatGPT can complete an assistant message successfully while the image tool
+// failed. Read the explicit error flag, not the success status or refusal words
+// in arbitrary user content. Only plain message text is exposed to clients.
+func openAIImageMessageError(message map[string]any) string {
+	author, _ := message["author"].(map[string]any)
+	role := strings.ToLower(strings.TrimSpace(stringValue(author["role"])))
+	if role != "assistant" && role != "tool" {
+		return ""
+	}
+	metadata, _ := message["metadata"].(map[string]any)
+	isError, _ := metadata["is_error"].(bool)
+	if !isError {
+		return ""
+	}
+	content, _ := message["content"].(map[string]any)
+	text := []string{}
+	if strings.EqualFold(stringValue(content["content_type"]), "text") {
+		if parts, ok := content["parts"].([]any); ok {
+			for _, part := range parts {
+				if value, ok := part.(string); ok && strings.TrimSpace(value) != "" {
+					text = append(text, value)
+				}
+			}
+		}
+		if value, ok := content["text"].(string); ok && strings.TrimSpace(value) != "" {
+			text = append(text, value)
+		}
+	}
+	if len(text) > 0 {
+		return truncateOpenAIImageReason(strings.Join(text, " "))
+	}
+	// An unfinished SSE message may carry the flag before its text arrives.
+	finished, _ := message["end_turn"].(bool)
+	if finished || strings.HasPrefix(stringValue(message["status"]), "finished_") {
+		return "upstream reported an image generation error without a description"
+	}
+	return ""
+}
+
 func truncateOpenAIImageReason(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
-	if len(value) > 160 {
-		return value[:160]
+	runes := []rune(value)
+	if len(runes) > 160 {
+		return string(runes[:160]) + "…"
 	}
 	return value
 }
@@ -901,30 +971,64 @@ func (o *OpenAIImage) markPrimaryProxyFailure(ctx context.Context, err error) {
 	}
 }
 
+// The remote generation has already completed when this error is returned.
+// Callers may report failure/refund, but must not start another generation.
+type imageDownloadError struct{ err error }
+
+func (e *imageDownloadError) Error() string { return e.err.Error() }
+func (e *imageDownloadError) Unwrap() error { return e.err }
+func IsImageDownloadError(err error) bool {
+	var download *imageDownloadError
+	return errors.As(err, &download)
+}
+
 func (o *OpenAIImage) downloadImageRefWithRetry(ctx context.Context, account accounts.Account, conversationID, imageRef string) ([]byte, string, error) {
-	request := func(requestCtx context.Context) ([]byte, string, error) {
-		attemptCtx, cancel := context.WithTimeout(requestCtx, minDuration(o.RequestTimeout, openAIImageUploadAttemptTimeout))
-		defer cancel()
-		return o.downloadImageRef(attemptCtx, account, conversationID, imageRef)
-	}
 	proxyURL := o.selectedProxyURL(ctx, account)
-	raw, mime, err := request(proxyruntime.WithURL(ctx, proxyURL))
-	if err == nil || !isRetryableOpenAITransferError(err) {
-		return raw, mime, err
+	var stable *proxyruntime.Lease
+	var lastErr error
+	defer func() {
+		if stable != nil {
+			stable.Release(openAIImageProxyFailure(lastErr))
+		}
+	}()
+	// Refresh the signed URL and retry the same generated asset. This also works
+	// without a second proxy; a transient storage error need not start a new job.
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt) * 200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, "", ctx.Err()
+			case <-timer.C:
+			}
+		}
+		attemptCtx, cancel := context.WithTimeout(proxyruntime.WithURL(ctx, proxyURL), minDuration(o.RequestTimeout, openAIImageUploadAttemptTimeout))
+		started := time.Now()
+		raw, mime, err := o.downloadImageRef(attemptCtx, account, conversationID, imageRef)
+		cancel()
+		lastErr = err
+		if stable != nil {
+			stable.ObserveLatency(time.Since(started), openAIImageSlowDownload)
+		}
+		if err == nil {
+			return raw, mime, nil
+		}
+		if !isRetryableOpenAITransferError(err) {
+			return nil, "", err
+		}
+		if attempt == 0 {
+			o.markPrimaryProxyFailure(ctx, err)
+			stable = o.acquireStableRetry(ctx, account)
+			if stable != nil {
+				proxyURL = stable.URL
+			}
+		}
 	}
-	o.markPrimaryProxyFailure(ctx, err)
-	stable := o.acquireStableRetry(ctx, account)
-	if stable == nil {
-		return nil, "", err
-	}
-	retryStarted := time.Now()
-	raw, mime, err = request(proxyruntime.WithURL(ctx, stable.URL))
-	stable.ObserveLatency(time.Since(retryStarted), openAIImageSlowDownload)
-	stable.Release(openAIImageProxyFailure(err))
-	if err != nil {
-		return nil, "", fmt.Errorf("OpenAI image download failed after retry: %w", err)
-	}
-	return raw, mime, nil
+	return nil, "", fmt.Errorf("OpenAI image download failed after 3 attempts: %w", lastErr)
 }
 
 func (o *OpenAIImage) downloadFile(ctx context.Context, account accounts.Account, fileID string) ([]byte, string, error) {
@@ -957,7 +1061,7 @@ func (o *OpenAIImage) downloadImageRef(ctx context.Context, account accounts.Acc
 
 func (o *OpenAIImage) readImageDownloadResponse(ctx context.Context, account accounts.Account, response *http.Response) ([]byte, string, error) {
 	var value map[string]any
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (64<<20)+1))
 	_ = response.Body.Close()
 	if err != nil {
 		return nil, "", err
@@ -974,23 +1078,60 @@ func (o *OpenAIImage) readImageDownloadResponse(ctx context.Context, account acc
 		if err != nil {
 			return nil, "", err
 		}
-		raw, err = io.ReadAll(io.LimitReader(response.Body, 64<<20))
+		raw, err = io.ReadAll(io.LimitReader(response.Body, (64<<20)+1))
 		_ = response.Body.Close()
 		if err != nil {
 			return nil, "", err
 		}
 	}
-	if len(raw) == 0 {
-		return nil, "", fmt.Errorf("OpenAI image download returned empty content")
-	}
-	mimeType := response.Header.Get("Content-Type")
-	if semi := strings.IndexByte(mimeType, ';'); semi >= 0 {
-		mimeType = mimeType[:semi]
-	}
-	if mimeType == "" {
-		mimeType = "image/png"
+	mimeType, err := validatedImageMIME(raw)
+	if err != nil {
+		return nil, "", err
 	}
 	return raw, mimeType, nil
+}
+
+// Headers and extensions are advisory. A 200 storage error document is not an
+// image; decoding prevents XML/HTML, truncated data and spoofed MIME successes.
+func validatedImageMIME(raw []byte) (string, error) {
+	invalid := func(message string) (string, error) {
+		return "", &protocol.UpstreamError{Status: http.StatusBadGateway, Message: message}
+	}
+	if len(raw) == 0 || len(raw) > 64<<20 {
+		return invalid("OpenAI image download is empty or exceeds 64 MiB")
+	}
+	var storageError struct {
+		XMLName xml.Name
+		Code    string `xml:"Code"`
+	}
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}))
+	if len(trimmed) > 0 && trimmed[0] == '<' && len(trimmed) <= 64<<10 && xml.Unmarshal(trimmed, &storageError) == nil && storageError.XMLName.Local == "Error" {
+		// Never copy arbitrary upstream messages or signed URLs into client errors.
+		if storageError.Code == "ServerBusy" {
+			return invalid("OpenAI image storage returned ServerBusy instead of image bytes")
+		}
+		return invalid("OpenAI image storage returned an error document instead of image bytes")
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || uint64(config.Width) > 64_000_000/uint64(config.Height) {
+		return invalid("OpenAI image download is not a supported image or exceeds the pixel limit")
+	}
+	// DecodeConfig alone accepts files truncated after their dimensions header.
+	if _, _, err := image.Decode(bytes.NewReader(raw)); err != nil {
+		return invalid("OpenAI image download contains corrupt or truncated image bytes")
+	}
+	switch format {
+	case "png":
+		return "image/png", nil
+	case "jpeg":
+		return "image/jpeg", nil
+	case "gif":
+		return "image/gif", nil
+	case "webp":
+		return "image/webp", nil
+	default:
+		return invalid("OpenAI image download has an unsupported image format")
+	}
 }
 
 func (o *OpenAIImage) requirementHeaders(requirements openAIRequirements) map[string]string {

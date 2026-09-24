@@ -119,16 +119,19 @@
         />
       </FormField>
 
-      <FormField label="超时继续等待">
+      <FormField label="图片任务总超时">
         <template #label-extra>
-          <HelpTip text="单位秒，图片超时后继续等待的额外时间。" />
+          <HelpTip text="单位秒，范围 60–900，默认 600（10 分钟）。包含排队、生成、重试和下载；保存后仅对新任务生效。" />
         </template>
         <Input
-          :model-value="imageTimeoutRetryField.input.value"
+          :model-value="imageTaskTimeoutField.input.value"
           type="number"
+          :min="60"
+          :max="900"
+          :step="1"
           block
-          placeholder="30"
-          @update:model-value="imageTimeoutRetryField.update"
+          placeholder="600"
+          @update:model-value="imageTaskTimeoutField.update"
         />
       </FormField>
     </div>
@@ -149,7 +152,7 @@ defineProps<{
   imagePollTimeoutField: NumberSettingField
   imageStreamTimeoutField: NumberSettingField
   imageAccountConcurrencyField: NumberSettingField
-  imageTimeoutRetryField: NumberSettingField
+  imageTaskTimeoutField: NumberSettingField
   proxyBusy: string
   proxyTestResult: ProxyTestResult | null
 }>()

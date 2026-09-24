@@ -65,6 +65,9 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	ctx, cancel := s.imageTaskContext(r.Context())
+	defer cancel()
+	r = r.WithContext(ctx)
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	var request struct {
 		Model          string `json:"model"`
@@ -176,7 +179,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		count = 1
 	}
 	results := make([][]map[string]string, count)
-	ctx, timeoutCancel := context.WithTimeout(ctx, imageRequestTotalTimeout(s.cfg.RequestTimeout))
+	ctx, timeoutCancel := s.imageTaskContext(ctx)
 	defer timeoutCancel()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -207,11 +210,15 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 			}
 			defer releaseSlot()
 			excluded := map[string]bool{}
+			var lastAttemptErr error
 			for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
 				accountStarted := time.Now()
 				s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
 				lease, reserveErr := s.accountPool.ReserveMatchingLimit(ctx, []string{"basic", "super", "heavy"}, excluded, isOpenAIAccount, s.cfg.ImageAccountLimit)
 				if reserveErr != nil {
+					if lastAttemptErr != nil {
+						reserveErr = lastAttemptErr
+					}
 					sendErr(reserveErr)
 					cancel()
 					return
@@ -224,7 +231,8 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					s.accountPool.Release(lease)
 					s.accountPool.Feedback(lease.Account, upstreamStatus(generateErr), generateErr)
 					excluded[lease.Account.Token] = true
-					if s.shouldRetry(upstreamStatus(generateErr), attempt) {
+					if ctx.Err() == nil && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && s.shouldRetry(upstreamStatus(generateErr), attempt) {
+						lastAttemptErr = generateErr
 						continue
 					}
 					sendErr(generateErr)
@@ -251,7 +259,8 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					s.accountPool.Release(lease)
 					s.accountPool.Feedback(lease.Account, upstreamStatus(resolveErr), resolveErr)
 					excluded[lease.Account.Token] = true
-					if s.shouldRetry(upstreamStatus(resolveErr), attempt) {
+					if ctx.Err() == nil && !provider.IsImageDownloadError(resolveErr) && !provider.IsImageTerminalError(resolveErr) && s.shouldRetry(upstreamStatus(resolveErr), attempt) {
+						lastAttemptErr = resolveErr
 						continue
 					}
 					sendErr(resolveErr)
@@ -283,20 +292,6 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		data = data[:count]
 	}
 	return data, nil
-}
-
-func imageRequestTotalTimeout(requestTimeout time.Duration) time.Duration {
-	if requestTimeout <= 0 {
-		requestTimeout = 3 * time.Minute
-	}
-	total := requestTimeout * 2
-	if total < 2*time.Minute {
-		return 2 * time.Minute
-	}
-	if total > 6*time.Minute {
-		return 6 * time.Minute
-	}
-	return total
 }
 
 func (s *Server) parseImageEditRequest(r *http.Request) (imageEditRequest, error) {
@@ -713,6 +708,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	ctx, cancel := s.imageTaskContext(r.Context())
+	defer cancel()
+	r = r.WithContext(ctx)
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	request, err := s.parseImageEditRequest(r)
 	if err != nil {

@@ -21,7 +21,7 @@ image_min_free_mb: 500
 image_settle_enabled: false
 image_check_before_hit_enabled: false
 image_settle_secs: 2
-image_timeout_retry_secs: 30
+image_task_timeout_secs: 600
 
 auto_remove_rate_limited_accounts: false
 auto_remove_invalid_accounts: true

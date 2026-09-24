@@ -84,7 +84,7 @@ export interface Settings {
   image_settle_enabled?: boolean
   image_check_before_hit_enabled?: boolean
   image_settle_secs?: number
-  image_timeout_retry_secs?: number
+  image_task_timeout_secs?: number
   auto_remove_invalid_accounts?: boolean
   auto_remove_rate_limited_accounts?: boolean
   log_levels: string[]

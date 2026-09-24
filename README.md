@@ -154,6 +154,38 @@ curl http://127.0.0.1:3000/v1/images/edits \
 
 <code>gpt-image-2</code> 也可以通过 <code>/v1/chat/completions</code> 调用。纯文本 content 是提示词；只有 <code>image_url</code>、<code>input_image</code> 或 <code>image</code> 内容块会被当作参考图输入。
 
+### 异步图片任务
+
+长时间生成可使用 `POST /api/image-tasks/generations`：提交 JSON 中的
+`client_task_id`、`model`、`prompt`、`n`、`size`、`quality`，服务先将任务写入
+`data/image_tasks/`，返回 HTTP 202 和任务 `id`，后台继续生成。随后用同一 API Key
+调用 `GET /api/image-tasks/{id}`，每隔几秒查询一次；`queued`、`running` 为进行中，
+`success` 时读取 `data` 图片列表，`error` 时读取 `error` 原因。
+`POST /api/image-tasks/edits` 支持 multipart 的同名字段与 `image` / `image[]`。
+
+同一调用者重复提交相同 `client_task_id` 和内容会返回原任务；内容不同返回 409。
+调用者之间任务隔离。提交连接断开不会取消后台生成；每次查询都是独立的短请求，
+适用于 Cloudflare 等反向代理的读取超时限制。标准 `/v1/images/generations` 和
+`/v1/images/edits` 仍为同步接口，客户端需要明确使用上述提交与查询协议。
+
+任务记录不保存 API Key、提示词和输入图片原文。完成状态与结果链接在重启后仍可查询；
+由于上游执行没有可恢复的任务句柄，重启时未完成任务会标记为 `error`，不自动重新生成。
+任务记录与图片按 `GO_IMAGE_RETENTION_DAYS` 清理，保留期后不再保证去重或结果可读。
+当前实现面向单个主服务进程，多个实例不可共享同一个任务目录。
+
+### 图片任务总超时
+
+在管理控制台「设置 → 基础配置」中设置「图片任务总超时」，单位秒，默认 600
+（10 分钟），范围 60–900。配置键为 `image_task_timeout_secs`，保存后立即对新任务
+生效；正在执行的任务使用提交时的期限。该期限包含排队、上游生成、重试、结果轮询
+和下载，适用于图片生成、编辑和图片聊天；异步任务返回 202 后继续使用同一期限。
+上游结果轮询使用任务剩余时间，不再受原 6 分钟总上限限制。单次网络请求仍受连接
+和传输超时约束。同步接口仍受客户端或反向代理期限限制，长任务应使用异步接口。
+
+原 `image_timeout_retry_secs` 未接入 Go 生图逻辑，已从控制台和新安装配置移除。
+已有配置中的旧值可以保留，不会影响新期限。默认 10 分钟适配现有 Cherry ModelScope
+轮询窗口；使用其他客户端时还需确保客户端等待时间足够。
+
 ### 结果筛选规则
 
 参考图和生成图在 ChatGPT 上游响应中都可能表现为 <code>file-service://</code> 或 <code>sediment://</code> 资产指针，且 SSE 过程中可能先回显上传的参考图。为避免“把参考图当成生成结果”，Go 版按以下规则处理：
