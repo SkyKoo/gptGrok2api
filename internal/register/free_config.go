@@ -37,7 +37,7 @@ func safeFailure(err error) string {
 }
 
 type FreeConfig struct {
-	Name, Birthdate, Proxy             string
+	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
 }
@@ -58,11 +58,6 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 		}
 	}
 	profile := object(raw["openai_free"])
-	c.Name, c.Birthdate = stringValue(profile["name"]), stringValue(profile["birthdate"])
-	birthday, err := time.Parse("2006-01-02", c.Birthdate)
-	if c.Name == "" || len([]rune(c.Name)) > 100 || err != nil || !birthday.Before(time.Now()) || birthday.Year() < 1900 {
-		return c, fail("config", "name_and_valid_birthdate_required")
-	}
 	if value := intValue(profile["timeout_seconds"]); value != 0 {
 		if value < 60 || value > 1800 {
 			return c, fail("config", "timeout_must_be_60_to_1800_seconds")

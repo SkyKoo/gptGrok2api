@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/mail"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -53,9 +54,46 @@ func NewHME(c HMEConfig, interval time.Duration) (*HME, error) {
 		return nil, err
 	}
 	jar, _ := cookiejar.New(nil)
+	var sessionJar http.CookieJar = jar
+	// Only the operator-pinned Docker endpoint may carry its Secure session over
+	// internal HTTP. Public HTTP endpoints keep normal browser cookie semantics.
+	if c.BaseURL == strings.TrimRight(os.Getenv("GO_HME_INTERNAL_BASE_URL"), "/") {
+		origin, _ := url.Parse(c.BaseURL)
+		if origin.Scheme == "http" {
+			sessionJar = internalHMEJar{CookieJar: jar, origin: origin}
+		}
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // Mail traffic never inherits the registration proxy.
-	return &HME{cfg: c, interval: interval, http: &http.Client{Jar: jar, Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &HME{cfg: c, interval: interval, http: &http.Client{Jar: sessionJar, Transport: transport, Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+}
+
+// Preserve normal domain, path and expiry checks; map only the pinned internal
+// origin into its own secure jar namespace. Cookies never cross origins.
+type internalHMEJar struct {
+	http.CookieJar
+	origin *url.URL
+}
+
+func (j internalHMEJar) cookieURL(u *url.URL) *url.URL {
+	copy := *u
+	if u.Scheme == j.origin.Scheme && u.Host == j.origin.Host {
+		copy.Scheme = "https"
+	}
+	return &copy
+}
+
+func (j internalHMEJar) Cookies(u *url.URL) []*http.Cookie {
+	if u.Scheme != j.origin.Scheme || u.Host != j.origin.Host {
+		return nil
+	}
+	return j.CookieJar.Cookies(j.cookieURL(u))
+}
+
+func (j internalHMEJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	if u.Scheme == j.origin.Scheme && u.Host == j.origin.Host {
+		j.CookieJar.SetCookies(j.cookieURL(u), cookies)
+	}
 }
 func (h *HME) Close() { h.http.CloseIdleConnections() }
 func (h *HME) request(ctx context.Context, method, path string, body any, out any) error {
@@ -165,12 +203,24 @@ func suitableMessage(m hmeMessage, box Mailbox, after time.Time) bool {
 	if err != nil {
 		return false
 	}
-	parts := strings.SplitN(sender.Address, "@", 2)
+	return isOpenAISender(sender.Address)
+}
+
+// HME rewrites some forwarded senders into an iCloud address such as
+// noreply_at_tm_openai_com_<opaque>@icloud.com. Keep the direct OpenAI sender
+// allow-list, and accept only this recognizable HME encoding so unrelated
+// iCloud messages cannot satisfy an OTP wait.
+func isOpenAISender(raw string) bool {
+	parts := strings.SplitN(strings.ToLower(raw), "@", 2)
 	if len(parts) != 2 {
 		return false
 	}
-	domain := strings.ToLower(parts[1])
-	return domain == "openai.com" || strings.HasSuffix(domain, ".openai.com") || domain == "chatgpt.com" || strings.HasSuffix(domain, ".chatgpt.com")
+	local, domain := parts[0], parts[1]
+	if domain == "openai.com" || strings.HasSuffix(domain, ".openai.com") || domain == "chatgpt.com" || strings.HasSuffix(domain, ".chatgpt.com") {
+		return true
+	}
+	return domain == "icloud.com" && strings.HasPrefix(local, "noreply_at_") &&
+		(strings.Contains(local, "_openai_com") || strings.Contains(local, "_chatgpt_com"))
 }
 func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
 	query := url.Values{"account_id": {box.AccountID}, "alias": {box.Email}, "folder": {"all"}, "limit": {"30"}, "days": {"1"}}

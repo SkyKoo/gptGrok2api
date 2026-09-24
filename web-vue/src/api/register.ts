@@ -201,7 +201,7 @@ export type CheckoutTask = {
 }
 
 export type LegacyRegisterConfig = {
-  openai_free: { name: string; birthdate: string; timeout_seconds: number }
+  openai_free: { timeout_seconds: number }
   jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean }>
   target: RegisterTarget | string
   grok: GrokRegisterConfig

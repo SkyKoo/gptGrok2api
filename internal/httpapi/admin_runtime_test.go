@@ -438,7 +438,7 @@ func TestRegistrationManagementEndpoints(t *testing.T) {
 		t.Fatalf("unexpected register config: %d %s", configResponse.Code, configResponse.Body.String())
 	}
 	startResponse := adminRequest(handler, http.MethodPost, "/api/register/start", nil)
-	if startResponse.Code != http.StatusBadRequest || !strings.Contains(startResponse.Body.String(), "name_and_valid_birthdate_required") {
+	if startResponse.Code != http.StatusBadRequest || !strings.Contains(startResponse.Body.String(), "enable_exactly_one_icloud_hme_provider") {
 		t.Fatalf("register start should reject missing configuration: %d %s", startResponse.Code, startResponse.Body.String())
 	}
 	runtimeResponse := adminRequest(handler, http.MethodGet, "/api/register/runtime", nil)

@@ -186,7 +186,7 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
 }
 
 export const defaultRegisterConfig: LegacyRegisterConfig = {
-  openai_free: { name: '', birthdate: '', timeout_seconds: 600 },
+  openai_free: { timeout_seconds: 600 },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
   checkout: {
@@ -553,7 +553,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
   return {
     ...defaultRegisterConfig,
     ...raw,
-    openai_free: { ...defaultRegisterConfig.openai_free, ...raw.openai_free },
+    openai_free: { timeout_seconds: raw.openai_free?.timeout_seconds || defaultRegisterConfig.openai_free.timeout_seconds },
     target,
     grok: normalizeGrokRegisterConfig(raw.grok),
     mode: target === 'grok' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
@@ -724,7 +724,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
   const checkoutChannel = config.checkout?.channel === 'pix' ? 'pix' : 'upi'
   return {
     target,
-    openai_free: { ...config.openai_free },
+    openai_free: { timeout_seconds: config.openai_free.timeout_seconds },
     grok,
     checkout: {
       enabled: Boolean(config.checkout?.enabled),
@@ -1185,7 +1185,6 @@ export function registerActionDisabled(
 ) {
   if (legacySaving || !config) return true
   if (config.enabled) return false
-  if (config.target === 'openai' && (!config.openai_free.name.trim() || !config.openai_free.birthdate)) return true
   return enabledCount === 0 || issueCount > 0
 }
 
@@ -1197,7 +1196,6 @@ export function registerRuntimeHint(
   if (enabledCount === 0) return '至少启用一个邮箱来源。'
   if (issueCount > 0) return `还有 ${issueCount} 项必填配置未完成。`
   if (config?.enabled) return '任务运行中，配置已锁定。'
-  if (config?.target === 'openai' && (!config.openai_free.name.trim() || !config.openai_free.birthdate)) return '请先填写注册姓名和出生日期。'
   return '启动前会自动保存当前配置。'
 }
 

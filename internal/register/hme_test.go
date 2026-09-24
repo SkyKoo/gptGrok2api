@@ -3,12 +3,85 @@ package register
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestHMEInternalSecureSessionIsPinnedAndRedirectsAreRejected(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "public_http", true: "pinned_internal_http"}[enabled], func(t *testing.T) {
+			creates := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+				if r.URL.Path == "/api/auth/login" {
+					http.SetCookie(w, &http.Cookie{Name: "hme_session", Value: "session", Path: "/api/", Secure: true, HttpOnly: true})
+					respond(map[string]string{"csrf_token": "csrf"})
+					return
+				}
+				cookie, err := r.Cookie("hme_session")
+				if err != nil || cookie.Value != "session" {
+					w.WriteHeader(401)
+					_, _ = w.Write([]byte(`{"success":false,"code":"AUTH_REQUIRED"}`))
+					return
+				}
+				if r.Header.Get("X-CSRF-Token") != "csrf" {
+					t.Error("missing csrf")
+				}
+				creates++
+				respond(map[string]string{"email": "alias@example.test", "account_id": "acc-test"})
+			}))
+			defer server.Close()
+			// Use a Docker-style host, not loopback: newer Go releases may treat
+			// localhost as a secure cookie context even when its scheme is HTTP.
+			baseURL := "http://hme-internal.test:8081"
+			pinned := ""
+			if enabled {
+				pinned = baseURL
+			}
+			t.Setenv("GO_HME_INTERNAL_BASE_URL", pinned)
+			h, err := NewHME(HMEConfig{baseURL, "password", "acc-test"}, time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			h.http.Transport.(*http.Transport).DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", server.Listener.Addr().String())
+			}
+			_, err = h.Acquire(context.Background(), "job")
+			if enabled {
+				if err != nil || creates != 1 {
+					t.Fatalf("internal authentication failed: %v", err)
+				}
+				for _, raw := range []string{baseURL + "/outside-cookie-path", "http://other.invalid/api/create", "http://hme-internal.test:8082/api/create", strings.Replace(baseURL, "http:", "https:", 1) + "/api/create"} {
+					u, _ := url.Parse(raw)
+					if len(h.http.Jar.Cookies(u)) != 0 {
+						t.Fatalf("session escaped scope: %s", raw)
+					}
+				}
+			} else if err == nil || creates != 0 {
+				t.Fatal("public HTTP unexpectedly received Secure cookie")
+			}
+		})
+	}
+	foreignCalls := 0
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { foreignCalls++ }))
+	defer foreign.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, foreign.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	t.Setenv("GO_HME_INTERNAL_BASE_URL", origin.URL)
+	h, _ := NewHME(HMEConfig{origin.URL, "private-password", "acc-test"}, time.Millisecond)
+	defer h.Close()
+	if _, err := h.Acquire(context.Background(), "job"); err == nil || foreignCalls != 0 {
+		t.Fatal("followed redirect with credentials")
+	}
+}
 
 func TestHMEAuthenticatesCreatesAliasAndReadsFreshJunkCode(t *testing.T) {
 	created, detail := 0, 0
@@ -122,6 +195,25 @@ func TestMailCodeRejectsAmbiguousAndEmbeddedDigits(t *testing.T) {
 	for _, input := range []string{"1234567", "one 123456 two 654321", "no code"} {
 		if mailCode(input) != "" {
 			t.Errorf("accepted %q", input)
+		}
+	}
+}
+
+func TestHMEAcceptsOpenAIForwarderAddress(t *testing.T) {
+	after := time.Now().UTC().Add(-time.Minute)
+	box := Mailbox{Email: "alias@example.test", AccountID: "acc-test"}
+	for _, sender := range []string{
+		"noreply@tm.openai.com",
+		"noreply_at_tm_openai_com_88czx49dw80135_51446d5b@icloud.com",
+		"noreply_at_chatgpt_com_opaque@icloud.com",
+	} {
+		if !suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after) {
+			t.Errorf("accepted sender was rejected: %s", sender)
+		}
+	}
+	for _, sender := range []string{"random@icloud.com", "noreply_at_example_com@icloud.com"} {
+		if suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after) {
+			t.Errorf("unrelated sender was accepted: %s", sender)
 		}
 	}
 }
