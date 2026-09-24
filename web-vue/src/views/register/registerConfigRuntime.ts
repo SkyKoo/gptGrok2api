@@ -127,6 +127,7 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     config.value.enabled = incoming.enabled
     config.value.stats = incoming.stats
     config.value.logs = incoming.logs
+    config.value.jobs = incoming.jobs
     config.value.grok_oauth_logs = incoming.grok_oauth_logs
     config.value.checkout_logs = incoming.checkout_logs
     config.value.checkout_tasks = incoming.checkout_tasks
@@ -323,10 +324,11 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   }
 
   async function resetStats() {
+    const free = config.value?.target === 'openai'
     const ok = await input.confirm({
-      title: '重置注册统计',
-      message: '将清空当前注册任务的统计和运行日志。',
-      confirmText: '重置',
+      title: free ? '清理已完成记录' : '重置注册统计',
+      message: free ? '清理已成功入库并校验的任务记录。配置、账号及未完成的恢复记录会保留。' : '将清空当前注册任务的统计和运行日志。',
+      confirmText: free ? '清理' : '重置',
     })
     if (!ok) return
     saving.value = true

@@ -21,7 +21,9 @@
       <div v-else-if="registerConfig" class="register-content">
         <div class="register-layout">
           <div class="register-config-column">
-            <RegisterTaskSettingsPanel
+            <RegisterFreeSettingsPanel v-if="registerConfig.target === 'openai'" :config="registerConfig"
+              @target="setRegisterTarget" @proxy="updateFreeProxy" />
+            <RegisterTaskSettingsPanel v-else
               :config="registerConfig"
               :proxy-mode="registerProxyMode"
               :selected-proxy-group-id="selectedRegisterProxyGroupId"
@@ -106,6 +108,8 @@
             @reset-stats="resetLegacyStats"
             @export-grok="exportGrokAccounts"
           >
+            <RegisterFreeJobs v-if="registerConfig.target === 'openai'" :jobs="registerConfig.jobs" :running="registerConfig.enabled"
+              @changed="refreshFreeJobs" />
             <FormSection
               v-if="hasCheckoutRuntime"
               id="checkout-runtime"
@@ -170,6 +174,8 @@ import RegisterProviderCard from '@/views/register/RegisterProviderCard.vue'
 import CheckoutTaskTable from '@/views/register/CheckoutTaskTable.vue'
 import RegisterRuntimePanel from '@/views/register/RegisterRuntimePanel.vue'
 import RegisterTaskSettingsPanel from '@/views/register/RegisterTaskSettingsPanel.vue'
+import RegisterFreeSettingsPanel from '@/views/register/RegisterFreeSettingsPanel.vue'
+import RegisterFreeJobs from '@/views/register/RegisterFreeJobs.vue'
 import {
   defaultRegisterConfig,
   enabledRegisterProviderCount as buildEnabledRegisterProviderCount,
@@ -213,6 +219,11 @@ const legacySaving = registerConfigRuntime.saving
 const autosaveStatus = registerConfigRuntime.autosaveStatus
 const autosaveMessage = registerConfigRuntime.autosaveMessage
 const registerConfig = registerConfigRuntime.config
+function updateFreeProxy(value: string) {
+  registerConfigRuntime.setProxyMode(value === '' ? 'global' : value === 'direct' ? 'direct' : 'custom')
+  if (value && value !== 'direct') registerConfigRuntime.setCustomProxyInput(value)
+}
+async function refreshFreeJobs() { await registerConfigRuntime.loadConfig(true); startLiveUpdates() }
 const registerProviders = registerConfigRuntime.providers
 const registerProxyMode = registerConfigRuntime.proxyMode
 const selectedRegisterProxyGroupId = registerConfigRuntime.selectedProxyGroupId

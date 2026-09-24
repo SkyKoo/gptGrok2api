@@ -174,6 +174,14 @@ http://your-server:3000/v1/files/image?id=<image-id>
 
 ## 账号、重试和代理
 
+### Go ChatGPT Free 注册（实验功能）
+
+注册页支持通过独立部署的 iCloud HME 服务创建邮箱别名、接收验证码，并由 Go 原生执行器
+完成单账号注册、自动入库和校验。每次运行 1 个任务，无新增容器；真实上游可用性需单独验收。
+配置要求、任务恢复和功能边界见 [Go 注册说明](docs/registration/go-free.md)。
+
+### 账号池行为
+
 - 图片和聊天请求遇到 <code>401</code>、<code>403</code>、<code>429</code>、<code>500</code>、<code>502</code>、<code>503</code>、<code>504</code> 或网络错误时，会排除当前账号并按限制尝试其他账号。
 - OAuth 账号优先使用 <code>refresh_token</code> 刷新 access token，并持久化新 token；Go 版不会使用账户密码或 2FA Secret 自动登录生成 token。
 - 图片请求默认单账号并发为 <code>1</code>，单进程总并发为 <code>128</code>。代理组会按真实请求的成功率、延迟和并发容量选择节点。

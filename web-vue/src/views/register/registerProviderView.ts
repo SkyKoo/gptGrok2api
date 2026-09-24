@@ -41,6 +41,7 @@ export type RegisterRuntimeLogLine = {
 }
 
 export const providerTypeOptions = [
+  { value: 'icloud_hme', label: 'iCloud HME（独立服务）' },
   { value: 'cloudmail_gen', label: 'CloudMail Gen' },
   { value: 'cloudflare_temp_email', label: 'Cloudflare Temp Email' },
   { value: 'tempmail_lol', label: 'TempMail.lol' },
@@ -132,6 +133,7 @@ export const providerTypeKeys: Record<string, string[]> = {
   duckmail: ['api_key', 'default_domain'],
   gptmail: ['key_mode', 'api_key', 'default_domain', 'local_compose'],
   icloud_api: ['api_base', 'api_key', 'project', 'purpose', 'keyword', 'wait_ms', 'use_proxy'],
+  icloud_hme: ['api_base', 'admin_password', 'admin_password_set', 'account_id'],
   icloud_local: ['project', 'purpose', 'keyword', 'wait_ms'],
   donemail: ['api_base', 'admin_key', 'domain', 'email_prefix', 'message_limit'],
   yyds_mail: ['api_base', 'api_key', 'domain', 'subdomain', 'wildcard'],
@@ -184,10 +186,11 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
 }
 
 export const defaultRegisterConfig: LegacyRegisterConfig = {
+  openai_free: { name: '', birthdate: '', timeout_seconds: 600 },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
   checkout: {
-    enabled: true,
+    enabled: false,
     channel: 'upi',
     pix_protocol: 'enhanced',
     country: 'IN',
@@ -214,18 +217,18 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     pool_id: '',
   },
   agent_identity_archive: {
-    enabled: true,
+    enabled: false,
   },
   mail: {
     request_timeout: 30,
-    wait_timeout: 30,
+    wait_timeout: 180,
     wait_interval: 2,
     user_agent: '',
     providers: [],
   },
   proxy: '',
-  total: 10,
-  threads: 3,
+  total: 1,
+  threads: 1,
   mode: 'total',
   target_quota: 100,
   target_available: 10,
@@ -345,7 +348,7 @@ export function createProviderId(type = 'provider') {
   return `${type}-${suffix}`
 }
 
-export function defaultProvider(type = 'cloudmail_gen'): RegisterProvider {
+export function defaultProvider(type = 'icloud_hme'): RegisterProvider {
   const base = { id: createProviderId(type), enable: true, type }
   switch (type) {
     case 'cloudmail_gen':
@@ -362,6 +365,8 @@ export function defaultProvider(type = 'cloudmail_gen'): RegisterProvider {
       return { ...base, api_key: '', default_domain: 'duckmail.sbs' }
     case 'gptmail':
       return { ...base, key_mode: 'public', api_key: '', default_domain: '', local_compose: false }
+    case 'icloud_hme':
+      return { ...base, api_base: '', admin_password: '', account_id: '' }
     case 'icloud_api':
       return {
         ...base,
@@ -548,6 +553,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
   return {
     ...defaultRegisterConfig,
     ...raw,
+    openai_free: { ...defaultRegisterConfig.openai_free, ...raw.openai_free },
     target,
     grok: normalizeGrokRegisterConfig(raw.grok),
     mode: target === 'grok' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
@@ -718,6 +724,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
   const checkoutChannel = config.checkout?.channel === 'pix' ? 'pix' : 'upi'
   return {
     target,
+    openai_free: { ...config.openai_free },
     grok,
     checkout: {
       enabled: Boolean(config.checkout?.enabled),
@@ -749,7 +756,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
       pool_id: String(config.cpa_sync?.pool_id || '').trim(),
     },
     agent_identity_archive: {
-      enabled: config.agent_identity_archive?.enabled !== false,
+      enabled: config.agent_identity_archive?.enabled === true,
     },
     mail: {
       ...config.mail,
@@ -827,6 +834,11 @@ export function providerRequirementMessages(provider: RegisterProvider) {
   }
 
   switch (type) {
+    case 'icloud_hme':
+      requireValue(provider.api_base, 'HME 服务地址')
+      requireValue(provider.account_id, 'HME 账号 ID')
+      if (!provider.admin_password_set) requireValue(provider.admin_password, 'HME 管理员密码')
+      break
     case 'cloudmail_gen':
       requireValue(provider.api_base, 'CloudMail URL')
       requireValue(provider.admin_email, '管理员邮箱')
@@ -891,7 +903,7 @@ export function providerRequirementMessages(provider: RegisterProvider) {
 }
 
 export function providerUsesApiBase(provider: RegisterProvider) {
-  return ['cloudmail_gen', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail', 'ddg_mail', 'donemail', 'icloud_api'].includes(providerType(provider))
+  return ['icloud_hme', 'cloudmail_gen', 'cloudflare_temp_email', 'moemail', 'inbucket', 'yyds_mail', 'ddg_mail', 'donemail', 'icloud_api'].includes(providerType(provider))
 }
 
 export function providerUsesApiKey(provider: RegisterProvider) {
@@ -899,7 +911,7 @@ export function providerUsesApiKey(provider: RegisterProvider) {
 }
 
 export function providerUsesAdminPassword(provider: RegisterProvider) {
-  return ['cloudmail_gen', 'cloudflare_temp_email', 'ddg_mail'].includes(providerType(provider))
+  return ['icloud_hme', 'cloudmail_gen', 'cloudflare_temp_email', 'ddg_mail'].includes(providerType(provider))
 }
 
 export function providerUsesDefaultDomain(provider: RegisterProvider) {
@@ -1173,6 +1185,7 @@ export function registerActionDisabled(
 ) {
   if (legacySaving || !config) return true
   if (config.enabled) return false
+  if (config.target === 'openai' && (!config.openai_free.name.trim() || !config.openai_free.birthdate)) return true
   return enabledCount === 0 || issueCount > 0
 }
 
@@ -1184,6 +1197,7 @@ export function registerRuntimeHint(
   if (enabledCount === 0) return '至少启用一个邮箱来源。'
   if (issueCount > 0) return `还有 ${issueCount} 项必填配置未完成。`
   if (config?.enabled) return '任务运行中，配置已锁定。'
+  if (config?.target === 'openai' && (!config.openai_free.name.trim() || !config.openai_free.birthdate)) return '请先填写注册姓名和出生日期。'
   return '启动前会自动保存当前配置。'
 }
 

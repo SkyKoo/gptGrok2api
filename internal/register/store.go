@@ -516,10 +516,13 @@ func (s *Store) getLocked() map[string]any {
 func defaultConfig() map[string]any {
 	return map[string]any{
 		"enabled":                  false,
-		"target":                   "grok",
-		"total":                    0,
-		"threads":                  2,
-		"mode":                     "register",
+		"target":                   "openai",
+		"total":                    1,
+		"threads":                  1,
+		"mode":                     "total",
+		"openai_free":              map[string]any{"name": "", "birthdate": "", "timeout_seconds": 600},
+		"checkout":                 map[string]any{"enabled": false},
+		"agent_identity_archive":   map[string]any{"enabled": false},
 		"target_quota":             0,
 		"target_available":         0,
 		"check_interval":           60,

@@ -108,11 +108,19 @@
           <span class="register-label">{{ currentType === 'ddg_mail' ? 'CF Admin Password' : 'Admin Password' }}</span>
           <Input
             :model-value="provider.admin_password"
+            type="password"
+            :placeholder="provider.admin_password_set ? '已保存；留空保留原密码' : ''"
             block
             root-class="font-mono"
             :disabled="disabled"
-            @update:model-value="value => emit('update-field', index, 'admin_password', String(value || '').trim())"
+            @update:model-value="value => emit('update-field', index, 'admin_password', String(value || ''))"
           />
+        </label>
+
+        <label v-if="currentType === 'icloud_hme'" class="register-field">
+          <span class="register-label">HME 账号 ID</span>
+          <Input :model-value="provider.account_id" block :disabled="disabled" placeholder="acc_…"
+            @update:model-value="value => emit('update-field', index, 'account_id', String(value || '').trim())" />
         </label>
 
         <label v-if="providerUsesApiKey(provider) && !providerUsesPublicGptMailKey(provider)" class="register-field">

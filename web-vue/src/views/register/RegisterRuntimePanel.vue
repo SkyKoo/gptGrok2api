@@ -22,7 +22,7 @@
           :disabled="resetDisabled"
           @click="emit('reset-stats')"
         >
-          重置
+          {{ target === 'openai' ? '清理已完成记录' : '重置' }}
         </Button>
         <FloatingActionMenu
           v-if="target === 'grok'"

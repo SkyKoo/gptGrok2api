@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
 func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +35,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.resetRegister(w)
 	case path == "/runtime" && r.Method == http.MethodGet:
 		s.registerRuntimeStatus(w)
+	case path == "/openai/retry-result" && r.Method == http.MethodPost:
+		s.retryFreeRegistration(w, r)
 	case path == "/checkout-retries/stop" && r.Method == http.MethodPost:
 		s.stopCheckoutRetries(w)
 	case path == "/checkout-history/clear" && r.Method == http.MethodPost:
@@ -88,23 +91,47 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) registerConfig(w http.ResponseWriter) {
-	writeJSON(w, http.StatusOK, map[string]any{"register": s.registerStore.Get()})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
 }
 
 func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
 	var updates map[string]any
 	if !decodeJSON(w, r, &updates) {
 		return
 	}
-	value, err := s.registerStore.Update(updates)
+	if s.freeRegister.Snapshot()["running"] == true {
+		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
+		return
+	}
+	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error"} {
+		delete(updates, key)
+	}
+	s.mergeHMEPassword(updates)
+	_, err := s.registerStore.Update(updates)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": value})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
 }
 
 func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if stringValue(s.registerStore.Get()["target"]) == "openai" || s.freeRegister.Snapshot()["running"] == true {
+		if enabled {
+			if _, err := s.freeRegister.Start(s.registerStore.Get()); err != nil {
+				registrationError(w, err)
+				return
+			}
+		} else {
+			s.freeRegister.Stop()
+		}
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
+		return
+	}
 	if enabled {
 		config := s.registerStore.Get()
 		target := stringValue(config["target"])
@@ -112,7 +139,7 @@ func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
 			target = "grok"
 		}
 		if err := s.registerRuntime.Start(target); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			writeRegistrationJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"ok":       false,
 				"runtime":  s.registerRuntime.Status(target),
 				"register": config,
@@ -127,20 +154,30 @@ func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": value})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": value})
 }
 
 func (s *Server) resetRegister(w http.ResponseWriter) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if stringValue(s.registerStore.Get()["target"]) == "openai" {
+		if err := s.freeRegister.ResetCompleted(); err != nil {
+			registrationError(w, err)
+			return
+		}
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
+		return
+	}
 	value, err := s.registerStore.Reset()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": value})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": value})
 }
 
 func (s *Server) registerAction(w http.ResponseWriter, message string) {
-	writeJSON(w, http.StatusNotImplemented, map[string]any{"ok": false, "runtime": "go", "error": message})
+	writeRegistrationJSON(w, http.StatusNotImplemented, map[string]any{"ok": false, "runtime": "go", "error": message})
 }
 
 func (s *Server) resetOutlookPool(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +200,7 @@ func (s *Server) resetOutlookPool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": value, "runtime_available": false, "runtime_error": "Outlook token/Graph registration worker is not configured in Go runtime"})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": value, "runtime_available": false, "runtime_error": "Outlook token/Graph registration worker is not configured in Go runtime"})
 }
 
 func (s *Server) retryOutlookPool(w http.ResponseWriter, r *http.Request) {
@@ -183,7 +220,7 @@ func (s *Server) retryOutlookPool(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "register": value, "runtime_available": false, "runtime_error": "Outlook token/Graph registration worker is not configured in Go runtime"})
+	writeRegistrationJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "register": value, "runtime_available": false, "runtime_error": "Outlook token/Graph registration worker is not configured in Go runtime"})
 }
 
 func (s *Server) gptMailStatus(w http.ResponseWriter, r *http.Request, refreshKey bool) {
@@ -219,7 +256,7 @@ func (s *Server) gptMailStatus(w http.ResponseWriter, r *http.Request, refreshKe
 		writeError(w, http.StatusBadRequest, err.Error(), "upstream_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": result})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"status": result})
 }
 
 func firstGPTMailConfig(mail map[string]any) map[string]any {
@@ -239,7 +276,7 @@ func (s *Server) stopCheckoutRetries(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"register": value})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": value})
 }
 
 func (s *Server) clearCheckoutHistory(w http.ResponseWriter) {
@@ -248,7 +285,7 @@ func (s *Server) clearCheckoutHistory(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, value)
+	writeRegistrationJSON(w, http.StatusOK, value)
 }
 
 func (s *Server) setGrokProbePolling(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +304,7 @@ func (s *Server) setGrokProbePolling(w http.ResponseWriter, r *http.Request) {
 	case s.probeWake <- struct{}{}:
 	default:
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"probe_scheduler": status})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"probe_scheduler": status})
 }
 
 // refreshGrokRuntimeSnapshot imports the local registration archive and then
@@ -354,7 +391,7 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 	}
 	wg.Wait()
 	errors, _ := result["errors"].([]any)
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{
 		"ok":            len(errors) == 0,
 		"refreshed":     true,
 		"refreshing":    false,
@@ -370,11 +407,22 @@ func (s *Server) registerRuntimeStatus(w http.ResponseWriter) {
 	if target == "" {
 		target = "grok"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runtime": s.registerRuntime.Status(target)})
+	if target == "openai" {
+		state := s.freeRegister.Snapshot()
+		_, err := registerruntime.ParseFreeConfig(config)
+		state["ready"] = err == nil && state["error"] == nil
+		state["target"], state["driver"] = "openai", "go_chatgpt_web"
+		if err != nil {
+			state["configuration_error"] = err.Error()
+		}
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"runtime": state})
+		return
+	}
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"runtime": s.registerRuntime.Status(target)})
 }
 
 func (s *Server) openAISurvival(w http.ResponseWriter) {
-	writeJSON(w, http.StatusOK, map[string]any{"survival": s.survivalSnapshot()})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"survival": s.survivalSnapshot()})
 }
 
 func (s *Server) updateOpenAISurvival(w http.ResponseWriter, r *http.Request) {
@@ -391,7 +439,7 @@ func (s *Server) updateOpenAISurvival(w http.ResponseWriter, r *http.Request) {
 	case s.survivalWake <- struct{}{}:
 	default:
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"survival": value["openai_survival"]})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"survival": value["openai_survival"]})
 }
 
 func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
@@ -413,7 +461,7 @@ func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 	if end > len(items) {
 		end = len(items)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": false, "runtime_error": "Go registration runtime archive is local-only", "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": false, "runtime_error": "Go registration runtime archive is local-only", "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
 }
 
 func (s *Server) registeredGrokCredentials(w http.ResponseWriter, id string) {
@@ -431,7 +479,7 @@ func (s *Server) registeredGrokCredentials(w http.ResponseWriter, id string) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, item)
+	writeRegistrationJSON(w, http.StatusOK, item)
 }
 
 func decodeIDs(w http.ResponseWriter, r *http.Request) ([]string, bool) {
@@ -482,7 +530,7 @@ func (s *Server) syncRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 			skipped++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sync_state": "synced", "added": added, "skipped": skipped, "verification_pending": len(items) - added - skipped})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"ok": true, "sync_state": "synced", "added": added, "skipped": skipped, "verification_pending": len(items) - added - skipped})
 }
 
 func (s *Server) authorizeRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +561,7 @@ func (s *Server) authorizeRegisteredGrokAccounts(w http.ResponseWriter, r *http.
 			failed++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"summary": map[string]int{"total": len(results), "queued": queued, "reused": 0, "skipped": 0, "failed": failed}, "results": results})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"summary": map[string]int{"total": len(results), "queued": queued, "reused": 0, "skipped": 0, "failed": failed}, "results": results})
 }
 
 func (s *Server) disableRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
@@ -534,7 +582,7 @@ func (s *Server) disableRegisteredGrokAccounts(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"disabled": request.Disabled, "summary": map[string]int{"total": len(ids), "ok": count, "fail": len(ids) - count}})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"disabled": request.Disabled, "summary": map[string]int{"total": len(ids), "ok": count, "fail": len(ids) - count}})
 }
 
 func (s *Server) deleteRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
@@ -547,7 +595,7 @@ func (s *Server) deleteRegisteredGrokAccounts(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"removed": removed, "count": removed, "upstream_deleted": 0})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"removed": removed, "count": removed, "upstream_deleted": 0})
 }
 
 func (s *Server) exportRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request, ids []string) {
@@ -649,7 +697,7 @@ func (s *Server) registerEvents(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	last := ""
 	for {
-		payload := map[string]any{"register": s.registerStore.Get()}
+		payload := s.registrationSnapshot()
 		raw, _ := json.Marshal(payload)
 		if string(raw) != last {
 			writeSSE(w, payload)

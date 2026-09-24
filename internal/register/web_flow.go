@@ -1,0 +1,437 @@
+package register
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	fhttp "github.com/bogdanfinn/fhttp"
+	tlsclient "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
+)
+
+const registrationUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+const registrationCH = `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`
+
+type Progress func(stage string) error
+type RegistrationFlow interface {
+	Register(context.Context, Mailbox, FreeConfig, func(context.Context, time.Time) (string, error), Progress) (map[string]any, error)
+	Close()
+}
+
+// WebRegistrar ports the old ChatGPTWebRegistrar's HTTP flow. Endpoints are
+// constructor arguments for isolated contract tests; the UI cannot redirect auth.
+type WebRegistrar struct {
+	chat, auth    string
+	http          tlsclient.HttpClient
+	device, state string
+}
+
+func NewWebRegistrar(chat, auth, proxy string) (*WebRegistrar, error) {
+	for _, base := range []string{chat, auth} {
+		u, err := url.Parse(base)
+		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
+			return nil, fail("config", "invalid_auth_origin")
+		}
+	}
+	options := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profiles.Chrome_131), tlsclient.WithTimeoutSeconds(30), tlsclient.WithNotFollowRedirects(), tlsclient.WithCookieJar(tlsclient.NewCookieJar())}
+	if proxy != "" && proxy != "direct" {
+		options = append(options, tlsclient.WithProxyUrl(proxy))
+	}
+	client, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), options...)
+	if err != nil {
+		return nil, fail("config", "http_client_failed")
+	}
+	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), http: client}, nil
+}
+func (r *WebRegistrar) Close() { r.http.CloseIdleConnections() }
+func sameOrigin(raw, base string) bool {
+	a, e := url.Parse(raw)
+	b, f := url.Parse(base)
+	return e == nil && f == nil && a.User == nil && a.Scheme == b.Scheme && a.Host == b.Host
+}
+func (r *WebRegistrar) trusted(raw string) bool {
+	return sameOrigin(raw, r.chat) || sameOrigin(raw, r.auth)
+}
+
+type webReply struct {
+	data    map[string]any
+	headers fhttp.Header
+	status  int
+}
+
+func (r *WebRegistrar) request(ctx context.Context, stage, method, rawURL, body, contentType string, headers map[string]string) (webReply, error) {
+	var result webReply
+	if !r.trusted(rawURL) {
+		return result, fail(stage, "untrusted_redirect")
+	}
+	req, err := fhttp.NewRequestWithContext(ctx, method, rawURL, strings.NewReader(body))
+	if err != nil {
+		return result, fail(stage, "invalid_request")
+	}
+	req.Header = fhttp.Header{"user-agent": {registrationUA}, "accept": {"application/json"}, "accept-language": {"en-US,en;q=0.9"}, "sec-ch-ua": {registrationCH}, "sec-ch-ua-mobile": {"?0"}, "sec-ch-ua-platform": {`"Windows"`}}
+	if strings.HasPrefix(req.URL.Path, "/api/auth/") && sameOrigin(rawURL, r.chat) {
+		req.Header.Set("origin", r.chat)
+		req.Header.Set("referer", r.chat+"/")
+		req.Header.Set("x-openai-target-path", req.URL.Path)
+		route := req.URL.Path
+		if route == "/api/auth/signin/openai" {
+			route = "/api/auth/signin/{provider}"
+		}
+		req.Header.Set("x-openai-target-route", route)
+	} else if strings.HasPrefix(req.URL.Path, "/api/accounts/") {
+		req.Header.Set("origin", r.auth)
+	}
+	if contentType != "" {
+		req.Header.Set("content-type", contentType)
+	}
+	if r.device != "" {
+		req.Header.Set("oai-device-id", r.device)
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	resp, err := r.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, fail(stage, "network_error")
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return result, fail(stage, "read_error")
+	}
+	result = webReply{data: map[string]any{}, headers: resp.Header, status: resp.StatusCode}
+	_ = json.Unmarshal(raw, &result.data)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		code := "upstream_rejected"
+		if resp.StatusCode == 403 || strings.Contains(string(raw), "cf-chl-") {
+			code = "verification_required"
+		}
+		if resp.StatusCode == 429 {
+			code = "rate_limited"
+		}
+		return result, &Failure{Stage: stage, Code: code, HTTPStatus: resp.StatusCode}
+	}
+	if errorValue := result.data["error"]; errorValue != nil && errorValue != "" {
+		return result, fail(stage, "upstream_rejected")
+	}
+	if success, ok := result.data["success"].(bool); ok && !success {
+		return result, fail(stage, "upstream_rejected")
+	}
+	return result, nil
+}
+func (r *WebRegistrar) json(ctx context.Context, stage, path string, body any, headers map[string]string) (webReply, error) {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return webReply{}, fail(stage, "invalid_request")
+	}
+	return r.request(ctx, stage, "POST", r.auth+path, string(raw), "application/json", headers)
+}
+func (r *WebRegistrar) navigate(ctx context.Context, stage, rawURL string) (string, error) {
+	for hop := 0; hop < 10; hop++ {
+		referer := r.auth + "/email-verification"
+		if stage == "authorize" {
+			referer = r.chat + "/"
+		}
+		if stage == "session" {
+			referer = r.auth + "/about-you"
+		}
+		res, err := r.request(ctx, stage, "GET", rawURL, "", "", map[string]string{"accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "referer": referer})
+		if err != nil {
+			return "", err
+		}
+		if res.status == 200 {
+			return rawURL, nil
+		}
+		if res.status < 300 || res.status >= 400 {
+			return "", fail(stage, "unexpected_status")
+		}
+		location := res.headers.Get("Location")
+		if location == "" {
+			return "", fail(stage, "missing_redirect")
+		}
+		base, _ := url.Parse(rawURL)
+		next, err := base.Parse(location)
+		if err != nil {
+			return "", fail(stage, "invalid_redirect")
+		}
+		rawURL = next.String()
+	}
+	return "", fail(stage, "redirect_limit")
+}
+func (r *WebRegistrar) cookie(rawURL, name, value string) {
+	u, _ := url.Parse(rawURL)
+	r.http.SetCookies(u, []*fhttp.Cookie{{Name: name, Value: value, Path: "/", Secure: u.Scheme == "https", HttpOnly: true}})
+}
+func (r *WebRegistrar) begin(ctx context.Context) error {
+	var authorize string
+	for i := 0; i < 2; i++ {
+		csrf, err := r.request(ctx, "authorize", "GET", r.chat+"/api/auth/csrf", "", "", nil)
+		if err != nil {
+			return err
+		}
+		token := stringValue(csrf.data["csrfToken"])
+		if csrf.status != 200 || token == "" {
+			return fail("authorize", "missing_csrf")
+		}
+		body := url.Values{"csrfToken": {token}, "callbackUrl": {r.chat + "/"}, "json": {"true"}}
+		signin, err := r.request(ctx, "authorize", "POST", r.chat+"/api/auth/signin/openai?prompt=login&screen_hint=login_or_signup", body.Encode(), "application/x-www-form-urlencoded", nil)
+		if err != nil {
+			return err
+		}
+		authorize = stringValue(signin.data["url"])
+	}
+	u, err := url.Parse(authorize)
+	if err != nil || !sameOrigin(authorize, r.auth) || u.Path != "/api/accounts/authorize" {
+		return fail("authorize", "invalid_authorize_url")
+	}
+	r.device, r.state = u.Query().Get("device_id"), u.Query().Get("state")
+	if r.device == "" {
+		return fail("authorize", "missing_device_id")
+	}
+	r.cookie(r.auth, "oai-did", r.device)
+	landing, err := r.navigate(ctx, "authorize", authorize)
+	if err != nil {
+		return err
+	}
+	if !sameOrigin(landing, r.auth) {
+		return fail("authorize", "invalid_landing")
+	}
+	return nil
+}
+
+func (r *WebRegistrar) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	if err := progress("authorize"); err != nil {
+		return nil, err
+	}
+	if err := r.begin(ctx); err != nil {
+		return nil, err
+	}
+	if err := progress("submit_email"); err != nil {
+		return nil, err
+	}
+	headers, err := r.challenge(ctx, "authorize_continue")
+	if err != nil {
+		return nil, err
+	}
+	headers["referer"] = r.auth + "/log-in-or-create-account"
+	res, err := r.json(ctx, "submit_email", "/api/accounts/authorize/continue", map[string]any{"username": map[string]string{"kind": "email", "value": box.Email}, "screen_hint": "login_or_signup"}, headers)
+	if err != nil {
+		return nil, err
+	}
+	if stringValue(object(res.data["page"])["type"]) != "email_otp_verification" {
+		return nil, fail("submit_email", "unexpected_page_or_existing_account")
+	}
+	if err := progress("send_code"); err != nil {
+		return nil, err
+	}
+	after := time.Now().UTC().Add(-10 * time.Second)
+	headers["referer"] = r.auth + "/email-verification"
+	// Reuse the authorize challenge for email send. OTP submission is never retried.
+	res, err = r.request(ctx, "send_code", "GET", r.auth+"/api/accounts/email-otp/send", "", "", headers)
+	if err != nil {
+		return nil, err
+	}
+	if res.status != 200 && res.status != 302 {
+		return nil, fail("send_code", "unexpected_status")
+	}
+	if err := progress("wait_code"); err != nil {
+		return nil, err
+	}
+	mailCtx, cancel := context.WithTimeout(ctx, cfg.MailTimeout)
+	code, err := wait(mailCtx, after)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	if len(code) != 6 || mailCode(code) != code {
+		return nil, fail("wait_code", "invalid_code")
+	}
+	if err := progress("validate_code"); err != nil {
+		return nil, err
+	}
+	res, err = r.json(ctx, "validate_code", "/api/accounts/email-otp/validate", map[string]string{"code": code}, map[string]string{"referer": r.auth + "/email-verification"})
+	if err != nil {
+		return nil, err
+	}
+	if res.status != 200 {
+		return nil, fail("validate_code", "unexpected_status")
+	}
+	if next := continuationURL(res.data); next != "" {
+		base, _ := url.Parse(r.auth + "/")
+		nextURL, parseErr := base.Parse(next)
+		if parseErr != nil || !sameOrigin(nextURL.String(), r.auth) {
+			return nil, fail("validate_code", "invalid_continuation")
+		}
+		if _, err = r.navigate(ctx, "validate_code", nextURL.String()); err != nil {
+			return nil, err
+		}
+	}
+	if err := progress("create_profile"); err != nil {
+		return nil, err
+	}
+	headers, err = r.challenge(ctx, "oauth_create_account")
+	if err != nil {
+		return nil, err
+	}
+	headers["referer"] = r.auth + "/about-you"
+	res, err = r.json(ctx, "create_profile", "/api/accounts/user/profile", map[string]string{"name": cfg.Name, "birthdate": cfg.Birthdate}, headers)
+	if err != nil {
+		return nil, err
+	}
+	callback := continuationURL(res.data)
+	if callback == "" {
+		callback = res.headers.Get("Location")
+	}
+	u, err := url.Parse(callback)
+	if err != nil || !sameOrigin(callback, r.chat) || u.Path != "/api/auth/callback/openai" {
+		return nil, fail("create_profile", "invalid_callback")
+	}
+	if r.state != "" && u.Query().Get("state") != r.state {
+		return nil, fail("create_profile", "callback_state_mismatch")
+	}
+	if err := progress("session"); err != nil {
+		return nil, err
+	}
+	if _, err = r.navigate(ctx, "session", callback); err != nil {
+		return nil, err
+	}
+	for attempt := 0; attempt < 4; attempt++ {
+		res, err = r.request(ctx, "session", "GET", r.chat+"/api/auth/session", "", "", nil)
+		if err != nil {
+			return nil, err
+		}
+		token := stringValue(res.data["accessToken"])
+		if res.status == 200 && token != "" {
+			user := object(res.data["user"])
+			if email := stringValue(user["email"]); !strings.EqualFold(email, box.Email) {
+				return nil, fail("session", "email_mismatch")
+			}
+			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": map[string]any{"user-agent": registrationUA, "impersonate": "chrome131", "oai-device-id": r.device, "sec-ch-ua": registrationCH, "sec-ch-ua-platform": `"Windows"`}}, nil
+		}
+		if attempt < 3 {
+			if err = pause(ctx, time.Duration(attempt+1)*time.Second); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nil, fail("session", "missing_access_token")
+}
+
+// challenge implements the legacy HTTP fallback; it intentionally reports an
+// unsupported upstream challenge rather than inventing a token or claiming success.
+func (r *WebRegistrar) challenge(ctx context.Context, flow string) (map[string]string, error) {
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return nil, fail("challenge", "random_failed")
+	}
+	configuration := []any{"1920x1080", time.Now().UTC().Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)"), 4294705152, 1, registrationUA, r.chat + "/sentinel/20260423af3c/sdk.js", nil, nil, "en-US", 5, "hardwareConcurrency-undefined", "location", "Object", 1000, hex.EncodeToString(id), "", 8, time.Now().UnixMilli() - 1000}
+	encode := func() string { raw, _ := json.Marshal(configuration); return base64.StdEncoding.EncodeToString(raw) }
+	requirements := "gAAAAAC" + encode()
+	body, _ := json.Marshal(map[string]string{"p": requirements, "id": r.device, "flow": flow})
+	res, err := r.request(ctx, "challenge", "POST", r.chat+"/backend-api/sentinel/req", string(body), "text/plain;charset=UTF-8", map[string]string{"origin": r.chat, "referer": r.chat + "/backend-api/sentinel/frame.html?sv=20260423af3c"})
+	if err != nil {
+		return nil, err
+	}
+	token := stringValue(res.data["token"])
+	if res.status != 200 || token == "" {
+		return nil, fail("challenge", "missing_token")
+	}
+	pow := object(res.data["proofofwork"])
+	proof := requirements
+	if boolValue(pow["required"], false) {
+		seed, difficulty := stringValue(pow["seed"]), strings.ToLower(stringValue(pow["difficulty"]))
+		if seed == "" || len(difficulty) < 1 || len(difficulty) > 8 || strings.Trim(difficulty, "0123456789abcdef") != "" {
+			return nil, fail("challenge", "unsupported_difficulty")
+		}
+		proof = ""
+		start := time.Now()
+		for i := 0; i < 500000; i++ {
+			if i%256 == 0 && ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			configuration[3], configuration[9] = i, time.Since(start).Milliseconds()
+			encoded := encode()
+			if legacyRegistrationHash(seed + encoded)[:len(difficulty)] <= difficulty {
+				proof = "gAAAAAB" + encoded + "~S"
+				break
+			}
+		}
+		if proof == "" {
+			return nil, fail("challenge", "work_limit")
+		}
+	}
+	turnstile := ""
+	ts := object(res.data["turnstile"])
+	if boolValue(ts["required"], false) {
+		turnstile, err = provider.RegistrationSentinelToken(stringValue(ts["dx"]), requirements)
+		if err != nil || turnstile == "" {
+			return nil, fail("challenge", "unsupported_challenge")
+		}
+	}
+	var cookie string
+	for _, line := range res.headers.Values("Set-Cookie") {
+		h := fhttp.Header{"Set-Cookie": {line}}
+		response := fhttp.Response{Header: h}
+		for _, c := range response.Cookies() {
+			if c.Name == "oai-sc" {
+				cookie = c.Value
+			}
+		}
+	}
+	if cookie == "" {
+		origin, _ := url.Parse(r.chat)
+		for _, existing := range r.http.GetCookies(origin) {
+			if existing.Name == "oai-sc" {
+				cookie = existing.Value
+				break
+			}
+		}
+	}
+	if cookie == "" {
+		return nil, fail("challenge", "missing_session_cookie")
+	}
+	r.cookie(r.auth, "oai-sc", cookie)
+	value, _ := json.Marshal(map[string]string{"p": proof, "t": turnstile, "c": token, "id": r.device, "flow": flow})
+	return map[string]string{"openai-sentinel-token": string(value)}, nil
+}
+func legacyRegistrationHash(text string) string {
+	h := uint32(2166136261)
+	for _, ch := range text {
+		h ^= uint32(ch)
+		h *= 16777619
+	}
+	h ^= h >> 16
+	h *= 2246822507
+	h ^= h >> 13
+	h *= 3266489909
+	h ^= h >> 16
+	return fmt.Sprintf("%08x", h)
+}
+
+func continuationURL(data map[string]any) string {
+	for _, key := range []string{"continue_url", "continueUrl"} {
+		if value := stringValue(data[key]); value != "" {
+			return value
+		}
+	}
+	for _, source := range []map[string]any{object(object(data["page"])["payload"]), object(data["oai-client-auth-session"])} {
+		for _, key := range []string{"continue_url", "continueUrl", "next_url", "nextUrl"} {
+			if value := stringValue(source[key]); value != "" {
+				return value
+			}
+		}
+	}
+	return ""
+}

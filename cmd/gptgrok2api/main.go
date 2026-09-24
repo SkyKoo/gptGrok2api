@@ -29,9 +29,10 @@ func main() {
 		log.Printf("open runtime log: %v", logErr)
 	}
 
+	application := httpapi.New(cfg)
 	server := &http.Server{
 		Addr:                         cfg.ListenAddr,
-		Handler:                      httpapi.New(cfg).Handler(),
+		Handler:                      application.Handler(),
 		ReadHeaderTimeout:            10 * time.Second,
 		ReadTimeout:                  cfg.RequestTimeout,
 		WriteTimeout:                 0,
@@ -54,6 +55,9 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if err := application.ShutdownRegistration(ctx); err != nil {
+		log.Printf("registration shutdown: %v", err)
+	}
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}

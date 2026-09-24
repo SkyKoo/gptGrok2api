@@ -438,8 +438,8 @@ func TestRegistrationManagementEndpoints(t *testing.T) {
 		t.Fatalf("unexpected register config: %d %s", configResponse.Code, configResponse.Body.String())
 	}
 	startResponse := adminRequest(handler, http.MethodPost, "/api/register/start", nil)
-	if startResponse.Code != http.StatusServiceUnavailable || !strings.Contains(startResponse.Body.String(), `"ready":false`) {
-		t.Fatalf("register start should report unavailable executor: %d %s", startResponse.Code, startResponse.Body.String())
+	if startResponse.Code != http.StatusBadRequest || !strings.Contains(startResponse.Body.String(), "name_and_valid_birthdate_required") {
+		t.Fatalf("register start should reject missing configuration: %d %s", startResponse.Code, startResponse.Body.String())
 	}
 	runtimeResponse := adminRequest(handler, http.MethodGet, "/api/register/runtime", nil)
 	if runtimeResponse.Code != http.StatusOK || !strings.Contains(runtimeResponse.Body.String(), `"ready":false`) {

@@ -59,6 +59,8 @@ type Server struct {
 	taskQueue          tasks.QueueAPI
 	registerStore      *registerruntime.Store
 	registerRuntime    *registerruntime.Runtime
+	freeRegister       *registerruntime.FreeEngine
+	registrationMu     sync.Mutex
 	monitor            *runtimeMonitor
 	logMu              sync.Mutex
 	videoMu            sync.RWMutex
@@ -135,6 +137,7 @@ func New(cfg config.Config) *Server {
 		registerStore:      registerruntime.New(cfg.RegisterPath, cfg.GrokAccountsPath),
 		registerRuntime:    registerruntime.NewRuntime(),
 	}
+	server.initFreeRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)
