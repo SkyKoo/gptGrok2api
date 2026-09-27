@@ -11,15 +11,30 @@ import (
 
 // Failure contains only a fixed diagnostic code, never an upstream response or secret.
 type Failure struct {
-	Stage, Code string
-	HTTPStatus  int
+	Stage, Code                          string
+	HTTPStatus                           int
+	Operation, UpstreamStage, RetryAfter string
+	UpstreamStatus                       int
 }
 
 func (e *Failure) Error() string {
+	message := e.Stage + ": " + e.Code
 	if e.HTTPStatus != 0 {
-		return fmt.Sprintf("%s: %s (HTTP %d)", e.Stage, e.Code, e.HTTPStatus)
+		message += fmt.Sprintf(" (HTTP %d)", e.HTTPStatus)
 	}
-	return e.Stage + ": " + e.Code
+	if e.Operation != "" {
+		message += " operation=" + e.Operation
+	}
+	if e.UpstreamStage != "" {
+		message += " upstream_stage=" + e.UpstreamStage
+	}
+	if e.UpstreamStatus != 0 {
+		message += fmt.Sprintf(" upstream_http=%d", e.UpstreamStatus)
+	}
+	if e.RetryAfter != "" {
+		message += fmt.Sprintf(" retry_after=%q", e.RetryAfter)
+	}
+	return message
 }
 func fail(stage, code string) error { return &Failure{Stage: stage, Code: code} }
 func safeFailure(err error) string {

@@ -12,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -97,17 +98,21 @@ func (j internalHMEJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 }
 func (h *HME) Close() { h.http.CloseIdleConnections() }
 func (h *HME) request(ctx context.Context, method, path string, body any, out any) error {
+	operation := hmeOperation(path)
+	failure := func(code string, status int) *Failure {
+		return &Failure{Stage: "mail", Code: code, HTTPStatus: status, Operation: operation}
+	}
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return fail("mail", "invalid_request")
+			return failure("invalid_request", 0)
 		}
 		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, h.cfg.BaseURL+path, reader)
 	if err != nil {
-		return fail("mail", "invalid_request")
+		return failure("invalid_request", 0)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -119,28 +124,44 @@ func (h *HME) request(ctx context.Context, method, path string, body any, out an
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fail("mail", "network_error")
+		return failure("network_error", 0)
 	}
 	defer resp.Body.Close()
 	var envelope struct {
-		Success bool            `json:"success"`
-		Code    string          `json:"code"`
-		Data    json.RawMessage `json:"data"`
+		Success        bool            `json:"success"`
+		Code           string          `json:"code"`
+		Data           json.RawMessage `json:"data"`
+		Stage          string          `json:"stage"`
+		UpstreamStatus int             `json:"upstream_status"`
+		RetryAfter     string          `json:"retry_after"`
 	}
 	err = json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&envelope)
 	if err != nil {
-		return &Failure{Stage: "mail", Code: "invalid_response", HTTPStatus: resp.StatusCode}
+		result := failure("invalid_response", resp.StatusCode)
+		result.RetryAfter = hmeRetryAfter(resp.Header.Get("Retry-After"))
+		return result
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !envelope.Success {
 		code := "upstream_error"
 		switch envelope.Code {
-		case "AUTH_REQUIRED", "INVALID_CREDENTIALS", "RATE_LIMITED", "CSRF_INVALID", "ACCOUNT_NOT_FOUND", "UPSTREAM_UNAUTHORIZED", "ICLOUD_LOGIN_EXPIRED":
+		case "AUTH_REQUIRED", "INVALID_CREDENTIALS", "RATE_LIMITED", "CSRF_INVALID", "ACCOUNT_NOT_FOUND", "UPSTREAM_UNAUTHORIZED", "ICLOUD_LOGIN_EXPIRED",
+			"UPSTREAM_RATE_LIMITED", "UPSTREAM_UNAVAILABLE", "UPSTREAM_NETWORK_ERROR", "UPSTREAM_TIMEOUT", "UPSTREAM_INVALID_RESPONSE", "UPSTREAM_REJECTED", "UPSTREAM_FAILURE", "ALIAS_CREATE_FAILED",
+			"ICLOUD_LOGIN_RATE_LIMITED", "ICLOUD_LOGIN_REJECTED", "ICLOUD_LOGIN_FAILED", "ICLOUD_LOGIN_PROTOCOL_ERROR", "ICLOUD_LOGIN_ACTION_REQUIRED", "OTP_REQUIRED", "OTP_INVALID":
 			code = strings.ToLower(envelope.Code)
 		}
-		return &Failure{Stage: "mail", Code: code, HTTPStatus: resp.StatusCode}
+		result := failure(code, resp.StatusCode)
+		result.RetryAfter = hmeRetryAfter(resp.Header.Get("Retry-After"))
+		if result.RetryAfter == "" {
+			result.RetryAfter = hmeRetryAfter(envelope.RetryAfter)
+		}
+		result.UpstreamStage = hmeUpstreamStage(envelope.Stage)
+		if envelope.UpstreamStatus >= 100 && envelope.UpstreamStatus <= 599 {
+			result.UpstreamStatus = envelope.UpstreamStatus
+		}
+		return result
 	}
 	if out != nil && json.Unmarshal(envelope.Data, out) != nil {
-		return fail("mail", "invalid_response")
+		return failure("invalid_response", resp.StatusCode)
 	}
 	return nil
 }
@@ -265,4 +286,43 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 			return "", err
 		}
 	}
+}
+
+func hmeOperation(path string) string {
+	switch {
+	case path == "/api/auth/login":
+		return "hme_login"
+	case path == "/api/create":
+		return "alias_create"
+	case strings.HasPrefix(path, "/api/inbox?"):
+		return "inbox_list"
+	case strings.HasPrefix(path, "/api/inbox/"):
+		return "message_read"
+	default:
+		return "hme_request"
+	}
+}
+
+func hmeUpstreamStage(stage string) string {
+	switch stage {
+	case "session_validate", "alias_generate", "alias_reserve", "alias_list", "alias_deactivate", "alias_reactivate", "alias_delete",
+		"start", "federate", "password_challenge", "password_verify", "otp_verify", "trust", "web_session", "session_save":
+		return stage
+	default:
+		return ""
+	}
+}
+
+func hmeRetryAfter(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || len(raw) > 128 {
+		return ""
+	}
+	if n, err := strconv.ParseUint(raw, 10, 31); err == nil {
+		return strconv.FormatUint(n, 10)
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		return t.UTC().Format(http.TimeFormat)
+	}
+	return ""
 }
