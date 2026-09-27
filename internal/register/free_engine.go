@@ -75,7 +75,9 @@ func NewFreeEngine(path string, factory FreeFactory, importer ImportAccount, ver
 			if j.Status == "running" || j.Status == "queued" {
 				j.Status = "interrupted"
 				j.Error = "process_restarted_no_automatic_registration_retry"
-				if len(j.Account) > 0 {
+				if j.Mailbox.Email != "" && len(j.Account) == 0 {
+					j.Status = "registration_pending"
+				} else if len(j.Account) > 0 {
 					if j.Imported {
 						j.Status = "verification_pending"
 					} else {
@@ -348,23 +350,27 @@ func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail Ma
 	if runErr = e.change(id, func(j *RegistrationJob) { j.Mailbox = box }); runErr != nil {
 		return
 	}
+	runErr = e.runWithMailbox(ctx, id, cfg, mail, flow, box)
+}
+
+// runWithMailbox performs the ChatGPT portion using the supplied alias. The
+// caller must have already acquired or prepared the mailbox session.
+func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConfig, mail MailSource, flow RegistrationFlow, box Mailbox) error {
 	account, err := flow.Register(ctx, box, cfg, func(ctx context.Context, after time.Time) (string, error) { return mail.WaitCode(ctx, box, after) }, func(stage string) error { return e.progress(id, stage) })
 	if err != nil {
-		runErr = err
-		return
+		return err
 	}
 	if stringValue(account["access_token"]) == "" {
-		runErr = fail("session", "missing_access_token")
-		return
+		return fail("session", "missing_access_token")
 	}
 	account["registration_job_id"] = id
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": box.AccountID, "email": box.Email}
 	account["enabled"] = false
 	account["status"] = "待验证"
-	if runErr = e.change(id, func(j *RegistrationJob) { j.Account = account; j.Stage = "import"; j.Status = "import_pending" }); runErr != nil {
-		return
+	if err = e.change(id, func(j *RegistrationJob) { j.Account = account; j.Stage = "import"; j.Status = "import_pending" }); err != nil {
+		return err
 	}
-	runErr = e.importAndVerify(ctx, id)
+	return e.importAndVerify(ctx, id)
 }
 func (e *FreeEngine) getJob(id string) (RegistrationJob, error) {
 	e.mu.Lock()
@@ -422,7 +428,9 @@ func (e *FreeEngine) failJob(id string, err error) {
 		if errors.Is(err, context.Canceled) {
 			j.Status = "cancelled"
 		}
-		if len(j.Account) > 0 {
+		if j.Mailbox.Email != "" && len(j.Account) == 0 {
+			j.Status = "registration_pending"
+		} else if len(j.Account) > 0 {
 			if j.Imported {
 				j.Status = "verification_pending"
 			} else {
@@ -520,6 +528,95 @@ func (e *FreeEngine) RetrySavedResult(id string) error {
 	}()
 	return nil
 }
+
+// RetryRegistration reuses the alias already recorded for a failed job. It
+// re-authenticates HME, but never calls Acquire or creates another alias.
+func (e *FreeEngine) RetryRegistration(raw map[string]any, id string) error {
+	cfg, err := ParseFreeConfig(raw)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	if e.loadError != nil {
+		e.mu.Unlock()
+		return e.loadError
+	}
+	if e.closing {
+		e.mu.Unlock()
+		return fail("task", "shutting_down")
+	}
+	if e.runCancel != nil || len(e.active) > 0 {
+		e.mu.Unlock()
+		return fail("task", "already_running")
+	}
+	var job RegistrationJob
+	found := false
+	for i := range e.jobs {
+		if e.jobs[i].ID != id {
+			continue
+		}
+		job = cloneJob(e.jobs[i])
+		if job.Mailbox.Email == "" || len(job.Account) > 0 || job.Verified {
+			e.mu.Unlock()
+			return fail("task", "no_saved_mailbox")
+		}
+		found = true
+		break
+	}
+	if !found {
+		e.mu.Unlock()
+		return fail("task", "not_found")
+	}
+	e.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	done := make(chan struct{})
+	e.mu.Lock()
+	// Recheck after the unlocked snapshot so two admin requests cannot resume
+	// the same alias concurrently.
+	if e.runCancel != nil || len(e.active) > 0 {
+		e.mu.Unlock()
+		cancel()
+		return fail("task", "already_running")
+	}
+	e.active[id] = &activeRegistration{cancel: cancel, done: done}
+	e.mu.Unlock()
+	if err := e.change(id, func(j *RegistrationJob) {
+		j.Status = "running"
+		j.Stage = "compensation"
+		j.Error = ""
+	}); err != nil {
+		e.finishTask(id)
+		return err
+	}
+	go func() {
+		defer e.finishTask(id)
+		defer func() {
+			if recover() != nil {
+				e.failJob(id, fail("task", "internal_error"))
+			}
+		}()
+		mail, flow, factoryErr := e.factory(cfg)
+		if factoryErr != nil {
+			e.failJob(id, factoryErr)
+			return
+		}
+		defer mail.Close()
+		defer flow.Close()
+		preparer, ok := mail.(MailSessionPreparer)
+		if !ok {
+			e.failJob(id, fail("mail", "resume_not_supported"))
+			return
+		}
+		if err := preparer.Prepare(ctx, job.Mailbox); err != nil {
+			e.failJob(id, err)
+			return
+		}
+		if err := e.runWithMailbox(ctx, id, cfg, mail, flow, job.Mailbox); err != nil {
+			e.failJob(id, err)
+		}
+	}()
+	return nil
+}
 func (e *FreeEngine) Snapshot() map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -539,7 +636,7 @@ func (e *FreeEngine) Snapshot() map[string]any {
 			failed++
 		}
 		_, active := e.active[j.ID]
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": maskEmail(j.Mailbox.Email), "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active})
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Verified && !active})
 		logs = append(logs, j.Logs...)
 	}
 	if len(logs) > 200 {

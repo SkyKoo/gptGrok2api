@@ -37,7 +37,7 @@ func TestHMEConfigSecretRetentionAndEndpointChange(t *testing.T) {
 	if check() != "PRIVATE-PASSWORD" {
 		t.Fatal("blank password did not retain saved credential")
 	}
-	for _, path := range []string{"/api/register/checkout-retries/stop", "/api/register/checkout-history/clear", "/api/register/outlook-pool/reset"} {
+	for _, path := range []string{"/api/register/checkout-retries/stop", "/api/register/checkout-history/clear", "/api/register/outlook-pool/reset", "/api/register/openai/retry-registration"} {
 		result := adminRequest(handler, http.MethodPost, path, strings.NewReader(`{}`))
 		if strings.Contains(result.Body.String(), "PRIVATE-PASSWORD") {
 			t.Fatalf("legacy action leaked HME credential: %s", path)

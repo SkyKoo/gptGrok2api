@@ -155,6 +155,35 @@ func TestHMEAuthenticatesCreatesAliasAndReadsFreshJunkCode(t *testing.T) {
 	}
 }
 
+func TestHMEPrepareReauthenticatesWithoutCreatingAlias(t *testing.T) {
+	creates, logins := 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+		switch r.URL.Path {
+		case "/api/auth/login":
+			logins++
+			respond(map[string]string{"csrf_token": "csrf"})
+		case "/api/create":
+			creates++
+			respond(map[string]string{"email": "new@example.test", "account_id": "acc-test"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	h, err := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.Prepare(context.Background(), Mailbox{Email: "saved@example.test", AccountID: "acc-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if logins != 1 || creates != 0 {
+		t.Fatalf("prepare unexpectedly created alias: logins=%d creates=%d", logins, creates)
+	}
+}
+
 func TestHMETimeoutRedactionAndNoMutationRetry(t *testing.T) {
 	t.Run("creation_failure", func(t *testing.T) {
 		creates := 0

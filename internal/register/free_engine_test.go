@@ -16,11 +16,18 @@ func freeTestConfig() map[string]any {
 	return map[string]any{"target": "openai", "mode": "total", "total": 1, "threads": 1, "mail": map[string]any{"providers": []any{map[string]any{"id": "test", "type": "icloud_hme", "api_base": "https://mail.example.test", "admin_password": "fake-password", "account_id": "acc-test", "enable": true}}}}
 }
 
-type fakeMail struct{ calls atomic.Int32 }
+type fakeMail struct {
+	calls    atomic.Int32
+	prepared atomic.Int32
+}
 
 func (m *fakeMail) Acquire(context.Context, string) (Mailbox, error) {
 	m.calls.Add(1)
 	return Mailbox{Email: "alias@example.test", AccountID: "acc-test"}, nil
+}
+func (m *fakeMail) Prepare(context.Context, Mailbox) error {
+	m.prepared.Add(1)
+	return nil
 }
 func (m *fakeMail) WaitCode(context.Context, Mailbox, time.Time) (string, error) {
 	return "987654", nil
@@ -28,13 +35,14 @@ func (m *fakeMail) WaitCode(context.Context, Mailbox, time.Time) (string, error)
 func (m *fakeMail) Close() {}
 
 type fakeFlow struct {
-	calls   atomic.Int32
-	block   bool
-	started chan struct{}
+	calls     atomic.Int32
+	block     bool
+	failFirst bool
+	started   chan struct{}
 }
 
 func (f *fakeFlow) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
-	f.calls.Add(1)
+	call := f.calls.Add(1)
 	if err := progress("wait_code"); err != nil {
 		return nil, err
 	}
@@ -44,6 +52,9 @@ func (f *fakeFlow) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wa
 	if f.block {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if f.failFirst && call == 1 {
+		return nil, errors.New("simulated_registration_failure")
 	}
 	return map[string]any{"access_token": "PRIVATE-TOKEN", "email": box.Email, "source_type": "chatgpt_web"}, nil
 }
@@ -88,8 +99,11 @@ func TestFreeEnginePreservesResultAndRetriesOnlyImport(t *testing.T) {
 		t.Fatalf("lost pending account: %+v", job)
 	}
 	public, _ := json.Marshal(engine.Snapshot())
-	if strings.Contains(string(public), "PRIVATE") || strings.Contains(string(public), "secret-password") || strings.Contains(string(public), "alias@example.test") {
+	if strings.Contains(string(public), "PRIVATE") || strings.Contains(string(public), "secret-password") {
 		t.Fatalf("secret in snapshot: %s", public)
+	}
+	if !strings.Contains(string(public), "alias@example.test") {
+		t.Fatal("registration task email was not fully exposed in the admin snapshot")
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal("journal is not private")
@@ -104,6 +118,32 @@ func TestFreeEnginePreservesResultAndRetriesOnlyImport(t *testing.T) {
 	}
 	if mail.calls.Load() != 1 || flow.calls.Load() != 1 || imports.Load() != 2 || verifies.Load() != 1 {
 		t.Fatal("retry repeated registration or skipped verification")
+	}
+}
+
+func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	mail, flow := &fakeMail{}, &fakeFlow{failFirst: true}
+	engine := NewFreeEngine(path, func(FreeConfig) (MailSource, RegistrationFlow, error) { return mail, flow, nil }, func(context.Context, string, map[string]any) error { return nil }, func(context.Context, string, map[string]any) error { return nil })
+	id, err := engine.Start(freeTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitEngine(t, engine)
+	job, _ := engine.getJob(id)
+	if job.Status != "registration_pending" || job.Mailbox.Email != "alias@example.test" || len(job.Account) != 0 {
+		t.Fatalf("failed registration did not retain mailbox: %+v", job)
+	}
+	if err := engine.RetryRegistration(freeTestConfig(), id); err != nil {
+		t.Fatal(err)
+	}
+	waitEngine(t, engine)
+	job, _ = engine.getJob(id)
+	if job.Status != "completed" || !job.Verified || job.Mailbox.Email != "alias@example.test" {
+		t.Fatalf("compensation did not complete: %+v", job)
+	}
+	if mail.calls.Load() != 1 || mail.prepared.Load() != 1 || flow.calls.Load() != 2 {
+		t.Fatalf("compensation created a new mailbox or skipped retry: acquire=%d prepare=%d register=%d", mail.calls.Load(), mail.prepared.Load(), flow.calls.Load())
 	}
 }
 
@@ -132,7 +172,7 @@ func TestFreeEngineCancellationAndConcurrentStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, _ := engine.getJob(id)
-	if job.Status != "cancelled" {
+	if job.Status != "registration_pending" {
 		t.Fatalf("got %s", job.Status)
 	}
 }

@@ -37,6 +37,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.registerRuntimeStatus(w)
 	case path == "/openai/retry-result" && r.Method == http.MethodPost:
 		s.retryFreeRegistration(w, r)
+	case path == "/openai/retry-registration" && r.Method == http.MethodPost:
+		s.retryFreeRegistrationTask(w, r)
 	case path == "/checkout-retries/stop" && r.Method == http.MethodPost:
 		s.stopCheckoutRetries(w)
 	case path == "/checkout-history/clear" && r.Method == http.MethodPost:

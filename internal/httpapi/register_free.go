@@ -153,6 +153,20 @@ func (s *Server) retryFreeRegistration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
 }
 
+func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := s.freeRegister.RetryRegistration(s.registerStore.Get(), body.ID); err != nil {
+		registrationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
+}
+
 // ShutdownRegistration cancels background registration before the process exits.
 func (s *Server) ShutdownRegistration(ctx context.Context) error { return s.freeRegister.Shutdown(ctx) }
 

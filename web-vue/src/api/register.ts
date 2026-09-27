@@ -202,7 +202,7 @@ export type CheckoutTask = {
 
 export type LegacyRegisterConfig = {
   openai_free: { timeout_seconds: number }
-  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean }>
+  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean }>
   target: RegisterTarget | string
   grok: GrokRegisterConfig
   checkout: OpenAICheckoutConfig
@@ -283,6 +283,9 @@ export type GptMailStatus = {
 export const registerApi = {
   retryFreeResult(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-result', { id })
+  },
+  retryFreeRegistration(id: string) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-registration', { id })
   },
   getConfig() {
     return apiClient.get<any, { register: LegacyRegisterConfig }>('/api/register')

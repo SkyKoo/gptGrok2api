@@ -40,6 +40,13 @@ type MailSource interface {
 	Close()
 }
 
+// MailSessionPreparer re-authenticates an existing mailbox without creating a
+// new alias. It is used by compensation registration after the first attempt
+// failed after HME had already returned an address.
+type MailSessionPreparer interface {
+	Prepare(context.Context, Mailbox) error
+}
+
 // HME talks to the deployed icloud-hme API, not the legacy Privacy Mail API.
 // It creates a labelled alias once and leaves it in place on failure so that a
 // partially created account can be recovered without deleting its email address.
@@ -97,6 +104,34 @@ func (j internalHMEJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
 	}
 }
 func (h *HME) Close() { h.http.CloseIdleConnections() }
+
+func (h *HME) login(ctx context.Context) error {
+	var session struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := h.request(ctx, http.MethodPost, "/api/auth/login", map[string]string{"password": h.cfg.Password}, &session); err != nil {
+		return err
+	}
+	if session.CSRF == "" {
+		return fail("mail", "missing_csrf")
+	}
+	h.csrf = session.CSRF
+	return nil
+}
+
+// Prepare resumes an already-created alias. It deliberately does not call
+// /api/create, so a compensation attempt cannot consume another HME address.
+func (h *HME) Prepare(ctx context.Context, box Mailbox) error {
+	if box.AccountID == "" || box.AccountID != h.cfg.AccountID {
+		return fail("mail", "mailbox_account_mismatch")
+	}
+	address, err := mail.ParseAddress(box.Email)
+	if err != nil || address.Address != box.Email {
+		return fail("mail", "invalid_saved_mailbox")
+	}
+	return h.login(ctx)
+}
+
 func (h *HME) request(ctx context.Context, method, path string, body any, out any) error {
 	operation := hmeOperation(path)
 	failure := func(code string, status int) *Failure {
@@ -166,16 +201,9 @@ func (h *HME) request(ctx context.Context, method, path string, body any, out an
 	return nil
 }
 func (h *HME) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
-	var session struct {
-		CSRF string `json:"csrf_token"`
-	}
-	if err := h.request(ctx, http.MethodPost, "/api/auth/login", map[string]string{"password": h.cfg.Password}, &session); err != nil {
+	if err := h.login(ctx); err != nil {
 		return Mailbox{}, err
 	}
-	if session.CSRF == "" {
-		return Mailbox{}, fail("mail", "missing_csrf")
-	}
-	h.csrf = session.CSRF
 	var box Mailbox
 	if err := h.request(ctx, http.MethodPost, "/api/create", map[string]string{"account_id": h.cfg.AccountID, "label": "CFM Free " + jobID}, &box); err != nil {
 		return box, err

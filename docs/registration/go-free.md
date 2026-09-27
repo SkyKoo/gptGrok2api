@@ -46,6 +46,10 @@ HME 使用管理员 Cookie 会话及 CSRF，调用登录、创建别名、邮件
 - 注册结果先写入注册配置同目录的 `openai_registration_tasks.json`（0600）。
 - 账号先以禁用、待校验状态入库；校验成功后启用。
 - `completed`：已入库并通过账号校验。它不代表已验证实际生图权限。
+- HME 别名创建成功后，邮箱会立即写入任务记录并在管理页面完整显示；如果后续注册流程
+  失败或进程中断，任务进入 `registration_pending`，可点击“复用此邮箱重试注册”。
+  补偿流程只重新登录 HME、复用已保存别名并重新执行 ChatGPT 流程，不调用 `/api/create`
+  或再消耗一个邮箱。任务拿到凭据后仍按入库/校验状态恢复。
 - `import_pending` / `verification_pending`：凭据保留，可点击“重试入库 / 校验”。
   重试只处理保存的结果，不创建别名、不再次注册、不重复发送验证码。
 - `interrupted`：进程中断且未保存凭据。人工核查邮箱标签及账号状态，不能断言注册失败。
@@ -67,6 +71,7 @@ HME 使用管理员 Cookie 会话及 CSRF，调用登录、创建别名、邮件
 | `GET /api/register/runtime` | 配置就绪状态、任务和存储错误 |
 | `GET /api/register/events` | 与前端协议一致的配置 SSE 快照 |
 | `POST /api/register/openai/retry-result` | `{"id":"任务 ID"}`；仅重试保存结果 |
+| `POST /api/register/openai/retry-registration` | `{"id":"任务 ID"}`；复用已创建 HME 邮箱补偿注册 |
 | `POST /api/register/reset` | 清理已完成记录，保留配置和待恢复结果 |
 
 ## 协议边界
@@ -98,7 +103,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/cfm-register-arm64 ./cmd/
 
 新增覆盖：发码与收码顺序、会话保持、验证码不重放、回调域名/state/邮箱校验、垃圾邮件详情、
 旧邮件和非目标邮件过滤、取消、并发启动拒绝、恢复文件损坏、重启不重复注册、导入失败重试、
-校验失败保持禁用、HME 密码脱敏与变更地址时不转发密码。
+校验失败保持禁用、HME 密码脱敏与变更地址时不转发密码、注册失败后复用原邮箱补偿注册。
 
 真实验收应使用隔离测试实例及明确选择的 HME 账号，完成一次注册、账号校验和一次实际生图。
 验收需另行登记 O 机器的部署/数据变更；本功能实现没有改动线上实例。
