@@ -37,20 +37,29 @@ func safeFailure(err error) string {
 }
 
 type FreeConfig struct {
+	Total, Threads                     int
 	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
 }
 
-// ParseFreeConfig deliberately supports a bounded, single-account run. Unknown
-// legacy modes/providers are rejected before any mailbox or account is created.
+// ParseFreeConfig accepts the native Go OpenAI registration limits while keeping
+// the legacy mode fields explicit. Total controls how many accounts one run
+// attempts; Threads controls the number of simultaneous registration jobs.
 func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 	c := FreeConfig{Timeout: 10 * time.Minute, MailTimeout: 3 * time.Minute, PollInterval: 3 * time.Second}
 	if stringValue(raw["target"]) != "openai" {
 		return c, fail("config", "openai_target_required")
 	}
-	if stringValue(raw["mode"]) != "total" || intValue(raw["total"]) != 1 || intValue(raw["threads"]) != 1 {
-		return c, fail("config", "use_total_mode_with_total_1_and_threads_1")
+	if stringValue(raw["mode"]) != "total" {
+		return c, fail("config", "use_total_mode")
+	}
+	c.Total, c.Threads = intValue(raw["total"]), intValue(raw["threads"])
+	if c.Total < 1 || c.Total > 100 {
+		return c, fail("config", "total_must_be_1_to_100")
+	}
+	if c.Threads < 1 || c.Threads > 100 {
+		return c, fail("config", "threads_must_be_1_to_100")
 	}
 	for _, key := range []string{"checkout", "sub2api_sync", "cpa_sync", "agent_identity_archive"} {
 		if boolValue(object(raw[key])["enabled"], false) {

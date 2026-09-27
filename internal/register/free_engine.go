@@ -33,15 +33,23 @@ type FreeFactory func(FreeConfig) (MailSource, RegistrationFlow, error)
 type ImportAccount func(context.Context, string, map[string]any) error
 type VerifyAccount func(context.Context, string, map[string]any) error
 
-// FreeEngine owns one cancellable task. Durable credentials are recorded before
-// import, so retry/restart cannot accidentally start another registration.
+type activeRegistration struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+// FreeEngine owns one cancellable registration run. A run uses a bounded worker
+// pool; each worker has its own mailbox source and protocol client. Durable
+// credentials are recorded before import, so retry/restart cannot accidentally
+// create another account.
 type FreeEngine struct {
 	mu            sync.Mutex
 	path          string
 	jobs          []RegistrationJob
-	active        string
-	cancel        context.CancelFunc
-	done          chan struct{}
+	active        map[string]*activeRegistration
+	runCancel     context.CancelFunc
+	runDone       chan struct{}
+	runThreads    int
 	loadError     error
 	closing       bool
 	factory       FreeFactory
@@ -50,7 +58,7 @@ type FreeEngine struct {
 }
 
 func NewFreeEngine(path string, factory FreeFactory, importer ImportAccount, verifier VerifyAccount) *FreeEngine {
-	e := &FreeEngine{path: path, factory: factory, importAccount: importer, verifyAccount: verifier, jobs: []RegistrationJob{}}
+	e := &FreeEngine{path: path, factory: factory, importAccount: importer, verifyAccount: verifier, jobs: []RegistrationJob{}, active: map[string]*activeRegistration{}}
 	raw, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		e.loadError = fail("storage", "journal_unreadable")
@@ -91,45 +99,194 @@ func (e *FreeEngine) Start(raw map[string]any) (string, error) {
 		return "", err
 	}
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	if e.loadError != nil {
+		e.mu.Unlock()
 		return "", e.loadError
 	}
 	if e.closing {
+		e.mu.Unlock()
 		return "", fail("task", "shutting_down")
 	}
-	if e.active != "" {
+	if e.runCancel != nil || len(e.active) > 0 {
+		e.mu.Unlock()
 		return "", fail("task", "already_running")
 	}
 	// Never evict a pending result just to make space for another registration.
-	if len(e.jobs) >= 100 {
+	if len(e.jobs)+cfg.Total > 100 {
+		e.mu.Unlock()
 		return "", fail("task", "history_full_archive_completed_jobs_first")
 	}
-	mail, flow, err := e.factory(cfg)
+	id, err := e.createJobLocked()
 	if err != nil {
+		e.mu.Unlock()
 		return "", err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	e.runCancel = cancel
+	e.runDone = make(chan struct{})
+	e.runThreads = cfg.Threads
+	e.mu.Unlock()
+	go e.runBatch(ctx, cfg, id)
+	return id, nil
+}
+
+func (e *FreeEngine) createJobLocked() (string, error) {
 	idBytes := make([]byte, 16)
-	if _, err = rand.Read(idBytes); err != nil {
-		mail.Close()
-		flow.Close()
+	if _, err := rand.Read(idBytes); err != nil {
 		return "", fail("task", "random_failed")
 	}
 	id := hex.EncodeToString(idBytes)
 	now := time.Now().UTC().Format(time.RFC3339)
-	j := RegistrationJob{ID: id, Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}}
-	e.jobs = append(e.jobs, j)
-	if err = e.saveLocked(); err != nil {
+	e.jobs = append(e.jobs, RegistrationJob{ID: id, Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}})
+	if err := e.saveLocked(); err != nil {
 		e.jobs = e.jobs[:len(e.jobs)-1]
-		mail.Close()
-		flow.Close()
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	e.active, e.cancel, e.done = id, cancel, make(chan struct{})
-	go e.run(ctx, id, cfg, mail, flow)
 	return id, nil
 }
+
+func (e *FreeEngine) runBatch(ctx context.Context, cfg FreeConfig, firstID string) {
+	workers := cfg.Threads
+	if workers > cfg.Total {
+		workers = cfg.Total
+	}
+	work := make(chan string)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case id, ok := <-work:
+					if !ok {
+						return
+					}
+					e.runTask(ctx, id, cfg)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	enqueue := func(id string) bool {
+		select {
+		case work <- id:
+			return true
+		case <-ctx.Done():
+			e.cancelQueued(id, ctx.Err())
+			return false
+		}
+	}
+	if !enqueue(firstID) {
+		close(work)
+		wg.Wait()
+		e.finishRun()
+		return
+	}
+	for i := 1; i < cfg.Total; i++ {
+		e.mu.Lock()
+		id, err := e.createJobLocked()
+		e.mu.Unlock()
+		if err != nil {
+			e.cancelRun()
+			break
+		}
+		if !enqueue(id) {
+			break
+		}
+	}
+	close(work)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		e.cancelQueued("", err)
+	}
+	e.finishRun()
+}
+
+func (e *FreeEngine) runTask(parent context.Context, id string, cfg FreeConfig) {
+	ctx, cancel := context.WithTimeout(parent, cfg.Timeout)
+	done := make(chan struct{})
+	e.mu.Lock()
+	e.active[id] = &activeRegistration{cancel: cancel, done: done}
+	e.mu.Unlock()
+	defer e.finishTask(id)
+	defer func() {
+		if recover() != nil {
+			e.failJob(id, fail("task", "internal_error"))
+		}
+	}()
+	mail, flow, err := e.factory(cfg)
+	if err != nil {
+		e.failJob(id, err)
+		return
+	}
+	defer mail.Close()
+	defer flow.Close()
+	e.run(ctx, id, cfg, mail, flow)
+}
+
+func (e *FreeEngine) finishRun() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.runCancel != nil {
+		e.runCancel()
+	}
+	e.runCancel = nil
+	e.runThreads = 0
+	if e.runDone != nil {
+		close(e.runDone)
+		e.runDone = nil
+	}
+}
+
+func (e *FreeEngine) finishTask(id string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if task, ok := e.active[id]; ok {
+		delete(e.active, id)
+		if task.cancel != nil {
+			task.cancel()
+		}
+		close(task.done)
+	}
+}
+
+func (e *FreeEngine) cancelRun() {
+	e.mu.Lock()
+	cancel := e.runCancel
+	e.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (e *FreeEngine) cancelQueued(id string, reason error) {
+	if reason == nil {
+		reason = context.Canceled
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	changed := false
+	for i := range e.jobs {
+		if id != "" && e.jobs[i].ID != id {
+			continue
+		}
+		if e.jobs[i].Status != "queued" {
+			continue
+		}
+		e.jobs[i].Status = "cancelled"
+		e.jobs[i].Error = safeFailure(reason)
+		e.jobs[i].Logs = append(e.jobs[i].Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: e.jobs[i].Error, Level: "error"})
+		e.jobs[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		changed = true
+	}
+	if changed && e.saveLocked() != nil {
+		e.loadError = fail("storage", "journal_write_failed")
+	}
+}
+
 func (e *FreeEngine) saveLocked() error {
 	if writeJSON0600(e.path, e.jobs) != nil {
 		return fail("storage", "journal_write_failed")
@@ -171,9 +328,6 @@ func (e *FreeEngine) progress(id, stage string) error {
 	})
 }
 func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail MailSource, flow RegistrationFlow) {
-	defer e.finishActive()
-	defer mail.Close()
-	defer flow.Close()
 	var runErr error
 	defer func() {
 		if recover() != nil {
@@ -278,43 +432,53 @@ func (e *FreeEngine) failJob(id string, err error) {
 		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: j.Error, Level: "error"})
 	})
 }
-func (e *FreeEngine) finishActive() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.cancel != nil {
-		e.cancel()
-	}
-	e.active = ""
-	e.cancel = nil
-	if e.done != nil {
-		close(e.done)
-		e.done = nil
-	}
-}
 func (e *FreeEngine) Stop() {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.cancel != nil {
-		e.cancel()
+	cancels := make([]context.CancelFunc, 0, len(e.active)+1)
+	if e.runCancel != nil {
+		cancels = append(cancels, e.runCancel)
+	}
+	for _, task := range e.active {
+		if task.cancel != nil {
+			cancels = append(cancels, task.cancel)
+		}
+	}
+	e.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
 	}
 }
 func (e *FreeEngine) Shutdown(ctx context.Context) error {
 	e.mu.Lock()
 	e.closing = true
-	if e.cancel != nil {
-		e.cancel()
+	cancels := make([]context.CancelFunc, 0, len(e.active)+1)
+	done := make([]<-chan struct{}, 0, len(e.active)+1)
+	if e.runCancel != nil {
+		cancels = append(cancels, e.runCancel)
 	}
-	done := e.done
+	if e.runDone != nil {
+		done = append(done, e.runDone)
+	}
+	for _, task := range e.active {
+		if task.cancel != nil {
+			cancels = append(cancels, task.cancel)
+		}
+		if task.done != nil {
+			done = append(done, task.done)
+		}
+	}
 	e.mu.Unlock()
-	if done == nil {
-		return nil
+	for _, cancel := range cancels {
+		cancel()
 	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	for _, channel := range done {
+		select {
+		case <-channel:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	return nil
 }
 
 // RetrySavedResult resumes only import/verification. It never logs in to HME,
@@ -328,7 +492,7 @@ func (e *FreeEngine) RetrySavedResult(id string) error {
 	if e.closing {
 		return fail("task", "shutting_down")
 	}
-	if e.active != "" {
+	if e.runCancel != nil || len(e.active) > 0 {
 		return fail("task", "already_running")
 	}
 	found := false
@@ -341,9 +505,10 @@ func (e *FreeEngine) RetrySavedResult(id string) error {
 		return fail("task", "no_saved_result")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	e.active, e.cancel, e.done = id, cancel, make(chan struct{})
+	done := make(chan struct{})
+	e.active[id] = &activeRegistration{cancel: cancel, done: done}
 	go func() {
-		defer e.finishActive()
+		defer e.finishTask(id)
 		defer func() {
 			if recover() != nil {
 				e.failJob(id, fail("task", "internal_error"))
@@ -361,23 +526,38 @@ func (e *FreeEngine) Snapshot() map[string]any {
 	jobs := []any{}
 	logs := []JobLog{}
 	success, failed := 0, 0
+	activeIDs := make([]string, 0, len(e.active))
+	for _, j := range e.jobs {
+		if _, ok := e.active[j.ID]; ok {
+			activeIDs = append(activeIDs, j.ID)
+		}
+	}
 	for _, j := range e.jobs {
 		if j.Status == "completed" {
 			success++
-		} else if j.ID != e.active {
+		} else if j.Status == "failed" || j.Status == "cancelled" || j.Status == "interrupted" {
 			failed++
 		}
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": maskEmail(j.Mailbox.Email), "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && j.ID != e.active})
+		_, active := e.active[j.ID]
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": maskEmail(j.Mailbox.Email), "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active})
 		logs = append(logs, j.Logs...)
 	}
 	if len(logs) > 200 {
 		logs = logs[len(logs)-200:]
 	}
-	running := 0
-	if e.active != "" {
-		running = 1
+	running := len(activeIDs)
+	if e.runCancel != nil && running == 0 {
+		running = 0
 	}
-	result := map[string]any{"running": running == 1, "active_job_id": e.active, "jobs": jobs, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": running, "threads": 1}}
+	activeID := ""
+	if len(activeIDs) > 0 {
+		activeID = activeIDs[0]
+	}
+	threads := e.runThreads
+	if threads == 0 && running > 0 {
+		threads = running
+	}
+	result := map[string]any{"running": e.runCancel != nil || running > 0, "active_job_id": activeID, "active_job_ids": activeIDs, "jobs": jobs, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": running, "threads": threads}}
 	if e.loadError != nil {
 		result["error"] = safeFailure(e.loadError)
 	}
@@ -386,7 +566,7 @@ func (e *FreeEngine) Snapshot() map[string]any {
 func (e *FreeEngine) ResetCompleted() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.active != "" {
+	if e.runCancel != nil || len(e.active) > 0 {
 		return fail("task", "already_running")
 	}
 	if e.loadError != nil {

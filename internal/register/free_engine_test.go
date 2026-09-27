@@ -137,6 +137,74 @@ func TestFreeEngineCancellationAndConcurrentStart(t *testing.T) {
 	}
 }
 
+type parallelFlow struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	active  *atomic.Int32
+	max     *atomic.Int32
+}
+
+func (f *parallelFlow) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	if err := progress("wait_code"); err != nil {
+		return nil, err
+	}
+	current := f.active.Add(1)
+	for {
+		previous := f.max.Load()
+		if current <= previous || f.max.CompareAndSwap(previous, current) {
+			break
+		}
+	}
+	f.started <- struct{}{}
+	select {
+	case <-f.release:
+	case <-ctx.Done():
+		f.active.Add(-1)
+		return nil, ctx.Err()
+	}
+	f.active.Add(-1)
+	return map[string]any{"access_token": "PRIVATE-TOKEN", "email": box.Email, "source_type": "chatgpt_web"}, nil
+}
+func (f *parallelFlow) Close() {}
+
+func TestFreeEngineRunsConfiguredTotalWithThreadPool(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var active, max atomic.Int32
+	var created atomic.Int32
+	engine := NewFreeEngine(path, func(FreeConfig) (MailSource, RegistrationFlow, error) {
+		created.Add(1)
+		return &fakeMail{}, &parallelFlow{started: started, release: release, active: &active, max: &max}, nil
+	}, func(context.Context, string, map[string]any) error { return nil }, func(context.Context, string, map[string]any) error { return nil })
+	cfg := freeTestConfig()
+	cfg["total"], cfg["threads"] = 2, 2
+	if _, err := engine.Start(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("configured workers did not start concurrently")
+		}
+	}
+	if max.Load() != 2 || created.Load() != 2 {
+		t.Fatalf("expected two concurrent jobs, max=%d factories=%d", max.Load(), created.Load())
+	}
+	runningStats := engine.Snapshot()["stats"].(map[string]any)
+	if runningStats["threads"] != 2 || runningStats["running"] != 2 {
+		t.Fatalf("unexpected running batch stats: %#v", runningStats)
+	}
+	close(release)
+	waitEngine(t, engine)
+	snapshot := engine.Snapshot()
+	stats := snapshot["stats"].(map[string]any)
+	if stats["done"] != 2 || stats["success"] != 2 || stats["running"] != 0 || stats["threads"] != 0 {
+		t.Fatalf("unexpected batch stats: %#v", stats)
+	}
+}
+
 func TestFreeEngineRestartDoesNotRepeatRegistration(t *testing.T) {
 	for _, withResult := range []bool{false, true} {
 		t.Run(map[bool]string{false: "before_credentials", true: "after_credentials"}[withResult], func(t *testing.T) {
@@ -211,7 +279,7 @@ func TestFreeEngineCorruptJournalAndInvalidConfigFailBeforeNetwork(t *testing.T)
 		t.Fatal("ignored corrupt journal")
 	}
 	for _, change := range []func(map[string]any){
-		func(c map[string]any) { c["threads"] = 2 }, func(c map[string]any) { c["total"] = 0 }, func(c map[string]any) { c["mode"] = "quota" }, func(c map[string]any) { c["proxy"] = "group:foo" },
+		func(c map[string]any) { c["threads"] = 0 }, func(c map[string]any) { c["total"] = 0 }, func(c map[string]any) { c["mode"] = "quota" }, func(c map[string]any) { c["proxy"] = "group:foo" },
 		func(c map[string]any) { c["checkout"] = map[string]any{"enabled": true} }, func(c map[string]any) { c["openai_free"] = map[string]any{"timeout_seconds": 1} },
 		func(c map[string]any) {
 			p := object(c["mail"])["providers"].([]any)
@@ -223,5 +291,11 @@ func TestFreeEngineCorruptJournalAndInvalidConfigFailBeforeNetwork(t *testing.T)
 		if _, err := ParseFreeConfig(c); err == nil {
 			t.Fatalf("invalid config accepted: %+v", c)
 		}
+	}
+	accepted := freeTestConfig()
+	accepted["threads"] = 2
+	accepted["total"] = 2
+	if _, err := ParseFreeConfig(accepted); err != nil {
+		t.Fatalf("configurable total/thread count rejected: %v", err)
 	}
 }
