@@ -56,6 +56,10 @@ type FreeConfig struct {
 	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
+	// BrowserProfile is selected by the registration flow factory. It is not
+	// user configuration; compensation retries may set it to the saved task
+	// profile so the same protocol environment is reused.
+	BrowserProfile *BrowserProfile
 }
 
 // ParseFreeConfig accepts the native Go OpenAI registration limits while keeping

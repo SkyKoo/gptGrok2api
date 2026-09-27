@@ -16,11 +16,8 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 )
 
-const registrationUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-const registrationCH = `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`
 const sentinelOrigin = "https://sentinel.openai.com"
 const sentinelVersion = "20260810913b"
 
@@ -30,23 +27,35 @@ type RegistrationFlow interface {
 	Close()
 }
 
+// RegistrationProfileProvider exposes the protocol profile selected for a
+// flow so the durable task journal can reuse it during compensation retry.
+type RegistrationProfileProvider interface {
+	BrowserProfile() BrowserProfile
+}
+
 // WebRegistrar ports the old ChatGPTWebRegistrar's HTTP flow. Endpoints are
 // constructor arguments for isolated contract tests; the UI cannot redirect auth.
 type WebRegistrar struct {
 	chat, auth, sentinel string
 	http                 tlsclient.HttpClient
+	profile              BrowserProfile
 	device, state        string
 	authSessionID        string
 }
 
-func NewWebRegistrar(chat, auth, proxy string) (*WebRegistrar, error) {
+func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfile) (*WebRegistrar, error) {
 	for _, base := range []string{chat, auth} {
 		u, err := url.Parse(base)
 		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && u.Scheme != "http") {
 			return nil, fail("config", "invalid_auth_origin")
 		}
 	}
-	options := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profiles.Chrome_131), tlsclient.WithTimeoutSeconds(30), tlsclient.WithNotFollowRedirects(), tlsclient.WithCookieJar(tlsclient.NewCookieJar())}
+	profile := NewBrowserProfile()
+	if len(requestedProfile) > 0 && requestedProfile[0].valid() {
+		profile = requestedProfile[0]
+		profile.NavigatorLanguages = append([]string(nil), profile.NavigatorLanguages...)
+	}
+	options := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profile.tlsClientProfile()), tlsclient.WithTimeoutSeconds(30), tlsclient.WithNotFollowRedirects(), tlsclient.WithCookieJar(tlsclient.NewCookieJar())}
 	if proxy != "" && proxy != "direct" {
 		options = append(options, tlsclient.WithProxyUrl(proxy))
 	}
@@ -54,9 +63,10 @@ func NewWebRegistrar(chat, auth, proxy string) (*WebRegistrar, error) {
 	if err != nil {
 		return nil, fail("config", "http_client_failed")
 	}
-	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client}, nil
+	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client, profile: profile}, nil
 }
-func (r *WebRegistrar) Close() { r.http.CloseIdleConnections() }
+func (r *WebRegistrar) Close()                         { r.http.CloseIdleConnections() }
+func (r *WebRegistrar) BrowserProfile() BrowserProfile { return r.profile }
 func sameOrigin(raw, base string) bool {
 	a, e := url.Parse(raw)
 	b, f := url.Parse(base)
@@ -81,7 +91,7 @@ func (r *WebRegistrar) request(ctx context.Context, stage, method, rawURL, body,
 	if err != nil {
 		return result, fail(stage, "invalid_request")
 	}
-	req.Header = fhttp.Header{"user-agent": {registrationUA}, "accept": {"application/json"}, "accept-language": {"en-US,en;q=0.9"}, "sec-ch-ua": {registrationCH}, "sec-ch-ua-mobile": {"?0"}, "sec-ch-ua-platform": {`"Windows"`}}
+	req.Header = fhttp.Header{"user-agent": {r.profile.UserAgent}, "accept": {"application/json"}, "accept-language": {r.profile.AcceptLanguage}, "sec-ch-ua": {r.profile.SecCHUA}, "sec-ch-ua-mobile": {r.profile.SecCHUAMobile}, "sec-ch-ua-platform": {r.profile.SecCHUAPlatform}}
 	if strings.HasPrefix(req.URL.Path, "/api/auth/") && sameOrigin(rawURL, r.chat) {
 		req.Header.Set("origin", r.chat)
 		req.Header.Set("referer", r.chat+"/")
@@ -420,7 +430,9 @@ func (r *WebRegistrar) Register(ctx context.Context, box Mailbox, cfg FreeConfig
 			if email := stringValue(user["email"]); !strings.EqualFold(email, box.Email) {
 				return nil, fail("session", "email_mismatch")
 			}
-			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": map[string]any{"user-agent": registrationUA, "impersonate": "chrome131", "oai-device-id": r.device, "sec-ch-ua": registrationCH, "sec-ch-ua-platform": `"Windows"`}}, nil
+			fingerprint := r.profile.fingerprintMetadata()
+			fingerprint["oai-device-id"] = r.device
+			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint}, nil
 		}
 		if attempt < 3 {
 			if err = pause(ctx, time.Duration(attempt+1)*time.Second); err != nil {
@@ -442,13 +454,13 @@ func (r *WebRegistrar) challenge(ctx context.Context, flow string) (map[string]s
 	configuration := []any{
 		3000,
 		time.Now().UTC().Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)"),
-		4294705152,
+		r.profile.JSHeapSizeLimit,
 		1,
-		registrationUA,
+		r.profile.UserAgent,
 		r.sentinel + "/sentinel/" + sentinelVersion + "/sdk.js",
 		nil,
-		"en-US",
-		"en-US,en",
+		r.profile.NavigatorLanguage,
+		r.profile.navigatorLanguagesValue(),
 		1,
 		"hardwareConcurrency",
 		"location",
@@ -456,7 +468,7 @@ func (r *WebRegistrar) challenge(ctx context.Context, flow string) (map[string]s
 		1000,
 		sentinelSID,
 		"",
-		8,
+		r.profile.DeviceMemory,
 		time.Now().UnixMilli() - 1000,
 		0, 0, 0, 0, 0, 0, 0,
 	}

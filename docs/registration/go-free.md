@@ -1,14 +1,15 @@
-# Go ChatGPT Free 注册（功能分支）
+# Go ChatGPT Free 注册
 
-状态：2026-09-24，已实现本地功能和模拟测试；真实上游注册、账号校验及生图验收尚未完成。
-在真实验收通过之前保留在功能分支，不合并或部署到生产 main。
+状态：2026-09-28，Go 注册主流程、HME 补偿注册和 protocol 浏览器画像已实现并通过本地模拟测试。
+生产部署状态以 O 机器运维记录为准；本文不代表真实上游注册成功率承诺。
 
 ## 范围
 
 - 分支 `codex/go-free-registration` 从本地 `main` 的 `6290521` 创建。
 - 参考删除前 `01d49d300c1c7553e879bbcfbb085ec3952a11d2` 中的
   `services/register/openai_register.py`（`ChatGPTWebRegistrar`）及相关模拟测试。
-- Go 主服务直接执行注册，无 Python/Node/浏览器运行时，无新增容器或 Go 模块依赖。
+- Go 主服务直接执行注册，无 Python 或真实浏览器运行时；Sentinel 仅使用镜像内置 Node VM
+  运行 SDK，无新增容器或 Go 模块依赖。
 - 每次只运行一个账号：`target=openai`、`mode=total`、`total=1`、`threads=1`。
 - 邮箱接入的是独立部署的 `icloud-hme`，类型 `icloud_hme`。
   旧 `icloud_api` / `icloud_local` 面向另一个 Privacy Mail 项目，协议不同，不适用于此实现。
@@ -81,13 +82,18 @@ HTTP 注册参照历史网页流程，包括两次 CSRF/sign-in 初始化、Cook
 证书验证保持开启，没有迁移旧代码的 `verify=False`。
 
 注册校验使用旧 Python 的 HTTP Sentinel 回退协议及已有 Go 解码器。
-没有移植旧 Node SDK/浏览器执行路径、Session Observer 或外部浏览器辅助服务。
+protocol 模式参考 Turb 的 `config/browser.py`，为每个注册任务从候选池选择一组稳定的
+`BrowserProfile`，同时供 tls-client、HTTP Client Hints 和 Sentinel VM 使用；同一任务内不变，
+补偿注册从任务恢复文件复用原画像。当前画像池使用 tls-client 已有的 Chrome 131 Profile，
+并随机选择屏幕尺寸、CPU 核数、JS 堆和设备内存组合。它只是在协议层模拟参数，不是完整浏览器
+指纹，也没有引入 Roxy、Cloak、Browser Use 或 Skyvern 等外部浏览器服务。
+没有移植 Turb 的真实浏览器驱动、Session Observer 或外部浏览器辅助服务。
 上游协议、页面或验证要求变化时会返回明确失败；模拟测试通过不保证真实注册成功。
 日志仅包含固定阶段/错误类别/HTTP 状态，不记录验证码、Token、Cookie 或上游响应体。
 
 ## 测试与合并条件
 
-2026-09-24 本地结果：全量 Go 测试、注册/HTTP/provider 包竞态检查、`go vet`、前端构建、
+2026-09-28 本地结果：全量 Go 测试、注册/HTTP/provider 包竞态检查、`go vet`、前端构建、
 Linux ARM64 无 CGO 编译均通过。所有新增网络测试均使用 loopback 模拟服务；没有连接真实
 HME 或创建 ChatGPT 账号。最终复核补充了验证码后的授权跳转、嵌套回调和已有 Cookie 复用场景。
 
@@ -103,7 +109,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/cfm-register-arm64 ./cmd/
 
 新增覆盖：发码与收码顺序、会话保持、验证码不重放、回调域名/state/邮箱校验、垃圾邮件详情、
 旧邮件和非目标邮件过滤、取消、并发启动拒绝、恢复文件损坏、重启不重复注册、导入失败重试、
-校验失败保持禁用、HME 密码脱敏与变更地址时不转发密码、注册失败后复用原邮箱补偿注册。
+校验失败保持禁用、HME 密码脱敏与变更地址时不转发密码、注册失败后复用原邮箱补偿注册、
+画像池字段一致性和补偿重试复用原画像。
 
 真实验收应使用隔离测试实例及明确选择的 HME 账号，完成一次注册、账号校验和一次实际生图。
 验收需另行登记 O 机器的部署/数据变更；本功能实现没有改动线上实例。

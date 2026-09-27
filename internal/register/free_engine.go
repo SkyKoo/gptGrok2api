@@ -12,17 +12,20 @@ import (
 )
 
 type RegistrationJob struct {
-	ID        string         `json:"id"`
-	Status    string         `json:"status"`
-	Stage     string         `json:"stage"`
-	Error     string         `json:"error,omitempty"`
-	CreatedAt string         `json:"created_at"`
-	UpdatedAt string         `json:"updated_at"`
-	Mailbox   Mailbox        `json:"mailbox"`
-	Imported  bool           `json:"imported"`
-	Verified  bool           `json:"verified"`
-	Account   map[string]any `json:"account,omitempty"` // private recovery journal only
-	Logs      []JobLog       `json:"logs"`
+	ID        string  `json:"id"`
+	Status    string  `json:"status"`
+	Stage     string  `json:"stage"`
+	Error     string  `json:"error,omitempty"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	Mailbox   Mailbox `json:"mailbox"`
+	// BrowserProfile is private task state. Snapshot deliberately omits it,
+	// while compensation retries use it to keep the protocol environment stable.
+	BrowserProfile *BrowserProfile `json:"browser_profile,omitempty"`
+	Imported       bool            `json:"imported"`
+	Verified       bool            `json:"verified"`
+	Account        map[string]any  `json:"account,omitempty"` // private recovery journal only
+	Logs           []JobLog        `json:"logs"`
 }
 type JobLog struct {
 	Time  string `json:"time"`
@@ -226,6 +229,13 @@ func (e *FreeEngine) runTask(parent context.Context, id string, cfg FreeConfig) 
 	}
 	defer mail.Close()
 	defer flow.Close()
+	if provider, ok := flow.(RegistrationProfileProvider); ok {
+		profile := provider.BrowserProfile()
+		if err := e.change(id, func(j *RegistrationJob) { j.BrowserProfile = &profile }); err != nil {
+			e.failJob(id, err)
+			return
+		}
+	}
 	e.run(ctx, id, cfg, mail, flow)
 }
 
@@ -568,6 +578,10 @@ func (e *FreeEngine) RetryRegistration(raw map[string]any, id string) error {
 		return fail("task", "not_found")
 	}
 	e.mu.Unlock()
+	if job.BrowserProfile != nil && job.BrowserProfile.valid() {
+		profile := *job.BrowserProfile
+		cfg.BrowserProfile = &profile
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	done := make(chan struct{})
 	e.mu.Lock()

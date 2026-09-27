@@ -20,7 +20,11 @@ func (s *Server) initFreeRegistration() {
 		if err != nil {
 			return nil, nil, err
 		}
-		flow, err := registerruntime.NewWebRegistrar(strings.TrimSuffix(strings.TrimRight(s.cfg.OpenAIBaseURL, "/"), "/backend-api"), s.cfg.OpenAIAuthBaseURL, proxy)
+		var profile []registerruntime.BrowserProfile
+		if cfg.BrowserProfile != nil {
+			profile = append(profile, *cfg.BrowserProfile)
+		}
+		flow, err := registerruntime.NewWebRegistrar(strings.TrimSuffix(strings.TrimRight(s.cfg.OpenAIBaseURL, "/"), "/backend-api"), s.cfg.OpenAIAuthBaseURL, proxy, profile...)
 		if err != nil {
 			mail.Close()
 			return nil, nil, err

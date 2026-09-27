@@ -39,6 +39,7 @@ type fakeFlow struct {
 	block     bool
 	failFirst bool
 	started   chan struct{}
+	profile   BrowserProfile
 }
 
 func (f *fakeFlow) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
@@ -59,6 +60,12 @@ func (f *fakeFlow) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wa
 	return map[string]any{"access_token": "PRIVATE-TOKEN", "email": box.Email, "source_type": "chatgpt_web"}, nil
 }
 func (f *fakeFlow) Close() {}
+func (f *fakeFlow) BrowserProfile() BrowserProfile {
+	if f.profile.valid() {
+		return f.profile
+	}
+	return browserProfileBase(1440, 900, 8, 4294967296)
+}
 func waitEngine(t *testing.T, e *FreeEngine) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -102,6 +109,9 @@ func TestFreeEnginePreservesResultAndRetriesOnlyImport(t *testing.T) {
 	if strings.Contains(string(public), "PRIVATE") || strings.Contains(string(public), "secret-password") {
 		t.Fatalf("secret in snapshot: %s", public)
 	}
+	if strings.Contains(string(public), "browser_profile") {
+		t.Fatalf("private browser profile leaked into snapshot: %s", public)
+	}
 	if !strings.Contains(string(public), "alias@example.test") {
 		t.Fatal("registration task email was not fully exposed in the admin snapshot")
 	}
@@ -123,8 +133,15 @@ func TestFreeEnginePreservesResultAndRetriesOnlyImport(t *testing.T) {
 
 func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tasks.json")
-	mail, flow := &fakeMail{}, &fakeFlow{failFirst: true}
-	engine := NewFreeEngine(path, func(FreeConfig) (MailSource, RegistrationFlow, error) { return mail, flow, nil }, func(context.Context, string, map[string]any) error { return nil }, func(context.Context, string, map[string]any) error { return nil })
+	mail, flow := &fakeMail{}, &fakeFlow{failFirst: true, profile: browserProfileBase(1728, 1117, 10, 4294967296)}
+	var retryProfile *BrowserProfile
+	engine := NewFreeEngine(path, func(cfg FreeConfig) (MailSource, RegistrationFlow, error) {
+		if cfg.BrowserProfile != nil {
+			profile := *cfg.BrowserProfile
+			retryProfile = &profile
+		}
+		return mail, flow, nil
+	}, func(context.Context, string, map[string]any) error { return nil }, func(context.Context, string, map[string]any) error { return nil })
 	id, err := engine.Start(freeTestConfig())
 	if err != nil {
 		t.Fatal(err)
@@ -133,6 +150,9 @@ func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 	job, _ := engine.getJob(id)
 	if job.Status != "registration_pending" || job.Mailbox.Email != "alias@example.test" || len(job.Account) != 0 {
 		t.Fatalf("failed registration did not retain mailbox: %+v", job)
+	}
+	if job.BrowserProfile == nil || job.BrowserProfile.Name != flow.profile.Name {
+		t.Fatalf("failed registration did not retain browser profile: %#v", job.BrowserProfile)
 	}
 	if err := engine.RetryRegistration(freeTestConfig(), id); err != nil {
 		t.Fatal(err)
@@ -144,6 +164,9 @@ func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 	}
 	if mail.calls.Load() != 1 || mail.prepared.Load() != 1 || flow.calls.Load() != 2 {
 		t.Fatalf("compensation created a new mailbox or skipped retry: acquire=%d prepare=%d register=%d", mail.calls.Load(), mail.prepared.Load(), flow.calls.Load())
+	}
+	if retryProfile == nil || retryProfile.Name != flow.profile.Name {
+		t.Fatalf("compensation did not reuse browser profile: %#v", retryProfile)
 	}
 }
 
