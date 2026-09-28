@@ -657,6 +657,31 @@ async function refreshAndPoll(accessTokens: string[]) {
   throw new Error('刷新进度超时，请稍后重新打开列表查看结果')
 }
 
+async function reloginAndPoll(accountId: string) {
+  const start = await apiClient.post<
+    { account_ref: string },
+    { progress_id?: string }
+  >('/api/accounts/relogin', { account_ref: accountId })
+  const progressId = cleanString(start.progress_id)
+  if (!progressId) return { status: 'ok' }
+
+  const deadline = Date.now() + 35 * 60_000
+  while (Date.now() < deadline) {
+    const progress = await apiClient.get<never, {
+      done?: boolean
+      stage?: string
+      error?: string
+      result?: unknown
+    }>(`/api/accounts/relogin/progress/${encodeURIComponent(progressId)}`)
+    if (progress.done) {
+      if (progress.error) throw new Error(String(progress.error))
+      return { status: 'ok', progress }
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 900))
+  }
+  throw new Error('重新登录超时，请稍后重新打开列表查看结果')
+}
+
 async function refreshAndPollWithProgress(
   accountIdsOrTokens: string[],
   onProgress?: (progress: AccountRefreshProgress) => void,
@@ -902,6 +927,11 @@ export const accountsApi = {
 
   refreshToken: async (accountId: string) => {
     await refreshAndPoll([resolveToken(accountId)])
+    return { status: 'ok', account: undefined as unknown as Account }
+  },
+
+  relogin: async (accountId: string) => {
+    await reloginAndPoll(accountId)
     return { status: 'ok', account: undefined as unknown as Account }
   },
 

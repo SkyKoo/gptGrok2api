@@ -147,6 +147,7 @@
               :selected="isSelected(item.id)"
               :refreshing="refreshingAccountId === item.id"
               :resetting="resettingAccountId === item.id"
+              :relogging="reloggingAccountId === item.id"
               :status-detail-card-class="accountStatusDetailCardClass"
               :status-detail-text="accountStatusDetailText"
               @toggle-select="toggleSelect"
@@ -155,6 +156,7 @@
               @toggle-enabled="toggleEnabled"
               @refresh-token="refreshToken"
               @reset-state="resetAccountState"
+              @relogin="reloginAccount"
               @copy-final-checkout-link="copyFinalCheckoutLink"
               @open-final-checkout-link="openFinalCheckoutLink"
               @remove="removeAccount"
@@ -179,6 +181,7 @@
           :selected="isSelected(item.id)"
           :refreshing="refreshingAccountId === item.id"
           :resetting="resettingAccountId === item.id"
+          :relogging="reloggingAccountId === item.id"
           :status-detail-card-class="accountStatusDetailCardClass"
           :status-detail-text="accountStatusDetailText"
           @toggle-select="toggleSelect"
@@ -187,6 +190,7 @@
           @toggle-enabled="toggleEnabled"
           @refresh-token="refreshToken"
           @reset-state="resetAccountState"
+          @relogin="reloginAccount"
           @copy-final-checkout-link="copyFinalCheckoutLink"
           @open-final-checkout-link="openFinalCheckoutLink"
           @remove="removeAccount"
@@ -1145,6 +1149,7 @@ const {
   viewMode,
   refreshingAccountId,
   resettingAccountId,
+  reloggingAccountId,
   importBusy,
   exportBusy,
   showImportModal,
@@ -1237,6 +1242,7 @@ const {
   toggleEnabled,
   refreshToken,
   resetAccountState,
+  reloginAccount,
   removeAccount,
   runBulkAction,
   bindSelectedAccountsToGroup,

@@ -189,6 +189,7 @@ export function useAccountsPage() {
   const editingId = accountCrud.editingId
   const refreshingAccountId = accountCrud.refreshingAccountId
   const resettingAccountId = accountCrud.resettingAccountId
+  const reloggingAccountId = accountCrud.reloggingAccountId
   const accountStatusOptions = accountCrud.accountStatusOptions
   const form = accountCrud.form
 
@@ -387,6 +388,7 @@ export function useAccountsPage() {
   const toggleEnabled = accountCrud.toggleEnabled
   const refreshToken = accountCrud.refreshToken
   const resetAccountState = accountCrud.resetAccountState
+  const reloginAccount = accountCrud.reloginAccount
   const removeAccount = accountCrud.removeAccount
 
   const pageLifecycle = useAccountPageLifecycleRuntime({
@@ -444,6 +446,7 @@ export function useAccountsPage() {
     viewMode,
     refreshingAccountId,
     resettingAccountId,
+    reloggingAccountId,
     importBusy,
     exportBusy,
     showImportModal,
@@ -537,6 +540,7 @@ export function useAccountsPage() {
     toggleEnabled,
     refreshToken,
     resetAccountState,
+    reloginAccount,
     removeAccount,
     runBulkAction,
     bindSelectedAccountsToGroup,

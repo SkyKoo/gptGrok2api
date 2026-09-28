@@ -76,6 +76,8 @@ type Server struct {
 	external           *externalManager
 	refreshMu          sync.RWMutex
 	refreshProgress    map[string]*accountRefreshProgress
+	reloginMu          sync.RWMutex
+	reloginProgress    map[string]*accountReloginProgress
 	survivalMu         sync.RWMutex
 	survivalStatus     map[string]any
 	survivalRunning    bool
@@ -126,6 +128,7 @@ func New(cfg config.Config) *Server {
 		schedulerLeases:    map[string]map[string]any{},
 		external:           newExternalManager(cfg.DataDir),
 		refreshProgress:    map[string]*accountRefreshProgress{},
+		reloginProgress:    map[string]*accountReloginProgress{},
 		survivalStatus:     map[string]any{"running": false, "last_started_at": "", "last_finished_at": "", "last_error": "", "last_summary": map[string]any{}, "next_run_at": ""},
 		survivalWake:       make(chan struct{}, 1),
 		probeStop:          make(chan struct{}),
@@ -297,6 +300,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/refresh", s.accountRefreshStart)
 	mux.HandleFunc("/api/accounts/refresh-at", s.accountAccessTokenRefresh)
 	mux.HandleFunc("/api/accounts/refresh/progress/", s.accountRefreshProgressAPI)
+	mux.HandleFunc("/api/accounts/relogin", s.accountReloginStart)
+	mux.HandleFunc("/api/accounts/relogin/progress/", s.accountReloginProgressAPI)
 	mux.HandleFunc("/api/accounts/oauth/start", s.accountOAuthStart)
 	mux.HandleFunc("/api/accounts/oauth/finish", s.accountOAuthFinish)
 	mux.HandleFunc("/api/accounts/export", s.accountExport)

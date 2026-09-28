@@ -15,7 +15,7 @@ import (
 // used after a wait timeout. The profile branch also covers the protocol-only
 // about-you submission used for new accounts.
 func TestWebRegistrationTurbProtocol(t *testing.T) {
-	for _, scenario := range []string{"success", "resend", "profile_required", "wrong_state"} {
+	for _, scenario := range []string{"success", "resend", "profile_required", "existing_profile_required", "wrong_state"} {
 		t.Run(scenario, func(t *testing.T) {
 			var base string
 			providers, anonymousSession, csrf, signin, authorize, resend, validate, callback := 0, 0, 0, 0, 0, 0, 0, 0
@@ -63,7 +63,7 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 					if body["code"] != "987654" {
 						t.Error("invalid OTP")
 					}
-					if scenario == "profile_required" {
+					if scenario == "profile_required" || scenario == "existing_profile_required" {
 						write(map[string]any{"page": map[string]string{"type": "about_you"}})
 						return
 					}
@@ -117,7 +117,11 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 			flow.sentinel = base
 			stages := []string{}
 			waitCalls := 0
-			account, err := flow.Register(context.Background(), Mailbox{Email: "alias@example.test"}, FreeConfig{MailTimeout: 20 * time.Millisecond}, func(ctx context.Context, after time.Time) (string, error) {
+			login := flow.Register
+			if scenario == "existing_profile_required" {
+				login = flow.LoginExisting
+			}
+			account, err := login(context.Background(), Mailbox{Email: "alias@example.test"}, FreeConfig{MailTimeout: 20 * time.Millisecond}, func(ctx context.Context, after time.Time) (string, error) {
 				waitCalls++
 				if scenario == "resend" && waitCalls == 1 {
 					return "", context.DeadlineExceeded
@@ -151,12 +155,15 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 				if err == nil || account != nil {
 					t.Fatal("accepted invalid registration")
 				}
-				if scenario == "profile_required" && !strings.Contains(err.Error(), "profile_completion_required") {
+				if (scenario == "profile_required" || scenario == "existing_profile_required") && !strings.Contains(err.Error(), "profile_completion_required") {
 					t.Fatalf("wrong profile error: %v", err)
 				}
 				if scenario == "wrong_state" && !strings.Contains(err.Error(), "callback_state_mismatch") {
 					t.Fatalf("wrong state error: %v", err)
 				}
+			}
+			if scenario == "existing_profile_required" && (aboutYou != 0 || sentinel != 0 || createProfile != 0 || callback != 0) {
+				t.Errorf("existing login attempted profile completion: about_you=%d sentinel=%d create_profile=%d callback=%d", aboutYou, sentinel, createProfile, callback)
 			}
 			if scenario != "resend" && resend != 0 {
 				t.Errorf("initial protocol unexpectedly called send endpoint: %d", resend)

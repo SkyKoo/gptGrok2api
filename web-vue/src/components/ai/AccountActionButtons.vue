@@ -34,10 +34,12 @@ const props = withDefaults(defineProps<{
   item: Account
   refreshing?: boolean
   resetting?: boolean
+  relogging?: boolean
   align?: 'start' | 'end'
 }>(), {
   refreshing: false,
   resetting: false,
+  relogging: false,
   align: 'start',
 })
 
@@ -46,6 +48,7 @@ const emit = defineEmits<{
   (e: 'toggle-enabled'): void
   (e: 'refresh-token'): void
   (e: 'reset-state'): void
+  (e: 'relogin'): void
   (e: 'copy-final-checkout-link'): void
   (e: 'open-final-checkout-link'): void
   (e: 'remove'): void
@@ -89,6 +92,11 @@ const menuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
       label: props.resetting ? '重置中...' : '重置状态',
       disabled: props.resetting,
     },
+    {
+      key: 'relogin',
+      label: props.relogging ? '重新登录中...' : '重新登录并更新会话',
+      disabled: props.relogging,
+    },
   ],
   [
     {
@@ -111,6 +119,7 @@ function handleSelect(key: string) {
   if (key === 'toggle-enabled') emit('toggle-enabled')
   if (key === 'refresh-token') emit('refresh-token')
   if (key === 'reset-state') emit('reset-state')
+  if (key === 'relogin') emit('relogin')
   if (key === 'remove') emit('remove')
 }
 </script>

@@ -27,6 +27,12 @@ type RegistrationFlow interface {
 	Close()
 }
 
+// ExistingLoginFlow performs the email OTP flow for an account that already
+// exists. It must not submit the profile-completion step or create a mailbox.
+type ExistingLoginFlow interface {
+	LoginExisting(context.Context, Mailbox, FreeConfig, func(context.Context, time.Time) (string, error), Progress) (map[string]any, error)
+}
+
 // RegistrationProfileProvider exposes the protocol profile selected for a
 // flow so the durable task journal can reuse it during compensation retry.
 type RegistrationProfileProvider interface {
@@ -266,21 +272,24 @@ func profilePage(data map[string]any) bool {
 
 // continueAfterOTP follows the upstream result. New accounts can require the
 // Turb-compatible about-you step before OAuth can be completed.
-func (r *WebRegistrar) continueAfterOTP(ctx context.Context, reply webReply, email string) error {
+func (r *WebRegistrar) continueAfterOTP(ctx context.Context, reply webReply, email string, existingOnly bool) error {
 	next := continuationURL(reply.data)
 	if next == "" {
 		next = reply.headers.Get("Location")
 	}
 	if profilePage(reply.data) {
+		if existingOnly {
+			return fail("session", "profile_completion_required")
+		}
 		return r.completeProfile(ctx, email, next)
 	}
-	return r.followContinuation(ctx, next, email, false)
+	return r.followContinuation(ctx, next, email, false, existingOnly)
 }
 
 // followContinuation validates every redirect before requesting it. When the
 // upstream exposes the profile page, profileDone determines whether this is
 // the first profile completion or a rejection after submission.
-func (r *WebRegistrar) followContinuation(ctx context.Context, next, email string, profileDone bool) error {
+func (r *WebRegistrar) followContinuation(ctx context.Context, next, email string, profileDone, existingOnly bool) error {
 	base, _ := url.Parse(r.auth + "/")
 	for hop := 0; next != ""; hop++ {
 		if hop >= 10 {
@@ -292,6 +301,9 @@ func (r *WebRegistrar) followContinuation(ctx context.Context, next, email strin
 		}
 		path := strings.TrimRight(u.Path, "/")
 		if sameOrigin(u.String(), r.auth) && (path == "/about-you" || path == "/api/accounts/user/profile") {
+			if existingOnly {
+				return fail("session", "profile_completion_required")
+			}
 			if profileDone {
 				return fail("session", "profile_submission_rejected")
 			}
@@ -318,6 +330,9 @@ func (r *WebRegistrar) followContinuation(ctx context.Context, next, email strin
 			return fail("session", "unexpected_status")
 		}
 		if profilePage(res.data) {
+			if existingOnly {
+				return fail("session", "profile_completion_required")
+			}
 			if profileDone {
 				return fail("session", "profile_submission_rejected")
 			}
@@ -363,10 +378,21 @@ func (r *WebRegistrar) completeProfile(ctx context.Context, email, aboutURL stri
 	if next == "" {
 		return fail("session", "profile_continuation_missing")
 	}
-	return r.followContinuation(ctx, next, email, true)
+	return r.followContinuation(ctx, next, email, true, false)
 }
 
 func (r *WebRegistrar) Register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	return r.register(ctx, box, cfg, wait, progress, false)
+}
+
+// LoginExisting re-authenticates an existing ChatGPT account using its saved
+// mailbox. It rejects profile completion so relogin cannot create or modify a
+// profile intended only for a new registration.
+func (r *WebRegistrar) LoginExisting(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	return r.register(ctx, box, cfg, wait, progress, true)
+}
+
+func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress, existingOnly bool) (map[string]any, error) {
 	if err := progress("authorize"); err != nil {
 		return nil, err
 	}
@@ -416,7 +442,7 @@ func (r *WebRegistrar) Register(ctx context.Context, box Mailbox, cfg FreeConfig
 	if err := progress("session"); err != nil {
 		return nil, err
 	}
-	if err := r.continueAfterOTP(ctx, res, box.Email); err != nil {
+	if err := r.continueAfterOTP(ctx, res, box.Email, existingOnly); err != nil {
 		return nil, err
 	}
 	for attempt := 0; attempt < 4; attempt++ {

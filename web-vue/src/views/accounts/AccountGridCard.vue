@@ -2,7 +2,7 @@
   <article
     class="ui-card flex h-full flex-col gap-4 transition-all"
     :class="[rowClass(item), selected ? 'ring-2 ring-primary/30' : 'hover:border-primary/30']"
-    v-memo="[signature, detailSignature, selected, refreshing, resetting]"
+    v-memo="[signature, detailSignature, selected, refreshing, resetting, relogging]"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
@@ -59,10 +59,12 @@
       :item="item"
       :refreshing="refreshing"
       :resetting="resetting"
+      :relogging="relogging"
       @edit="emit('edit', item)"
       @toggle-enabled="emit('toggle-enabled', item)"
       @refresh-token="emit('refresh-token', item.id)"
       @reset-state="emit('reset-state', item.id)"
+      @relogin="emit('relogin', item.id)"
       @copy-final-checkout-link="emit('copy-final-checkout-link', item)"
       @open-final-checkout-link="emit('open-final-checkout-link', item)"
       @remove="emit('remove', item.id)"
@@ -95,11 +97,13 @@ const props = withDefaults(defineProps<{
   selected: boolean
   refreshing?: boolean
   resetting?: boolean
+  relogging?: boolean
   statusDetailCardClass?: string
   statusDetailText: (item: Account) => string
 }>(), {
   refreshing: false,
   resetting: false,
+  relogging: false,
   statusDetailCardClass: '',
 })
 
@@ -113,6 +117,7 @@ const emit = defineEmits<{
   (e: 'toggle-enabled', item: Account): void
   (e: 'refresh-token', id: string): void
   (e: 'reset-state', id: string): void
+  (e: 'relogin', id: string): void
   (e: 'copy-final-checkout-link', item: Account): void
   (e: 'open-final-checkout-link', item: Account): void
   (e: 'remove', id: string): void

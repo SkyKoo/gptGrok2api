@@ -63,6 +63,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
   const editingId = ref<string | null>(null)
   const refreshingAccountId = ref('')
   const resettingAccountId = ref('')
+  const reloggingAccountId = ref('')
   const form = reactive(createDefaultForm())
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
@@ -225,6 +226,29 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     }
   }
 
+  async function reloginAccount(accountId: string) {
+    const confirmed = await confirmDialog.ask({
+      title: '确认重新登录账号',
+      message: `将使用注册配置中的 HME 邮箱读取验证码，获取账号 ${accountId} 的新会话并更新原账号，不会创建新邮箱或新账号。是否继续？`,
+      confirmText: '重新登录',
+      cancelText: '取消',
+    })
+    if (!confirmed) return
+
+    reloggingAccountId.value = accountId
+    toast.info(`正在重新登录账号 ${accountId}，请等待邮箱验证码...`)
+    try {
+      await accountsApi.relogin(accountId)
+      toast.success(`账号 ${accountId} 已重新登录，会话已更新`)
+      await options.loadData({ silentErrorToast: true })
+    } catch (error) {
+      toast.error(`账号 ${accountId} 重新登录失败：${options.normalizeErrorMessage(error)}`)
+      await options.loadData({ silentErrorToast: true })
+    } finally {
+      reloggingAccountId.value = ''
+    }
+  }
+
   async function removeAccount(accountId: string) {
     const confirmed = await confirmDialog.ask({
       title: '删除账号',
@@ -249,6 +273,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     editingId,
     refreshingAccountId,
     resettingAccountId,
+    reloggingAccountId,
     accountStatusOptions,
     form,
     setProxyControlsSync,
@@ -260,6 +285,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     toggleEnabled,
     refreshToken,
     resetAccountState,
+    reloginAccount,
     removeAccount,
   }
 }
