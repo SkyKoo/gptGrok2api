@@ -308,6 +308,46 @@ func TestRequestMonitorWritesMultipartCallLog(t *testing.T) {
 	}
 }
 
+func TestRequestMonitorPreservesFullJSONPrompt(t *testing.T) {
+	root := t.TempDir()
+	cfg := adminTestConfig(root)
+	server := &Server{cfg: cfg, monitor: newRuntimeMonitor()}
+	prompt := strings.Repeat("年轻成年东亚女性，真实三次元高质量古风幻想 Cosplay 写真摄影。", 8)
+	body, err := json.Marshal(map[string]any{
+		"model":  "gpt-image-2",
+		"prompt": prompt,
+		"size":   "1024x1024",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.withRequestMonitor(response, request, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	}))
+
+	raw, err := os.ReadFile(filepath.Join(cfg.DataDir, "logs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var item map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &item); err != nil {
+		t.Fatal(err)
+	}
+	detail := mapValue(item["detail"])
+	if got := stringValue(detail["request_text_full"]); got != prompt {
+		t.Fatalf("full prompt was not preserved: got %d bytes, want %d", len(got), len(prompt))
+	}
+	if got := stringValue(detail["request_text"]); got == prompt || len(got) >= len(prompt) {
+		t.Fatalf("request preview was not shortened: got %d bytes, full %d", len(got), len(prompt))
+	}
+	if _, ok := detail["request_text_truncated"]; ok {
+		t.Fatal("normal-sized full prompt should not be marked as truncated")
+	}
+}
+
 func TestResponseImageOutputsIgnoresMalformedURLs(t *testing.T) {
 	raw := []byte(`{"choices":[{"message":{"content":"![image](http://%zz/v1/files/image?id=bad)"}}]}`)
 	outputs := responseImageOutputs(raw)

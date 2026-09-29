@@ -25,30 +25,32 @@ type runtimeMonitor struct {
 }
 
 type monitorRecord struct {
-	CallID       string           `json:"call_id"`
-	Endpoint     string           `json:"endpoint"`
-	Model        string           `json:"model"`
-	Summary      string           `json:"summary,omitempty"`
-	Status       string           `json:"status"`
-	Stage        string           `json:"stage"`
-	StartedAt    int64            `json:"started_ts"`
-	UpdatedAt    int64            `json:"updated_ts"`
-	EndedAt      int64            `json:"ended_ts,omitempty"`
-	Duration     int64            `json:"duration_ms,omitempty"`
-	Progress     int              `json:"progress,omitempty"`
-	Error        string           `json:"error,omitempty"`
-	Metrics      map[string]any   `json:"metrics,omitempty"`
-	Perf         map[string]any   `json:"perf,omitempty"`
-	Events       []map[string]any `json:"events,omitempty"`
-	RequestMeta  map[string]any   `json:"request_meta,omitempty"`
-	AccountEmail string           `json:"account_email,omitempty"`
-	AccountID    string           `json:"account_id,omitempty"`
-	KeyName      string           `json:"key_name,omitempty"`
-	KeyID        string           `json:"key_id,omitempty"`
-	ProxySource  string           `json:"proxy_source,omitempty"`
-	EgressMode   string           `json:"egress_mode,omitempty"`
-	EgressLabel  string           `json:"egress_label,omitempty"`
-	HasProxy     bool             `json:"has_proxy"`
+	CallID               string           `json:"call_id"`
+	Endpoint             string           `json:"endpoint"`
+	Model                string           `json:"model"`
+	Summary              string           `json:"summary,omitempty"`
+	RequestTextFull      string           `json:"request_text_full,omitempty"`
+	RequestTextTruncated bool             `json:"request_text_truncated,omitempty"`
+	Status               string           `json:"status"`
+	Stage                string           `json:"stage"`
+	StartedAt            int64            `json:"started_ts"`
+	UpdatedAt            int64            `json:"updated_ts"`
+	EndedAt              int64            `json:"ended_ts,omitempty"`
+	Duration             int64            `json:"duration_ms,omitempty"`
+	Progress             int              `json:"progress,omitempty"`
+	Error                string           `json:"error,omitempty"`
+	Metrics              map[string]any   `json:"metrics,omitempty"`
+	Perf                 map[string]any   `json:"perf,omitempty"`
+	Events               []map[string]any `json:"events,omitempty"`
+	RequestMeta          map[string]any   `json:"request_meta,omitempty"`
+	AccountEmail         string           `json:"account_email,omitempty"`
+	AccountID            string           `json:"account_id,omitempty"`
+	KeyName              string           `json:"key_name,omitempty"`
+	KeyID                string           `json:"key_id,omitempty"`
+	ProxySource          string           `json:"proxy_source,omitempty"`
+	EgressMode           string           `json:"egress_mode,omitempty"`
+	EgressLabel          string           `json:"egress_label,omitempty"`
+	HasProxy             bool             `json:"has_proxy"`
 }
 
 func newRuntimeMonitor() *runtimeMonitor {
@@ -144,11 +146,18 @@ func (m *runtimeMonitor) enrich(id string, body map[string]any) {
 	if value := stringValue(body["key_id"]); value != "" {
 		item.KeyID = value
 	}
+	if value := stringValue(body["request_text_full"]); value != "" {
+		item.RequestTextFull = value
+	}
+	if value, ok := body["request_text_truncated"].(bool); ok {
+		item.RequestTextTruncated = value
+	}
 	if len(item.Events) > 0 {
 		for k, v := range body {
-			if k != "call_id" {
-				item.Events[len(item.Events)-1][k] = v
+			if k == "call_id" || k == "request_text_full" || k == "request_text_truncated" {
+				continue
 			}
+			item.Events[len(item.Events)-1][k] = v
 		}
 	}
 }
@@ -813,8 +822,12 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 	}
 	if summary := strings.TrimSpace(record.Summary); summary != "" {
 		detail["request_text"] = summary
-		detail["request_text_full"] = summary
-		if len(summary) > 180 {
+		full := record.RequestTextFull
+		if full == "" {
+			full = summary
+		}
+		detail["request_text_full"] = full
+		if record.RequestTextTruncated {
 			detail["request_text_truncated"] = true
 		}
 	}

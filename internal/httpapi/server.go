@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/agentidentity"
@@ -410,6 +411,11 @@ type statusCaptureWriter struct {
 
 const maxJSONBodyBytes = 64 << 20
 
+const (
+	maxRequestPreviewBytes    = 180
+	maxLoggedRequestTextBytes = 4 << 20
+)
+
 func (w *statusCaptureWriter) WriteHeader(status int) {
 	if w.status == 0 {
 		w.status = status
@@ -447,7 +453,7 @@ func (s *Server) shouldMonitorRequest(r *http.Request) bool {
 }
 
 func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) {
-	modelName, summary, requestShape := monitorRequestShape(r)
+	modelName, summary, requestTextFull, requestTextTruncated, requestShape := monitorRequestShape(r)
 	id := newChatID()
 	if task, ok := r.Context().Value(imageTaskLogContextKey{}).(imageTaskLogContext); ok {
 		id = task.CallID
@@ -457,6 +463,7 @@ func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next
 		}
 	}
 	s.monitor.start(id, r.URL.Path, modelName, summary)
+	s.monitor.enrich(id, map[string]any{"request_text_full": requestTextFull, "request_text_truncated": requestTextTruncated})
 	proxySnapshot := s.proxyManager.Snapshot()
 	meta := map[string]any{"model": modelName, "endpoint": r.URL.Path, "has_proxy": boolValue(proxySnapshot["proxy_configured"], false), "egress_mode": stringValue(proxySnapshot["mode"])}
 	if identity, ok := s.auth.Identity(s.auth.APIKey(r)); ok {
@@ -612,14 +619,14 @@ func accountFieldValue(fields map[string]any, key string) string {
 	return stringValue(current)
 }
 
-func monitorRequestShape(r *http.Request) (string, string, any) {
+func monitorRequestShape(r *http.Request) (string, string, string, bool, any) {
 	if r == nil {
-		return "", "", ""
+		return "", "", "", false, ""
 	}
 	contentType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
 	if strings.HasPrefix(contentType, "multipart/form-data") {
 		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			return "", "", "multipart/form-data"
+			return "", "", "", false, "multipart/form-data"
 		}
 		values := r.MultipartForm.Value
 		modelName := strings.TrimSpace(firstFormValue(values, "model"))
@@ -630,46 +637,71 @@ func monitorRequestShape(r *http.Request) (string, string, any) {
 		if summary == "" {
 			summary = strings.TrimSpace(firstFormValue(values, "message"))
 		}
-		if len(summary) > 180 {
-			summary = summary[:180]
-		}
+		preview, full, truncated := requestTextForMonitor(summary)
 		count := 0
 		for _, key := range imageEditReferenceFields {
 			count += len(r.MultipartForm.File[key]) + len(values[key])
 		}
-		return modelName, summary, map[string]any{"content_type": "multipart/form-data", "image_url_parts": count, "data_url_images": count, "size": firstFormValue(values, "size")}
+		return modelName, preview, full, truncated, map[string]any{"content_type": "multipart/form-data", "image_url_parts": count, "data_url_images": count, "size": firstFormValue(values, "size")}
 	}
 	if r.Body == nil || (r.ContentLength > maxJSONBodyBytes && r.ContentLength != -1) {
-		return "", "", "application/json"
+		return "", "", "", false, "application/json"
 	}
 	if contentType != "application/json" && contentType != "" {
-		return "", "", contentType
+		return "", "", "", false, contentType
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBodyBytes))
 	if err != nil {
 		r.Body = io.NopCloser(strings.NewReader(""))
-		return "", "", "application/json"
+		return "", "", "", false, "application/json"
 	}
 	r.Body = io.NopCloser(strings.NewReader(string(raw)))
 	decoded, ok := normalizeJSONBytes(raw, r.Header.Get("Content-Encoding"))
 	if !ok {
-		return "", "", "application/json"
+		return "", "", "", false, "application/json"
 	}
 	r.Body = io.NopCloser(bytes.NewReader(decoded))
 	var payload map[string]any
 	if json.Unmarshal(decoded, &payload) != nil {
-		return "", "", "application/json"
+		return "", "", "", false, "application/json"
 	}
 	modelName := stringValue(payload["model"])
 	summary := stringValue(payload["prompt"])
 	if summary == "" {
 		summary = protocol.ExtractMessage(chatMessagesFromAny(payload["messages"]))
 	}
-	if len(summary) > 180 {
-		summary = summary[:180]
-	}
+	preview, full, truncated := requestTextForMonitor(summary)
 	urlParts, dataURLs := imageReferenceStats(payload)
-	return modelName, summary, map[string]any{"content_type": "application/json", "image_url_parts": urlParts, "data_url_images": dataURLs, "size": stringValue(payload["size"])}
+	return modelName, preview, full, truncated, map[string]any{"content_type": "application/json", "image_url_parts": urlParts, "data_url_images": dataURLs, "size": stringValue(payload["size"])}
+}
+
+func requestTextForMonitor(value string) (preview, full string, truncated bool) {
+	full = strings.TrimSpace(value)
+	if full == "" {
+		return "", "", false
+	}
+	if len(full) > maxLoggedRequestTextBytes {
+		full = truncateRunes(full, maxLoggedRequestTextBytes)
+		truncated = true
+	}
+	return truncateRunes(full, maxRequestPreviewBytes), full, truncated
+}
+
+func truncateRunes(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return value
+	}
+	result := make([]rune, 0, maxBytes)
+	used := 0
+	for _, r := range value {
+		size := utf8.RuneLen(r)
+		if size < 0 || used+size > maxBytes {
+			break
+		}
+		result = append(result, r)
+		used += size
+	}
+	return string(result)
 }
 
 func imageReferenceStats(value any) (int, int) {
