@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -117,5 +119,46 @@ func TestRegistrationConfigDoesNotAcceptRuntimeState(t *testing.T) {
 	_, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
 	if err == nil {
 		t.Fatal("empty config is ready")
+	}
+}
+
+func TestRegistrationCleanupReturnsCountAndKeepsRecovery(t *testing.T) {
+	cfg := adminTestConfig(t.TempDir())
+	cfg.RegisterPath = filepath.Join(cfg.DataDir, "register.json")
+	journal := filepath.Join(cfg.DataDir, "openai_registration_tasks.json")
+	jobs := `[{"id":"done","status":"completed","imported":true,"verified":true},{"id":"failed","status":"failed"},{"id":"pending","status":"registration_pending","mailbox":{"email":"retry@example.test"}}]`
+	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journal, []byte(jobs), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg)
+	if _, err := s.registerStore.Update(map[string]any{"target": "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.Handler()
+	unauth := httptest.NewRecorder()
+	handler.ServeHTTP(unauth, httptest.NewRequest(http.MethodPost, "/api/register/reset", nil))
+	if unauth.Code != http.StatusUnauthorized {
+		t.Fatal("cleanup endpoint lacks authentication")
+	}
+	for _, want := range []int{2, 0} {
+		res := adminRequest(handler, http.MethodPost, "/api/register/reset", nil)
+		var body struct {
+			Removed  int `json:"removed"`
+			Register struct {
+				Jobs []struct {
+					ID    string `json:"id"`
+					Email string `json:"email"`
+				} `json:"jobs"`
+			} `json:"register"`
+		}
+		if res.Code != http.StatusOK || json.Unmarshal(res.Body.Bytes(), &body) != nil {
+			t.Fatalf("cleanup failed: %d %s", res.Code, res.Body.String())
+		}
+		if body.Removed != want || len(body.Register.Jobs) != 1 || body.Register.Jobs[0].ID != "pending" || body.Register.Jobs[0].Email != "retry@example.test" {
+			t.Fatalf("incorrect cleanup result: %s", res.Body.String())
+		}
 	}
 }

@@ -306,7 +306,7 @@ export const registerApi = {
     return apiClient.post<any, { register: LegacyRegisterConfig; removed: number }>('/api/register/checkout-history/clear')
   },
   resetLegacy() {
-    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/reset')
+    return apiClient.post<any, { register: LegacyRegisterConfig; removed?: number }>('/api/register/reset')
   },
   resetOutlookPool(scope: 'all' | 'retryable' | 'invalid' | 'unused' | 'failed' = 'all') {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/outlook-pool/reset', { scope })

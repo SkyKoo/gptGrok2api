@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -186,7 +187,7 @@ func TestFreeEngineCancellationAndConcurrentStart(t *testing.T) {
 	if _, err := engine.Start(freeTestConfig()); err == nil {
 		t.Fatal("accepted second active task")
 	}
-	if err := engine.ResetCompleted(); err == nil {
+	if _, err := engine.ClearFinished(); err == nil {
 		t.Fatal("reset running task")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -323,7 +324,7 @@ func TestFreeEngineVerificationFailureRetainsAccount(t *testing.T) {
 	if !job.Imported || job.Verified || job.Status != "verification_pending" || len(job.Account) == 0 {
 		t.Fatalf("bad state %+v", job)
 	}
-	if err := engine.ResetCompleted(); err != nil {
+	if _, err := engine.ClearFinished(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := engine.getJob(id); err != nil {
@@ -360,5 +361,71 @@ func TestFreeEngineCorruptJournalAndInvalidConfigFailBeforeNetwork(t *testing.T)
 	accepted["total"] = 2
 	if _, err := ParseFreeConfig(accepted); err != nil {
 		t.Fatalf("configurable total/thread count rejected: %v", err)
+	}
+}
+
+func TestFreeEngineClearFinishedPreservesRecoveryState(t *testing.T) {
+	jobs := []RegistrationJob{
+		{ID: "completed", Status: "completed", Imported: true, Verified: true, Mailbox: Mailbox{Email: "done@example.test"}},
+		{ID: "failed-empty", Status: "failed"},
+		{ID: "cancelled-empty", Status: "cancelled"},
+		{ID: "interrupted-empty", Status: "interrupted"},
+		{ID: "failed-mailbox", Status: "failed", Mailbox: Mailbox{Email: "retry@example.test"}},
+		{ID: "cancelled-mailbox", Status: "cancelled", Mailbox: Mailbox{Email: "retry@example.test"}},
+		{ID: "interrupted-mailbox", Status: "interrupted", Mailbox: Mailbox{Email: "retry@example.test"}},
+		{ID: "partial-mailbox", Status: "failed", Mailbox: Mailbox{AccountID: "hme-test"}},
+		{ID: "failed-account", Status: "failed", Account: map[string]any{"access_token": "saved-result"}},
+		{ID: "completed-account", Status: "completed", Account: map[string]any{"access_token": "saved-result"}},
+		{ID: "imported", Status: "failed", Imported: true},
+		{ID: "verified", Status: "failed", Verified: true},
+		{ID: "registration-pending", Status: "registration_pending", Mailbox: Mailbox{Email: "retry@example.test"}},
+		{ID: "import-pending", Status: "import_pending", Account: map[string]any{"access_token": "saved-result"}},
+		{ID: "verification-pending", Status: "verification_pending", Imported: true, Account: map[string]any{"access_token": "saved-result"}},
+		{ID: "queued", Status: "queued"},
+		{ID: "running", Status: "running"},
+		{ID: "unknown", Status: "future-state"},
+	}
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	engine := NewFreeEngine(path, nil, nil, nil)
+	engine.jobs = jobs
+	removed, err := engine.ClearFinished()
+	if err != nil || removed != 4 {
+		t.Fatalf("cleanup removed %d: %v", removed, err)
+	}
+	want := jobs[4:]
+	if !reflect.DeepEqual(engine.jobs, want) {
+		t.Fatal("cleanup changed recoverable or unfinished jobs")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted []RegistrationJob
+	if err := json.Unmarshal(raw, &persisted); err != nil || !reflect.DeepEqual(persisted, want) {
+		t.Fatalf("cleanup did not persist the retained recovery state: %v", err)
+	}
+	if removed, err := engine.ClearFinished(); err != nil || removed != 0 {
+		t.Fatalf("repeated cleanup changed retained jobs: %d, %v", removed, err)
+	}
+}
+
+func TestFreeEngineClearFinishedWriteFailureKeepsHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	engine := NewFreeEngine(path, nil, nil, nil)
+	jobs := []RegistrationJob{{ID: "failed", Status: "failed"}, {ID: "pending", Status: "registration_pending", Mailbox: Mailbox{Email: "retry@example.test"}}}
+	engine.jobs = jobs
+	if err := engine.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	engine.path = t.TempDir() // A directory cannot be replaced by the journal file.
+	if removed, err := engine.ClearFinished(); err == nil || removed != 0 {
+		t.Fatalf("cleanup reported success after storage failure: %d, %v", removed, err)
+	}
+	if !reflect.DeepEqual(engine.jobs, jobs) {
+		t.Fatal("storage failure lost in-memory recovery state")
+	}
+	reloaded := NewFreeEngine(path, nil, nil, nil)
+	if !reflect.DeepEqual(reloaded.jobs, jobs) {
+		t.Fatal("storage failure changed the existing journal")
 	}
 }

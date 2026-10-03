@@ -326,8 +326,8 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   async function resetStats() {
     const free = config.value?.target === 'openai'
     const ok = await input.confirm({
-      title: free ? '清理已完成记录' : '重置注册统计',
-      message: free ? '清理已成功入库并校验的任务记录。配置、账号及未完成的恢复记录会保留。' : '将清空当前注册任务的统计和运行日志。',
+      title: free ? '清理历史记录' : '重置注册统计',
+      message: free ? '清理成功记录，以及未保存邮箱或账号的失败、取消和中断记录。已创建的邮箱、待恢复任务、账号及配置会保留。' : '将清空当前注册任务的统计和运行日志。',
       confirmText: free ? '清理' : '重置',
     })
     if (!ok) return
@@ -335,9 +335,9 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     try {
       const response = await registerApi.resetLegacy()
       applyConfig(response.register)
-      input.notifySuccess('注册统计已重置')
+      input.notifySuccess(free ? `已清理 ${response.removed || 0} 条任务记录` : '注册统计已重置')
     } catch (error: any) {
-      input.notifyError(error?.message || '重置注册统计失败')
+      input.notifyError(error?.message || (free ? '清理任务记录失败' : '重置注册统计失败'))
     } finally {
       saving.value = false
     }

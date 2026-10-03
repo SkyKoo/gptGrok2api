@@ -163,11 +163,12 @@ func (s *Server) resetRegister(w http.ResponseWriter) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	if stringValue(s.registerStore.Get()["target"]) == "openai" {
-		if err := s.freeRegister.ResetCompleted(); err != nil {
+		removed, err := s.freeRegister.ClearFinished()
+		if err != nil {
 			registrationError(w, err)
 			return
 		}
-		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot(), "removed": removed})
 		return
 	}
 	value, err := s.registerStore.Reset()

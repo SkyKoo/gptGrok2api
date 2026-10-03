@@ -674,26 +674,42 @@ func (e *FreeEngine) Snapshot() map[string]any {
 	}
 	return result
 }
-func (e *FreeEngine) ResetCompleted() error {
+
+// ClearFinished removes successful jobs and terminal failures with no recovery
+// state. Pending mailboxes and saved accounts must survive history cleanup.
+func (e *FreeEngine) ClearFinished() (int, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.runCancel != nil || len(e.active) > 0 {
-		return fail("task", "already_running")
+		return 0, fail("task", "already_running")
 	}
 	if e.loadError != nil {
-		return e.loadError
+		return 0, e.loadError
 	}
 	previous := e.jobs
 	kept := []RegistrationJob{}
 	for _, j := range e.jobs {
-		if len(j.Account) > 0 || j.Status != "completed" {
+		removable := false
+		if len(j.Account) == 0 {
+			switch j.Status {
+			case "completed":
+				removable = true
+			case "failed", "cancelled", "interrupted":
+				removable = j.Mailbox == (Mailbox{}) && !j.Imported && !j.Verified
+			}
+		}
+		if !removable {
 			kept = append(kept, j)
 		}
+	}
+	removed := len(previous) - len(kept)
+	if removed == 0 {
+		return 0, nil
 	}
 	e.jobs = kept
 	if err := e.saveLocked(); err != nil {
 		e.jobs = previous
-		return err
+		return 0, err
 	}
-	return nil
+	return removed, nil
 }
