@@ -9,6 +9,7 @@ GPTGrok2API Go 是一个自托管的 OpenAI 兼容网关。它使用 Go 运行�
 ## 能力概览
 
 - OpenAI 兼容接口：Chat Completions、Responses、Anthropic Messages、搜索、图片、视频和可编辑文件任务。
+- ChatGPT Web 多模态聊天：通过 Chat Completions / Responses 接收文字和参考图，返回文字或实时 SSE；支持范围与示例见 [多模态聊天](docs/multimodal-chat.md)。
 - OpenAI 图片：<code>gpt-image-2</code> 文生图、图生图和多参考图编辑。
 - Grok：文本、Grok Imagine 图片、图片编辑、视频，以及 Console/Thinking 模型。
 - 多账号池：JWT、OAuth refresh token、Grok SSO/OAuth、账号分组、失败换号、限流冷却和并发调度。

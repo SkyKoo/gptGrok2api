@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 // OpenAIChat implements the authenticated ChatGPT Web conversation endpoint
@@ -29,20 +31,43 @@ type OpenAIChatEvent struct {
 	Done     bool
 }
 
-func (c *OpenAIChat) Complete(ctx context.Context, account accounts.Account, request protocol.ChatRequest) (string, string, error) {
+// OpenAIChatImage binds decoded client image bytes to their original message
+// position. Uploaded file IDs are deliberately scoped to one account attempt.
+type OpenAIChatImage struct {
+	MessageIndex int
+	PartIndex    int
+	Input        OpenAIImageInput
+}
+
+func (c *OpenAIChat) Complete(ctx context.Context, account accounts.Account, request protocol.ChatRequest, images ...OpenAIChatImage) (string, string, error) {
 	var text strings.Builder
 	var thinking strings.Builder
 	err := c.Stream(ctx, account, request, func(event OpenAIChatEvent) error {
 		text.WriteString(event.Text)
 		thinking.WriteString(event.Thinking)
 		return nil
-	})
+	}, images...)
 	return text.String(), thinking.String(), err
 }
 
-func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, request protocol.ChatRequest, onEvent func(OpenAIChatEvent) error) error {
+func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, request protocol.ChatRequest, onEvent func(OpenAIChatEvent) error, images ...OpenAIChatImage) error {
 	if c == nil || c.Image == nil {
 		return fmt.Errorf("OpenAI chat provider is not configured")
+	}
+	if _, selected := proxyruntime.URLSelectionFromContext(ctx); !selected && c.Image.Proxy != nil {
+		ctx = proxyruntime.WithURL(ctx, c.Image.Proxy.Resolve(account.Fields, false))
+	}
+	inputs := make([]OpenAIImageInput, len(images))
+	for index, image := range images {
+		inputs[index] = image.Input
+	}
+	references, err := c.Image.uploadInputs(ctx, account, inputs)
+	if err != nil {
+		return err
+	}
+	payload, err := openAIChatPayloadWithImages(request, images, references)
+	if err != nil {
+		return err
 	}
 	scripts, build, err := c.Image.bootstrap(ctx, account)
 	if err != nil {
@@ -52,7 +77,6 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if err != nil {
 		return err
 	}
-	payload := openAIChatPayload(request)
 	headers := c.Image.requirementHeaders(requirements)
 	headers["Accept"] = "text/event-stream"
 	response, err := c.Image.do(ctx, "POST", "/backend-api/conversation", account, payload, headers, true)
@@ -60,9 +84,16 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 		return err
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return readOpenAIHTTPError(response, "conversation")
+	}
+	return scanOpenAIChat(response.Body, onEvent)
+}
 
+func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error) error {
 	state := openAIChatState{}
-	scanner := bufio.NewScanner(response.Body)
+	ended, hasText := false, false
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 8<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -73,6 +104,9 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 			line = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		}
 		if line == "[DONE]" {
+			if !hasText {
+				return fmt.Errorf("ChatGPT returned no assistant text")
+			}
 			return onEvent(OpenAIChatEvent{Done: true})
 		}
 		if !strings.HasPrefix(line, "{") {
@@ -80,13 +114,19 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 		}
 		var value any
 		if err := json.Unmarshal([]byte(line), &value); err != nil {
-			continue
+			return fmt.Errorf("invalid ChatGPT stream event: %w", err)
 		}
 		event, eventErr := state.event(value)
 		if eventErr != nil {
 			return eventErr
 		}
-		if event.Text != "" || event.Thinking != "" || event.Done {
+		hasText = hasText || event.Text != ""
+		if event.Text != "" {
+			ended = event.Done
+		} else {
+			ended = ended || event.Done
+		}
+		if event.Text != "" || event.Thinking != "" {
 			if err := onEvent(event); err != nil {
 				return err
 			}
@@ -95,11 +135,74 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if err := scanner.Err(); err != nil {
 		return err
 	}
+	if !ended || !hasText {
+		return fmt.Errorf("ChatGPT stream ended before completion: %w", io.ErrUnexpectedEOF)
+	}
 	return onEvent(OpenAIChatEvent{Done: true})
 }
 
+func openAIChatPayloadWithImages(request protocol.ChatRequest, images []OpenAIChatImage, references []openAIImageReference) (map[string]any, error) {
+	if len(images) != len(references) {
+		return nil, fmt.Errorf("chat image upload count does not match input")
+	}
+	refs := make(map[[2]int]openAIImageReference, len(images))
+	for index, image := range images {
+		refs[[2]int{image.MessageIndex, image.PartIndex}] = references[index]
+	}
+	payload := openAIChatPayload(request)
+	messages := make([]any, 0, len(request.Messages))
+	for messageIndex, message := range request.Messages {
+		parts := []any{}
+		attachments := []any{}
+		switch content := message.Content.(type) {
+		case string:
+			if content != "" {
+				parts = append(parts, content)
+			}
+		case []any:
+			for partIndex, raw := range content {
+				part, ok := raw.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("invalid chat content part")
+				}
+				switch part["type"] {
+				case "text":
+					parts = append(parts, stringValue(part["text"]))
+				case "image_url":
+					ref, ok := refs[[2]int{messageIndex, partIndex}]
+					if !ok {
+						return nil, fmt.Errorf("chat image has no uploaded reference")
+					}
+					parts = append(parts, map[string]any{"content_type": "image_asset_pointer", "asset_pointer": "file-service://" + ref.FileID, "width": ref.Width, "height": ref.Height, "size_bytes": ref.FileSize})
+					attachments = append(attachments, map[string]any{"id": ref.FileID, "mimeType": ref.MIME, "name": ref.FileName, "size": ref.FileSize, "width": ref.Width, "height": ref.Height})
+				default:
+					return nil, fmt.Errorf("unsupported chat content part")
+				}
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		contentType := "text"
+		metadata := map[string]any{}
+		if len(attachments) > 0 {
+			contentType = "multimodal_text"
+			metadata["attachments"] = attachments
+		}
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "developer" {
+			role = "system"
+		}
+		messages = append(messages, map[string]any{"id": firstUUID(), "author": map[string]any{"role": role}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": map[string]any{"content_type": contentType, "parts": parts}, "metadata": metadata})
+	}
+	payload["messages"] = messages
+	return payload, nil
+}
+
 type openAIChatState struct {
-	text string
+	text   string
+	path   string
+	hidden bool
 }
 
 func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
@@ -123,9 +226,25 @@ func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
 				Body:    stringValue(rawError["message"]),
 			}
 		}
-		if candidate := openAIAssistantText(object); candidate != "" {
+		if path, ok := object["p"].(string); ok {
+			s.path = path
+		}
+		for _, raw := range []any{object, object["v"]} {
+			envelope, _ := raw.(map[string]any)
+			message, ok := envelope["message"].(map[string]any)
+			if !ok {
+				continue
+			}
+			author, _ := message["author"].(map[string]any)
+			role, channel := stringValue(author["role"]), stringValue(message["channel"])
+			s.hidden = (role != "" && role != "assistant") || (channel != "" && channel != "final")
+			if message["status"] == "finished_successfully" && !s.hidden {
+				event.Done = true
+			}
+		}
+		if candidate := openAIAssistantText(object); candidate != "" && !s.hidden {
 			event.Text = appendDelta(&s.text, candidate)
-		} else if delta, ok := object["v"].(string); ok && object["o"] == "append" {
+		} else if delta, ok := object["v"].(string); ok && object["o"] == "append" && !s.hidden && (s.path == "/message/content/parts/0" || s.path == "/message/content/text") {
 			event.Text = delta
 			s.text += delta
 		}
@@ -219,6 +338,9 @@ func openAIAssistantText(value map[string]any) string {
 		}
 		author, _ := message["author"].(map[string]any)
 		if role := strings.ToLower(stringValue(author["role"])); role != "" && role != "assistant" {
+			continue
+		}
+		if channel := stringValue(message["channel"]); channel != "" && channel != "final" {
 			continue
 		}
 		content, _ := message["content"].(map[string]any)

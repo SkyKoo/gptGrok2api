@@ -14,29 +14,59 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Model           string           `json:"model"`
-	Messages        []Message        `json:"messages"`
-	Stream          bool             `json:"stream"`
-	Size            string           `json:"size,omitempty"`
-	ReasoningEffort string           `json:"reasoning_effort"`
-	Temperature     *float64         `json:"temperature"`
-	TopP            *float64         `json:"top_p"`
-	MaxTokens       *int             `json:"max_tokens"`
-	Tools           []map[string]any `json:"tools"`
-	ToolChoice      any              `json:"tool_choice"`
+	Fields          map[string]json.RawMessage `json:"-"`
+	Model           string                     `json:"model"`
+	Messages        []Message                  `json:"messages"`
+	Stream          bool                       `json:"stream"`
+	Size            string                     `json:"size,omitempty"`
+	ReasoningEffort string                     `json:"reasoning_effort"`
+	Temperature     *float64                   `json:"temperature"`
+	TopP            *float64                   `json:"top_p"`
+	MaxTokens       *int                       `json:"max_tokens"`
+	Tools           []map[string]any           `json:"tools"`
+	ToolChoice      any                        `json:"tool_choice"`
 }
 
 type ResponsesRequest struct {
-	Model           string           `json:"model"`
-	Input           any              `json:"input"`
-	Instructions    string           `json:"instructions"`
-	Stream          bool             `json:"stream"`
-	Reasoning       map[string]any   `json:"reasoning"`
-	Temperature     *float64         `json:"temperature"`
-	TopP            *float64         `json:"top_p"`
-	MaxOutputTokens *int             `json:"max_output_tokens"`
-	Tools           []map[string]any `json:"tools"`
-	ToolChoice      any              `json:"tool_choice"`
+	Fields          map[string]json.RawMessage `json:"-"`
+	Model           string                     `json:"model"`
+	Input           any                        `json:"input"`
+	Instructions    string                     `json:"instructions"`
+	Stream          bool                       `json:"stream"`
+	Reasoning       map[string]any             `json:"reasoning"`
+	Temperature     *float64                   `json:"temperature"`
+	TopP            *float64                   `json:"top_p"`
+	MaxOutputTokens *int                       `json:"max_output_tokens"`
+	Tools           []map[string]any           `json:"tools"`
+	ToolChoice      any                        `json:"tool_choice"`
+}
+
+// Keep the original parameter names so provider-specific validation can reject
+// unsupported features rather than silently dropping them during decoding.
+func (r *ChatRequest) UnmarshalJSON(raw []byte) error {
+	type plain ChatRequest
+	var value plain
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &value.Fields); err != nil {
+		return err
+	}
+	*r = ChatRequest(value)
+	return nil
+}
+
+func (r *ResponsesRequest) UnmarshalJSON(raw []byte) error {
+	type plain ResponsesRequest
+	var value plain
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &value.Fields); err != nil {
+		return err
+	}
+	*r = ResponsesRequest(value)
+	return nil
 }
 
 type UpstreamEvent struct {

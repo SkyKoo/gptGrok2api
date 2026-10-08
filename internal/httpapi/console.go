@@ -257,6 +257,14 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
 	}
+	if route.OpenAI || route.Image {
+		if route.Image {
+			writeOpenAIInputError(w, &protocol.InputError{Param: "model", Message: "image generation models are not supported by this Responses adapter; use the images API"})
+			return
+		}
+		s.openAIResponses(w, r, request, route)
+		return
+	}
 	if !route.Console {
 		messages := protocol.ResponsesInputMessages(request.Input, request.Instructions)
 		if len(messages) == 0 {

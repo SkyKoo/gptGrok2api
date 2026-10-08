@@ -15,117 +15,130 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
-func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
-	message := protocol.ExtractMessage(request.Messages)
-	if strings.TrimSpace(message) == "" {
-		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
-		return
-	}
-	responseID := newChatID()
+// runOpenAIChat owns the account lease for upload and conversation together.
+// A retry is safe only before client-visible text has been emitted.
+func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, route model.ChatRoute, images []provider.OpenAIChatImage, onEvent func(provider.OpenAIChatEvent) error) error {
 	excluded := map[string]bool{}
-	var text, thinking string
 	var lastErr error
-	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
+		if err := r.Context().Err(); err != nil {
+			return err
+		}
 		lease, err := s.accountPool.ReserveMatching(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount)
 		if err != nil {
-			lastErr = err
-			break
+			if lastErr != nil && errors.Is(err, accounts.ErrUnavailable) {
+				return lastErr
+			}
+			return err
 		}
 		s.enrichMonitorAccount(r, lease.Account)
-		text, thinking, err = s.openAIChat.Complete(r.Context(), lease.Account, request)
-		s.accountPool.Release(lease)
-		if err != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
-			excluded[lease.Account.Token] = true
-			lastErr = err
-			if attempt < s.cfg.ChatMaxRetries {
-				continue
+		emitted, clientFailed := false, false
+		err = s.openAIChat.Stream(r.Context(), lease.Account, request, func(event provider.OpenAIChatEvent) error {
+			if event.Text != "" {
+				emitted = true
 			}
-			break
+			callbackErr := onEvent(event)
+			clientFailed = callbackErr != nil
+			return callbackErr
+		}, images...)
+		s.accountPool.Release(lease)
+		if err == nil {
+			s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+			return nil
 		}
-		lastErr = nil
-		break
+		if r.Context().Err() != nil || clientFailed {
+			return err
+		}
+		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		excluded[lease.Account.Token] = true
+		lastErr = err
+		if emitted || !s.shouldRetry(upstreamStatus(err), attempt) {
+			return err
+		}
 	}
-	if lastErr != nil {
-		writeOpenAIChatError(w, lastErr)
+}
+
+func (s *Server) completeOpenAIChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
+	request, images, err := s.prepareOpenAIChat(r.Context(), request)
+	if err != nil {
+		writeOpenAITextChatError(w, err)
 		return
 	}
-	messagePayload := map[string]any{"role": "assistant", "content": text}
-	if thinking != "" && request.ReasoningEffort != "none" {
-		messagePayload["reasoning_content"] = thinking
+	var text strings.Builder
+	err = s.runOpenAIChat(r, request, route, images, func(event provider.OpenAIChatEvent) error { text.WriteString(event.Text); return nil })
+	if err != nil {
+		writeOpenAITextChatError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id": responseID, "object": "chat.completion", "created": time.Now().Unix(), "model": request.Model,
-		"choices": []any{map[string]any{"index": 0, "message": messagePayload, "finish_reason": "stop"}},
-		"usage":   usageFor(message, text, thinking),
+		"id": newChatID(), "object": "chat.completion", "created": time.Now().Unix(), "model": request.Model,
+		"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": text.String()}, "finish_reason": "stop"}},
+		// The Web stream does not supply official API token usage.
+		"usage": nil,
 	})
 }
 
-func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
-	message := protocol.ExtractMessage(request.Messages)
-	if strings.TrimSpace(message) == "" {
-		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
-		return
-	}
+func setOpenAIStreamHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	flusher, _ := w.(http.Flusher)
-	responseID := newChatID()
-	excluded := map[string]bool{}
-	emitted := false
-	var lastErr error
-	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.ReserveMatching(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount)
-		if err != nil {
-			lastErr = err
-			break
+}
+
+func writeOpenAIStreamData(w http.ResponseWriter, event string, value any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	if event != "" {
+		if _, err = fmt.Fprintf(w, "event: %s\n", event); err != nil {
+			return err
 		}
-		s.enrichMonitorAccount(r, lease.Account)
-		err = s.openAIChat.Stream(r.Context(), lease.Account, request, func(event provider.OpenAIChatEvent) error {
-			if event.Text == "" && event.Thinking == "" {
-				return nil
-			}
-			if !emitted {
-				writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
-				emitted = true
-			}
-			delta := map[string]any{}
-			if event.Text != "" {
-				delta["content"] = event.Text
-			}
-			if event.Thinking != "" && request.ReasoningEffort != "none" {
-				delta["reasoning_content"] = event.Thinking
-			}
-			writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": delta}}})
-			if flusher != nil {
-				flusher.Flush()
-			}
+	}
+	if _, err = fmt.Fprintf(w, "data: %s\n\n", raw); err != nil {
+		return err
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
+func (s *Server) streamOpenAIChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
+	request, images, err := s.prepareOpenAIChat(r.Context(), request)
+	if err != nil {
+		writeOpenAITextChatError(w, err)
+		return
+	}
+	setOpenAIStreamHeaders(w)
+	id, created, emitted := newChatID(), time.Now().Unix(), false
+	send := func(delta map[string]any, finish any) error {
+		return writeOpenAIStreamData(w, "", map[string]any{"id": id, "object": "chat.completion.chunk", "created": created, "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+	}
+	err = s.runOpenAIChat(r, request, route, images, func(event provider.OpenAIChatEvent) error {
+		if event.Text == "" {
 			return nil
-		})
-		s.accountPool.Release(lease)
-		if err != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
-			excluded[lease.Account.Token] = true
-			lastErr = err
-			if !emitted && attempt < s.cfg.ChatMaxRetries {
-				continue
-			}
-			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
-		lastErr = nil
-		break
+		if !emitted {
+			if err := send(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
+				return err
+			}
+			emitted = true
+		}
+		return send(map[string]any{"content": event.Text}, nil)
+	})
+	if r.Context().Err() != nil {
+		return
 	}
-	if lastErr != nil {
-		writeSSE(w, map[string]any{"error": map[string]any{"message": lastErr.Error(), "type": "upstream_error"}})
+	if err != nil {
+		_ = writeOpenAIStreamData(w, "", map[string]any{"error": openAIChatErrorObject(err)})
+	} else {
+		_ = send(map[string]any{}, "stop")
 	}
-	if !emitted {
-		writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "content": ""}}}})
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
 	}
-	writeSSE(w, map[string]any{"id": responseID, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": request.Model, "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "stop"}}})
-	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 }
 
 func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest) {
@@ -296,6 +309,28 @@ func responseContent(response map[string]any) string {
 	return stringValue(message["content"])
 }
 
+func openAIChatErrorObject(err error) map[string]any {
+	kind, code := "server_error", "server_error"
+	if errors.Is(err, accounts.ErrUnavailable) || upstreamStatus(err) == http.StatusTooManyRequests {
+		kind, code = "rate_limit_error", "rate_limit_exceeded"
+	}
+	return map[string]any{"message": err.Error(), "type": kind, "param": nil, "code": code}
+}
+
+func writeOpenAITextChatError(w http.ResponseWriter, err error) {
+	var input *protocol.InputError
+	if errors.As(err, &input) {
+		writeOpenAIInputError(w, input)
+		return
+	}
+	status := upstreamStatus(err)
+	if errors.Is(err, accounts.ErrUnavailable) {
+		status = http.StatusTooManyRequests
+	}
+	writeJSON(w, status, map[string]any{"error": openAIChatErrorObject(err)})
+}
+
+// Preserve the existing error contract of the image handlers.
 func writeOpenAIChatError(w http.ResponseWriter, err error) {
 	status := upstreamStatus(err)
 	if errors.Is(err, accounts.ErrUnavailable) {
