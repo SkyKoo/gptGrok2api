@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -179,5 +180,75 @@ func BenchmarkPoolReserveWithTwoThousandCachedAccounts(b *testing.B) {
 			b.Fatal(err)
 		}
 		pool.Release(lease)
+	}
+}
+
+func TestPoolSkipsExpiredJWTWithoutChangingAccounts(t *testing.T) {
+	root := t.TempDir()
+	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	jwt := func(exp int64) string {
+		return "eyJhbGciOiJIUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp))) + ".signature"
+	}
+	expired, valid := jwt(time.Now().Add(-time.Hour).Unix()), jwt(time.Now().Add(time.Hour).Unix())
+	items := []map[string]any{{"access_token": expired, "status": "正常", "quota": 25}, {"access_token": valid, "status": "正常"}}
+	if err := repository.SaveAccounts(items); err != nil {
+		t.Fatal(err)
+	}
+	p := New(repository)
+	p.SetInvalidCallback(func(Account) { t.Error("offline expiry triggered re-login") })
+	for i := 0; i < 4; i++ {
+		lease, err := p.Reserve(context.Background(), []string{"basic"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease.Account.Token != valid {
+			t.Fatal("expired credential consumed a lease")
+		}
+		p.Release(lease)
+	}
+	stored, err := repository.AccountList()
+	if err != nil || len(stored) != 2 || stored[0]["status"] != "正常" {
+		t.Fatalf("offline check modified stored accounts: %v", err)
+	}
+	if err := repository.SaveAccounts(items[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Reserve(context.Background(), []string{"basic"}, nil); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("all expired: %v", err)
+	}
+	// Replacing the credential invalidates the cached expiry without restarting.
+	if err := repository.SaveAccounts(items[1:]); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := p.Reserve(context.Background(), []string{"basic"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Release(lease)
+}
+
+func TestJWTExpiryEligibility(t *testing.T) {
+	now := time.Unix(100, 500000000)
+	for _, tc := range []struct {
+		payload string
+		want    bool
+	}{
+		{`{"exp":99}`, false}, {`{"exp":100.5}`, false}, {`{"exp":100.6}`, true},
+		{`{"exp":0}`, false}, {`{"exp":-1}`, false}, {`{"exp":101}`, true},
+		{`{}`, true}, {`{"exp":null}`, true}, {`{"exp":"100"}`, true}, {`bad`, true},
+	} {
+		t.Run(tc.payload, func(t *testing.T) {
+			token := "header." + base64.RawURLEncoding.EncodeToString([]byte(tc.payload)) + ".signature"
+			account, _ := normalize(map[string]any{"access_token": token, "status": "正常"})
+			if got := New(nil).available(account, []string{"basic"}, now); got != tc.want {
+				t.Fatalf("available=%v want=%v", got, tc.want)
+			}
+		})
+	}
+	for _, token := range []string{"opaque-grok-token", "malformed.jwt.token"} {
+		account, _ := normalize(map[string]any{"access_token": token})
+		if !New(nil).available(account, []string{"basic"}, now) {
+			t.Fatal("opaque token behavior changed")
+		}
 	}
 }

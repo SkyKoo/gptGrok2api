@@ -2,6 +2,8 @@ package accounts
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,9 +20,10 @@ var ErrUnavailable = errors.New("no available accounts")
 var retryAfterPattern = regexp.MustCompile(`(?i)(\d+)\s*(hours?|hrs?|小时|minutes?|mins?|分钟)`)
 
 type Account struct {
-	Token  string
-	Pool   string
-	Fields map[string]any
+	Token            string
+	Pool             string
+	Fields           map[string]any
+	credentialExpiry *float64
 }
 
 type Lease struct {
@@ -267,6 +270,10 @@ func retryAfterDuration(err error) time.Duration {
 }
 
 func (p *Pool) available(account Account, pools []string, now time.Time) bool {
+	// The claim is only a local exclusion hint, not proof that a token is valid.
+	if account.credentialExpiry != nil && *account.credentialExpiry <= float64(now.Unix())+float64(now.Nanosecond())/1e9 {
+		return false
+	}
 	if !poolAllowed(account.Pool, pools) {
 		return false
 	}
@@ -330,7 +337,28 @@ func normalize(item map[string]any) (Account, bool) {
 	default:
 		pool = "basic"
 	}
-	return Account{Token: token, Pool: pool, Fields: item}, true
+	return Account{Token: token, Pool: pool, Fields: item, credentialExpiry: jwtExpiry(token)}, true
+}
+
+// Parse once per account snapshot. Opaque tokens and unknown/malformed claims
+// retain their existing scheduling behavior; only a known expired JWT is skipped.
+// Never persist this hint as an upstream auth failure or trigger re-login here.
+func jwtExpiry(token string) *float64 {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return nil
+	}
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil {
+		return nil
+	}
+	return claims.Exp
 }
 
 func normalizeAccounts(items []map[string]any) []Account {

@@ -436,3 +436,117 @@ func TestOpenAIResponsesDisconnectCancelsUpstream(t *testing.T) {
 		t.Fatal("client disconnect retried")
 	}
 }
+
+func TestOpenAIUpstreamAuthMappingAndLogs(t *testing.T) {
+	for _, responses := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			for _, status := range []int{401, 403} {
+				t.Run(fmt.Sprintf("responses=%v/stream=%v/status=%d", responses, stream, status), func(t *testing.T) {
+					var calls atomic.Int32
+					server, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+						calls.Add(1)
+						http.Error(w, "token_revoked private-upstream-detail", status)
+					})
+					path := "/v1/chat/completions"
+					if responses {
+						path = "/v1/responses"
+					}
+					result := invokeMultimodal(server, path, multimodalRequestBody(t, responses, stream, false))
+					wantHTTP := 502
+					if stream {
+						wantHTTP = 200
+					}
+					if result.Code != wantHTTP || !strings.Contains(result.Body.String(), "upstream_authentication_error") || strings.Contains(result.Body.String(), "private-upstream-detail") {
+						t.Fatalf("bad auth error: %d %s", result.Code, result.Body.String())
+					}
+					if calls.Load() < 1 || calls.Load() > int32(server.cfg.ChatMaxRetries+1) {
+						t.Fatalf("retry limit: %d", calls.Load())
+					}
+					logs := server.loadCallLogs()
+					if len(logs) != 1 {
+						t.Fatalf("logs=%d", len(logs))
+					}
+					detail := mapValue(logs[0]["detail"])
+					meta := mapValue(detail["request_meta"])
+					if detail["endpoint"] != path || detail["status"] != "failed" || intValue(meta["upstream_status"]) != status || intValue(meta["error_status"]) != 502 || intValue(meta["upstream_attempts"]) != int(calls.Load()) {
+						t.Fatalf("bad log: %#v", detail)
+					}
+					if !strings.Contains(stringValue(detail["request_text_full"]), "before") {
+						t.Fatalf("lost request summary: %#v", detail)
+					}
+					// Caller auth still fails before an upstream attempt.
+					r := httptest.NewRequest("POST", path, strings.NewReader(multimodalRequestBody(t, responses, false, false)))
+					r.Header.Set("Authorization", "Bearer wrong-key")
+					w := httptest.NewRecorder()
+					server.Handler().ServeHTTP(w, r)
+					if w.Code != 401 {
+						t.Fatalf("caller auth changed: %d", w.Code)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestResponsesLogsSuccessAndLateStreamFailure(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprint(fail), func(t *testing.T) {
+			server, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+				// Error arrives after the response capture's 8 KiB limit.
+				raw, _ := json.Marshal(map[string]any{"message": map[string]any{"author": map[string]any{"role": "assistant"}, "content": map[string]any{"parts": []string{strings.Repeat("a", 10000)}}}})
+				fmt.Fprintf(w, "data: %s\n\n", raw)
+				if !fail {
+					fmt.Fprintln(w, "data: [DONE]")
+				}
+			})
+			body := multimodalRequestBody(t, true, true, true)
+			result := invokeMultimodal(server, "/v1/responses", body)
+			if result.Code != 200 {
+				t.Fatal(result.Body.String())
+			}
+			logs := server.loadCallLogs()
+			if len(logs) != 1 {
+				t.Fatalf("logs=%d", len(logs))
+			}
+			detail := mapValue(logs[0]["detail"])
+			shape := mapValue(detail["request_shape"])
+			want := "success"
+			if fail {
+				want = "failed"
+			}
+			if detail["status"] != want || intValue(shape["image_url_parts"]) != 2 || intValue(shape["data_url_images"]) != 2 {
+				t.Fatalf("bad outcome/shape: %#v", detail)
+			}
+			raw, _ := json.Marshal(logs)
+			if strings.Contains(string(raw), "data:image/") || strings.Contains(string(raw), "api-secret") {
+				t.Fatal("request binary or key leaked to logs")
+			}
+		})
+	}
+}
+
+func TestOpenAIExpiredAccountsDoNotConsumeRetries(t *testing.T) {
+	var calls atomic.Int32
+	server, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer valid" {
+			t.Error("expired token reached upstream")
+		}
+		fmt.Fprintln(w, `data: {"message":{"author":{"role":"assistant"},"content":{"parts":["ok"]}}}`)
+		fmt.Fprintln(w, "data: [DONE]")
+	})
+	items := []map[string]any{}
+	for i := 0; i < 6; i++ {
+		token := "header." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, i))) + ".signature"
+		items = append(items, map[string]any{"access_token": token, "source_type": "chatgpt_web", "status": "正常"})
+	}
+	items = append(items, map[string]any{"access_token": "valid", "source_type": "chatgpt_web", "status": "正常"})
+	if err := server.store.SaveAccounts(items); err != nil {
+		t.Fatal(err)
+	}
+	server.cfg.ChatMaxRetries = 0
+	result := invokeMultimodal(server, "/v1/responses", `{"model":"auto","input":"hi"}`)
+	if result.Code != 200 || calls.Load() != 1 {
+		t.Fatalf("expired accounts consumed retry: %d calls=%d", result.Code, calls.Load())
+	}
+}

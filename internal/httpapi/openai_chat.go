@@ -17,7 +17,16 @@ import (
 
 // runOpenAIChat owns the account lease for upload and conversation together.
 // A retry is safe only before client-visible text has been emitted.
-func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, route model.ChatRoute, images []provider.OpenAIChatImage, onEvent func(provider.OpenAIChatEvent) error) error {
+func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, route model.ChatRoute, images []provider.OpenAIChatImage, onEvent func(provider.OpenAIChatEvent) error) (resultErr error) {
+	defer func() {
+		if resultErr != nil {
+			detail := openAIChatErrorObject(resultErr)
+			s.enrichRequestMonitor(r, map[string]any{"error_status": openAITextChatStatus(resultErr), "error_code": detail["code"]})
+			if outcome, ok := r.Context().Value(monitorOutcomeKey{}).(*monitorOutcome); ok {
+				outcome.errorText = stringValue(detail["message"])
+			}
+		}
+	}()
 	excluded := map[string]bool{}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -32,6 +41,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 			return err
 		}
 		s.enrichMonitorAccount(r, lease.Account)
+		s.enrichRequestMonitor(r, map[string]any{"upstream_attempts": attempt + 1})
 		emitted, clientFailed := false, false
 		err = s.openAIChat.Stream(r.Context(), lease.Account, request, func(event provider.OpenAIChatEvent) error {
 			if event.Text != "" {
@@ -43,12 +53,14 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		}, images...)
 		s.accountPool.Release(lease)
 		if err == nil {
+			s.enrichRequestMonitor(r, map[string]any{"upstream_status": http.StatusOK})
 			s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
 			return nil
 		}
 		if r.Context().Err() != nil || clientFailed {
 			return err
 		}
+		s.enrichRequestMonitor(r, map[string]any{"upstream_status": upstreamStatus(err)})
 		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
 		excluded[lease.Account.Token] = true
 		lastErr = err
@@ -310,11 +322,27 @@ func responseContent(response map[string]any) string {
 }
 
 func openAIChatErrorObject(err error) map[string]any {
+	// Account credentials belong to the gateway; do not report them as a bad
+	// caller API key or echo upstream credential details to the caller.
+	if upstreamStatus(err) == http.StatusUnauthorized || upstreamStatus(err) == http.StatusForbidden {
+		return map[string]any{"message": "ChatGPT upstream account authentication or access failed; check the CFM account pool.", "type": "server_error", "param": nil, "code": "upstream_authentication_error"}
+	}
 	kind, code := "server_error", "server_error"
 	if errors.Is(err, accounts.ErrUnavailable) || upstreamStatus(err) == http.StatusTooManyRequests {
 		kind, code = "rate_limit_error", "rate_limit_exceeded"
 	}
 	return map[string]any{"message": err.Error(), "type": kind, "param": nil, "code": code}
+}
+
+func openAITextChatStatus(err error) int {
+	if errors.Is(err, accounts.ErrUnavailable) {
+		return http.StatusTooManyRequests
+	}
+	status := upstreamStatus(err)
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return http.StatusBadGateway
+	}
+	return status
 }
 
 func writeOpenAITextChatError(w http.ResponseWriter, err error) {
@@ -323,11 +351,7 @@ func writeOpenAITextChatError(w http.ResponseWriter, err error) {
 		writeOpenAIInputError(w, input)
 		return
 	}
-	status := upstreamStatus(err)
-	if errors.Is(err, accounts.ErrUnavailable) {
-		status = http.StatusTooManyRequests
-	}
-	writeJSON(w, status, map[string]any{"error": openAIChatErrorObject(err)})
+	writeJSON(w, openAITextChatStatus(err), map[string]any{"error": openAIChatErrorObject(err)})
 }
 
 // Preserve the existing error contract of the image handlers.

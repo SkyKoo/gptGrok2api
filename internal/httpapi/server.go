@@ -449,7 +449,7 @@ func (s *Server) shouldMonitorRequest(r *http.Request) bool {
 		return false
 	}
 	path := strings.TrimRight(r.URL.Path, "/")
-	return path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/chat/completions"
+	return path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/chat/completions" || path == "/v1/responses"
 }
 
 func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) {
@@ -480,13 +480,19 @@ func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next
 	s.monitor.update(id, "handler_started", 10, "")
 	s.monitor.enrich(id, map[string]any{"metrics": map[string]any{"handler_queue_ms": 0}})
 	capture := &statusCaptureWriter{ResponseWriter: w}
-	next.ServeHTTP(capture, r.WithContext(context.WithValue(r.Context(), monitorCallIDKey{}, id)))
+	outcome := &monitorOutcome{}
+	ctx := context.WithValue(r.Context(), monitorCallIDKey{}, id)
+	ctx = context.WithValue(ctx, monitorOutcomeKey{}, outcome)
+	next.ServeHTTP(capture, r.WithContext(ctx))
 	status := capture.status
 	if status == 0 {
 		status = http.StatusOK
 	}
 	errText := monitorResponseErrorText(capture.body.Bytes(), status)
-	if status >= 400 {
+	if outcome.errorText != "" {
+		errText = outcome.errorText
+	}
+	if status >= 400 || errText != "" {
 		s.monitor.finish(id, "failed", modelName, summary, errText)
 	} else {
 		s.monitor.finish(id, "success", modelName, summary, "")
@@ -497,6 +503,10 @@ func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next
 }
 
 type monitorCallIDKey struct{}
+type monitorOutcomeKey struct{}
+
+// Explicit outcome survives SSE's HTTP 200 and the capped response capture.
+type monitorOutcome struct{ errorText string }
 
 func (s *Server) enrichRequestMonitor(r *http.Request, meta map[string]any) {
 	if r == nil {
@@ -670,9 +680,37 @@ func monitorRequestShape(r *http.Request) (string, string, string, bool, any) {
 	if summary == "" {
 		summary = protocol.ExtractMessage(chatMessagesFromAny(payload["messages"]))
 	}
+	if strings.TrimRight(r.URL.Path, "/") == "/v1/responses" {
+		summary = responsesMonitorText(payload)
+	}
 	preview, full, truncated := requestTextForMonitor(summary)
 	urlParts, dataURLs := imageReferenceStats(payload)
 	return modelName, preview, full, truncated, map[string]any{"content_type": "application/json", "image_url_parts": urlParts, "data_url_images": dataURLs, "size": stringValue(payload["size"])}
+}
+
+// Extract only text; never stringify image URLs, base64 bodies or other fields.
+func responsesMonitorText(payload map[string]any) string {
+	messages := []protocol.Message{}
+	if instructions, ok := payload["instructions"].(string); ok && instructions != "" {
+		messages = append(messages, protocol.Message{Role: "developer", Content: instructions})
+	}
+	if input, ok := payload["input"].(string); ok {
+		messages = append(messages, protocol.Message{Role: "user", Content: input})
+	} else {
+		for _, message := range chatMessagesFromAny(payload["input"]) {
+			if parts, ok := message.Content.([]any); ok {
+				texts := []any{}
+				for _, part := range parts {
+					if object, ok := part.(map[string]any); ok && (object["type"] == "input_text" || object["type"] == "output_text") {
+						texts = append(texts, map[string]any{"type": "text", "text": object["text"]})
+					}
+				}
+				message.Content = texts
+			}
+			messages = append(messages, message)
+		}
+	}
+	return protocol.ExtractMessage(messages)
 }
 
 func requestTextForMonitor(value string) (preview, full string, truncated bool) {
@@ -722,7 +760,7 @@ func imageReferenceStats(value any) (int, int) {
 		}
 	case map[string]any:
 		for k, x := range v {
-			if k == "image_url" || k == "image_url_parts" || k == "image" || k == "images" || k == "images[]" || k == "content" || k == "messages" {
+			if k == "image_url" || k == "image_url_parts" || k == "image" || k == "images" || k == "images[]" || k == "content" || k == "messages" || k == "input" || k == "url" {
 				a, b := imageReferenceStats(x)
 				urls += a
 				data += b
