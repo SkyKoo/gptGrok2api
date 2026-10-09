@@ -161,7 +161,9 @@ func (s *Server) logsAPI(w http.ResponseWriter, r *http.Request) {
 	if end > total {
 		end = total
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": filtered[offset:end], "total": total, "limit": limit, "offset": offset})
+	page := filtered[offset:end]
+	s.restoreLogImageOutputs(page)
+	writeJSON(w, http.StatusOK, map[string]any{"items": page, "total": total, "limit": limit, "offset": offset})
 }
 
 func (s *Server) deleteLogs(w http.ResponseWriter, r *http.Request) {

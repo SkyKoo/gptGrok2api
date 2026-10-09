@@ -161,6 +161,10 @@ JSON `images` 编辑输入仍是 CFM 扩展；标准 multipart 输入继续支�
 `output_format`（PNG/JPEG/WebP 选择）、逐步出图等能力尚未实现，不承诺这些参数生效。
 上游没有提供的 token 用量、实际质量等元数据不会伪造返回。Grok 的返回方式不变。
 
+调用日志直接关联服务器已保存的生成图片，不依赖对外返回 URL。对于历史日志缺少图片地址的记录，
+日志管理会按图片元数据中的 `call_id` 补齐预览；只关联仍存在的生成结果，不重写原日志、
+不重新生成图片，也不改变图片保留期限。
+
 <code>gpt-image-2</code> 也可以通过 <code>/v1/chat/completions</code> 调用。纯文本 content 是提示词；只有 <code>image_url</code>、<code>input_image</code> 或 <code>image</code> 内容块会被当作参考图输入。
 
 ### 异步图片任务

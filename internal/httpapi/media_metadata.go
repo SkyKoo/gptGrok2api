@@ -40,6 +40,7 @@ func (s *Server) recordGeneratedMedia(ctx context.Context, result map[string]str
 	callID, _ := ctx.Value(monitorCallIDKey{}).(string)
 	endpoint, model := "", ""
 	if callID != "" {
+		s.monitor.addOutputImage(callID, localImageLogOutput(filename))
 		if record, ok := s.monitor.detail(callID); ok {
 			endpoint = record.Endpoint
 			model = record.Model
@@ -62,4 +63,49 @@ func mediaMetadata(path string) map[string]any {
 		return nil
 	}
 	return out
+}
+
+func localImageLogOutput(filename string) map[string]string {
+	return map[string]string{"url": "/images/" + url.PathEscape(filename), "filename": filename}
+}
+
+// Restore previews for older calls whose Base64 response could not supply URLs.
+// This is a read-time join: it never rewrites logs or recreates missing images.
+func (s *Server) restoreLogImageOutputs(items []map[string]any) {
+	missing := map[string][]map[string]any{}
+	for _, item := range items {
+		if stringValue(item["type"]) != "call" {
+			continue
+		}
+		detail := mapValue(item["detail"])
+		if len(detail) == 0 || len(anyList(detail["output_images"])) > 0 || len(anyList(detail["image_urls"])) > 0 {
+			continue
+		}
+		callID := firstNonEmpty(stringValue(detail["call_id"]), stringValue(item["id"]))
+		if callID != "" {
+			missing[callID] = append(missing[callID], detail)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	outputs := map[string][]map[string]string{}
+	entries, _ := os.ReadDir(s.cfg.ImageDataDir)
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !isImageStorageFile(entry.Name()) {
+			continue
+		}
+		meta := mediaMetadata(filepath.Join(s.cfg.ImageDataDir, entry.Name()))
+		callID := stringValue(meta["call_id"])
+		if len(missing[callID]) == 0 || stringValue(meta["source_type"]) != "generated_output" || stringValue(meta["role"]) != "output" {
+			continue
+		}
+		outputs[callID] = append(outputs[callID], localImageLogOutput(entry.Name()))
+	}
+	for callID, images := range outputs {
+		for _, detail := range missing[callID] {
+			detail["output_images"] = images
+			detail["image_urls"] = images
+		}
+	}
 }

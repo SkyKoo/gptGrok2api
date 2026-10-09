@@ -51,6 +51,9 @@ type monitorRecord struct {
 	EgressMode           string           `json:"egress_mode,omitempty"`
 	EgressLabel          string           `json:"egress_label,omitempty"`
 	HasProxy             bool             `json:"has_proxy"`
+
+	// Generated outputs are recorded separately from the capped HTTP response.
+	OutputImages []map[string]string `json:"-"`
 }
 
 func newRuntimeMonitor() *runtimeMonitor {
@@ -160,6 +163,24 @@ func (m *runtimeMonitor) enrich(id string, body map[string]any) {
 			item.Events[len(item.Events)-1][k] = v
 		}
 	}
+}
+
+func (m *runtimeMonitor) addOutputImage(id string, output map[string]string) {
+	if m == nil || id == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item := m.active[id]
+	if item == nil {
+		return
+	}
+	for _, existing := range item.OutputImages {
+		if existing["url"] == output["url"] {
+			return
+		}
+	}
+	item.OutputImages = append(item.OutputImages, map[string]string{"url": output["url"], "filename": output["filename"]})
 }
 
 func (m *runtimeMonitor) finish(id, status, model, summary, errText string) {
@@ -836,7 +857,11 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		detail["raw_error"] = errorText
 		detail["upstream_error"] = errorText
 	}
-	if outputs := responseImageOutputs(responseBody); len(outputs) > 0 {
+	outputs := record.OutputImages
+	if len(outputs) == 0 {
+		outputs = responseImageOutputs(responseBody)
+	}
+	if len(outputs) > 0 {
 		detail["output_images"] = outputs
 		detail["image_urls"] = outputs
 	}
