@@ -153,6 +153,14 @@ curl http://127.0.0.1:3000/v1/images/edits \
   -F 'image=@reference.png;type=image/png'
 ~~~
 
+同步 `gpt-image-2` 生成与编辑返回 `{"created": <Unix 秒>, "data": [{"b64_json": "..."}]}`，
+与官方 GPT Image 的 Base64 返回方式一致；不再返回 `data[].url`。请求请省略
+`response_format`，显式传入该参数返回 400（`error.param=response_format`）。
+JSON `images` 编辑输入仍是 CFM 扩展；标准 multipart 输入继续支持。
+本次仅对齐同步图片返回协议，原有数量和参考图限制保持；`mask`、透明背景、
+`output_format`（PNG/JPEG/WebP 选择）、逐步出图等能力尚未实现，不承诺这些参数生效。
+上游没有提供的 token 用量、实际质量等元数据不会伪造返回。Grok 的返回方式不变。
+
 <code>gpt-image-2</code> 也可以通过 <code>/v1/chat/completions</code> 调用。纯文本 content 是提示词；只有 <code>image_url</code>、<code>input_image</code> 或 <code>image</code> 内容块会被当作参考图输入。
 
 ### 异步图片任务
@@ -195,9 +203,9 @@ curl http://127.0.0.1:3000/v1/images/edits \
 2. 轮询 conversation 的 <code>mapping</code> 时，只读取 <code>tool</code> 和 <code>assistant</code> 记录中的图片资产；<code>user</code> 记录全部忽略。
 3. 按消息 <code>create_time</code> 排序，并过滤 SSE 回显、输入资产指针和与参考图字节相同的内容。
 4. 识别 <code>file-service://</code>、<code>sediment://</code> 以及当前文件 ID 结构，下载真正的生成资产。
-5. 生成资产写入本地图片存储，API 返回本站 URL，而不是上游临时下载地址。
+5. 生成资产写入本地图片存储；GPT Image 同步接口返回 Base64，异步任务和图库使用本站 URL。
 
-因此，编辑请求的参考图只会参与生成，不会出现在返回的 <code>data</code> 图片列表中。默认返回格式是 URL，例如：
+因此，编辑请求的参考图只会参与生成，不会出现在返回的 <code>data</code> 图片列表中。异步任务的结果仍为 URL，例如：
 
 ~~~text
 http://your-server:3000/v1/files/image?id=<image-id>

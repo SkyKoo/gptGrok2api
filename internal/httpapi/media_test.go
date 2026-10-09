@@ -315,7 +315,7 @@ func TestImageGenerationsRunsOpenAIBatchesConcurrently(t *testing.T) {
 
 	server.openAIImage = provider.NewOpenAIImage(upstream.URL, upstream.Client(), nil, 30*time.Second)
 
-	requestBody := `{"model":"gpt-image-2","prompt":"一只猫","n":2,"size":"1024x1024","response_format":"url"}`
+	requestBody := `{"model":"gpt-image-2","prompt":"一只猫","n":2,"size":"1024x1024"}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(requestBody))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer api-secret")
@@ -391,7 +391,7 @@ func TestOpenAIImageRequestsPersistOnlyReturnedImageCount(t *testing.T) {
 	defer upstream.Close()
 	server.openAIImage = provider.NewOpenAIImage(upstream.URL, upstream.Client(), nil, 30*time.Second)
 
-	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-2","prompt":"一只猫","n":1,"response_format":"url"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"gpt-image-2","prompt":"一只猫","n":1}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer api-secret")
 	response := httptest.NewRecorder()

@@ -94,7 +94,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	if isOpenAIImageModel(request.Model) {
 		request.Size = provider.NormalizeOpenAIImageSize(request.Size)
 	}
-	if request.ResponseFormat == "" {
+	if request.ResponseFormat == "" && !isOpenAIImageModel(request.Model) {
 		request.ResponseFormat = "url"
 	}
 	if request.Quality == "" {
@@ -119,7 +119,11 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isOpenAIImageModel(request.Model) {
-		data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, request.ResponseFormat, requestPublicBase(r), request.N)
+		format, ok := openAIImagesResponseFormat(w, r, request.ResponseFormat)
+		if !ok {
+			return
+		}
+		data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, format, requestPublicBase(r), request.N)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
@@ -765,7 +769,10 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		if size == "" {
 			size = "1024x1024"
 		}
-		format := imageEditResponseFormat(request.ResponseFormat)
+		format, ok := openAIImagesResponseFormat(w, r, request.ResponseFormat)
+		if !ok {
+			return
+		}
 		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
@@ -832,6 +839,22 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+}
+
+// OpenAI Images returns Base64. Only the server's native task worker uses URLs;
+// the private context marker cannot be supplied by an external HTTP caller.
+func openAIImagesResponseFormat(w http.ResponseWriter, r *http.Request, requested string) (string, bool) {
+	if task, ok := r.Context().Value(imageTaskLogContextKey{}).(imageTaskLogContext); ok && task.TaskID != "" {
+		return "url", true
+	}
+	if requested != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{
+			"message": "response_format is not supported for GPT image models; omit it to receive base64-encoded images",
+			"type":    "invalid_request_error", "param": "response_format", "code": nil,
+		}})
+		return "", false
+	}
+	return "b64_json", true
 }
 
 func imageEditResponseFormat(string) string {

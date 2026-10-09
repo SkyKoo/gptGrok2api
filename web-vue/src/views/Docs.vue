@@ -54,7 +54,7 @@
             <p class="text-sm font-semibold">图生图（/v1/images/edits）</p>
             <CodeBlock :content="imageEditExample" />
             <p class="mt-2 text-xs text-muted-foreground">
-              也支持 image_url / image_b64，mask_url / mask_b64 同理；真实支持情况以后端版本和上游返回为准。
+              GPT Image 同步生成和编辑返回 data[].b64_json，请省略 response_format；异步任务继续返回图片 URL。mask、透明背景、输出格式选择和逐步出图尚未实现。
             </p>
           </section>
         </div>
@@ -169,15 +169,13 @@ const imageGenerationExample = computed(() => `curl -X POST "http://localhost:78
     "model": "${primaryImageModel.value}",
     "prompt": "draw a tiny cat icon, minimal flat vector",
     "n": 1,
-    "size": "1024x1024",
-    "response_format": "url"
+    "size": "1024x1024"
   }'`)
 
 const imageEditExample = computed(() => `curl -X POST "http://localhost:7860/v1/images/edits" \\
   -H "Authorization: Bearer YOUR_API_KEY" \\
   -F "model=${primaryImageEditModel.value}" \\
   -F "prompt=把这张图改成赛博风格" \\
-  -F "response_format=url" \\
   -F "image=@reference.png"`)
 
 const operationSections = [

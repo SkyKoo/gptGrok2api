@@ -220,7 +220,7 @@ func TestImageTaskAsyncLifecycleSurvivesCallerCancellation(t *testing.T) {
 					if tc.wantError {
 						t.Fatal("storage error counted as successful image")
 					}
-					if len(task.Data) != 1 || task.Data[0]["url"] == "" {
+					if len(task.Data) != 1 || task.Data[0]["url"] == "" || task.Data[0]["b64_json"] != nil {
 						t.Fatalf("missing result: %s", w.Body.String())
 					}
 					break
