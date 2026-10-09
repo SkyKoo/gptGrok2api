@@ -579,7 +579,7 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 		if json.Unmarshal(raw, &value) != nil {
 			return false
 		}
-		if terminalErr = openAIImageTerminalError(value); terminalErr != nil {
+		if terminalErr = openAIImageTerminalError(value, account.Token); terminalErr != nil {
 			return true
 		}
 		collectOpenAIImageRefs(value, &conversationID, &fileIDs)
@@ -606,7 +606,7 @@ func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Acc
 			if len(ids) > 0 {
 				return uniqueStrings(ids), nil
 			}
-			if terminal := openAIImageTerminalError(value); terminal != nil {
+			if terminal := openAIImageTerminalError(value, account.Token); terminal != nil {
 				return nil, terminal
 			}
 			lastErr = errors.New("upstream response contained no image reference")
@@ -693,7 +693,10 @@ func openAIImagePollErrorSummary(err error) string {
 
 // Explicit upstream terminal failures must reach the caller without generating
 // again on another account, even when retryable HTTP statuses are customized.
-type imageTerminalError struct{ err error }
+type imageTerminalError struct {
+	err    error
+	detail ImageErrorDetail
+}
 
 func (e *imageTerminalError) Error() string { return e.err.Error() }
 func (e *imageTerminalError) Unwrap() error { return e.err }
@@ -702,13 +705,14 @@ func IsImageTerminalError(err error) bool {
 	return errors.As(err, &terminal)
 }
 
-func openAIImageTerminalError(value any) error {
+func openAIImageTerminalError(value any, secrets ...string) error {
 	reason := openAIImageTerminalReason(value)
 	if reason == "" {
 		return nil
 	}
-	message := "OpenAI image generation stopped by upstream: " + reason
-	return &imageTerminalError{err: &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}}
+	detail := imageErrorDetail(reason, secrets...)
+	message := imageTerminalPrefix + truncateOpenAIImageReason(strings.TrimPrefix(detail.Message, imageTerminalPrefix))
+	return &imageTerminalError{err: &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}, detail: detail}
 }
 
 func openAIImageTerminalReason(value any) string {
@@ -740,10 +744,10 @@ func openAIImageTerminalReason(value any) string {
 			case "error":
 				if details, ok := item.(map[string]any); ok {
 					if message := firstStringValue(details, "message", "code", "type"); message != "" {
-						return truncateOpenAIImageReason(message)
+						return strings.TrimSpace(message)
 					}
 				} else if message, ok := item.(string); ok && strings.TrimSpace(message) != "" {
-					return truncateOpenAIImageReason(message)
+					return strings.TrimSpace(message)
 				}
 			}
 		}
@@ -791,7 +795,7 @@ func openAIImageMessageError(message map[string]any) string {
 		}
 	}
 	if len(text) > 0 {
-		return truncateOpenAIImageReason(strings.Join(text, " "))
+		return strings.Join(text, "\n")
 	}
 	// An unfinished SSE message may carry the flag before its text arrives.
 	finished, _ := message["end_turn"].(bool)

@@ -165,6 +165,8 @@ export type SystemLogRow = {
   upstreamPreview: string
   rawUpstreamMessage: string
   rawUpstreamError: string
+  errorDetailRedacted: boolean
+  errorDetailTruncated: boolean
   urls: string[]
   imageUrls: string[]
   diagnosisChips: LogDiagnosisChip[]
@@ -444,6 +446,8 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     upstreamPreview,
     rawUpstreamMessage,
     rawUpstreamError,
+    errorDetailRedacted: detailRawValue(detail, 'error_detail_redacted') === true,
+    errorDetailTruncated: detailRawValue(detail, 'error_detail_truncated') === true,
     urls,
     imageUrls,
     diagnosisChips: buildSystemLogDiagnosisChips({

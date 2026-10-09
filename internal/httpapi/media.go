@@ -282,6 +282,13 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 	wg.Wait()
 	select {
 	case err := <-errCh:
+		// Record only the final failure after all workers stop, never a transient
+		// attempt or a later cancellation from another worker.
+		if r != nil {
+			if outcome, ok := r.Context().Value(monitorOutcomeKey{}).(*monitorOutcome); ok {
+				outcome.imageError = provider.ImageErrorDetails(err)
+			}
+		}
 		return nil, err
 	default:
 	}

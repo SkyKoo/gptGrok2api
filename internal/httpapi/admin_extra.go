@@ -30,22 +30,24 @@ import (
 // in the same volume layout and do not need an additional database.
 
 type imageTaskState struct {
-	ID          string           `json:"id"`
-	OwnerID     string           `json:"owner_id"`
-	RequestHash string           `json:"request_hash,omitempty"`
-	Status      string           `json:"status"`
-	Mode        string           `json:"mode"`
-	Model       string           `json:"model"`
-	N           int              `json:"n"`
-	Size        string           `json:"size,omitempty"`
-	Quality     string           `json:"quality,omitempty"`
-	Prompt      string           `json:"-"`
-	Images      [][]byte         `json:"-"`
-	ImageNames  []string         `json:"-"`
-	Data        []map[string]any `json:"data,omitempty"`
-	Error       string           `json:"error,omitempty"`
-	CreatedAt   string           `json:"created_at"`
-	UpdatedAt   string           `json:"updated_at"`
+	ID                   string           `json:"id"`
+	OwnerID              string           `json:"owner_id"`
+	RequestHash          string           `json:"request_hash,omitempty"`
+	Status               string           `json:"status"`
+	Mode                 string           `json:"mode"`
+	Model                string           `json:"model"`
+	N                    int              `json:"n"`
+	Size                 string           `json:"size,omitempty"`
+	Quality              string           `json:"quality,omitempty"`
+	Prompt               string           `json:"-"`
+	Images               [][]byte         `json:"-"`
+	ImageNames           []string         `json:"-"`
+	Data                 []map[string]any `json:"data,omitempty"`
+	Error                string           `json:"error,omitempty"`
+	ErrorDetail          string           `json:"error_detail,omitempty"`
+	ErrorDetailTruncated bool             `json:"error_detail_truncated,omitempty"`
+	CreatedAt            string           `json:"created_at"`
+	UpdatedAt            string           `json:"updated_at"`
 }
 
 type editableFileTaskState struct {
@@ -792,10 +794,11 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 	recorder := &responseCapture{header: make(http.Header)}
 	// Monitor the execution, not the 202 acknowledgement or polling requests.
 	// The shared monitor supplies account identity, timings, outputs and errors.
+	var outcome monitorOutcome
 	if task.Mode == "edit" {
-		s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageEdits))
+		outcome = s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageEdits))
 	} else {
-		s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageGenerations))
+		outcome = s.withRequestMonitor(recorder, req, http.HandlerFunc(s.imageGenerations))
 	}
 	s.imageTaskMu.Lock()
 	defer s.imageTaskMu.Unlock()
@@ -823,6 +826,8 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 		}
 	} else {
 		task.Status = "error"
+		task.ErrorDetail = outcome.imageError.Message
+		task.ErrorDetailTruncated = outcome.imageError.Truncated
 		var result map[string]any
 		if json.Unmarshal(recorder.body.Bytes(), &result) == nil {
 			if value, ok := result["error"].(map[string]any); ok {

@@ -92,12 +92,15 @@
           tone="danger"
           @copy="emit('copy', $event)"
         />
-        <DetailTextBlock
-          title="原始上游错误"
-          :content="log.rawUpstreamError"
-          tone="danger"
-          @copy="emit('copy', $event)"
-        />
+        <details v-if="log.rawUpstreamError" :key="log.id" class="log-error-detail">
+          <summary>展开{{ log.errorDetailTruncated ? '错误详情（超长已截断）' : log.errorDetailRedacted ? '完整错误原因' : '上游错误详情' }}{{ log.errorDetailRedacted ? '（已脱敏）' : '' }}</summary>
+          <DetailTextBlock
+            :title="log.errorDetailTruncated ? '错误详情（超过长度上限）' : log.errorDetailRedacted ? '完整错误原因' : '上游错误详情'"
+            :content="log.rawUpstreamError"
+            tone="danger"
+            @copy="emit('copy', $event)"
+          />
+        </details>
         <DetailTextBlock
           title="上游文本回复"
           :content="log.rawUpstreamMessage || log.upstreamPreview"
@@ -172,6 +175,13 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.log-error-detail > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
 .log-detail-summary {
   display: flex;
   flex-direction: column;

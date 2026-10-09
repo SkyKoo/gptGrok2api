@@ -165,6 +165,13 @@ JSON `images` 编辑输入仍是 CFM 扩展；标准 multipart 输入继续支�
 日志管理会按图片元数据中的 `call_id` 补齐预览；只关联仍存在的生成结果，不重写原日志、
 不重新生成图片，也不改变图片保留期限。
 
+ChatGPT Web 明确终止生图时，对外错误消息和页面默认展示保留简短摘要；调用日志的
+`raw_error` / `upstream_error` 保存脱敏后的完整原因，日志详情可展开并复制。
+异步任务文件也保留 `error_detail`，重启后仍可排查；任务公开查询只返回摘要。
+记录前会过滤账号凭据、认证头、Cookie、邮箱、URL 和图片 data URL。单条诊断最多保存
+65,536 个字符，超出时明确标记 `error_detail_truncated`，不会静默截断。
+此调整不改变失败状态或重试策略；旧日志已丢失的后半段无法恢复。
+
 <code>gpt-image-2</code> 也可以通过 <code>/v1/chat/completions</code> 调用。纯文本 content 是提示词；只有 <code>image_url</code>、<code>input_image</code> 或 <code>image</code> 内容块会被当作参考图输入。
 
 ### 异步图片任务

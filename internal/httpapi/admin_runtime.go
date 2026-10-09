@@ -53,7 +53,9 @@ type monitorRecord struct {
 	HasProxy             bool             `json:"has_proxy"`
 
 	// Generated outputs are recorded separately from the capped HTTP response.
-	OutputImages []map[string]string `json:"-"`
+	OutputImages         []map[string]string `json:"-"`
+	ErrorDetail          string              `json:"-"`
+	ErrorDetailTruncated bool                `json:"-"`
 }
 
 func newRuntimeMonitor() *runtimeMonitor {
@@ -856,6 +858,12 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		detail["error"] = errorText
 		detail["raw_error"] = errorText
 		detail["upstream_error"] = errorText
+		if record.ErrorDetail != "" {
+			detail["raw_error"] = record.ErrorDetail
+			detail["upstream_error"] = record.ErrorDetail
+			detail["error_detail_redacted"] = true
+			detail["error_detail_truncated"] = record.ErrorDetailTruncated
+		}
 	}
 	outputs := record.OutputImages
 	if len(outputs) == 0 {

@@ -452,7 +452,7 @@ func (s *Server) shouldMonitorRequest(r *http.Request) bool {
 	return path == "/v1/images/generations" || path == "/v1/images/edits" || path == "/v1/chat/completions" || path == "/v1/responses"
 }
 
-func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) {
+func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next http.Handler) monitorOutcome {
 	modelName, summary, requestTextFull, requestTextTruncated, requestShape := monitorRequestShape(r)
 	id := newChatID()
 	if task, ok := r.Context().Value(imageTaskLogContextKey{}).(imageTaskLogContext); ok {
@@ -498,15 +498,21 @@ func (s *Server) withRequestMonitor(w http.ResponseWriter, r *http.Request, next
 		s.monitor.finish(id, "success", modelName, summary, "")
 	}
 	if record, ok := s.monitor.detail(id); ok {
+		record.ErrorDetail = outcome.imageError.Message
+		record.ErrorDetailTruncated = outcome.imageError.Truncated
 		s.appendCallLog(record, status, requestShape, capture.body.Bytes(), errText)
 	}
+	return *outcome
 }
 
 type monitorCallIDKey struct{}
 type monitorOutcomeKey struct{}
 
 // Explicit outcome survives SSE's HTTP 200 and the capped response capture.
-type monitorOutcome struct{ errorText string }
+type monitorOutcome struct {
+	errorText  string
+	imageError provider.ImageErrorDetail
+}
 
 func (s *Server) enrichRequestMonitor(r *http.Request, meta map[string]any) {
 	if r == nil {
