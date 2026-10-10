@@ -45,6 +45,7 @@ func (s *Server) capabilityScheduler() {
 	for {
 		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) {
 			s.refreshDueCapabilities()
+			s.refreshDueModels()
 		}
 		select {
 		case <-s.probeStop:

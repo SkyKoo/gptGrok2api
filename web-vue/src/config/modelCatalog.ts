@@ -1,19 +1,6 @@
 import type { Settings } from '@/types/api'
 
-export const FALLBACK_CHAT_MODELS = [
-  'auto',
-  'gpt-5',
-  'gpt-5-1',
-  'gpt-5-2',
-  'gpt-5-3',
-  'gpt-5-3-mini',
-  'gpt-5-5',
-  'gpt-5-6',
-  'gpt-5-6-sol',
-  'gpt-5-6-terra',
-  'gpt-5-6-luna',
-  'gpt-5-mini',
-]
+export const FALLBACK_CHAT_MODELS: string[] = []
 
 export const FALLBACK_IMAGE_MODELS = [
   'gpt-image-2',

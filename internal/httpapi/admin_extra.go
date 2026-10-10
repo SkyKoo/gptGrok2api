@@ -89,7 +89,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chat, images, videos := []string{}, []string{}, []string{}
-	for _, item := range s.catalog {
+	for _, item := range s.modelSpecs() {
 		if !item.Enabled {
 			continue
 		}
@@ -105,6 +105,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "model_catalog", "chat_models": chat, "image_models": images,
 		"image_edit_models": images, "video_models": videos, "models": []any{},
+		"discovery":              s.discovery.Summary(s.openAIAccountIDs()),
 		"all_models":             append(append(append([]string{}, chat...), images...), videos...),
 		"source":                 map[string]string{"chat": "go", "image": "go", "grok": "unavailable"},
 		"openai_models_endpoint": "/v1/models",

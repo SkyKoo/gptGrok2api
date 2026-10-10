@@ -20,10 +20,7 @@ func ResolveChat(id string) (ChatRoute, bool) {
 	if id == "gpt-image-2" {
 		return ChatRoute{OpenAI: true, Image: true, PoolCandidates: []string{"basic", "super", "heavy"}}, true
 	}
-	if isOpenAIChatModel(id) {
-		return ChatRoute{OpenAI: true, PoolCandidates: []string{"basic", "super", "heavy"}}, true
-	}
-	if strings.HasSuffix(id, "-console") || strings.Contains(id, "-console-") {
+	if strings.HasPrefix(id, "grok-") && (strings.HasSuffix(id, "-console") || strings.Contains(id, "-console-")) {
 		return ChatRoute{Mode: "console", PoolCandidates: []string{"basic"}, Console: true}, true
 	}
 	switch id {
@@ -51,24 +48,4 @@ func ResolveChat(id string) (ChatRoute, bool) {
 		return ChatRoute{Mode: "grok-420-computer-use-sa", PoolCandidates: []string{"super", "heavy"}}, true
 	}
 	return ChatRoute{}, false
-}
-
-func isOpenAIChatModel(id string) bool {
-	switch strings.TrimSpace(id) {
-	case "auto",
-		"gpt-5",
-		"gpt-5-1",
-		"gpt-5-2",
-		"gpt-5-3",
-		"gpt-5-3-mini",
-		"gpt-5-5",
-		"gpt-5-6",
-		"gpt-5-6-sol",
-		"gpt-5-6-terra",
-		"gpt-5-6-luna",
-		"gpt-5-mini":
-		return true
-	default:
-		return false
-	}
 }

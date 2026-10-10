@@ -4,7 +4,6 @@ import type { ModelCatalogResponse, ModelListResponse } from '@/api/models'
 import type { Settings } from '@/types/api'
 import {
   isImageModelId,
-  resolveChatModels,
   resolveImageModels,
 } from '@/config/modelCatalog'
 
@@ -67,7 +66,7 @@ function catalogFromOpenAIModels(response: ModelListResponse): ModelCatalogRespo
 export function useModelCatalog(resolveSettings: SettingsResolver) {
   const chatModels = computed(() => {
     const fromCatalog = normalizeList(sharedCatalog.value?.chat_models)
-    return fromCatalog.length > 0 ? fromCatalog : resolveChatModels(resolveSettings())
+    return fromCatalog
   })
 
   const imageModels = computed(() => {

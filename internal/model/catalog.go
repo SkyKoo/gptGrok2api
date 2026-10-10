@@ -34,18 +34,6 @@ func (s Spec) Public() map[string]any {
 func Catalog() []Spec {
 	created := time.Now().Unix()
 	items := []Spec{
-		{"auto", "Auto", "openai", created, Chat, true},
-		{"gpt-5", "GPT-5", "openai", created, Chat, true},
-		{"gpt-5-1", "GPT-5.1", "openai", created, Chat, true},
-		{"gpt-5-2", "GPT-5.2", "openai", created, Chat, true},
-		{"gpt-5-3", "GPT-5.3", "openai", created, Chat, true},
-		{"gpt-5-3-mini", "GPT-5.3 Mini", "openai", created, Chat, true},
-		{"gpt-5-5", "GPT-5.5", "openai", created, Chat, true},
-		{"gpt-5-6", "GPT-5.6", "openai", created, Chat, true},
-		{"gpt-5-6-sol", "GPT-5.6 Sol", "openai", created, Chat, true},
-		{"gpt-5-6-terra", "GPT-5.6 Terra", "openai", created, Chat, true},
-		{"gpt-5-6-luna", "GPT-5.6 Luna", "openai", created, Chat, true},
-		{"gpt-5-mini", "GPT-5 Mini", "openai", created, Chat, true},
 		{"grok-4.20-0309-non-reasoning", "Grok 4.20 0309 Non-Reasoning", "xai", created, Chat, true},
 		{"grok-4.20-0309", "Grok 4.20 0309", "xai", created, Chat, true},
 		{"grok-4.20-0309-reasoning", "Grok 4.20 0309 Reasoning", "xai", created, Chat, true},

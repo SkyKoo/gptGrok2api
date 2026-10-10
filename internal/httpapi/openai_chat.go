@@ -38,7 +38,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		lease, err := s.accountPool.ReserveIntent(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount, 0, accounts.Intent{Kind: "chat", Model: request.Model, Uploads: len(images)})
+		lease, err := s.accountPool.ReserveIntent(r.Context(), route.PoolCandidates, excluded, s.supportsChatModel(request.Model), 0, accounts.Intent{Kind: "chat", Model: request.Model, Uploads: len(images)})
 		if err != nil {
 			if lastErr != nil && errors.Is(err, accounts.ErrUnavailable) {
 				return lastErr
@@ -58,6 +58,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		}, images...)
 		s.accountPool.Release(lease)
 		if err == nil {
+			_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), request.Model, true, false)
 			s.enrichRequestMonitor(r, map[string]any{"upstream_status": http.StatusOK})
 			s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
 			return nil

@@ -19,7 +19,7 @@ export type StudioModelFormRuntimeInput = {
 }
 
 export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
-  const { chatModels, imageModels, loadModelCatalog } = useModelCatalog(() => input.settingsStore.settings)
+  const { chatModels, imageModels, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
   const imageForm = reactive<StudioImageForm>({
@@ -29,7 +29,7 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     n: 1,
   })
 
-  const chatModelOptions = computed(() => uniqueStrings(['auto', ...chatModels.value]))
+  const chatModelOptions = computed(() => uniqueStrings(chatModels.value))
   const imageModelOptions = computed(() => uniqueStrings([imageForm.model, DEFAULT_IMAGE_MODEL, ...imageModels.value]))
 
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
@@ -40,6 +40,8 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
   })
 
   return {
+    modelCatalogError: loadError,
+    modelCatalogLoading: isLoading,
     chatModel,
     chatModelOptions,
     chatReasoningEffort,

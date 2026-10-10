@@ -71,6 +71,8 @@
         </div>
       </div>
 
+      <p v-if="modelCatalogError" class="px-4 py-2 text-sm text-rose-500">模型目录加载失败。<button type="button" class="underline" @click="modelFormRuntime.loadModelCatalog(true)">重试</button></p>
+      <p v-else-if="modelCatalogLoading" class="px-4 py-2 text-sm text-muted-foreground">正在加载模型目录…</p>
       <StudioMessageList
         ref="messageListRef"
         :conversation="activeConversation"
@@ -356,6 +358,8 @@ const resendMessage = sendRuntime.resendMessage
 const retryAssistantMessage = sendRuntime.retryAssistantMessage
 const sendImageEditRequest = sendRuntime.sendImageEditRequest
 const sendMessage = sendRuntime.sendMessage
+const modelCatalogError = modelFormRuntime.modelCatalogError
+const modelCatalogLoading = modelFormRuntime.modelCatalogLoading
 const chatModelOptions = modelFormRuntime.chatModelOptions
 const imageModelOptions = modelFormRuntime.imageModelOptions
 

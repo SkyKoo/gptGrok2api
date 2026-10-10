@@ -41,6 +41,9 @@ type Server struct {
 	auth               *auth.Validator
 	store              *store.Store
 	catalog            []model.Spec
+	discovery          *model.Registry
+	modelRefreshMu     sync.Mutex
+	modelRefreshing    map[string]bool
 	client             *http.Client
 	requestClient      *http.Client
 	accountPool        *accounts.Pool
@@ -111,6 +114,8 @@ func New(cfg config.Config) *Server {
 		auth:               auth.New(cfg.APIKey, cfg.AdminKey, cfg.AuthKeysPath, cfg.AllowAnonymous, repository),
 		store:              repository,
 		catalog:            model.Catalog(),
+		discovery:          model.NewRegistry(filepath.Join(cfg.DataDir, "chatgpt_models.json")),
+		modelRefreshing:    map[string]bool{},
 		client:             &http.Client{Timeout: 0},
 		requestClient:      requestClient,
 		accountPool:        accounts.New(repository),
@@ -323,6 +328,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/settings/account-cleanup/run", s.accountCleanup)
 	mux.HandleFunc("/api/third-party-apps", s.thirdPartyApps)
 	mux.HandleFunc("/api/model-catalog", s.modelCatalog)
+	mux.HandleFunc("/api/accounts/models/refresh", s.refreshModelsAPI)
 	mux.HandleFunc("/api/logs", s.logsAPI)
 	mux.HandleFunc("/api/logs/input-images/", s.logInputImage)
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
@@ -837,8 +843,8 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAPI(w, r) {
 		return
 	}
-	data := make([]map[string]any, 0, len(s.catalog))
-	for _, item := range s.catalog {
+	data := make([]map[string]any, 0, len(s.modelSpecs()))
+	for _, item := range s.modelSpecs() {
 		if item.Enabled {
 			data = append(data, item.Public())
 		}
@@ -851,7 +857,7 @@ func (s *Server) getModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/v1/models/")
-	item, ok := model.Find(s.catalog, id)
+	item, ok := model.Find(s.modelSpecs(), id)
 	if !ok {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
@@ -902,7 +908,7 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "top_p must be between 0 and 1", "invalid_request_error")
 		return
 	}
-	route, ok := model.ResolveChat(request.Model)
+	route, ok := s.resolveChatModel(request.Model)
 	if !ok {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return

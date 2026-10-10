@@ -391,3 +391,22 @@ web_dist/
 此接口只读取额度，不刷新令牌或重新登录。新增字段均可被旧版忽略，回退仅切换
 程序镜像，不覆盖账号、任务或图片数据。部署期间 `data/cfm-maintenance` 暂停
 新的周期额度查询；检查完成后删除该标记即可恢复。
+
+## 动态 ChatGPT Web 模型目录
+
+CFM 使用各账号凭据读取 `/backend-api/models?history_and_training_disabled=false`，
+账号仅关联目录摘要，相同的模型/能力目录只存一份；缓存保存在
+`data/chatgpt_models.json`，6 小时过期，重启保留。后台每轮最多刷新两个账号，
+失败退避并保留上一次目录，不因目录查询失败禁用账号。缓存损坏时保留原文件，
+停止覆盖并在管理目录状态中报告，便于恢复。
+
+`/v1/models`、单模型查询和 `/api/model-catalog` 共用动态目录；显式聊天请求只从
+该账号已发现支持的模型中选账号。`auto` 和已验证但可能未被上游列出的 `gpt-5-3`
+保留为明确的兼容入口。`research`、工作模式等尚未适配的条目只记录，不开放普通聊天。
+目录包含的名称是 ChatGPT Web 显示名称，不据此猜测对应哪个官方 API 型号。
+
+管理员可 `POST /api/accounts/models/refresh`，传入
+`{"account_refs":["账号管理返回的 account_ref"]}` 主动刷新 1–10 个账号。
+`GET /api/accounts/models/refresh` 和 `/api/model-catalog` 返回缓存就绪、过期、
+错误、不同目录数量及模型发现/验证状态。公共模型目录不会返回账号身份或凭据。
+前端读取后端目录，失败显示错误并可重试，不再提供写死的 GPT 聊天备用列表。

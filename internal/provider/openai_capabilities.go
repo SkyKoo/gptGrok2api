@@ -33,3 +33,8 @@ func (c *OpenAIAccountClient) FetchQuotas(ctx context.Context, a accounts.Accoun
 	quota, reset, unknown := extractImageQuota(limits)
 	return map[string]any{"limits_progress": limits, "capability_quotas": accounts.Quotas(limits, now), "quota_observed_at": now.UTC().Format(time.RFC3339), "quota": quota, "image_quota_unknown": unknown, "restore_at": reset, "default_model_slug": init["default_model_slug"]}, nil
 }
+
+// FetchModels uses this account's existing credentials, cookies and network path.
+func (c *OpenAIAccountClient) FetchModels(ctx context.Context, a accounts.Account) (map[string]any, error) {
+	return c.getJSON(ctx, "GET", "/backend-api/models?history_and_training_disabled=false", a.Token, a.Fields, nil)
+}

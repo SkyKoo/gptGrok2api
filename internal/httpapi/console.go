@@ -252,7 +252,7 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is required", "invalid_request_error")
 		return
 	}
-	route, ok := model.ResolveChat(request.Model)
+	route, ok := s.resolveChatModel(request.Model)
 	if !ok {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
