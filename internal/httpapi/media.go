@@ -48,7 +48,7 @@ type imageEditRequest struct {
 	Quality        string
 	ResponseFormat string
 	Inputs         []provider.OpenAIImageInput
-	HasMask        bool
+	Mask           []byte
 }
 
 type imageEditParseError struct {
@@ -182,7 +182,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 
-func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int, options provider.ImageOutputOptions) ([]map[string]string, error) {
+func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int, options provider.ImageOutputOptions, masks ...*provider.ImageMask) ([]map[string]string, error) {
 	if count < 1 {
 		count = 1
 	}
@@ -238,7 +238,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				s.enrichMonitorAccount(r, lease.Account)
 				s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 
-				generated, generateErr := s.openAIImage.GenerateWithOptions(ctx, lease.Account, prompt, model, size, quality, inputs, options)
+				generated, generateErr := s.openAIImage.GenerateWithOptions(ctx, lease.Account, prompt, model, size, quality, inputs, options, masks...)
 				if generateErr != nil {
 					s.accountPool.Release(lease)
 					if !provider.IsImageOutputError(generateErr) {
@@ -350,7 +350,11 @@ func (s *Server) parseImageEditRequest(r *http.Request) (imageEditRequest, error
 	if err := request.ImageOutputOptions.Validate(); err != nil {
 		return imageEditRequest{}, err
 	}
-	request.HasMask = hasMultipartField(r.MultipartForm, imageEditMaskFields)
+	mask, err := s.parseMultipartImageMask(r)
+	if err != nil {
+		return imageEditRequest{}, err
+	}
+	request.Mask = mask
 	for _, field := range imageEditReferenceFields {
 		for _, header := range r.MultipartForm.File[field] {
 			input, err := imageInputFromFileHeader(header)
@@ -402,10 +406,16 @@ func (s *Server) parseJSONImageEditRequest(r *http.Request) (imageEditRequest, e
 		Quality:            stringValue(body["quality"]),
 		ResponseFormat:     stringValue(body["response_format"]),
 	}
-	for _, field := range []string{"mask", "mask[]"} {
-		if value, ok := body[field]; ok && value != nil && stringValue(value) != "" {
-			request.HasMask = true
-		}
+	if body["mask"] != nil && body["mask[]"] != nil {
+		return imageEditRequest{}, invalidMask("only one mask is supported")
+	}
+	maskValue := body["mask"]
+	if maskValue == nil {
+		maskValue = body["mask[]"]
+	}
+	request.Mask, err = s.imageMaskFromValue(r.Context(), maskValue)
+	if err != nil {
+		return imageEditRequest{}, err
 	}
 	for _, field := range imageEditReferenceFields {
 		value, ok := body[field]
@@ -428,23 +438,6 @@ func firstFormValue(values map[string][]string, key string) string {
 		}
 	}
 	return ""
-}
-
-func hasMultipartField(form *multipart.Form, fields []string) bool {
-	if form == nil {
-		return false
-	}
-	for _, field := range fields {
-		if len(form.File[field]) > 0 {
-			return true
-		}
-		for _, value := range form.Value[field] {
-			if strings.TrimSpace(value) != "" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func imageInputFromFileHeader(header *multipart.FileHeader) (provider.OpenAIImageInput, error) {
@@ -595,6 +588,10 @@ func decodeBase64Image(value, filename, mimeType string) (provider.OpenAIImageIn
 }
 
 func (s *Server) downloadImageInput(ctx context.Context, source string) (provider.OpenAIImageInput, error) {
+	return s.downloadImageInputWithLimit(ctx, source, maxImageEditReferenceBytes)
+}
+
+func (s *Server) downloadImageInputWithLimit(ctx context.Context, source string, limit int64) (provider.OpenAIImageInput, error) {
 	if err := validateRemoteImageURL(ctx, source); err != nil {
 		return provider.OpenAIImageInput{}, imageEditParseError{Message: err.Error()}
 	}
@@ -630,12 +627,12 @@ func (s *Server) downloadImageInput(ctx context.Context, source string) (provide
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.OpenAIImageInput{}, imageEditParseError{Message: fmt.Sprintf("image_url fetch failed: HTTP %d", response.StatusCode)}
 	}
-	raw, err := io.ReadAll(io.LimitReader(response.Body, maxImageEditReferenceBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
 	if err != nil || len(raw) == 0 {
 		return provider.OpenAIImageInput{}, imageEditParseError{Message: "image_url returned empty content"}
 	}
-	if len(raw) > maxImageEditReferenceBytes {
-		return provider.OpenAIImageInput{}, imageEditParseError{Message: "image_url exceeds 50MB limit"}
+	if int64(len(raw)) > limit {
+		return provider.OpenAIImageInput{}, imageEditParseError{Message: "image_url exceeds the size limit"}
 	}
 	mimeType := strings.ToLower(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]))
 	parsed, _ := url.Parse(source)
@@ -750,6 +747,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	request, err := s.parseImageEditRequest(r)
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
 	if err != nil {
 		if writeImageOptionError(w, err) {
 			return
@@ -791,8 +791,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is not an image-edit model", "invalid_request_error")
 		return
 	}
-	if request.HasMask {
-		writeError(w, http.StatusBadRequest, "mask is not supported yet", "invalid_request_error")
+	mask, err := prepareImageMask(modelName, request.Mask, request.Inputs)
+	if err != nil {
+		writeImageOptionError(w, err)
 		return
 	}
 	inputs := request.Inputs
@@ -814,7 +815,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.recordInputImages(r, inputs)
-		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n, request.ImageOutputOptions)
+		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n, request.ImageOutputOptions, mask)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return

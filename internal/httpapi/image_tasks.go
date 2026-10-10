@@ -39,12 +39,27 @@ func imageTaskHash(task *imageTaskState) string {
 	if task.Background != "" || task.OutputFormat != "" {
 		fields = append(fields, task.ImageOutputOptions)
 	}
+	// Unmasked requests keep their historical hashes. A different mask must
+	// conflict even after restart, when the original input bytes are absent.
+	if len(task.Mask) > 0 {
+		fields = append(fields, struct {
+			Mask []byte `json:"mask"`
+		}{task.Mask})
+	}
 	raw, _ := json.Marshal(fields)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
 
 func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *imageTaskState) {
+	inputs := make([]provider.OpenAIImageInput, len(task.Images))
+	for i, raw := range task.Images {
+		inputs[i].Data = raw
+	}
+	if _, err := prepareImageMask(task.Model, task.Mask, inputs); err != nil {
+		writeImageOptionError(w, err)
+		return
+	}
 	task.ID = strings.TrimSpace(task.ID)
 	if len(task.ID) > 128 || strings.ContainsAny(task.ID, "/\\?#") || task.N < 1 || task.N > 10 {
 		writeError(w, http.StatusBadRequest, "invalid client_task_id or n (expected 1 to 10)", "invalid_request_error")
@@ -143,7 +158,7 @@ func (s *Server) saveImageTaskLocked(task *imageTaskState) error {
 
 func (s *Server) persistFinishedImageTaskLocked(task *imageTaskState) {
 	// Inputs are no longer required once a task reaches its terminal state.
-	task.Prompt, task.Images, task.ImageNames = "", nil, nil
+	task.Prompt, task.Images, task.ImageNames, task.Mask = "", nil, nil, nil
 	if err := s.saveImageTaskLocked(task); err != nil {
 		log.Printf("persist image task completion: %v", err)
 	}
@@ -244,10 +259,6 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "n must be between 1 and 2", "invalid_request_error")
 		return
 	}
-	if body.Mask != nil {
-		writeError(w, 400, "mask is not supported yet", "invalid_request_error")
-		return
-	}
 	if body.ImageURL != "" {
 		body.Images = append(body.Images, body.ImageURL)
 	}
@@ -276,10 +287,15 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		images = append(images, input.Data)
 		names = append(names, input.Name)
 	}
+	mask, err := s.imageMaskFromValue(ctx, body.Mask)
+	if err != nil {
+		writeImageOptionError(w, err)
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	task := &imageTaskState{ImageOutputOptions: body.ImageOutputOptions, ID: body.ClientTaskID, OwnerID: s.authIdentity(r), Status: "queued", Mode: "edit",
 		Model: firstNonEmpty(body.Model, "gpt-image-2"), N: n, Size: body.Size,
 		Quality: firstNonEmpty(body.Quality, "auto"), Prompt: strings.TrimSpace(body.Prompt), Images: images,
-		ImageNames: names, CreatedAt: now, UpdatedAt: now}
+		ImageNames: names, Mask: mask, CreatedAt: now, UpdatedAt: now}
 	s.submitImageTask(w, r, task)
 }

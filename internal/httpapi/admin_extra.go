@@ -44,6 +44,7 @@ type imageTaskState struct {
 	Prompt               string           `json:"-"`
 	Images               [][]byte         `json:"-"`
 	ImageNames           []string         `json:"-"`
+	Mask                 []byte           `json:"-"`
 	Data                 []map[string]any `json:"data,omitempty"`
 	Error                string           `json:"error,omitempty"`
 	ErrorDetail          string           `json:"error_detail,omitempty"`
@@ -708,12 +709,31 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	if !validateImageOutput(w, modelName, options) {
 		return
 	}
+	mask, err := s.parseMultipartImageMask(r)
+	if err != nil {
+		writeImageOptionError(w, err)
+		return
+	}
+	if mask != nil {
+		count := 0
+		for _, field := range imageEditReferenceFields {
+			count += len(r.MultipartForm.File[field]) + len(r.MultipartForm.Value[field])
+		}
+		if count != 1 {
+			writeImageOptionError(w, invalidMask("mask requires exactly one source image"))
+			return
+		}
+	}
 	files := r.MultipartForm.File["image[]"]
 	if len(files) == 0 {
 		files = r.MultipartForm.File["image"]
 	}
 	if len(files) == 0 {
 		writeError(w, http.StatusBadRequest, "at least one image is required", "invalid_request_error")
+		return
+	}
+	if mask != nil && len(files) != 1 {
+		writeImageOptionError(w, invalidMask("mask requires exactly one source image"))
 		return
 	}
 	if len(files) > 7 {
@@ -727,9 +747,9 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid image upload", "invalid_request_error")
 			return
 		}
-		raw, readErr := io.ReadAll(io.LimitReader(file, 16<<20))
+		raw, readErr := io.ReadAll(io.LimitReader(file, (16<<20)+1))
 		_ = file.Close()
-		if readErr != nil || len(raw) == 0 {
+		if readErr != nil || len(raw) == 0 || len(raw) > 16<<20 {
 			writeError(w, http.StatusBadRequest, "invalid image upload", "invalid_request_error")
 			return
 		}
@@ -738,7 +758,7 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	owner := s.authIdentity(r)
 	now := time.Now().UTC().Format(time.RFC3339)
-	task := &imageTaskState{ImageOutputOptions: options, ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: r.FormValue("size"), Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, CreatedAt: now, UpdatedAt: now}
+	task := &imageTaskState{ImageOutputOptions: options, ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: r.FormValue("size"), Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, Mask: mask, CreatedAt: now, UpdatedAt: now}
 	s.submitImageTask(w, r, task)
 }
 
@@ -787,6 +807,14 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 				return
 			}
 			_, _ = part.Write(raw)
+		}
+		if len(task.Mask) > 0 {
+			part, err := writer.CreateFormFile("mask", "mask.png")
+			if err != nil {
+				s.finishImageTaskError(task, "could not prepare mask upload")
+				return
+			}
+			_, _ = part.Write(task.Mask)
 		}
 		_ = writer.Close()
 		body = bytes.NewReader(buffer.Bytes())

@@ -132,7 +132,17 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 	return o.GenerateWithOptions(ctx, account, prompt, model, size, quality, inputs, ImageOutputOptions{})
 }
 
-func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput, options ImageOutputOptions) (results []ImageResult, err error) {
+func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput, options ImageOutputOptions, masks ...*ImageMask) (results []ImageResult, err error) {
+	var mask *ImageMask
+	if len(masks) > 1 {
+		return nil, &ImageOptionError{Param: "mask", Message: "only one mask is supported"}
+	}
+	if len(masks) == 1 {
+		mask = masks[0]
+	}
+	if mask != nil && !mask.matches(inputs) {
+		return nil, &ImageOptionError{Param: "mask", Message: "mask does not match the source image"}
+	}
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
@@ -176,6 +186,14 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 		proxyruntime.ObserveImageLeaseStage(ctx, time.Since(inputStarted), openAIImageSlowUpload)
 	}
 
+	var maskRef openAIImageReference
+	if mask != nil {
+		maskRef, err = o.uploadInputWithPurpose(ctx, account, OpenAIImageInput{Name: "image-mask.png", MIME: "image/png", Data: mask.png}, 1, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	stageStarted := time.Now()
 	scripts, build, err := o.bootstrap(ctx, account)
 	if err != nil {
@@ -201,7 +219,7 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 	proxyruntime.ObserveImageLeaseStage(ctx, time.Since(stageStarted), openAIImageSlowPrepare)
 
 	stageStarted = time.Now()
-	conversationID, imageRefs, err := o.start(ctx, account, requirements, conduit, prompt, model, size, quality, references)
+	conversationID, imageRefs, err := o.start(ctx, account, requirements, conduit, prompt, model, size, quality, references, maskRef)
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +246,10 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 	seen := map[string]bool{}
 	inputFileIDs := map[string]bool{}
 	inputContentHashes := map[[sha256.Size]byte]bool{}
+	if mask != nil {
+		inputFileIDs[maskRef.FileID] = true
+		inputContentHashes[sha256.Sum256(mask.png)] = true
+	}
 	var lastDownloadErr, lastOutputErr error
 	for _, ref := range references {
 		if ref.FileID != "" {
@@ -528,7 +550,7 @@ func (o *OpenAIImage) prepare(ctx context.Context, account accounts.Account, req
 	return token, nil
 }
 
-func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requirements openAIRequirements, conduit, prompt, model, size, quality string, references []openAIImageReference) (string, []string, error) {
+func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requirements openAIRequirements, conduit, prompt, model, size, quality string, references []openAIImageReference, masks ...openAIImageReference) (string, []string, error) {
 	parts := make([]any, 0, len(references)+1)
 	attachments := make([]any, 0, len(references))
 	for _, ref := range references {
@@ -556,6 +578,14 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	}
 	if len(attachments) > 0 {
 		metadata["attachments"] = attachments
+	}
+	if len(masks) > 0 && masks[0].FileID != "" {
+		if len(references) != 1 {
+			return "", nil, &ImageOptionError{Param: "mask", Message: "mask requires exactly one source image"}
+		}
+		metadata["dalle"] = map[string]any{"from_client": map[string]any{"operation": map[string]any{
+			"type": "inpainting", "original_file_id": references[0].FileID, "mask_file_id": masks[0].FileID,
+		}}}
 	}
 	payload := map[string]any{
 		"action": "next",
@@ -844,6 +874,10 @@ func truncateOpenAIImageReason(value string) string {
 }
 
 func (o *OpenAIImage) uploadInput(ctx context.Context, account accounts.Account, input OpenAIImageInput, index int) (openAIImageReference, error) {
+	return o.uploadInputWithPurpose(ctx, account, input, index, false)
+}
+
+func (o *OpenAIImage) uploadInputWithPurpose(ctx context.Context, account accounts.Account, input OpenAIImageInput, index int, mask bool) (openAIImageReference, error) {
 	if len(input.Data) == 0 {
 		return openAIImageReference{}, fmt.Errorf("image input %d is empty", index)
 	}
@@ -859,6 +893,11 @@ func (o *OpenAIImage) uploadInput(ctx context.Context, account accounts.Account,
 	payload := map[string]any{
 		"file_name": name, "file_size": len(input.Data), "use_case": "multimodal",
 		"width": width, "height": height,
+	}
+	if mask {
+		payload["use_case"] = "dalle_agent"
+		payload["entry_surface"] = "image_edit_mask"
+		payload["store_in_library"] = false
 	}
 	meta, err := o.prepareInputUpload(ctx, account, payload)
 	if err != nil {

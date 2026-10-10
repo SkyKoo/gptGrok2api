@@ -54,7 +54,7 @@
             <p class="text-sm font-semibold">图生图（/v1/images/edits）</p>
             <CodeBlock :content="imageEditExample" />
             <p class="mt-2 text-xs text-muted-foreground">
-              GPT Image 同步生成和编辑返回 data[].b64_json，请省略 response_format；异步任务继续返回图片 URL。mask、透明背景、输出格式选择和逐步出图尚未实现。
+              GPT Image 同步生成和编辑返回 data[].b64_json，请省略 response_format；异步任务继续返回图片 URL。GPT Image 编辑支持可选 PNG mask（透明区域为编辑区，尺寸与唯一原图一致）、透明背景和输出格式选择；逐步出图尚未实现。
             </p>
           </section>
         </div>
