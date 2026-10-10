@@ -1,7 +1,7 @@
 <template>
   <div v-if="images.length" class="detail-image-preview">
     <div class="detail-image-preview__header">
-      <span class="detail-image-preview__title">图片预览</span>
+      <span class="detail-image-preview__title">{{ title }}</span>
       <span class="detail-image-preview__count">{{ images.length }} 张</span>
     </div>
     <div class="detail-image-preview__grid">
@@ -10,22 +10,23 @@
         :key="`${image.url}-${index}`"
         type="button"
         class="detail-image-preview__item"
-        :title="image.title || image.url"
+        :title="image.label || image.title || image.url"
+        :disabled="image.broken || image.loading"
         @click="$emit('preview-click', image)"
       >
         <div class="detail-image-preview__media">
           <img
-            v-if="!image.broken"
+            v-if="!image.broken && !image.loading"
             :src="image.url"
             :alt="image.alt || `日志结果图片 ${index + 1}`"
             loading="lazy"
             class="detail-image-preview__image"
             @error="$emit('image-error', $event, image.url)"
           />
-          <span v-else>无法预览</span>
+          <span v-else>{{ image.loading ? '加载中…' : image.unavailableText || '图片已过期或无法预览' }}</span>
         </div>
         <p class="detail-image-preview__filename">
-          {{ image.filename || '-' }}
+          {{ image.label || image.filename || '-' }}
         </p>
       </button>
     </div>
@@ -39,11 +40,15 @@ export type DetailImagePreviewItem = {
   filename?: string
   alt?: string
   broken?: boolean
+  loading?: boolean
+  label?: string
+  unavailableText?: string
 }
 
-defineProps<{
+withDefaults(defineProps<{
   images: DetailImagePreviewItem[]
-}>()
+  title?: string
+}>(), { title: '图片预览' })
 
 defineEmits<{
   (e: 'image-error', event: Event, url: string): void

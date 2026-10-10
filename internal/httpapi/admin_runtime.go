@@ -54,6 +54,7 @@ type monitorRecord struct {
 
 	// Generated outputs are recorded separately from the capped HTTP response.
 	OutputImages         []map[string]string `json:"-"`
+	InputImages          []logInputImage     `json:"-"`
 	ErrorDetail          string              `json:"-"`
 	ErrorDetailTruncated bool                `json:"-"`
 }
@@ -864,6 +865,9 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 			detail["error_detail_redacted"] = true
 			detail["error_detail_truncated"] = record.ErrorDetailTruncated
 		}
+	}
+	if len(record.InputImages) > 0 {
+		detail["input_images"] = record.InputImages
 	}
 	outputs := record.OutputImages
 	if len(outputs) == 0 {

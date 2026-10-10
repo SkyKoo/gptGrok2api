@@ -1,4 +1,5 @@
 import apiClient from './client'
+import { normalizeLogInputImages, logOutputSource, type LogInputImage } from './logInputImages'
 import type { AdminLogGroup, AdminLogStats, AdminLogsResponse, LogEntry } from '@/types/api'
 import { isImageModelId } from '@/config/modelCatalog'
 
@@ -169,6 +170,7 @@ export type SystemLogRow = {
   errorDetailTruncated: boolean
   urls: string[]
   imageUrls: string[]
+  inputImages: LogInputImage[]
   diagnosisChips: LogDiagnosisChip[]
   preview: string
   rawJson: string
@@ -382,7 +384,7 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const reason = detailValue(detail, 'reason')
   const summary = cleanString(item.summary)
   const preview = summarizeLogText(requestText || rawUpstreamMessage || upstreamPreview || error || rawUpstreamError || reason || summary)
-  const urls = collectUrls(detail)
+  const urls = collectUrls(logOutputSource(detail))
   const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
   const status = detailValue(detail, 'status')
   const durationMs = detailValue(detail, 'duration_ms')
@@ -450,6 +452,7 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     errorDetailTruncated: detailRawValue(detail, 'error_detail_truncated') === true,
     urls,
     imageUrls,
+    inputImages: normalizeLogInputImages(detail),
     diagnosisChips: buildSystemLogDiagnosisChips({
       status,
       durationMs,

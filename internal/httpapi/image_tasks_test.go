@@ -244,6 +244,14 @@ func TestImageTaskAsyncLifecycleSurvivesCallerCancellation(t *testing.T) {
 			// The worker writes one completed call; acknowledgement, polling, retries
 			// and querying after a process restart must not create extra call records.
 			assertImageTaskCallLog(t, reloaded, "async-one", logStatus, "/v1/images/"+mode)
+			if mode == "edits" {
+				logs := imageTaskCall(reloaded, "GET", "/api/logs", "admin-secret", "")
+				var result struct{ Items []map[string]any }
+				if err := json.Unmarshal(logs.Body.Bytes(), &result); err != nil || len(result.Items) != 1 {
+					t.Fatal("missing async log")
+				}
+				assertLogInputBytes(t, reloaded, mapValue(result.Items[0]["detail"]), [][]byte{tinyPNG})
+			}
 			expectedDownloads := tc.busyDownloads + 1
 			if tc.wantError {
 				expectedDownloads = 3

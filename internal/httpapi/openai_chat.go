@@ -27,6 +27,11 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 			}
 		}
 	}()
+	inputs := make([]provider.OpenAIImageInput, len(images))
+	for i, image := range images {
+		inputs[i] = image.Input
+	}
+	s.recordInputImages(r, inputs)
 	excluded := map[string]bool{}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -191,6 +196,7 @@ func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request,
 		}
 		inputs = append(inputs, parsed...)
 	}
+	s.recordInputImages(r, inputs)
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	if len(inputs) > 0 {
 		s.stageRequestMonitor(r, "image_uploading", 25, map[string]any{"upload_ms": time.Since(inputStarted).Milliseconds()})

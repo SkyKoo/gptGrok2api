@@ -322,6 +322,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/third-party-apps", s.thirdPartyApps)
 	mux.HandleFunc("/api/model-catalog", s.modelCatalog)
 	mux.HandleFunc("/api/logs", s.logsAPI)
+	mux.HandleFunc("/api/logs/input-images/", s.logInputImage)
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
 	mux.HandleFunc("/api/runtime-logs", s.runtimeLogs)
 	mux.HandleFunc("/api/proxy/runtime", s.proxyRuntime)

@@ -168,6 +168,7 @@
       :has-timeline="selectedHasTimeline"
       :timeline-details-visible="timelineDetailsVisible"
       :images="selectedDetailImages"
+      :input-images="selectedDetailInputImages"
       @close="closeDetail"
       @copy="copyText"
       @image-error="markPreviewBroken"
@@ -182,6 +183,7 @@
       :copied="Boolean(selectedDetailPreviewFile && copiedLogPreviewKey === selectedDetailPreviewFile.path)"
       :show-actions="true"
       :show-tag-action="false"
+      :show-copy-action="!selectedDetailPreview?.url.startsWith('blob:')"
       @download="downloadLogPreviewFile"
       @copy="copyLogPreviewFile"
       @close="closeDetailImagePreview"
@@ -341,6 +343,7 @@ const selectedLog = logDetailRuntime.selectedLog
 const selectedDetailPreview = logDetailRuntime.selectedDetailPreview
 const selectedDetailPreviewFile = logDetailRuntime.selectedDetailPreviewFile
 const selectedDetailImages = logDetailRuntime.selectedDetailImages
+const selectedDetailInputImages = logDetailRuntime.selectedDetailInputImages
 const selectedPrimaryDetailFields = logDetailRuntime.selectedPrimaryDetailFields
 const selectedDiagnosticDetailFields = logDetailRuntime.selectedDiagnosticDetailFields
 const selectedTimelineSegments = logDetailRuntime.selectedTimelineSegments

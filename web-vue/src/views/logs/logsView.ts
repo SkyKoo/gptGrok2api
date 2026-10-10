@@ -57,6 +57,9 @@ export type LogPreviewImage = {
   filename?: string
   alt?: string
   broken?: boolean
+  loading?: boolean
+  label?: string
+  unavailableText?: string
 }
 
 export type SystemLogRowSignatureInput = {
@@ -301,7 +304,7 @@ export function buildLogPreviewGalleryFile(image: LogPreviewImage | null | undef
   const filename = image.filename || filenameFromUrl(image.title || image.url) || 'log-preview-image'
   return {
     filename,
-    path: image.title || image.url,
+    path: image.url.startsWith('blob:') ? '' : image.title || image.url,
     url: image.url,
     thumbnail_url: image.url,
     size: 0,

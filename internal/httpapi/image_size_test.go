@@ -210,7 +210,9 @@ func TestImageSizeProtocolAndLogs(t *testing.T) {
 					if len(logResult.Items) != 1 {
 						t.Fatal("missing call log")
 					}
-					meta := mapValue(mapValue(mapValue(logResult.Items[0]["detail"])["request_meta"])["image_size"])
+					detail := mapValue(logResult.Items[0]["detail"])
+					assertLogInputBytes(t, s, detail, refs)
+					meta := mapValue(mapValue(detail["request_meta"])["image_size"])
 					if meta["requested_size"] != requested || meta["upstream_size_field_included"] != (normalized != "auto") || meta["size_prompt_appended"] != (normalized != "auto") {
 						t.Fatal("wrong logged settings", meta)
 					}

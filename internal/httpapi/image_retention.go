@@ -38,16 +38,18 @@ func (s *Server) cleanupExpiredImages() (int, int64) {
 	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 	removed := 0
 	var removedBytes int64
-	_ = filepath.Walk(s.cfg.ImageDataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() || !info.ModTime().Before(cutoff) {
+	for _, root := range []string{s.cfg.ImageDataDir, s.logInputImagesDir()} {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() || !info.ModTime().Before(cutoff) {
+				return nil
+			}
+			if removeErr := os.Remove(path); removeErr == nil {
+				removed++
+				removedBytes += info.Size()
+			}
 			return nil
-		}
-		if removeErr := os.Remove(path); removeErr == nil {
-			removed++
-			removedBytes += info.Size()
-		}
-		return nil
-	})
-	cleanupEmptyDirs(s.cfg.ImageDataDir)
+		})
+		cleanupEmptyDirs(root)
+	}
 	return removed, removedBytes
 }

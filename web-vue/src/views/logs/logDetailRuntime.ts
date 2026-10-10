@@ -1,6 +1,7 @@
 import { computed, ref, watch } from 'vue'
 import type { GalleryFile } from '@/api/gallery'
 import type { SystemLogRow } from '@/api/logs'
+import apiClient from '@/api/client'
 import {
   buildDiagnosticDetailFields,
   buildPrimaryDetailFields,
@@ -44,6 +45,49 @@ export function useLogDetailRuntime() {
 
   const selectedPrimaryDetailFields = computed(() => buildPrimaryDetailFields(selectedLog.value))
   const selectedDiagnosticDetailFields = computed(() => buildDiagnosticDetailFields(selectedLog.value))
+
+  const loadedInputImages = ref<DetailPreviewImage[]>([])
+  const selectedDetailInputImages = computed(() => loadedInputImages.value.map((image) => ({
+    ...image, broken: image.broken || isPreviewBroken(image.url),
+  })))
+  // Fetch only when the drawer opens; the API list never transfers image bytes.
+  // Cancel stale loads and revoke temporary object URLs on switch/close/unmount.
+  watch(selectedLog, (log, _previous, onCleanup) => {
+    const controller = new AbortController()
+    const objectUrls: string[] = []
+    selectedDetailPreview.value = null
+    brokenPreviewUrls.value = new Set()
+    onCleanup(() => {
+      controller.abort()
+      objectUrls.forEach((url) => URL.revokeObjectURL(url))
+    })
+    const inputs = log?.inputImages || []
+    loadedInputImages.value = inputs.map((input) => ({
+      url: '',
+      filename: input.filename || `reference-${input.index}`,
+      label: `参考图 ${input.index}${input.width && input.height ? ` · ${input.width} × ${input.height}` : ''}`,
+      alt: `输入参考图 ${input.index}`,
+      loading: Boolean(input.url),
+      broken: !input.url,
+      unavailableText: '参考图未保存或不可用',
+    }))
+    inputs.forEach(async (input, index) => {
+      if (!input.url) return
+      try {
+        const blob = await apiClient.get<never, Blob>(input.url, { responseType: 'blob', signal: controller.signal })
+        if (controller.signal.aborted) return
+        const url = URL.createObjectURL(blob)
+        objectUrls.push(url)
+        loadedInputImages.value[index] = { ...loadedInputImages.value[index], url, title: url, loading: false }
+      } catch {
+        if (!controller.signal.aborted) {
+          loadedInputImages.value[index] = {
+            ...loadedInputImages.value[index], loading: false, broken: true, unavailableText: '参考图已过期或无法加载',
+          }
+        }
+      }
+    })
+  })
 
   const selectedDetailImages = computed(() => buildLogPreviewImages(selectedLog.value, isPreviewBroken))
   const selectedDetailPreviewFile = computed<GalleryFile | null>(() => buildLogPreviewGalleryFile(selectedDetailPreview.value))
@@ -91,6 +135,7 @@ export function useLogDetailRuntime() {
     selectedDetailPreview,
     selectedDetailPreviewFile,
     selectedDetailImages,
+    selectedDetailInputImages,
     selectedPrimaryDetailFields,
     selectedDiagnosticDetailFields,
     selectedTimelineSegments,

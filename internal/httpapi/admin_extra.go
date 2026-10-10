@@ -492,6 +492,9 @@ func (s *Server) cleanupRetentionFiles(logDays, imageDays int, dryRun bool) map[
 	}
 	logCount, logBytes = visit(filepath.Join(s.cfg.DataDir, "logs.jsonl"), time.Duration(logDays)*24*time.Hour, !dryRun)
 	imageCount, imageBytes = visit(s.cfg.ImageDataDir, time.Duration(imageDays)*24*time.Hour, !dryRun)
+	inputCount, inputBytes := visit(s.logInputImagesDir(), time.Duration(imageDays)*24*time.Hour, !dryRun)
+	imageCount += inputCount
+	imageBytes += inputBytes
 	return map[string]any{"dry_run": dryRun, "logs": map[string]any{"removed": logCount, "removed_size_bytes": logBytes, "retention_days": logDays}, "images": map[string]any{"removed": imageCount, "removed_size_bytes": imageBytes, "retention_days": imageDays}, "total_removed": logCount + imageCount, "total_size_bytes": logBytes + imageBytes}
 }
 

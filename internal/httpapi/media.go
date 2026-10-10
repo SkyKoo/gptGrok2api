@@ -813,6 +813,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		s.recordInputImages(r, inputs)
 		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n, request.ImageOutputOptions)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
@@ -821,6 +822,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, openAIImagesResult(data, request.ImageOutputOptions))
 		return
 	}
+	s.recordInputImages(r, inputs)
 	lease, err := s.accountPool.Reserve(r.Context(), []string{"super", "heavy"}, nil)
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")

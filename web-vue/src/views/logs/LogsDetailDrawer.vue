@@ -108,6 +108,13 @@
           @copy="emit('copy', $event)"
         />
         <DetailImagePreview
+          title="输入参考图"
+          :images="inputImages"
+          @image-error="(event, url) => emit('image-error', event, url)"
+          @preview-click="emit('preview-image', $event)"
+        />
+        <DetailImagePreview
+          title="生成结果"
           :images="images"
           @image-error="(event, url) => emit('image-error', event, url)"
           @preview-click="emit('preview-image', $event)"
@@ -163,6 +170,7 @@ defineProps<{
   hasTimeline: boolean
   timelineDetailsVisible: boolean
   images: DetailPreviewImage[]
+  inputImages: DetailPreviewImage[]
 }>()
 
 const emit = defineEmits<{
