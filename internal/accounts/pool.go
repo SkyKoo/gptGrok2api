@@ -27,22 +27,27 @@ type Account struct {
 }
 
 type Lease struct {
-	Account Account
-	pool    *Pool
-	once    sync.Once
+	Account  Account
+	pool     *Pool
+	once     sync.Once
+	intent   Intent
+	used     map[string]bool
+	finished bool
 }
 
 type Pool struct {
-	repository *store.Store
-	onInvalid  func(Account)
-	mu         sync.Mutex
-	next       uint64
-	inflight   map[string]int
-	cooldowns  map[string]time.Time
-	failures   map[string]int
-	wake       chan struct{}
-	accounts   []Account
-	revision   uint64
+	repository       *store.Store
+	onInvalid        func(Account)
+	mu               sync.Mutex
+	next             uint64
+	inflight         map[string]int
+	cooldowns        map[string]time.Time
+	failures         map[string]int
+	wake             chan struct{}
+	accounts         []Account
+	revision         uint64
+	refreshing       map[string]bool
+	capabilityActive map[string]int
 }
 
 // SetInvalidCallback registers a callback for definitive credential failures.
@@ -58,9 +63,10 @@ func New(repository *store.Store) *Pool {
 	return &Pool{
 		repository: repository,
 		inflight:   map[string]int{},
-		cooldowns:  map[string]time.Time{},
-		failures:   map[string]int{},
-		wake:       make(chan struct{}),
+		refreshing: map[string]bool{}, capabilityActive: map[string]int{},
+		cooldowns: map[string]time.Time{},
+		failures:  map[string]int{},
+		wake:      make(chan struct{}),
 	}
 }
 
@@ -78,17 +84,22 @@ func (p *Pool) ReserveMatching(ctx context.Context, pools []string, excluded map
 // ReserveMatchingLimit waits when every matching account is at its concurrency
 // limit. A non-positive limit preserves the legacy least-busy behavior.
 func (p *Pool) ReserveMatchingLimit(ctx context.Context, pools []string, excluded map[string]bool, match func(Account) bool, maxInflight int) (*Lease, error) {
+	return p.ReserveIntent(ctx, pools, excluded, match, maxInflight, Intent{})
+}
+
+func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[string]bool, match func(Account) bool, maxInflight int, intent Intent) (*Lease, error) {
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		p.mu.Lock()
 		items, revision, err := p.repository.AccountSnapshot()
 		if err != nil {
+			p.mu.Unlock()
 			return nil, fmt.Errorf("load accounts: %w", err)
 		}
 
 		now := time.Now()
-		p.mu.Lock()
 		if p.revision != revision {
 			p.accounts = normalizeAccounts(items)
 			p.revision = revision
@@ -103,10 +114,17 @@ func (p *Pool) ReserveMatchingLimit(ctx context.Context, pools []string, exclude
 		}
 		for offset := 0; offset < len(p.accounts); offset++ {
 			account := p.accounts[(start+offset)%len(p.accounts)]
-			if excluded[account.Token] || (match != nil && !match(account)) || !p.available(account, pools, now) {
+			if excluded[account.Token] || (match != nil && !match(account)) || !p.availableForIntent(account, pools, now, intent) {
+				continue
+			}
+			if intent.Kind != "" && p.refreshing[Identity(account)] {
+				capacityBlocked = true
 				continue
 			}
 			inflight := p.inflight[account.Token]
+			if intent.Kind != "" {
+				inflight = p.capabilityActive[Identity(account)]
+			}
 			if maxInflight > 0 && inflight >= maxInflight {
 				capacityBlocked = true
 				continue
@@ -134,9 +152,17 @@ func (p *Pool) ReserveMatchingLimit(ctx context.Context, pools []string, exclude
 		// Starting at a rotating offset preserves tie fairness without building
 		// a temporary candidate list for every request.
 		p.next++
+		lease := &Lease{Account: selected, pool: p, intent: intent, used: map[string]bool{}}
+		if intent.Kind != "" {
+			if err := p.reserveQuotaLocked(lease); err != nil {
+				p.mu.Unlock()
+				return nil, err
+			}
+			p.capabilityActive[Identity(lease.Account)]++
+		}
 		p.inflight[selected.Token]++
 		p.mu.Unlock()
-		return &Lease{Account: selected, pool: p}, nil
+		return lease, nil
 	}
 }
 
@@ -151,6 +177,10 @@ func (p *Pool) Release(lease *Lease) {
 			delete(p.inflight, lease.Account.Token)
 		} else {
 			p.inflight[lease.Account.Token]--
+		}
+		if lease.intent.Kind != "" {
+			p.finishQuotaLocked(lease)
+			p.capabilityActive[Identity(lease.Account)]--
 		}
 		p.signalLocked()
 	})

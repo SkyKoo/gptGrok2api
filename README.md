@@ -373,3 +373,21 @@ web_dist/
 ## 上游与许可证
 
 本项目参考并继承了 [yukkcat/chatgpt2api](https://github.com/yukkcat/chatgpt2api) 的接口和业务思路，当前 Go 版代码与修改以本仓库为准。请保留仓库中的 [<code>LICENSE</code>](./LICENSE) 和 [<code>GROK2API_LICENSE</code>](./GROK2API_LICENSE) 文件，并按其中条款使用和分发。
+
+## ChatGPT Web 能力额度
+
+账号保存上游 `limits_progress`，对话 (`reason`)、图片 (`image_gen`) 和上传
+(`file_upload`) 分别检查。剩余量未知时显示“未知”，不会作为 0 或推算总额度。
+旧 `quota` 字段仍表示图片额度，旧版读取方式不变。仅因图片额度耗尽而限流的账号
+仍可处理额度允许的文字请求；认证失败、禁用和其他未知限流不会因此解除。
+
+每个上游尝试在发送前持久化预占；多张图片按子任务分别预占。未发送的预占释放，
+已发送或响应不确定的消耗保留为待核对。上游已可能接收的请求不自动重复生图。
+活跃账号每 5 分钟核对一次，完成请求后优先核对；重置时间到期仅触发重新读取，
+不自动补满。无在途请求时才应用快照，查询失败保留旧值。
+
+管理员可通过 `POST /api/accounts/quotas/refresh`，以
+`{"account_refs":["账号管理 API 返回的 account_ref"]}` 查询 1–10 个账号。
+此接口只读取额度，不刷新令牌或重新登录。新增字段均可被旧版忽略，回退仅切换
+程序镜像，不覆盖账号、任务或图片数据。部署期间 `data/cfm-maintenance` 暂停
+新的周期额度查询；检查完成后删除该标记即可恢复。

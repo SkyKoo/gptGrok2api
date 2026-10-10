@@ -38,7 +38,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		if err := r.Context().Err(); err != nil {
 			return err
 		}
-		lease, err := s.accountPool.ReserveMatching(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount)
+		lease, err := s.accountPool.ReserveIntent(r.Context(), route.PoolCandidates, excluded, isOpenAIAccount, 0, accounts.Intent{Kind: "chat", Model: request.Model, Uploads: len(images)})
 		if err != nil {
 			if lastErr != nil && errors.Is(err, accounts.ErrUnavailable) {
 				return lastErr
@@ -48,7 +48,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		s.enrichMonitorAccount(r, lease.Account)
 		s.enrichRequestMonitor(r, map[string]any{"upstream_attempts": attempt + 1})
 		emitted, clientFailed := false, false
-		err = s.openAIChat.Stream(r.Context(), lease.Account, request, func(event provider.OpenAIChatEvent) error {
+		err = s.openAIChat.Stream(s.quotaContext(r.Context(), lease), lease.Account, request, func(event provider.OpenAIChatEvent) error {
 			if event.Text != "" {
 				emitted = true
 			}
@@ -59,17 +59,17 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		s.accountPool.Release(lease)
 		if err == nil {
 			s.enrichRequestMonitor(r, map[string]any{"upstream_status": http.StatusOK})
-			s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+			s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
 			return nil
 		}
 		if r.Context().Err() != nil || clientFailed {
 			return err
 		}
 		s.enrichRequestMonitor(r, map[string]any{"upstream_status": upstreamStatus(err)})
-		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		s.accountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		excluded[lease.Account.Token] = true
 		lastErr = err
-		if emitted || !s.shouldRetry(upstreamStatus(err), attempt) {
+		if emitted || !s.quotaRetrySafe(lease, err) || !s.shouldRetry(upstreamStatus(err), attempt) {
 			return err
 		}
 	}
@@ -210,26 +210,26 @@ func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request,
 	s.stageRequestMonitor(r, "image_getting_account", 35, nil)
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
 		accountStarted := time.Now()
-		lease, err := s.accountPool.ReserveMatchingLimit(r.Context(), []string{"basic", "super", "heavy"}, excluded, isOpenAIAccount, s.cfg.ImageAccountLimit)
+		lease, err := s.accountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, excluded, isOpenAIAccount, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: request.Model, Uploads: len(inputs)})
 		if err != nil {
 			lastErr = err
 			break
 		}
 		s.enrichMonitorAccount(r, lease.Account)
 		s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
-		images, err = s.openAIImage.Generate(imageContext, lease.Account, prompt, request.Model, size, "auto", inputs)
+		images, err = s.openAIImage.Generate(s.quotaContext(imageContext, lease), lease.Account, prompt, request.Model, size, "auto", inputs)
 		selected = lease.Account
 		s.accountPool.Release(lease)
 		if err != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+			s.accountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
-			if s.shouldRetry(upstreamStatus(err), attempt) {
+			if s.quotaRetrySafe(lease, err) && s.shouldRetry(upstreamStatus(err), attempt) {
 				continue
 			}
 			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+		s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
 		lastErr = nil
 		break
 	}

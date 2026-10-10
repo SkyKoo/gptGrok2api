@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
@@ -187,6 +189,8 @@ func (c *OpenAIAccountClient) fetchUserInfo(ctx context.Context, accessToken str
 		"quota":               quota,
 		"image_quota_unknown": unknown,
 		"limits_progress":     limits,
+		"capability_quotas":   accounts.Quotas(limits, time.Now()),
+		"quota_observed_at":   time.Now().UTC().Format(time.RFC3339),
 		"default_model_slug":  init["default_model_slug"],
 		"restore_at":          restoreAt,
 		"status":              status,

@@ -7,6 +7,10 @@ export type AccountStatusCategory = 'normal' | 'limited' | 'abnormal' | 'disable
 export type CheckoutLinkStatus = 'ready' | 'failed' | 'pending' | 'processing' | ''
 
 export interface Account {
+ capability_quotas?: Record<string, { remaining: number | null; reset_at?: string }>
+ quota_pending?: Record<string, number>
+ quota_observed_at?: string
+ quota_refresh_error?: string
   id: string
   access_token?: string
   has_access_token?: boolean
@@ -456,6 +460,10 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
 
   return {
     id,
+    capability_quotas: item.capability_quotas,
+    quota_pending: item.quota_pending,
+    quota_observed_at: item.quota_observed_at,
+    quota_refresh_error: item.quota_refresh_error,
     access_token: accessToken,
     has_access_token: hasAccessToken,
     token_preview: tokenPreview || maskToken(accessToken),

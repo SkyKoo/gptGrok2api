@@ -79,6 +79,7 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	}
 	headers := c.Image.requirementHeaders(requirements)
 	headers["Accept"] = "text/event-stream"
+	notifyQuotaSent(ctx, "reason")
 	response, err := c.Image.do(ctx, "POST", "/backend-api/conversation", account, payload, headers, true)
 	if err != nil {
 		return err

@@ -618,6 +618,8 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	headers := o.requirementHeaders(requirements)
 	headers["X-Conduit-Token"] = conduit
 	headers["Accept"] = "text/event-stream"
+	notifyQuotaSent(ctx, "reason")
+	notifyQuotaSent(ctx, "image_gen")
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/f/conversation", account, payload, headers, true)
 	if err != nil {
 		return "", nil, err
@@ -929,6 +931,7 @@ func (o *OpenAIImage) prepareInputUpload(ctx context.Context, account accounts.A
 	request := func(requestCtx context.Context) (map[string]any, error) {
 		requestCtx, cancel := context.WithTimeout(requestCtx, minDuration(o.RequestTimeout, openAIImageUploadAttemptTimeout))
 		defer cancel()
+		notifyQuotaSent(ctx, "file_upload")
 		response, err := o.do(requestCtx, http.MethodPost, "/backend-api/files", account, payload, map[string]string{"Content-Type": "application/json", "Accept": "application/json"}, false)
 		var meta map[string]any
 		if err == nil {

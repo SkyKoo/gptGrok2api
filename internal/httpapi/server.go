@@ -166,6 +166,7 @@ func New(cfg config.Config) *Server {
 		go server.imageRetentionScheduler()
 		go server.grokProbeScheduler()
 		go server.openAISurvivalScheduler()
+		go server.capabilityScheduler()
 	}
 	return server
 }
@@ -298,6 +299,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/users/", s.userKeyByID)
 	mux.HandleFunc("/api/accounts", s.accounts)
 	mux.HandleFunc("/api/accounts/token", s.accountToken)
+	mux.HandleFunc("/api/accounts/quotas/refresh", s.refreshQuotasAPI)
 	mux.HandleFunc("/api/accounts/refresh", s.accountRefreshStart)
 	mux.HandleFunc("/api/accounts/refresh-at", s.accountAccessTokenRefresh)
 	mux.HandleFunc("/api/accounts/refresh/progress/", s.accountRefreshProgressAPI)
@@ -2026,6 +2028,9 @@ func positiveInt(raw string, fallback int) int {
 
 func accountForAPI(account map[string]any) map[string]any {
 	item := cloneMap(account)
+	if item["capability_quotas"] == nil {
+		item["capability_quotas"] = accounts.Quotas(account["limits_progress"], time.Time{})
+	}
 	ref := accountPublicRef(account)
 	if ref != "" {
 		item["id"] = ref
