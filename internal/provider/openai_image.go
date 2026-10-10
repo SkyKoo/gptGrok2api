@@ -631,6 +631,9 @@ func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Acc
 			if terminal := openAIImageTerminalError(value, account.Token); terminal != nil {
 				return nil, terminal
 			}
+			if terminal := openAIImageTextOnlyError(value, account.Token); terminal != nil {
+				return nil, terminal
+			}
 			lastErr = errors.New("upstream response contained no image reference")
 		} else if !isRetryableOpenAIError(err) {
 			return nil, err
@@ -749,6 +752,22 @@ func openAIImageTerminalReason(value any) string {
 		if reason := openAIImageMessageError(typed); reason != "" {
 			return reason
 		}
+		// Read an explicit explanation before generic status markers; map iteration
+		// order must not replace "quota exhausted" with only "failed".
+		if detail, ok := typed["error"].(map[string]any); ok {
+			if reason := firstStringValue(detail, "message", "code", "type"); reason != "" {
+				return reason
+			}
+		} else if reason, ok := typed["error"].(string); ok && strings.TrimSpace(reason) != "" {
+			return strings.TrimSpace(reason)
+		}
+		for _, key := range []string{"status", "state", "task_status", "generation_status"} {
+			if openAIImageFailureMarker(typed[key]) {
+				if reason, ok := typed["message"].(string); ok && strings.TrimSpace(reason) != "" {
+					return strings.TrimSpace(reason)
+				}
+			}
+		}
 		for key, item := range typed {
 			normalizedKey := strings.ToLower(strings.TrimSpace(key))
 			text := strings.ToLower(strings.TrimSpace(stringValue(item)))
@@ -788,9 +807,8 @@ func openAIImageTerminalReason(value any) string {
 	return ""
 }
 
-// ChatGPT can complete an assistant message successfully while the image tool
-// failed. Read the explicit error flag, not the success status or refusal words
-// in arbitrary user content. Only plain message text is exposed to clients.
+// Explicit failure markers may accompany a successful transport/message status.
+// Prefer the assistant/tool's business explanation to an opaque status keyword.
 func openAIImageMessageError(message map[string]any) string {
 	author, _ := message["author"].(map[string]any)
 	role := strings.ToLower(strings.TrimSpace(stringValue(author["role"])))
@@ -798,26 +816,15 @@ func openAIImageMessageError(message map[string]any) string {
 		return ""
 	}
 	metadata, _ := message["metadata"].(map[string]any)
+	content, _ := message["content"].(map[string]any)
+	finish, _ := metadata["finish_details"].(map[string]any)
 	isError, _ := metadata["is_error"].(bool)
+	isError = isError || openAIImageFailureMarker(message["status"]) || openAIImageFailureMarker(content["content_type"]) || openAIImageFailureMarker(message["finish_reason"]) || openAIImageFailureMarker(metadata["finish_reason"]) || openAIImageFailureMarker(finish["type"])
 	if !isError {
 		return ""
 	}
-	content, _ := message["content"].(map[string]any)
-	text := []string{}
-	if strings.EqualFold(stringValue(content["content_type"]), "text") {
-		if parts, ok := content["parts"].([]any); ok {
-			for _, part := range parts {
-				if value, ok := part.(string); ok && strings.TrimSpace(value) != "" {
-					text = append(text, value)
-				}
-			}
-		}
-		if value, ok := content["text"].(string); ok && strings.TrimSpace(value) != "" {
-			text = append(text, value)
-		}
-	}
-	if len(text) > 0 {
-		return strings.Join(text, "\n")
+	if text := openAIImageMessageText(message); text != "" {
+		return text
 	}
 	// An unfinished SSE message may carry the flag before its text arrives.
 	finished, _ := message["end_turn"].(bool)
