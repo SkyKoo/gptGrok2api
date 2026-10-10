@@ -89,10 +89,14 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chat, images, videos := []string{}, []string{}, []string{}
+	all := []string{}
+	public := []map[string]any{}
 	for _, item := range s.modelSpecs() {
 		if !item.Enabled {
 			continue
 		}
+		all = append(all, item.ID)
+		public = append(public, item.Public())
 		switch {
 		case item.Capability&model.Chat != 0:
 			chat = append(chat, item.ID)
@@ -104,9 +108,9 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "model_catalog", "chat_models": chat, "image_models": images,
-		"image_edit_models": images, "video_models": videos, "models": []any{},
+		"image_edit_models": images, "video_models": videos, "models": public,
 		"discovery":              s.discovery.Summary(s.openAIAccountIDs()),
-		"all_models":             append(append(append([]string{}, chat...), images...), videos...),
+		"all_models":             all,
 		"source":                 map[string]string{"chat": "go", "image": "go", "grok": "unavailable"},
 		"openai_models_endpoint": "/v1/models",
 	})
