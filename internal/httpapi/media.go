@@ -186,6 +186,11 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 	if count < 1 {
 		count = 1
 	}
+	conversationModel, configErr := s.imageConversationModel()
+	if configErr != nil {
+		return nil, configErr
+	}
+	trace := s.newRoutingTrace(r, model, conversationModel)
 	results := make([][]map[string]string, count)
 	sizeMeta := imageSizeRequestMetadata(size, inputs)
 	s.enrichRequestMonitor(r, map[string]any{"image_size": sizeMeta})
@@ -226,7 +231,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 			for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
 				accountStarted := time.Now()
 				s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
-				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, isOpenAIAccount, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: model, Uploads: len(inputs) + maskCount(masks)})
+				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, s.supportsChatModel(conversationModel), s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs) + maskCount(masks)})
 				if reserveErr != nil {
 					if lastAttemptErr != nil {
 						reserveErr = lastAttemptErr
@@ -238,14 +243,17 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				s.enrichMonitorAccount(r, lease.Account)
 				s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 
-				generated, generateErr := s.openAIImage.GenerateWithOptions(s.quotaContext(ctx, lease), lease.Account, prompt, model, size, quality, inputs, options, masks...)
+				attemptCtx, finish := trace.begin(s.quotaContext(ctx, lease), lease, index, attempt)
+				generated, generateErr := s.openAIImage.GenerateWithOptions(attemptCtx, lease.Account, prompt, conversationModel, size, quality, inputs, options, masks...)
 				if generateErr != nil {
+					retry := ctx.Err() == nil && s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)
+					finish(generateErr, retry)
 					s.accountPool.Release(lease)
 					if !provider.IsImageOutputError(generateErr) {
-						s.accountPool.FeedbackIntent(lease, upstreamStatus(generateErr), generateErr)
+						s.routingFeedback(lease, generateErr)
 					}
 					excluded[lease.Account.Token] = true
-					if ctx.Err() == nil && s.quotaRetrySafe(lease, generateErr) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr) && s.shouldRetry(upstreamStatus(generateErr), attempt) {
+					if retry {
 						lastAttemptErr = generateErr
 						continue
 					}
@@ -273,18 +281,17 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					break
 				}
 				if resolveErr != nil {
+					finish(resolveErr, false)
 					s.accountPool.Release(lease)
 					s.accountPool.FeedbackIntent(lease, upstreamStatus(resolveErr), resolveErr)
 					excluded[lease.Account.Token] = true
-					if ctx.Err() == nil && s.quotaRetrySafe(lease, resolveErr) && !provider.IsImageDownloadError(resolveErr) && !provider.IsImageTerminalError(resolveErr) && s.shouldRetry(upstreamStatus(resolveErr), attempt) {
-						lastAttemptErr = resolveErr
-						continue
-					}
 					sendErr(resolveErr)
 					cancel()
 					return
 				}
 				s.accountPool.Release(lease)
+				finish(nil, false)
+				_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
 				s.stageRequestMonitor(r, "image_response_ready", 95, map[string]any{"response_ms": time.Since(accountStarted).Milliseconds()})
 				s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
 				results[index] = items

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -212,12 +213,14 @@ func (p *Pool) finishQuotaLocked(l *Lease) {
 
 // RefreshCapabilities gates only this account while fetching. No pool lock is
 // held across network I/O; new leases wait, and credential rotation is detected.
+var ErrRefreshDeferred = errors.New("account refresh deferred while busy or credentials changed")
+
 func (p *Pool) RefreshCapabilities(a Account, fetch func(Account) (map[string]any, error)) error {
 	p.mu.Lock()
 	id := Identity(a)
 	if p.refreshing[id] || p.capabilityActive[id] > 0 {
 		p.mu.Unlock()
-		return nil
+		return ErrRefreshDeferred
 	}
 	p.refreshing[id] = true
 	current, err := p.currentAccountLocked(a)
@@ -238,7 +241,7 @@ func (p *Pool) RefreshCapabilities(a Account, fetch func(Account) (map[string]an
 		return e
 	}
 	if latest.Token != a.Token {
-		return nil
+		return ErrRefreshDeferred
 	}
 	updates := map[string]any{"cfm_account_id": id, "quota_last_attempt_at": time.Now().UTC().Format(time.RFC3339)}
 	if err != nil {

@@ -115,6 +115,24 @@ func (s *Store) Config() (map[string]any, error) {
 	return loadMap(s.configPath)
 }
 
+// MergeConfig merges a settings patch under the same lock used by per-key
+// updates, preventing unrelated settings from overwriting a routing change.
+func (s *Store) MergeConfig(updates map[string]any) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, err := loadMap(s.configPath)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range updates {
+		current[key] = value
+	}
+	if err = writeJSON(s.configPath, current); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
 func (s *Store) UpdateConfig(key string, value any) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

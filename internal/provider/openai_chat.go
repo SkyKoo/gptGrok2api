@@ -88,10 +88,10 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return readOpenAIHTTPError(response, "conversation")
 	}
-	return scanOpenAIChat(response.Body, onEvent)
+	return scanOpenAIChat(response.Body, onEvent, func(v any) { notifyUpstreamModel(ctx, v) })
 }
 
-func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error) error {
+func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error, observers ...func(any)) error {
 	state := openAIChatState{}
 	ended, hasText := false, false
 	scanner := bufio.NewScanner(reader)
@@ -116,6 +116,9 @@ func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error) error
 		var value any
 		if err := json.Unmarshal([]byte(line), &value); err != nil {
 			return fmt.Errorf("invalid ChatGPT stream event: %w", err)
+		}
+		for _, observe := range observers {
+			observe(value)
 		}
 		event, eventErr := state.event(value)
 		if eventErr != nil {

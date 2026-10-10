@@ -444,12 +444,24 @@ export function shouldAutoExpandTimeline(item: SystemLogRow | null, bottleneckSt
   return bottleneckStep?.tone === 'danger'
 }
 
+function routingValue(item: SystemLogRow, key: string): string {
+  const detail = detailRecord(item), monitor = monitorRecord(item)
+  const route = detail.model_routing || detail.request_meta?.model_routing || monitor.request_meta?.model_routing || monitor.model_routing || {}
+  if (key === 'upstream_model') {
+    const models = [...new Set((Array.isArray(route.attempts) ? route.attempts : []).map((a: any) => a.upstream_model).filter(Boolean))]
+    return models.length ? models.join(' / ') : route.sent_model ? '上游未提供' : ''
+  }
+  return formatInlineValue(route[key])
+}
+
 export function buildPrimaryDetailFields(item: SystemLogRow | null): DetailField[] {
   if (!item) return []
   return compactDetailFields([
     { label: '请求 ID', value: rawDetailValue(item, 'call_id') || item.id, copyable: true },
     { label: '接口', value: item.endpoint, copyable: true },
-    { label: '模型', value: item.model, copyable: true },
+    { label: '请求模型', value: item.model, copyable: true },
+    { label: '发送会话模型', value: routingValue(item, 'sent_model'), copyable: true },
+    { label: '上游返回会话模型', value: routingValue(item, 'upstream_model'), copyable: true },
     { label: '账号', value: item.accountEmail, copyable: true },
     { label: 'OAuth 账号 ID', value: item.accountId, copyable: true },
     { label: '密钥', value: maskKeyLabel([item.keyName, item.keyId].filter(Boolean).join(' / ')) },

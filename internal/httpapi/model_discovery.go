@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"net/http"
@@ -49,7 +50,7 @@ func (s *Server) refreshAccountModels(ctx context.Context, a accounts.Account) e
 	s.modelRefreshMu.Lock()
 	if s.modelRefreshing[id] {
 		s.modelRefreshMu.Unlock()
-		return nil
+		return accounts.ErrRefreshDeferred
 	}
 	s.modelRefreshing[id] = true
 	s.modelRefreshMu.Unlock()
@@ -124,7 +125,7 @@ func (s *Server) refreshModelsAPI(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	sem := make(chan struct{}, 2)
-	success, failed := 0, 0
+	success, failed, deferred := 0, 0, 0
 	for _, ref := range uniqueAccountRefs(body.Refs) {
 		row, e := s.accountByRef(ref)
 		if e != nil {
@@ -149,7 +150,9 @@ func (s *Server) refreshModelsAPI(w http.ResponseWriter, r *http.Request) {
 			e := s.refreshAccountModels(ctx, a)
 			cancel()
 			mu.Lock()
-			if e == nil {
+			if errors.Is(e, accounts.ErrRefreshDeferred) {
+				deferred++
+			} else if e == nil {
 				success++
 			} else {
 				failed++
@@ -158,5 +161,5 @@ func (s *Server) refreshModelsAPI(w http.ResponseWriter, r *http.Request) {
 		}(a)
 	}
 	wg.Wait()
-	writeJSON(w, 200, map[string]any{"refreshed": success, "failed": failed, "discovery": s.discovery.Summary(s.openAIAccountIDs())})
+	writeJSON(w, 200, map[string]any{"refreshed": success, "failed": failed, "deferred": deferred, "discovery": s.discovery.Summary(s.openAIAccountIDs())})
 }

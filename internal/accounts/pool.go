@@ -35,6 +35,9 @@ type Lease struct {
 	finished bool
 }
 
+// Intent returns the immutable reservation intent for routing diagnostics.
+func (l *Lease) Intent() Intent { return l.intent }
+
 type Pool struct {
 	repository       *store.Store
 	onInvalid        func(Account)

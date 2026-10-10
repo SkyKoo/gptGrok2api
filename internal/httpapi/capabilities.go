@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	"net/http"
@@ -15,7 +16,7 @@ func (s *Server) quotaContext(ctx context.Context, l *accounts.Lease) context.Co
 }
 func (s *Server) quotaRetrySafe(l *accounts.Lease, err error) bool {
 	status := upstreamStatus(err)
-	return !s.accountPool.Sent(l, "reason") || status == http.StatusUnauthorized || status == http.StatusTooManyRequests
+	return !s.accountPool.Sent(l, "reason") || status == http.StatusUnauthorized || status == http.StatusTooManyRequests || provider.IsModelRejected(err)
 }
 func maskCount(masks []*provider.ImageMask) int {
 	for _, m := range masks {
@@ -122,7 +123,7 @@ func (s *Server) refreshQuotasAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "provide 1–10 account_refs", "invalid_request_error")
 		return
 	}
-	refreshed, failed := 0, 0
+	refreshed, failed, deferred := 0, 0, 0
 	for _, ref := range uniqueAccountRefs(body.Refs) {
 		row, err := s.accountByRef(ref)
 		if err != nil {
@@ -137,11 +138,13 @@ func (s *Server) refreshQuotasAPI(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		err = s.refreshAccountQuotas(ctx, a)
 		cancel()
-		if err != nil {
+		if errors.Is(err, accounts.ErrRefreshDeferred) {
+			deferred++
+		} else if err != nil {
 			failed++
 		} else {
 			refreshed++
 		}
 	}
-	writeJSON(w, 200, map[string]any{"refreshed": refreshed, "failed": failed})
+	writeJSON(w, 200, map[string]any{"refreshed": refreshed, "failed": failed, "deferred": deferred})
 }

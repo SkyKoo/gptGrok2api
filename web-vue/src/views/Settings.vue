@@ -42,6 +42,8 @@
               @test-default-proxy="testDefaultProxy"
             />
 
+            <SettingsModelRoutingPanel />
+
             <SettingsProxyRuntimePanel
               v-model:clearance-test-target="clearanceTestTarget"
               :settings="localSettings"
@@ -261,6 +263,7 @@ import {
   backupStatusText as buildBackupStatusText,
   settingsTabs,
 } from '@/views/settings/settingsView'
+import SettingsModelRoutingPanel from '@/views/settings/SettingsModelRoutingPanel.vue'
 import SettingsBasicConfigPanel from '@/views/settings/SettingsBasicConfigPanel.vue'
 import SettingsBasicPolicyPanel from '@/views/settings/SettingsBasicPolicyPanel.vue'
 import SettingsBackupPanel from '@/views/settings/SettingsBackupPanel.vue'

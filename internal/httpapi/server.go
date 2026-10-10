@@ -329,6 +329,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/third-party-apps", s.thirdPartyApps)
 	mux.HandleFunc("/api/model-catalog", s.modelCatalog)
 	mux.HandleFunc("/api/accounts/models/refresh", s.refreshModelsAPI)
+	mux.HandleFunc("/api/openai/routing", s.openAIRoutingAPI)
 	mux.HandleFunc("/api/logs", s.logsAPI)
 	mux.HandleFunc("/api/logs/input-images/", s.logInputImage)
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
@@ -402,6 +403,9 @@ func (s *Server) withMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if s.rejectDuringMaintenance(w, r) {
 			return
 		}
 		if s.shouldMonitorRequest(r) {
@@ -1903,16 +1907,11 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["image_task_timeout_secs"] = seconds
 		}
-		current, err := s.store.Config()
+		// This setting has its own validated endpoint. Ignore an old UI snapshot
+		// so saving general settings cannot revert a concurrent model choice.
+		delete(updates, "openai_routing")
+		current, err := s.store.MergeConfig(updates)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		for key, value := range updates {
-			current[key] = value
-		}
-		current["image_task_timeout_secs"] = configuredImageTaskTimeoutSeconds(current)
-		if err := s.store.ReplaceConfig(current); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}

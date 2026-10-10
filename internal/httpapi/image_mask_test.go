@@ -117,6 +117,10 @@ func TestImageMaskSyncAsyncNativeProtocol(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					discoverTestModel(t, s, "gpt-6")
+					if _, e := s.store.UpdateConfig("openai_routing", map[string]any{"image_conversation_model": "gpt-6"}); e != nil {
+						t.Fatal(e)
+					}
 					mask := testMaskPNG(t, false, false)
 					cfg, _, _ := image.DecodeConfig(bytes.NewReader(maskSourcePNG(t)))
 					output := image.NewNRGBA(image.Rect(0, 0, 4, 4))
@@ -185,6 +189,9 @@ func TestImageMaskSyncAsyncNativeProtocol(t *testing.T) {
 							calls.Add(1)
 							var payload map[string]any
 							_ = json.NewDecoder(r.Body).Decode(&payload)
+							if payload["model"] != "gpt-6" {
+								t.Errorf("configured model not used for mask edit: %v", payload["model"])
+							}
 							message := mapValue(anyList(payload["messages"])[0])
 							metadata := mapValue(message["metadata"])
 							if len(anyList(metadata["attachments"])) != 1 || len(anyList(mapValue(message["content"])["parts"])) != 2 {

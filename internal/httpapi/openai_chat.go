@@ -32,6 +32,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		inputs[i] = image.Input
 	}
 	s.recordInputImages(r, inputs)
+	trace := s.newRoutingTrace(r, request.Model, request.Model)
 	excluded := map[string]bool{}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
@@ -48,7 +49,8 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 		s.enrichMonitorAccount(r, lease.Account)
 		s.enrichRequestMonitor(r, map[string]any{"upstream_attempts": attempt + 1})
 		emitted, clientFailed := false, false
-		err = s.openAIChat.Stream(s.quotaContext(r.Context(), lease), lease.Account, request, func(event provider.OpenAIChatEvent) error {
+		attemptCtx, finish := trace.begin(s.quotaContext(r.Context(), lease), lease, 0, attempt)
+		err = s.openAIChat.Stream(attemptCtx, lease.Account, request, func(event provider.OpenAIChatEvent) error {
 			if event.Text != "" {
 				emitted = true
 			}
@@ -56,6 +58,8 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 			clientFailed = callbackErr != nil
 			return callbackErr
 		}, images...)
+		retry := err != nil && r.Context().Err() == nil && !clientFailed && !emitted && s.routingRetry(lease, err, attempt)
+		finish(err, retry)
 		s.accountPool.Release(lease)
 		if err == nil {
 			_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), request.Model, true, false)
@@ -67,10 +71,10 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 			return err
 		}
 		s.enrichRequestMonitor(r, map[string]any{"upstream_status": upstreamStatus(err)})
-		s.accountPool.FeedbackIntent(lease, upstreamStatus(err), err)
+		s.routingFeedback(lease, err)
 		excluded[lease.Account.Token] = true
 		lastErr = err
-		if emitted || !s.quotaRetrySafe(lease, err) || !s.shouldRetry(upstreamStatus(err), attempt) {
+		if !retry {
 			return err
 		}
 	}
@@ -209,23 +213,32 @@ func (s *Server) completeOpenAIImageChat(w http.ResponseWriter, r *http.Request,
 	s.enrichRequestMonitor(r, map[string]any{"size": size, "image_url_parts": len(inputs), "data_url_images": len(inputs)})
 	s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
 	s.stageRequestMonitor(r, "image_getting_account", 35, nil)
+	conversationModel, err := s.imageConversationModel()
+	if err != nil {
+		writeOpenAIChatError(w, err)
+		return
+	}
+	trace := s.newRoutingTrace(r, request.Model, conversationModel)
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
 		accountStarted := time.Now()
-		lease, err := s.accountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, excluded, isOpenAIAccount, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: request.Model, Uploads: len(inputs)})
+		lease, err := s.accountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, excluded, s.supportsChatModel(conversationModel), s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs)})
 		if err != nil {
 			lastErr = err
 			break
 		}
 		s.enrichMonitorAccount(r, lease.Account)
 		s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
-		images, err = s.openAIImage.Generate(s.quotaContext(imageContext, lease), lease.Account, prompt, request.Model, size, "auto", inputs)
+		attemptCtx, finish := trace.begin(s.quotaContext(imageContext, lease), lease, 0, attempt)
+		images, err = s.openAIImage.Generate(attemptCtx, lease.Account, prompt, conversationModel, size, "auto", inputs)
+		retry := err != nil && imageContext.Err() == nil && s.routingRetry(lease, err, attempt)
+		finish(err, retry)
 		selected = lease.Account
 		s.accountPool.Release(lease)
 		if err != nil {
-			s.accountPool.FeedbackIntent(lease, upstreamStatus(err), err)
+			s.routingFeedback(lease, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
-			if s.quotaRetrySafe(lease, err) && s.shouldRetry(upstreamStatus(err), attempt) {
+			if retry {
 				continue
 			}
 			break

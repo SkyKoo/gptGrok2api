@@ -5,8 +5,8 @@ Baseline production image: gptgrok2api:sha-ef38a0f93420-20261010.
 Branch: codex/cfm-account-model-routing. No merge without user confirmation.
 
 1. Capability quotas, atomic reservations, scoped cooldowns and refresh — passed local tests, production deployment and one text/one image verification (c0ca414).
-2. Deduplicated upstream model discovery and dynamic catalog — in progress.
-3. Configurable routing and model observability — pending second deployment verification.
+2. Deduplicated upstream model discovery and dynamic catalog — deployed and verified (4a2fa00); fixed an all_models aggregation omission before progressing. Three metadata refreshes and one gpt-6 Responses stream passed; cache survives restart.
+3. Configurable routing, scoped rejection, model observability and maintenance admission — local implementation complete; deployment verification pending.
 
 All persistence changes must be additive. Ordinary rollback replaces only the app
 image, never restores old business data over newer writes. Before every deployment:

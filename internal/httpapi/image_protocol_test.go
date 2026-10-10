@@ -37,6 +37,14 @@ func TestGPTImageSyncResponseProtocol(t *testing.T) {
 			if _, _, _, err := s.store.AddAccounts(nil, []map[string]any{{"access_token": "jwt.header.payload", "pool": "basic"}}); err != nil {
 				t.Fatal(err)
 			}
+			sentModel := "gpt-5-3"
+			if tc.name != "generations" {
+				sentModel = "gpt-6"
+				discoverTestModel(t, s, sentModel)
+				if _, err := s.store.UpdateConfig("openai_routing", map[string]any{"image_conversation_model": sentModel}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			// A non-compressible image makes the Base64 response exceed the
 			// monitor's 8 KiB capture cap, reproducing the production regression.
 			output := image.NewRGBA(image.Rect(0, 0, 64, 64))
@@ -53,6 +61,13 @@ func TestGPTImageSyncResponseProtocol(t *testing.T) {
 			fileID := "file_000000001234567890abcdef12345678"
 			var upstream *httptest.Server
 			upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/backend-api/f/conversation/prepare" || r.URL.Path == "/backend-api/f/conversation" {
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if body["model"] != sentModel {
+						t.Errorf("sent model %v, want %s", body["model"], sentModel)
+					}
+				}
 				switch r.URL.Path {
 				case "/":
 					io.WriteString(w, `<html data-build="test-build"></html>`)

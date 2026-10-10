@@ -633,6 +633,7 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 		if json.Unmarshal(raw, &value) != nil {
 			return false
 		}
+		notifyUpstreamModel(ctx, value)
 		if terminalErr = openAIImageTerminalError(value, account.Token); terminalErr != nil {
 			return true
 		}
@@ -703,6 +704,7 @@ func (o *OpenAIImage) pollConversationOnce(ctx context.Context, account accounts
 		if err := decodeOpenAIJSON(response, &value, "image conversation"); err != nil {
 			return nil, err
 		}
+		notifyUpstreamModel(ctx, value)
 		return value, nil
 	}
 	value, err := request(ctx)
