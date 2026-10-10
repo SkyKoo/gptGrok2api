@@ -40,6 +40,7 @@ var imageEditReferenceFields = []string{"image", "image[]", "images", "images[]"
 var imageEditMaskFields = []string{"mask", "mask[]"}
 
 type imageEditRequest struct {
+	provider.ImageOutputOptions
 	Model          string
 	Prompt         string
 	N              int
@@ -70,6 +71,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	r = r.WithContext(ctx)
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	var request struct {
+		provider.ImageOutputOptions
 		Model          string `json:"model"`
 		Prompt         string `json:"prompt"`
 		N              int    `json:"n"`
@@ -80,7 +82,10 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &request) {
 		return
 	}
-	s.enrichRequestMonitor(r, map[string]any{"model": request.Model})
+	if !validateImageOutput(w, request.Model, request.ImageOutputOptions) {
+		return
+	}
+	s.enrichRequestMonitor(r, map[string]any{"model": request.Model, "background": request.Background, "output_format": request.OutputFormat})
 	if strings.TrimSpace(request.Prompt) == "" {
 		writeError(w, http.StatusBadRequest, "prompt cannot be empty", "invalid_request_error")
 		return
@@ -88,11 +93,10 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	if request.N == 0 {
 		request.N = 1
 	}
-	if request.Size == "" {
-		request.Size = "1024x1024"
-	}
 	if isOpenAIImageModel(request.Model) {
-		request.Size = provider.NormalizeOpenAIImageSize(request.Size)
+		request.Size = openAIImageRequestedSize(request.Size)
+	} else if request.Size == "" {
+		request.Size = "1024x1024"
 	}
 	if request.ResponseFormat == "" && !isOpenAIImageModel(request.Model) {
 		request.ResponseFormat = "url"
@@ -123,13 +127,13 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, format, requestPublicBase(r), request.N)
+		data, err := s.generateOpenAIImageData(r, r.Context(), request.Prompt, request.Model, request.Size, request.Quality, nil, format, requestPublicBase(r), request.N, request.ImageOutputOptions)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
 		}
 		s.stageRequestMonitor(r, "image_response_ready", 99, map[string]any{"response_ms": s.requestMonitorElapsed(r)})
-		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+		writeJSON(w, http.StatusOK, openAIImagesResult(data, request.ImageOutputOptions))
 		return
 	}
 	s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
@@ -178,11 +182,15 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 
-func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int) ([]map[string]string, error) {
+func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int, options provider.ImageOutputOptions) ([]map[string]string, error) {
 	if count < 1 {
 		count = 1
 	}
 	results := make([][]map[string]string, count)
+	sizeMeta := imageSizeRequestMetadata(size, inputs)
+	s.enrichRequestMonitor(r, map[string]any{"image_size": sizeMeta})
+	// Each worker owns one entry. Publish only after all workers have joined.
+	outputDimensions := make([]imagePixelSize, count)
 	ctx, timeoutCancel := s.imageTaskContext(ctx)
 	defer timeoutCancel()
 	ctx, cancel := context.WithCancel(ctx)
@@ -230,12 +238,14 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				s.enrichMonitorAccount(r, lease.Account)
 				s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 
-				generated, generateErr := s.openAIImage.Generate(ctx, lease.Account, prompt, model, size, quality, inputs)
+				generated, generateErr := s.openAIImage.GenerateWithOptions(ctx, lease.Account, prompt, model, size, quality, inputs, options)
 				if generateErr != nil {
 					s.accountPool.Release(lease)
-					s.accountPool.Feedback(lease.Account, upstreamStatus(generateErr), generateErr)
+					if !provider.IsImageOutputError(generateErr) {
+						s.accountPool.Feedback(lease.Account, upstreamStatus(generateErr), generateErr)
+					}
 					excluded[lease.Account.Token] = true
-					if ctx.Err() == nil && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && s.shouldRetry(upstreamStatus(generateErr), attempt) {
+					if ctx.Err() == nil && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr) && s.shouldRetry(upstreamStatus(generateErr), attempt) {
 						lastAttemptErr = generateErr
 						continue
 					}
@@ -254,6 +264,9 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 					}
 					s.recordGeneratedMedia(ctx, map[string]string{"url": localURL})
 					items = append(items, value)
+					if raw, err := base64.StdEncoding.DecodeString(image.Base64); err == nil {
+						outputDimensions[index] = decodeImagePixelSize(raw, index+1)
+					}
 					// Each worker represents exactly one requested output. Upstream can
 					// expose that output through multiple references, so resolving the
 					// remaining entries would only persist files that are later discarded.
@@ -280,6 +293,10 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		}()
 	}
 	wg.Wait()
+	// Replace, rather than mutate, metadata already shared with the live monitor.
+	completedSizeMeta := imageSizeRequestMetadata(size, inputs)
+	completedSizeMeta["output_dimensions"] = knownImagePixelSizes(outputDimensions)
+	s.enrichRequestMonitor(r, map[string]any{"image_size": completedSizeMeta})
 	select {
 	case err := <-errCh:
 		// Record only the final failure after all workers stop, never a transient
@@ -322,12 +339,16 @@ func (s *Server) parseImageEditRequest(r *http.Request) (imageEditRequest, error
 	}
 	values := r.MultipartForm.Value
 	request := imageEditRequest{
-		Model:          firstFormValue(values, "model"),
-		Prompt:         strings.TrimSpace(firstFormValue(values, "prompt")),
-		N:              positiveInt(firstFormValue(values, "n"), 1),
-		Size:           firstFormValue(values, "size"),
-		Quality:        firstFormValue(values, "quality"),
-		ResponseFormat: firstFormValue(values, "response_format"),
+		ImageOutputOptions: provider.ImageOutputOptions{Background: firstFormValue(values, "background"), OutputFormat: firstFormValue(values, "output_format")},
+		Model:              firstFormValue(values, "model"),
+		Prompt:             strings.TrimSpace(firstFormValue(values, "prompt")),
+		N:                  positiveInt(firstFormValue(values, "n"), 1),
+		Size:               firstFormValue(values, "size"),
+		Quality:            firstFormValue(values, "quality"),
+		ResponseFormat:     firstFormValue(values, "response_format"),
+	}
+	if err := request.ImageOutputOptions.Validate(); err != nil {
+		return imageEditRequest{}, err
 	}
 	request.HasMask = hasMultipartField(r.MultipartForm, imageEditMaskFields)
 	for _, field := range imageEditReferenceFields {
@@ -368,13 +389,18 @@ func (s *Server) parseJSONImageEditRequest(r *http.Request) (imageEditRequest, e
 	if err := json.Unmarshal(decoded, &body); err != nil {
 		return imageEditRequest{}, imageEditParseError{Message: describeJSONBodyError(err)}
 	}
+	options, err := parseImageOutputJSON(body)
+	if err != nil {
+		return imageEditRequest{}, err
+	}
 	request := imageEditRequest{
-		Model:          stringValue(body["model"]),
-		Prompt:         strings.TrimSpace(stringValue(body["prompt"])),
-		N:              positiveInt(stringValue(body["n"]), 1),
-		Size:           stringValue(body["size"]),
-		Quality:        stringValue(body["quality"]),
-		ResponseFormat: stringValue(body["response_format"]),
+		ImageOutputOptions: options,
+		Model:              stringValue(body["model"]),
+		Prompt:             strings.TrimSpace(stringValue(body["prompt"])),
+		N:                  positiveInt(stringValue(body["n"]), 1),
+		Size:               stringValue(body["size"]),
+		Quality:            stringValue(body["quality"]),
+		ResponseFormat:     stringValue(body["response_format"]),
 	}
 	for _, field := range []string{"mask", "mask[]"} {
 		if value, ok := body[field]; ok && value != nil && stringValue(value) != "" {
@@ -725,6 +751,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	s.stageRequestMonitor(r, "handler_queue_done", 10, nil)
 	request, err := s.parseImageEditRequest(r)
 	if err != nil {
+		if writeImageOptionError(w, err) {
+			return
+		}
 		status := http.StatusBadRequest
 		var parseError imageEditParseError
 		if errors.As(err, &parseError) && parseError.Status >= 400 {
@@ -738,7 +767,10 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if modelName == "" {
 		modelName = "grok-imagine-image-edit"
 	}
-	s.enrichRequestMonitor(r, map[string]any{"model": modelName})
+	if !validateImageOutput(w, modelName, request.ImageOutputOptions) {
+		return
+	}
+	s.enrichRequestMonitor(r, map[string]any{"model": modelName, "background": request.Background, "output_format": request.OutputFormat})
 	if prompt == "" {
 		writeError(w, http.StatusBadRequest, "prompt cannot be empty", "invalid_request_error")
 		return
@@ -772,20 +804,21 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		inputs = inputs[len(inputs)-7:]
 	}
 	if isOpenAIImageModel(modelName) {
-		size := strings.TrimSpace(request.Size)
-		if size == "" {
-			size = "1024x1024"
+		size := openAIImageRequestedSize(request.Size)
+		if !validOpenAIImageSize(size) {
+			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
+			return
 		}
 		format, ok := openAIImagesResponseFormat(w, r, request.ResponseFormat)
 		if !ok {
 			return
 		}
-		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n)
+		data, err := s.generateOpenAIImageData(r, r.Context(), prompt, modelName, size, request.Quality, inputs, format, requestPublicBase(r), n, request.ImageOutputOptions)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
+		writeJSON(w, http.StatusOK, openAIImagesResult(data, request.ImageOutputOptions))
 		return
 	}
 	lease, err := s.accountPool.Reserve(r.Context(), []string{"super", "heavy"}, nil)

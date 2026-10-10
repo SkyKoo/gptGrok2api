@@ -30,9 +30,11 @@ import (
 // in the same volume layout and do not need an additional database.
 
 type imageTaskState struct {
+	provider.ImageOutputOptions
 	ID                   string           `json:"id"`
 	OwnerID              string           `json:"owner_id"`
 	RequestHash          string           `json:"request_hash,omitempty"`
+	SizeVersion          int              `json:"size_version,omitempty"`
 	Status               string           `json:"status"`
 	Mode                 string           `json:"mode"`
 	Model                string           `json:"model"`
@@ -599,6 +601,7 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"items": items, "missing_ids": missing, "quota_summary": s.imageQuota()})
 	case http.MethodPost:
 		var body struct {
+			provider.ImageOutputOptions
 			ClientTaskID string `json:"client_task_id"`
 			Prompt       string `json:"prompt"`
 			Model        string `json:"model"`
@@ -616,6 +619,9 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 		if body.Model == "" {
 			body.Model = "gpt-image-2"
 		}
+		if !validateImageOutput(w, body.Model, body.ImageOutputOptions) {
+			return
+		}
 		if body.N == 0 {
 			body.N = 1
 		}
@@ -623,7 +629,7 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 			body.Quality = "auto"
 		}
 		owner := s.authIdentity(r)
-		task := &imageTaskState{ID: body.ClientTaskID, OwnerID: owner, Status: "queued", Mode: "generate", Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, Prompt: body.Prompt, CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+		task := &imageTaskState{ImageOutputOptions: body.ImageOutputOptions, ID: body.ClientTaskID, OwnerID: owner, Status: "queued", Mode: "generate", Model: body.Model, N: body.N, Size: body.Size, Quality: body.Quality, Prompt: body.Prompt, CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
 		s.submitImageTask(w, r, task)
 	default:
 		writeError(w, 405, "method not allowed", "invalid_request_error")
@@ -695,6 +701,10 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	if modelName == "" {
 		modelName = "grok-imagine-image-edit"
 	}
+	options := provider.ImageOutputOptions{Background: r.FormValue("background"), OutputFormat: r.FormValue("output_format")}
+	if !validateImageOutput(w, modelName, options) {
+		return
+	}
 	files := r.MultipartForm.File["image[]"]
 	if len(files) == 0 {
 		files = r.MultipartForm.File["image"]
@@ -725,7 +735,7 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	owner := s.authIdentity(r)
 	now := time.Now().UTC().Format(time.RFC3339)
-	task := &imageTaskState{ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: firstNonEmpty(r.FormValue("size"), "1024x1024"), Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, CreatedAt: now, UpdatedAt: now}
+	task := &imageTaskState{ImageOutputOptions: options, ID: clientID, OwnerID: owner, Status: "queued", Mode: "edit", Model: modelName, N: minInt(positiveInt(r.FormValue("n"), 1), 2), Size: r.FormValue("size"), Quality: firstNonEmpty(r.FormValue("quality"), "auto"), Prompt: prompt, Images: images, ImageNames: names, CreatedAt: now, UpdatedAt: now}
 	s.submitImageTask(w, r, task)
 }
 
@@ -756,6 +766,12 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 		_ = writer.WriteField("n", fmt.Sprint(task.N))
 		_ = writer.WriteField("size", task.Size)
 		_ = writer.WriteField("quality", task.Quality)
+		if task.Background != "" {
+			_ = writer.WriteField("background", task.Background)
+		}
+		if task.OutputFormat != "" {
+			_ = writer.WriteField("output_format", task.OutputFormat)
+		}
 		_ = writer.WriteField("response_format", "url")
 		for index, raw := range task.Images {
 			name := "image.png"
@@ -774,7 +790,7 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 		contentType = writer.FormDataContentType()
 		target = "http://internal/v1/images/edits"
 	} else {
-		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "quality": task.Quality, "response_format": "url"})
+		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "quality": task.Quality, "background": task.Background, "output_format": task.OutputFormat, "response_format": "url"})
 		body = bytes.NewReader(raw)
 		target = "http://internal/v1/images/generations"
 	}
@@ -854,6 +870,12 @@ func (s *Server) finishImageTaskError(task *imageTaskState, message string) {
 
 func imageTaskPublic(task *imageTaskState) map[string]any {
 	value := map[string]any{"id": task.ID, "status": task.Status, "mode": task.Mode, "model": task.Model, "n": task.N, "size": task.Size, "quality": task.Quality, "created_at": task.CreatedAt, "updated_at": task.UpdatedAt}
+	if task.Background != "" {
+		value["background"] = task.Background
+	}
+	if isOpenAIImageModel(task.Model) {
+		value["output_format"] = task.EffectiveFormat()
+	}
 	if len(task.Data) > 0 {
 		value["data"] = task.Data
 	}

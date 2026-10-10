@@ -621,6 +621,9 @@ func TestOpenAIImageGenerationFailsWhenEveryFileHasNoURL(t *testing.T) {
 
 func TestNormalizeOpenAIImageSize(t *testing.T) {
 	tests := map[string]string{
+		"":          "auto",
+		"auto":      "auto",
+		" AuTo ":    "auto",
 		"1024x1365": "1024x1360",
 		"1365x1024": "1360x1024",
 		"1920x1080": "1920x1088",

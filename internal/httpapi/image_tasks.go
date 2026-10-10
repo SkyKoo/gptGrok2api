@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
 // This context is set only by the background worker, never by client headers.
@@ -32,7 +34,12 @@ func imageTaskKey(owner, id string) string {
 }
 
 func imageTaskHash(task *imageTaskState) string {
-	raw, _ := json.Marshal([]any{task.Mode, task.Model, task.N, task.Size, task.Quality, task.Prompt, task.Images})
+	fields := []any{task.Mode, task.Model, task.N, task.Size, task.Quality, task.Prompt, task.Images}
+	// Preserve persisted hashes for requests created before output options existed.
+	if task.Background != "" || task.OutputFormat != "" {
+		fields = append(fields, task.ImageOutputOptions)
+	}
+	raw, _ := json.Marshal(fields)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -42,6 +49,24 @@ func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *i
 	if len(task.ID) > 128 || strings.ContainsAny(task.ID, "/\\?#") || task.N < 1 || task.N > 10 {
 		writeError(w, http.StatusBadRequest, "invalid client_task_id or n (expected 1 to 10)", "invalid_request_error")
 		return
+	}
+	// Old edit tasks defaulted to square, while generations stored the raw size.
+	// Compare that exact legacy hash only against legacy records. Never equate a
+	// new explicit square request with auto, and never rewrite or restart a match.
+	legacy := *task
+	if task.Mode == "edit" {
+		legacy.Size = firstNonEmpty(task.Size, "1024x1024")
+	}
+	legacyHash := imageTaskHash(&legacy)
+	if isOpenAIImageModel(task.Model) {
+		task.Size = openAIImageRequestedSize(task.Size)
+		task.SizeVersion = 1
+		if !validOpenAIImageSize(task.Size) {
+			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
+			return
+		}
+	} else {
+		task.Size = legacy.Size
 	}
 	task.RequestHash = imageTaskHash(task)
 	key := imageTaskKey(task.OwnerID, task.ID)
@@ -53,7 +78,7 @@ func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *i
 	}
 	start := false
 	if previous := s.imageTasks[key]; previous != nil {
-		if previous.RequestHash != task.RequestHash {
+		if previous.RequestHash != task.RequestHash && !(previous.SizeVersion == 0 && previous.RequestHash == legacyHash) {
 			s.imageTaskMu.Unlock()
 			writeError(w, http.StatusConflict, "client_task_id already belongs to a different request", "invalid_request_error")
 			return
@@ -190,6 +215,7 @@ func (s *Server) cleanupExpiredImageTasks() {
 // only bytes in memory; reference URLs/base64 and credentials are not persisted.
 func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		provider.ImageOutputOptions
 		ClientTaskID string   `json:"client_task_id"`
 		Prompt       string   `json:"prompt"`
 		Model        string   `json:"model"`
@@ -205,6 +231,9 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(body.ClientTaskID) == "" || strings.TrimSpace(body.Prompt) == "" {
 		writeError(w, 400, "client_task_id and prompt are required", "invalid_request_error")
+		return
+	}
+	if !validateImageOutput(w, firstNonEmpty(body.Model, "gpt-image-2"), body.ImageOutputOptions) {
 		return
 	}
 	n := 1
@@ -248,8 +277,8 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		names = append(names, input.Name)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	task := &imageTaskState{ID: body.ClientTaskID, OwnerID: s.authIdentity(r), Status: "queued", Mode: "edit",
-		Model: firstNonEmpty(body.Model, "gpt-image-2"), N: n, Size: firstNonEmpty(body.Size, "1024x1024"),
+	task := &imageTaskState{ImageOutputOptions: body.ImageOutputOptions, ID: body.ClientTaskID, OwnerID: s.authIdentity(r), Status: "queued", Mode: "edit",
+		Model: firstNonEmpty(body.Model, "gpt-image-2"), N: n, Size: body.Size,
 		Quality: firstNonEmpty(body.Quality, "auto"), Prompt: strings.TrimSpace(body.Prompt), Images: images,
 		ImageNames: names, CreatedAt: now, UpdatedAt: now}
 	s.submitImageTask(w, r, task)

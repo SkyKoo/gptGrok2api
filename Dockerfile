@@ -26,6 +26,7 @@ COPY --from=web-build /src/web-vue/dist /app/web_dist
 COPY internal/register/sentinel-runner.js /app/sentinel/sentinel-runner.js
 COPY internal/register/sentinel-sdk.js /app/sentinel/sdk.js
 COPY VERSION CHANGELOG.md config.example.yaml ./
+COPY third_party /app/third_party
 COPY services/default_prompt_library.json /app/services/default_prompt_library.json
 RUN mkdir -p /app/data /app/logs && chown -R app:app /app
 USER app

@@ -128,15 +128,19 @@ func (o *OpenAIImage) SetProxyManager(manager *proxyruntime.Manager) {
 	o.Proxy = manager
 }
 
-func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput) (results []ImageResult, err error) {
+func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput) ([]ImageResult, error) {
+	return o.GenerateWithOptions(ctx, account, prompt, model, size, quality, inputs, ImageOutputOptions{})
+}
+
+func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput, options ImageOutputOptions) (results []ImageResult, err error) {
+	if err := options.Validate(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(account.Token) == "" {
 		return nil, fmt.Errorf("OpenAI image generation requires an access token")
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return nil, fmt.Errorf("prompt cannot be empty")
-	}
-	if size == "" || strings.EqualFold(size, "auto") {
-		size = "1024x1024"
 	}
 	size = NormalizeOpenAIImageSize(size)
 	if quality == "" {
@@ -157,7 +161,11 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 		notifyOpenAIImageEgress(ctx, lease.URL)
 		defer func() { lease.Release(openAIImageProxyFailure(err)) }()
 	}
-	prompt = strings.TrimSpace(prompt) + "\n\n输出图片尺寸为 " + size + "。\n输出图片质量为 " + quality + "。"
+	prompt = strings.TrimSpace(prompt)
+	if size != "auto" {
+		prompt += "\n\n输出图片尺寸为 " + size + "。"
+	}
+	prompt += "\n输出图片质量为 " + quality + "。" + options.promptSuffix()
 	inputStarted := time.Now()
 	references, err := o.uploadInputs(ctx, account, inputs)
 	if err != nil {
@@ -220,7 +228,7 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 	seen := map[string]bool{}
 	inputFileIDs := map[string]bool{}
 	inputContentHashes := map[[sha256.Size]byte]bool{}
-	var lastDownloadErr error
+	var lastDownloadErr, lastOutputErr error
 	for _, ref := range references {
 		if ref.FileID != "" {
 			inputFileIDs[ref.FileID] = true
@@ -258,6 +266,11 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 		}
 		notifyOpenAIImageStage(ctx, "download_ms", downloadStarted)
 		proxyruntime.ObserveImageLeaseStage(ctx, time.Since(downloadStarted), openAIImageSlowDownload)
+		raw, mime, err = options.apply(raw, mime)
+		if err != nil {
+			lastOutputErr = err
+			continue
+		}
 		results = append(results, ImageResult{
 			Base64: base64.StdEncoding.EncodeToString(raw),
 			MIME:   mime,
@@ -267,6 +280,9 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 		notifyOpenAIImageStage(ctx, "total_ms", inputStarted)
 	}
 	if len(results) == 0 {
+		if lastOutputErr != nil {
+			return nil, lastOutputErr
+		}
 		if lastDownloadErr != nil {
 			return nil, &imageDownloadError{err: lastDownloadErr}
 		}
@@ -319,10 +335,12 @@ func (o *OpenAIImage) uploadInputs(ctx context.Context, account accounts.Account
 	return references, nil
 }
 
-// NormalizeOpenAIImageSize keeps legacy UI presets compatible with the
-// upstream image pipeline, which requires dimensions aligned to 16 pixels.
+// NormalizeOpenAIImageSize preserves automatic sizing and existing UI preset
+// aliases. Explicit dimensions are hints, not an exact Web output guarantee.
 func NormalizeOpenAIImageSize(size string) string {
 	switch strings.ToLower(strings.TrimSpace(size)) {
+	case "", "auto":
+		return "auto"
 	case "1024x1365":
 		return "1024x1360"
 	case "1365x1024":
@@ -332,7 +350,7 @@ func NormalizeOpenAIImageSize(size string) string {
 	case "1080x1920":
 		return "1088x1920"
 	default:
-		return strings.TrimSpace(size)
+		return strings.ToLower(strings.TrimSpace(size))
 	}
 }
 
@@ -560,8 +578,12 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 		"client_contextual_info":               map[string]any{"app_name": "chatgpt.com"},
 		"paragen_cot_summary_display_override": "allow",
 		"force_parallel_switch":                "auto",
-		"image_generation_size":                size,
 		"image_generation_quality":             quality,
+	}
+	// The Web field is only a legacy hint. In auto mode omit it entirely,
+	// allowing the prompt and reference composition to guide the result.
+	if size = NormalizeOpenAIImageSize(size); size != "auto" {
+		payload["image_generation_size"] = size
 	}
 	headers := o.requirementHeaders(requirements)
 	headers["X-Conduit-Token"] = conduit

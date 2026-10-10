@@ -132,6 +132,16 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 
 ## 图片生成、编辑与参考图逻辑
 
+### 尺寸语义
+
+GPT 图片的同步与异步生成、编辑统一将省略 `size` 或 `size: "auto"` 视为自动尺寸。
+CFM 不再将自动尺寸改成 `1024x1024`，也不追加固定尺寸提示词或向 Web 发送固定尺寸字段。
+`auto` 由上游根据提示词与参考图决定构图，不表示严格保留第一张参考图的像素尺寸。
+显式 `宽x高` 继续使用现有尺寸提示与兼容映射，但 ChatGPT Web 不保证按指定像素输出；
+CFM 保留返回原图，不因尺寸偏差重新生成、缩放或裁剪。Grok 的默认尺寸保持不变。
+调用日志的 `request_meta.image_size` 记录请求尺寸、按顺序排列的输入尺寸、上游尺寸字段是否发送、
+发送值及实际输出尺寸，便于区分参数和结果。已完成的旧异步任务重复提交仍返回原结果。
+
 ### 调用示例
 
 文生图：
@@ -156,10 +166,38 @@ curl http://127.0.0.1:3000/v1/images/edits \
 同步 `gpt-image-2` 生成与编辑返回 `{"created": <Unix 秒>, "data": [{"b64_json": "..."}]}`，
 与官方 GPT Image 的 Base64 返回方式一致；不再返回 `data[].url`。请求请省略
 `response_format`，显式传入该参数返回 400（`error.param=response_format`）。
-JSON `images` 编辑输入仍是 CFM 扩展；标准 multipart 输入继续支持。
-本次仅对齐同步图片返回协议，原有数量和参考图限制保持；`mask`、透明背景、
-`output_format`（PNG/JPEG/WebP 选择）、逐步出图等能力尚未实现，不承诺这些参数生效。
+标准 multipart 输入继续支持；CFM 的 JSON `images: ["URL 或 data URL"]` 简写仍是扩展，
+不同于官方 JSON 图片引用对象。原有数量和参考图限制保持。
 上游没有提供的 token 用量、实际质量等元数据不会伪造返回。Grok 的返回方式不变。
+
+同步 `/v1/images/generations`、`/v1/images/edits` 及 CFM 异步扩展
+`/api/image-tasks/generations`、`/api/image-tasks/edits` 支持以下官方命名的输出参数：
+
+| 参数 | 当前 CFM 支持范围 |
+| --- | --- |
+| `background` | `auto`、`transparent`、`opaque`；省略或 `null` 沿用原有自动行为 |
+| `output_format` | `png`、`jpeg`、`webp`；省略或 `null` 默认 `png` |
+
+例如编辑请求可增加 `-F 'background=transparent' -F 'output_format=png'`。
+这些参数仅支持 GPT Image 模型。`background` 描述输出背景属性，不代表“去背景”操作；
+编辑内容仍由原始 `prompt` 指定。CFM 将透明/不透明要求转换为 Web 上游提示，
+不直接转发尚未验证有效的顶层 Web 字段。输出格式由 CFM 在下载后编码实现，
+图片实际字节、返回的 `output_format`、下载 Content-Type 和文件扩展名保持一致。
+默认输出 PNG，已经是 PNG 的结果保留原始字节；PNG 和无损 WebP 保留 Alpha。
+JPEG 不支持透明度，`background=transparent` 与 `output_format=jpeg` 的组合会在生图前返回 400。
+JPEG 编码使用质量 100；自动背景模式下若上游仍返回透明像素，合成到白底后编码，避免黑底或黑边。
+这属于格式转换，不执行主体识别或去背景；JPEG 是有损格式，不能保证与源图像素完全相同。
+WebP 使用纯 Go 的 [nativewebp v1.3.0](https://github.com/HugoSmits86/nativewebp/tree/v1.3.0)
+编码，无需 C 库或新增容器，适用于 `CGO_ENABLED=0` 的 ARM64 构建；许可证位于
+`third_party/nativewebp/LICENSE` 并随镜像分发。本次没有实现 `output_compression` 控制。
+
+CFM 在保存前检查实际像素：透明输出必须同时包含完全透明和可见像素；
+不透明输出不能包含半透明或全透明像素。若上游生成结果不符合要求，同步返回 502、
+异步任务标记失败，不自动换号重新生图，也不把该结果存入图片库。
+此检查只验证透明属性，不能保证抠图边缘、主体保真度或背景分离质量。
+异步任务保存这两个参数并将其纳入重复提交校验；已有未传参任务的校验摘要保持兼容。
+`mask`、逐步出图及其他未列出的官方能力尚未实现。
+协议来源：[OpenAI 图片编辑接口](https://developers.openai.com/api/reference/go/resources/images/methods/edit)。
 
 调用日志直接关联服务器已保存的生成图片，不依赖对外返回 URL。对于历史日志缺少图片地址的记录，
 日志管理会按图片元数据中的 `call_id` 补齐预览；只关联仍存在的生成结果，不重写原日志、

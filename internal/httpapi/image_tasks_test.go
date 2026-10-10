@@ -454,7 +454,7 @@ func TestImagePollingDeadlinePreservesUpstreamReason(t *testing.T) {
 	s.openAIImage = provider.NewOpenAIImage("http://upstream.invalid", client, nil, time.Second)
 	ctx, cancel := provider.WithImageTaskTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := s.generateOpenAIImageData(nil, ctx, "test", "gpt-image-2", "1024x1024", "auto", nil, "url", "http://cfm.invalid", 1)
+	_, err := s.generateOpenAIImageData(nil, ctx, "test", "gpt-image-2", "1024x1024", "auto", nil, "url", "http://cfm.invalid", 1, provider.ImageOutputOptions{})
 	if err == nil || !strings.Contains(err.Error(), "last poll error: upstream response contained no image reference") {
 		t.Fatalf("lost polling diagnostic: %v", err)
 	}
