@@ -124,8 +124,8 @@
               <th class="py-3 pr-5">状态</th>
               <th class="py-3 pr-5">账户信息</th>
               <th class="py-3 pr-5">创建时间</th>
-              <th class="py-3 pr-5">图片额度</th>
-              <th class="py-3 pr-5">恢复时间</th>
+              <th class="py-3 pr-5">能力额度</th>
+              <th class="py-3 pr-5">图片恢复时间</th>
               <th class="py-3 pr-5">成功 / 失败</th>
               <th class="py-3 text-right">操作</th>
             </tr>

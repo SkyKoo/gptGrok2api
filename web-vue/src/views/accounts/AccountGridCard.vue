@@ -49,6 +49,10 @@
       </button>
     </div>
 
+    <section aria-label="能力额度">
+      <QuotaBadge :account="item" />
+    </section>
+
     <KeyValueList
       :items="accountDetailItems(item)"
       :columns="2"
@@ -77,6 +81,7 @@ import { computed } from 'vue'
 import { Checkbox, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
 
 import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
+import QuotaBadge from '@/components/ai/QuotaBadge.vue'
 import type { Account } from '@/api/accounts'
 import {
   accountDetailItems,
