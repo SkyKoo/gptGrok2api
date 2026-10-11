@@ -27,9 +27,11 @@ func maskCount(masks []*provider.ImageMask) int {
 	return 0
 }
 func (s *Server) refreshAccountQuotas(ctx context.Context, a accounts.Account) error {
-	return s.accountPool.RefreshCapabilities(a, func(current accounts.Account) (map[string]any, error) {
+	err := s.accountPool.RefreshCapabilities(a, func(current accounts.Account) (map[string]any, error) {
 		return s.openAIAccountClient().FetchQuotas(ctx, current)
 	})
+	s.recoverInvalidAccount(a.Fields, err)
+	return err
 }
 func (s *Server) capabilityScheduler() {
 	// Startup grace gives operators time to verify a rollout against a quiet data
@@ -66,7 +68,7 @@ func (s *Server) refreshDueCapabilities() {
 			return
 		}
 		a := accounts.Account{Token: accountToken(row), Fields: row}
-		if !isOpenAIAccount(a) || !boolValue(row["enabled"], true) {
+		if !isOpenAIAccount(a) || !boolValue(row["enabled"], true) || s.skipAccountRecoveryProbe(row) {
 			continue
 		}
 		if row["quota_last_used_at"] == nil && row["quota_refresh_needed"] != true {

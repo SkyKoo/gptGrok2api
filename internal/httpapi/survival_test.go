@@ -42,7 +42,7 @@ func TestOpenAISurvivalRunUsesRealAccountEndpoints(t *testing.T) {
 	}
 	server := New(cfg)
 	token := "survival-token"
-	if _, _, _, err := server.store.AddAccounts(nil, []map[string]any{{"access_token": token, "source_type": "chatgpt_web"}}); err != nil {
+	if _, _, _, err := server.store.AddAccounts(nil, []map[string]any{{"access_token": token, "source_type": "chatgpt_web", "status": "异常", "relogin_blocked": true, "quota": 25}}); err != nil {
 		t.Fatal(err)
 	}
 	response := adminRequest(server.Handler(), http.MethodPost, "/api/register/openai/survival/run", nil)
@@ -54,6 +54,13 @@ func TestOpenAISurvivalRunUsesRealAccountEndpoints(t *testing.T) {
 		status := server.survivalSnapshot()
 		if running, _ := status["running"].(bool); !running {
 			if summary, ok := status["last_summary"].(map[string]any); ok && intValue(summary["confirmed"]) == 1 {
+				items, err := server.store.AccountList()
+				if err != nil || len(items) != 1 {
+					t.Fatal("account missing after verification")
+				}
+				if items[0]["status"] != "正常" || items[0]["relogin_blocked"] == true || items[0]["type"] != "plus" || items[0]["email"] != "survival@example.test" {
+					t.Fatal("successful verification did not explicitly restore account state")
+				}
 				return
 			}
 		}

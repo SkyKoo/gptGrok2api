@@ -266,6 +266,9 @@ func (s *Server) maybeAutoRemoveInvalidAccount(account accounts.Account) {
 			strings.TrimSpace(firstNonEmpty(stringValue(account.Fields["two_factor_secret"]), stringValue(account.Fields["totp_secret"]))) != "") {
 		return
 	}
+	if profile, err := s.accountReloginProfile(account.Fields); err == nil && profile != nil && stringValue(account.Fields["email"]) != "" {
+		return
+	}
 	settings, err := s.store.Config()
 	if err != nil || !boolValue(settings["auto_remove_invalid_accounts"], false) {
 		return
@@ -2082,6 +2085,9 @@ func accountStatusCategory(account map[string]any) string {
 	if !boolValue(account["enabled"], true) || status == "disabled" || status == "auto_disabled" || status == "禁用" || reason == "disabled" {
 		return "disabled"
 	}
+	if accounts.IsAbnormal(account) {
+		return "abnormal"
+	}
 	if status == "limited" || status == "rate_limited" || status == "cooling" || status == "backoff" || status == "限流" {
 		return "limited"
 	}
@@ -2092,14 +2098,6 @@ func accountStatusCategory(account map[string]any) string {
 	switch errorKind {
 	case "quota_exhausted", "media_pending", "media_generation_unavailable", "media_degraded", "lane_degraded", "text_pending":
 		return "limited"
-	case "auth_invalid", "parse_failure":
-		return "abnormal"
-	}
-	if status == "abnormal" || status == "invalid" || status == "error" || status == "incomplete" || status == "异常" {
-		if intValue(account["quota"]) > 0 || boolValue(account["survival_alive"], false) {
-			return "normal"
-		}
-		return "abnormal"
 	}
 	return "normal"
 }

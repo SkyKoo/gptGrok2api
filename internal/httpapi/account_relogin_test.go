@@ -192,9 +192,7 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 						t.Fatal("expected login failure")
 					}
 					after, _ := os.ReadFile(cfg.AccountsPath)
-					if string(before) != string(after) {
-						t.Fatal("failed login changed token/environment")
-					}
+					assertReloginFailurePreservesAccount(t, before, after)
 					continue
 				}
 				if progress["stage"] != "completed" {
@@ -393,9 +391,7 @@ func TestReloginConcurrentAccountsAndDuplicateStart(t *testing.T) {
 		t.Fatal("tasks did not finish")
 	}
 	after, _ := os.ReadFile(cfg.AccountsPath)
-	if string(after) != string(before) {
-		t.Fatal("failed login altered accounts")
-	}
+	assertReloginFailurePreservesAccount(t, before, after)
 	select {
 	case <-arrived:
 		t.Fatal("extra upstream login was launched")
@@ -424,5 +420,27 @@ func TestReloginIndependentCompletionAndRetention(t *testing.T) {
 	}
 	if summary := reloginSummary(s.reloginProgress["b"]); summary.Result != nil || summary.TokenExpiresAt != expiry {
 		t.Fatal("summary lost expiry or included account result")
+	}
+}
+
+// Failure may change status diagnostics, but never credentials, saved environment,
+// enabled state, quota, or unrelated account fields.
+func assertReloginFailurePreservesAccount(t *testing.T, before, after []byte) {
+	t.Helper()
+	var oldRows, newRows []map[string]any
+	if json.Unmarshal(before, &oldRows) != nil || json.Unmarshal(after, &newRows) != nil || len(oldRows) != len(newRows) {
+		t.Fatal("account history changed on login failure")
+	}
+	for i, row := range newRows {
+		if row["status"] != "异常" || row["relogin_blocked"] != true || stringValue(row["last_relogin_error"]) == "" || stringValue(row["last_relogin_error_at"]) == "" {
+			t.Fatal("failed login was not persistently blocked")
+		}
+		for _, key := range []string{"status", "relogin_blocked", "last_relogin_error", "last_relogin_error_at"} {
+			delete(row, key)
+			delete(oldRows[i], key)
+		}
+		if !reflect.DeepEqual(oldRows[i], row) {
+			t.Fatal("failed login changed credentials/environment/other account data")
+		}
 	}
 }

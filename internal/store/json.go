@@ -455,10 +455,23 @@ func (s *Store) UpdateAccount(token string, updates map[string]any) (map[string]
 // and coalesces disk writes. This avoids rewriting a large account file for
 // every concurrent success, timeout, or proxy failure.
 func (s *Store) UpdateAccountRuntime(token string, updates map[string]any) (map[string]any, error) {
+	return s.UpdateAccountRuntimeIf(token, updates, nil)
+}
+
+// UpdateAccountRuntimeIf evaluates allow under the same lock as the update.
+// The predicate must not mutate the snapshot or call back into Store.
+func (s *Store) UpdateAccountRuntimeIf(token string, updates map[string]any, allow func(map[string]any) bool) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadAccountsLocked(); err != nil {
 		return nil, err
+	}
+	if allow != nil {
+		for _, current := range s.accountsCache {
+			if accountToken(current) == token && !allow(current) {
+				return cloneMap(current), nil
+			}
+		}
 	}
 	accounts, next, ok := s.updatedAccountsLocked(token, updates)
 	if !ok {
@@ -493,6 +506,11 @@ func (s *Store) RotateAccountTokens(oldToken, newToken, refreshToken, idToken st
 	}
 	if strings.TrimSpace(idToken) != "" {
 		updates["id_token"] = strings.TrimSpace(idToken)
+	}
+	if fields["relogin_blocked"] != true {
+		updates["relogin_blocked"] = nil
+		updates["last_relogin_error"] = nil
+		updates["last_relogin_error_at"] = nil
 	}
 	updates["last_token_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
 	updates["last_token_refresh_error"] = nil

@@ -244,3 +244,20 @@ func TestAccountStatusCategoryDoesNotTreatTransientMarkersAsAbnormal(t *testing.
 		t.Fatalf("expected transient markers to remain normal, got %q", category)
 	}
 }
+
+func TestAccountStatusNeverRecoversFromCachedQuota(t *testing.T) {
+	for _, status := range []string{"异常", "abnormal", "invalid", "error", "incomplete", "expired", "unauthorized"} {
+		item := map[string]any{"status": status, "enabled": true, "quota": 25, "survival_alive": true, "status_reason_code": "image_quota_exhausted"}
+		if got := accountStatusCategory(item); got != "abnormal" {
+			t.Fatalf("status %s became %s", status, got)
+		}
+	}
+	for _, marker := range []map[string]any{{"relogin_blocked": true}, {"last_error_kind": "auth_invalid"}, {"last_error_kind": "parse_failure"}, {"status_reason_code": "auth_invalid"}} {
+		marker["status"] = "正常"
+		marker["quota"] = 25
+		marker["survival_alive"] = true
+		if got := accountStatusCategory(marker); got != "abnormal" {
+			t.Fatalf("failure marker became %s", got)
+		}
+	}
+}

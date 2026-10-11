@@ -12,12 +12,12 @@
         <article v-for="task in tasks" :key="task.progress_id" class="space-y-3 py-4" :aria-label="task.email || task.account_ref">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="min-w-0 space-y-1">
-              <p class="break-all text-sm font-medium">{{ task.email || task.account_ref }}</p>
+              <p class="break-all text-sm font-medium">{{ task.email || task.account_ref }}<span v-if="task.automatic" class="ml-2 text-xs font-normal text-muted-foreground">自动恢复</span></p>
               <p class="text-xs text-muted-foreground">{{ reloginStageLabel(task.failed_stage || task.stage) }} · {{ task.done ? '耗时' : '已用时' }} {{ reloginElapsed(task, now) }}</p>
             </div>
             <div class="flex shrink-0 items-center gap-3">
-              <span class="rounded-full border px-2.5 py-1 text-xs" :class="task.unavailable ? 'border-amber-500/30 text-amber-600' : task.error ? 'border-rose-500/30 text-rose-500' : task.done ? 'border-emerald-500/30 text-emerald-600' : 'border-sky-500/30 text-sky-500'">{{ task.unavailable ? '结果待核对' : task.error ? '失败' : task.done ? '成功' : '进行中' }}</span>
-              <button v-if="task.done && task.error && !task.unavailable" type="button" class="text-xs text-foreground underline underline-offset-4 disabled:opacity-40" :disabled="busyIds.has(task.account_ref)" @click="emit('retry', task.account_ref)">{{ busyIds.has(task.account_ref) ? '重试中' : '重试' }}</button>
+              <span class="rounded-full border px-2.5 py-1 text-xs" :class="task.unavailable ? 'border-amber-500/30 text-amber-600' : task.error ? 'border-rose-500/30 text-rose-500' : task.done ? 'border-emerald-500/30 text-emerald-600' : 'border-sky-500/30 text-sky-500'">{{ task.unavailable ? '结果待核对' : task.error ? (task.session_updated ? '额度待刷新' : '失败') : task.done ? '成功' : '进行中' }}</span>
+              <button v-if="task.done && task.error && !task.unavailable && !task.session_updated" type="button" class="text-xs text-foreground underline underline-offset-4 disabled:opacity-40" :disabled="busyIds.has(task.account_ref)" @click="emit('retry', task.account_ref)">{{ busyIds.has(task.account_ref) ? '重试中' : '重试' }}</button>
               <button v-if="task.done" type="button" class="text-xs text-muted-foreground hover:text-foreground" :aria-label="`收起 ${task.email || task.account_ref} 的登录记录`" @click="emit('dismiss', task.progress_id)">收起记录</button>
             </div>
           </div>
@@ -30,7 +30,7 @@
             <p :class="task.unavailable ? 'text-muted-foreground' : 'text-rose-500'">{{ reloginErrorText(task) }}</p>
             <details v-if="task.error && !task.unavailable" class="text-muted-foreground"><summary class="cursor-pointer">错误详情</summary><p class="mt-2 break-words font-mono">{{ task.error }}</p></details>
           </div>
-          <p v-else-if="task.done" class="text-xs text-emerald-600">会话已更新<span v-if="task.token_expires_at"> · 新凭据到期时间：{{ formatTime(task.token_expires_at) }}</span></p>
+          <p v-else-if="task.done" class="text-xs text-emerald-600">会话已更新<span v-if="task.quotas_refreshed">，用户信息和额度已刷新</span><span v-if="task.token_expires_at"> · 新凭据到期时间：{{ formatTime(task.token_expires_at) }}</span></p>
           <p v-else-if="task.stage === 'wait_code'" class="text-xs text-muted-foreground">正在自动读取邮箱验证码，无需在此页面输入。</p>
         </article>
       </div>

@@ -11,27 +11,32 @@ export interface AccountReloginTask {
   done: boolean
   error?: string
   unavailable?: boolean
+  automatic?: boolean
+  session_updated?: boolean
+  quotas_refreshed?: boolean
 }
 
 export const reloginSteps = ['准备邮箱', '初始化登录', '等待验证码', '验证验证码', '获取并保存会话']
 
 export function reloginStep(task: AccountReloginTask): number {
   const stage = task.failed_stage || task.stage
-  return ({ mail: 0, mailbox: 0, authorize: 1, send_code: 2, wait_code: 2, validate_code: 3, session: 4, save_session: 4, completed: 5 } as Record<string, number>)[stage] ?? -1
+  return ({ mail: 0, mailbox: 0, authorize: 1, send_code: 2, wait_code: 2, validate_code: 3, session: 4, save_session: 4, refresh_account: 4, completed: 5 } as Record<string, number>)[stage] ?? -1
 }
 
 export function reloginStageLabel(stage: string): string {
-  return ({ queued: '等待启动', config: '准备登录环境', mailbox: '准备邮箱', mail: '准备邮箱', authorize: '初始化登录', send_code: '重新发送验证码', wait_code: '等待邮箱验证码', validate_code: '验证验证码', session: '获取会话', save_session: '校验账号并保存会话', completed: '会话已更新', failed: '重新登录失败', unavailable: '进度记录已不可用' } as Record<string, string>)[stage] || '处理登录请求'
+  return ({ queued: '等待启动', config: '准备登录环境', mailbox: '准备邮箱', mail: '准备邮箱', authorize: '初始化登录', send_code: '重新发送验证码', wait_code: '等待邮箱验证码', validate_code: '验证验证码', session: '获取会话', save_session: '校验账号并保存会话', refresh_account: '刷新用户信息和额度', completed: '会话已更新', failed: '重新登录失败', unavailable: '进度记录已不可用' } as Record<string, string>)[stage] || '处理登录请求'
 }
 
 export function reloginErrorText(task: AccountReloginTask): string {
   if (task.unavailable) return '服务重启或记录已过期，无法确认此次结果。请先刷新账号列表核对。'
+  if (task.session_updated) return '新登录凭据已保存，但用户信息或额度刷新未完成。账号已标记异常并暂停调度，请刷新账号信息和额度完成校验。'
   const error = task.error || ''
   if (error.includes('timeout')) return '等待超时，请确认邮箱服务可用后重试。'
   if (error.includes('cancelled')) return '登录任务已中止，可以重新尝试。'
   if (error.includes('saved_browser_profile_unsupported')) return '已保存的登录环境不受支持，请检查账号配置。'
+  if (error.includes('account_changed')) return '账号已删除或凭据已变更，本次登录结果未覆盖现有账号。'
   if (error.includes('mismatch')) return '登录结果与原账号不一致，未更新原账号。'
-  return '重新登录未完成，原账号凭据保持不变。可查看错误详情后重试。'
+  return '重新登录未完成，原账号凭据保持不变，账号已标记异常并暂停调度。可查看错误详情后重试。'
 }
 
 export function reloginElapsed(task: AccountReloginTask, now: number): string {
@@ -59,6 +64,7 @@ export function createReloginTracker(transport: Transport, changed: (state: Relo
   const tasks = new Map<string, AccountReloginTask>()
   const starting = new Set<string>()
   let pollError = false
+  let hasSnapshot = false
   let pendingSync: Promise<void> | undefined
   const emit = () => changed({ tasks: [...tasks.values()].sort((a, b) => Number(a.done) - Number(b.done) || Date.parse(b.started_at) - Date.parse(a.started_at)), starting: [...starting], pollError })
   const busy = (ref: string) => starting.has(ref) || [...tasks.values()].some(t => t.account_ref === ref && !t.done)
@@ -77,7 +83,7 @@ export function createReloginTracker(transport: Transport, changed: (state: Relo
         const ids = new Set(incoming.map(t => t.progress_id))
         let finished = false
         for (const task of incoming) {
-          if (tasks.has(task.progress_id) && !tasks.get(task.progress_id)!.done && task.done) finished = true
+          if (task.done && (tasks.has(task.progress_id) ? !tasks.get(task.progress_id)!.done : hasSnapshot)) finished = true
           merge(task)
         }
         for (const old of activeBeforeRead) {
@@ -88,6 +94,7 @@ export function createReloginTracker(transport: Transport, changed: (state: Relo
           }
         }
         pollError = false
+        hasSnapshot = true
         emit()
         if (finished) completed()
       } catch {

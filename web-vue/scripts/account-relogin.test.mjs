@@ -87,3 +87,23 @@ test('elapsed time freezes at completion and steps reflect the failed stage', ()
   assert.equal(reloginStep(failed), 3)
   assert.equal(reloginStep(task('b', 'completed')), 5)
 })
+
+
+test('automatically completed task between polls refreshes accounts without a new POST', async () => {
+  let incoming = [], completions = 0
+  const tracker = createReloginTracker({ start: async () => { throw Error('must not POST') }, list: async () => incoming }, () => {}, () => { completions++ })
+  await tracker.sync()
+  incoming = [{ ...task('a', 'completed'), automatic: true, session_updated: true, quotas_refreshed: true }]
+  await tracker.sync()
+  assert.equal(completions, 1)
+  await tracker.sync()
+  assert.equal(completions, 1)
+})
+
+test('partial recovery explains that new credentials are kept but quotas need refreshing', () => {
+  const partial = { ...task('a', 'failed'), session_updated: true, failed_stage: 'refresh_account', error: 'account_refresh_failed' }
+  assert.match(reloginErrorText(partial), /新登录凭据已保存/)
+  assert.doesNotMatch(reloginErrorText(partial), /原账号凭据保持不变/)
+  assert.match(reloginErrorText(partial), /异常.*暂停调度/)
+  assert.equal(reloginStep(partial), 4)
+})

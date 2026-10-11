@@ -96,25 +96,111 @@ func TestPoolFeedbackInvokesInvalidCallbackOnlyForAuthFailures(t *testing.T) {
 	}
 }
 
-func TestPoolSuccessfulFeedbackClearsStaleRequestAbnormalState(t *testing.T) {
-	root := t.TempDir()
-	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
-	stored := map[string]any{
-		"access_token": "one", "pool": "basic", "enabled": true, "status": "异常",
-		"status_reason_code": "auth_invalid", "last_error_kind": "auth_invalid",
-		"last_error_status": 403, "last_error_message": "temporary forbidden", "invalid_count": 1,
+func TestPoolSuccessfulFeedbackDoesNotRestoreAbnormalAccount(t *testing.T) {
+	for _, staleSnapshot := range []bool{false, true} {
+		t.Run(fmt.Sprint(staleSnapshot), func(t *testing.T) {
+			p, repository := quotaPool(t, 50, 25, "正常")
+			rows, _ := repository.AccountList()
+			snapshot := rows[0]
+			// An earlier request was dispatched before authentication failed.
+			_, _, err := repository.UpdateAccount("token", map[string]any{
+				"status": "异常", "status_reason_code": "auth_invalid", "last_error_kind": "auth_invalid",
+				"last_error_status": 401, "last_error_message": "expired", "invalid_count": 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if staleSnapshot {
+				// It carries a transient error to exercise atomic feedback filtering.
+				snapshot["last_error_kind"] = "upstream_error"
+			} else {
+				rows, _ = repository.AccountList()
+				snapshot = rows[0]
+			}
+			p.Feedback(Account{Token: "token", Pool: "basic", Fields: snapshot}, 200, nil)
+			rows, _ = repository.AccountList()
+			if rows[0]["status"] != "异常" || rows[0]["last_error_kind"] != "auth_invalid" {
+				t.Fatal("delayed success restored abnormal account")
+			}
+			if l, e := reserveIntent(p, Intent{Kind: "chat"}); !errors.Is(e, ErrUnavailable) {
+				p.Release(l)
+				t.Fatalf("abnormal account selected: %v", e)
+			}
+		})
 	}
-	if err := repository.SaveAccounts([]map[string]any{stored}); err != nil {
+}
+
+func TestPoolSuccessfulFeedbackClearsTransientErrorsOnNormalAccount(t *testing.T) {
+	p, repository := quotaPool(t, 50, 25, "正常")
+	rows, _ := repository.AccountList()
+	a := Account{Token: "token", Fields: rows[0]}
+	p.Feedback(a, 503, errors.New("temporary service failure"))
+	rows, _ = repository.AccountList()
+	a.Fields = rows[0]
+	p.Feedback(a, 200, nil)
+	rows, _ = repository.AccountList()
+	if rows[0]["status"] != "正常" || stringValue(rows[0]["last_error_kind"]) != "" {
+		t.Fatal("normal account kept transient error")
+	}
+}
+
+func TestPoolAbnormalNeverUsesCachedQuotaOrSurvival(t *testing.T) {
+	markers := []map[string]any{}
+	for _, status := range []string{"异常", "abnormal", "invalid", "error", "incomplete", "expired", "unauthorized", "disabled", "auto_disabled", "禁用"} {
+		markers = append(markers, map[string]any{"status": status})
+	}
+	markers = append(markers, map[string]any{"last_error_kind": "auth_invalid"}, map[string]any{"last_error_kind": "parse_failure"}, map[string]any{"status_reason_code": "auth_invalid"}, map[string]any{"status_reason_code": "account_invalid"}, map[string]any{"relogin_blocked": true})
+	for _, marker := range markers {
+		t.Run(fmt.Sprint(marker), func(t *testing.T) {
+			p, repository := quotaPool(t, 50, 25, "正常")
+			marker["survival_alive"] = true
+			if _, _, e := repository.UpdateAccount("token", marker); e != nil {
+				t.Fatal(e)
+			}
+			for _, intent := range []Intent{{}, {Kind: "chat"}, {Kind: "image"}} {
+				l, e := reserveIntent(p, intent)
+				if !errors.Is(e, ErrUnavailable) {
+					p.Release(l)
+					t.Fatalf("selected abnormal/disabled account for %q: %v", intent.Kind, e)
+				}
+			}
+		})
+	}
+}
+
+func TestPoolReloginBlockPersistsUntilVerifiedRecovery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accounts.json")
+	s := store.New(path, "", "")
+	if err := s.SaveAccounts([]map[string]any{{"access_token": "token", "status": "异常", "quota": 25, "survival_alive": true, "relogin_blocked": true, "custom": "preserve"}}); err != nil {
 		t.Fatal(err)
 	}
-	p := New(repository)
-	p.Feedback(Account{Token: "one", Pool: "basic", Fields: stored}, 200, nil)
-	items, err := repository.AccountList()
+	p := New(s)
+	rows, _ := s.AccountList()
+	a := Account{Token: "token", Fields: rows[0]}
+	if err := p.RefreshCapabilities(a, func(Account) (map[string]any, error) {
+		return map[string]any{"capability_quotas": Quotas([]any{map[string]any{"feature_name": "reason", "remaining": 50}, map[string]any{"feature_name": "image_gen", "remaining": 25}}, time.Now())}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FlushAccounts(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := store.New(path, "", "")
+	p = New(reopened)
+	if l, err := reserveIntent(p, Intent{Kind: "image"}); !errors.Is(err, ErrUnavailable) {
+		p.Release(l)
+		t.Fatalf("quota refresh or restart unblocked account: %v", err)
+	}
+	if _, _, err := reopened.RotateAccountTokens("token", "verified", "", "", map[string]any{"status": "正常"}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := reserveIntent(p, Intent{Kind: "image"})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("verified recovery still unavailable: %v", err)
 	}
-	if items[0]["status"] != "正常" || intValue(items[0]["invalid_count"]) != 0 || stringValue(items[0]["last_error_kind"]) != "" {
-		t.Fatalf("successful request did not recover account: %#v", items[0])
+	defer p.Release(l)
+	if l.Account.Token != "verified" || l.Account.Fields["custom"] != "preserve" || l.Account.Fields["relogin_blocked"] == true {
+		t.Fatal("recovery corrupted account")
 	}
 }
 

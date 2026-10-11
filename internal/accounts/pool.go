@@ -203,8 +203,8 @@ func (p *Pool) Feedback(account Account, status int, err error) {
 		delete(p.cooldowns, account.Token)
 		delete(p.failures, account.Token)
 		p.mu.Unlock()
-		// A completed upstream request is positive proof that the credential is
-		// usable. Clear stale request markers left by an earlier proxy/CDN error.
+		// A delayed request success must not undo a newer abnormal state. Only
+		// explicit account verification/relogin can restore an abnormal account.
 		if hasRequestErrorMarkers(account.Fields) {
 			updates := map[string]any{
 				"last_error_kind":    nil,
@@ -215,10 +215,9 @@ func (p *Pool) Feedback(account Account, status int, err error) {
 				"invalid_count":      0,
 				"cooldown_until":     nil,
 			}
-			if isRequestMarkedAbnormal(account.Fields) {
-				updates["status"] = "正常"
-			}
-			_, _ = p.repository.UpdateAccountRuntime(account.Token, updates)
+			_, _ = p.repository.UpdateAccountRuntimeIf(account.Token, updates, func(current map[string]any) bool {
+				return !IsAbnormal(current)
+			})
 		}
 		return
 	}
@@ -275,12 +274,25 @@ func hasRequestErrorMarkers(fields map[string]any) bool {
 	return intValue(fields["invalid_count"]) > 0
 }
 
-func isRequestMarkedAbnormal(fields map[string]any) bool {
-	status := strings.ToLower(strings.TrimSpace(stringValue(fields["status"])))
-	reason := strings.ToLower(strings.TrimSpace(stringValue(fields["status_reason_code"])))
-	kind := strings.ToLower(strings.TrimSpace(stringValue(fields["last_error_kind"])))
-	return status == "异常" || status == "abnormal" || status == "invalid" || status == "unauthorized" ||
-		reason == "auth_invalid" || reason == "account_invalid" || kind == "auth_invalid"
+// IsAbnormal is shared by scheduling and the admin status display. Historical
+// quota/survival snapshots are never evidence that an abnormal account recovered.
+func IsAbnormal(fields map[string]any) bool {
+	if boolValue(fields["relogin_blocked"], false) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(fields["status"]))) {
+	case "abnormal", "invalid", "error", "incomplete", "异常", "expired", "unauthorized":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(fields["status_reason_code"]))) {
+	case "auth_invalid", "account_invalid":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(fields["last_error_kind"]))) {
+	case "auth_invalid", "parse_failure":
+		return true
+	}
+	return false
 }
 
 func retryAfterDuration(err error) time.Duration {
@@ -303,6 +315,9 @@ func retryAfterDuration(err error) time.Duration {
 }
 
 func (p *Pool) available(account Account, pools []string, now time.Time) bool {
+	if IsAbnormal(account.Fields) {
+		return false
+	}
 	// The claim is only a local exclusion hint, not proof that a token is valid.
 	if account.credentialExpiry != nil && *account.credentialExpiry <= float64(now.Unix())+float64(now.Nanosecond())/1e9 {
 		return false
@@ -319,37 +334,11 @@ func (p *Pool) available(account Account, pools []string, now time.Time) bool {
 	}
 	switch status {
 	case "disabled", "auto_disabled", "禁用", "abnormal", "invalid", "error", "incomplete", "异常", "expired", "unauthorized":
-		if looksRecovered(account.Fields) {
-			break
-		}
 		return false
 	case "limited", "rate_limited", "cooling", "backoff", "限流":
 		return false
 	}
 	if until := timestamp(account.Fields, "cooldown_until", "cooldown_until_ms", "next_retry_at"); until.After(now) {
-		return false
-	}
-	return true
-}
-
-func looksRecovered(fields map[string]any) bool {
-	if intValue(fields["quota"]) <= 0 && !boolValue(fields["survival_alive"], false) {
-		return false
-	}
-	if intValue(fields["invalid_count"]) > 0 {
-		return false
-	}
-	for _, key := range []string{"last_refresh_error", "last_token_refresh_error", "last_error_message"} {
-		if stringValue(fields[key]) != "" {
-			return false
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(stringValue(fields["last_error_kind"]))) {
-	case "auth_invalid", "parse_failure", "upstream_error":
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(stringValue(fields["status_reason_code"]))) {
-	case "account_invalid", "snlm0e_refresh_failed", "parse_failure", "upstream_error":
 		return false
 	}
 	return true

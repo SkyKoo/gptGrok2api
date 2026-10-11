@@ -202,6 +202,7 @@ func (s *Server) refreshOneAccount(parent context.Context, progressID, ref strin
 			_, _, _ = s.store.UpdateAccount(token, updates)
 		}
 		s.recordRefreshError(progressID, ref, err)
+		s.recoverInvalidAccount(account, err)
 		return
 	}
 	updated, _, updateErr := s.store.RotateAccountTokens(token, result.AccessToken, result.RefreshToken, result.IDToken, result.Fields)

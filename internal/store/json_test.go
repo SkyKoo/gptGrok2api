@@ -89,6 +89,9 @@ func TestRotateAccountTokensClearsStaleErrorMarkers(t *testing.T) {
 		"last_error_message":       "expired",
 		"last_error_at":            "2026-08-23T10:00:00Z",
 		"last_token_refresh_error": "old token failure",
+		"relogin_blocked":          true,
+		"last_relogin_error":       "old login failure",
+		"last_relogin_error_at":    "2026-08-23T10:00:00Z",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +119,9 @@ func TestRotateAccountTokensClearsStaleErrorMarkers(t *testing.T) {
 		"last_token_refresh_error",
 		"last_token_refresh_error_at",
 		"status_reason_code",
+		"relogin_blocked",
+		"last_relogin_error",
+		"last_relogin_error_at",
 	} {
 		if updated[key] != nil {
 			t.Fatalf("stale marker %q was not cleared: %#v", key, updated[key])
@@ -161,5 +167,26 @@ func TestAccountSnapshotUsesCopyOnWriteAndFlushesRuntimeUpdates(t *testing.T) {
 	}
 	if len(persisted) != 1 || persisted[0]["last_error_message"] != "temporary" {
 		t.Fatalf("runtime update was not flushed: %#v", persisted)
+	}
+}
+
+func TestRotateAccountTokensRetainsPartialReloginBlock(t *testing.T) {
+	repository := New(filepath.Join(t.TempDir(), "accounts.json"), "", "")
+	if err := repository.SaveAccounts([]map[string]any{{"access_token": "old", "quota": 25, "enabled": false}}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := repository.RotateAccountTokens("old", "new", "", "", map[string]any{"status": "异常", "relogin_blocked": true, "last_relogin_error": "account_refresh_failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated["relogin_blocked"] != true || updated["status"] != "异常" || updated["enabled"] != false || updated["access_token"] != "new" {
+		t.Fatal("partial login was not atomically blocked")
+	}
+	updated, _, err = repository.RotateAccountTokens("new", "new", "", "", map[string]any{"status": "正常"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated["relogin_blocked"] == true || updated["last_relogin_error"] != nil || updated["enabled"] != false {
+		t.Fatal("verified recovery did not clear block or changed enabled state")
 	}
 }

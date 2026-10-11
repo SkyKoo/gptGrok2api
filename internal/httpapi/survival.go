@@ -60,7 +60,7 @@ func (s *Server) executeOpenAISurvival() {
 	var wg sync.WaitGroup
 	for _, account := range items {
 		account := account
-		if strings.TrimSpace(accountToken(account)) == "" {
+		if strings.TrimSpace(accountToken(account)) == "" || s.skipAccountRecoveryProbe(account) {
 			continue
 		}
 		wg.Add(1)
@@ -178,9 +178,15 @@ func (s *Server) survivalProbe(account map[string]any, refreshFirst bool) string
 			status = "token_dead"
 		}
 		_, _, _ = s.store.UpdateAccount(accountToken(active), map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_check_error": safeRefreshError(err)})
+		s.recoverInvalidAccount(active, err)
 		return status
 	}
-	updated, _, updateErr := s.store.RotateAccountTokens(accountToken(active), result.AccessToken, result.RefreshToken, result.IDToken, map[string]any{"survival_status": firstNonEmpty(stringValue(result.Fields["type"]), "free"), "survival_last_probe_status": firstNonEmpty(stringValue(result.Fields["type"]), "free"), "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_alive": true, "survival_plan_type": firstNonEmpty(stringValue(result.Fields["type"]), "free"), "survival_check_error": nil})
+	fields := cloneMap(result.Fields)
+	plan := firstNonEmpty(stringValue(fields["type"]), "free")
+	for key, value := range map[string]any{"survival_status": plan, "survival_last_probe_status": plan, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_alive": true, "survival_plan_type": plan, "survival_check_error": nil} {
+		fields[key] = value
+	}
+	updated, _, updateErr := s.store.RotateAccountTokens(accountToken(active), result.AccessToken, result.RefreshToken, result.IDToken, fields)
 	if updateErr != nil || updated == nil {
 		return "error"
 	}
