@@ -9,6 +9,7 @@ export type RegisterLiveRuntimeInput = {
   applyConfig: (config: LegacyRegisterConfig) => void
   isTaskEnabled: () => boolean
   hasActiveCheckoutRetries?: () => boolean
+  hasScheduledRegistration?: () => boolean
 }
 
 const POLL_INTERVAL_KEY = 'register:poll'
@@ -21,7 +22,7 @@ export function useRegisterLiveRuntime(input: RegisterLiveRuntimeInput) {
   const eventSource = ref<EventSource | null>(null)
 
   function shouldKeepUpdating() {
-    return input.isTaskEnabled() || Boolean(input.hasActiveCheckoutRetries?.())
+    return input.isTaskEnabled() || Boolean(input.hasActiveCheckoutRetries?.()) || Boolean(input.hasScheduledRegistration?.())
   }
 
   function stopLiveUpdates() {

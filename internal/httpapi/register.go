@@ -27,6 +27,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.registerConfig(w)
 	case (path == "" || path == "/") && r.Method == http.MethodPost:
 		s.updateRegisterConfig(w, r)
+	case path == "/schedule":
+		s.registrationScheduleAPI(w, r)
 	case path == "/start" && r.Method == http.MethodPost:
 		s.setRegisterEnabled(w, true)
 	case path == "/stop" && r.Method == http.MethodPost:
@@ -107,7 +109,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
 		return
 	}
-	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error"} {
+	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "registration_schedule"} {
 		delete(updates, key)
 	}
 	s.mergeHMEPassword(updates)
@@ -122,6 +124,10 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
+	if enabled && s.registrationClosing {
+		writeError(w, 503, "服务正在停止，请稍后重试", "server_error")
+		return
+	}
 	if stringValue(s.registerStore.Get()["target"]) == "openai" || s.freeRegister.Snapshot()["running"] == true {
 		if enabled {
 			if _, err := s.freeRegister.Start(s.registerStore.Get()); err != nil {

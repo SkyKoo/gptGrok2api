@@ -106,6 +106,10 @@
             @reset-stats="resetLegacyStats"
             @export-grok="exportGrokAccounts"
           >
+            <template #schedule>
+              <RegisterSchedulePanel v-if="registerConfig.target === 'openai'" :schedule="registerConfig.registration_schedule"
+                :prepare="registerConfigRuntime.flushAutosave" :config-saving="legacySaving" @saved="applyRegistrationSchedule" />
+            </template>
             <RegisterFreeJobs v-if="registerConfig.target === 'openai'" :jobs="registerConfig.jobs" :running="registerConfig.enabled"
               @changed="refreshFreeJobs" />
             <FormSection
@@ -173,6 +177,8 @@ import CheckoutTaskTable from '@/views/register/CheckoutTaskTable.vue'
 import RegisterRuntimePanel from '@/views/register/RegisterRuntimePanel.vue'
 import RegisterTaskSettingsPanel from '@/views/register/RegisterTaskSettingsPanel.vue'
 import RegisterFreeJobs from '@/views/register/RegisterFreeJobs.vue'
+import RegisterSchedulePanel from '@/views/register/RegisterSchedulePanel.vue'
+import type { RegistrationSchedule } from '@/lib/registrationSchedule'
 import {
   defaultRegisterConfig,
   enabledRegisterProviderCount as buildEnabledRegisterProviderCount,
@@ -217,6 +223,10 @@ const autosaveStatus = registerConfigRuntime.autosaveStatus
 const autosaveMessage = registerConfigRuntime.autosaveMessage
 const registerConfig = registerConfigRuntime.config
 async function refreshFreeJobs() { await registerConfigRuntime.loadConfig(true); startLiveUpdates() }
+function applyRegistrationSchedule(schedule: RegistrationSchedule) {
+  if (registerConfig.value) registerConfig.value.registration_schedule = schedule
+  startLiveUpdates()
+}
 const registerProviders = registerConfigRuntime.providers
 const registerProxyMode = registerConfigRuntime.proxyMode
 const selectedRegisterProxyGroupId = registerConfigRuntime.selectedProxyGroupId
@@ -285,6 +295,7 @@ const liveRuntime = useRegisterLiveRuntime({
   applyConfig: (config) => applyRegisterRuntimeConfig(config),
   isTaskEnabled: registerConfigRuntime.isTaskEnabled,
   hasActiveCheckoutRetries,
+  hasScheduledRegistration: () => Boolean(registerConfig.value?.registration_schedule?.enabled),
 })
 const startLiveUpdates = liveRuntime.startLiveUpdates
 registerConfigRuntime.onConfigApplied(() => pruneGptMailStates())

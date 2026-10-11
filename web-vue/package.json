@@ -10,6 +10,7 @@
     "build:server": "npm run build && node -e \"const fs = require('fs'); fs.rmSync('../web_dist', { recursive: true, force: true }); fs.cpSync('dist', '../web_dist', { recursive: true })\"",
     "preview": "vite preview",
     "test:log-images": "node --experimental-strip-types --test scripts/log-input-images.test.mjs",
+    "test:registration-schedule": "node --experimental-strip-types --test scripts/registration-schedule.test.mjs",
     "test:account-quotas": "node --experimental-strip-types --test scripts/account-quotas.test.mjs"
   },
   "devDependencies": {

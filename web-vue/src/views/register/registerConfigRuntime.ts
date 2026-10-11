@@ -124,6 +124,7 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
       return nextProvider
     })
 
+    config.value.registration_schedule = incoming.registration_schedule
     config.value.enabled = incoming.enabled
     config.value.stats = incoming.stats
     config.value.logs = incoming.logs

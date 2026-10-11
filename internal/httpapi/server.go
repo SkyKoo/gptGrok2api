@@ -89,6 +89,10 @@ type Server struct {
 	probeStop          chan struct{}
 	probeWake          chan struct{}
 	proxyProbeURL      string
+
+	registrationSchedule *registerruntime.Schedule
+	registrationStop     chan struct{}
+	registrationClosing  bool
 }
 
 func New(cfg config.Config) *Server {
@@ -172,6 +176,7 @@ func New(cfg config.Config) *Server {
 		go server.grokProbeScheduler()
 		go server.openAISurvivalScheduler()
 		go server.capabilityScheduler()
+		go server.registrationScheduler()
 	}
 	return server
 }

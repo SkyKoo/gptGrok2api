@@ -36,6 +36,8 @@
         />
       </div>
 
+      <slot name="schedule" />
+
       <SurfaceBox tone="muted" density="compact">
         {{ runtimeHint }}
       </SurfaceBox>

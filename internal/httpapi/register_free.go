@@ -35,6 +35,8 @@ func (s *Server) initFreeRegistration() {
 	if s.cfg.RegisterPath != "" {
 		journalDir = filepath.Dir(s.cfg.RegisterPath)
 	}
+	s.registrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "openai_registration_schedule.json"))
+	s.registrationStop = make(chan struct{})
 	s.freeRegister = registerruntime.NewFreeEngine(filepath.Join(journalDir, "openai_registration_tasks.json"), factory, s.importRegisteredAccount, s.verifyRegisteredAccount)
 }
 func (s *Server) importRegisteredAccount(ctx context.Context, id string, account map[string]any) error {
@@ -94,6 +96,7 @@ func (s *Server) verifyRegisteredAccount(ctx context.Context, id string, account
 }
 func (s *Server) registrationSnapshot() map[string]any {
 	value := s.registerStore.Get()
+	value["registration_schedule"] = s.registrationSchedule.Snapshot()
 	providers, _ := mapValue(value["mail"])["providers"].([]any)
 	for _, raw := range providers {
 		p := mapValue(raw)
@@ -172,7 +175,15 @@ func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Reques
 }
 
 // ShutdownRegistration cancels background registration before the process exits.
-func (s *Server) ShutdownRegistration(ctx context.Context) error { return s.freeRegister.Shutdown(ctx) }
+func (s *Server) ShutdownRegistration(ctx context.Context) error {
+	s.registrationMu.Lock()
+	if !s.registrationClosing {
+		s.registrationClosing = true
+		close(s.registrationStop)
+	}
+	s.registrationMu.Unlock()
+	return s.freeRegister.Shutdown(ctx)
+}
 
 func writeRegistrationJSON(w http.ResponseWriter, status int, value any) {
 	redactHMECredentials(value)

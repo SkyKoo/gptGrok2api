@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { RegistrationSchedule } from '@/lib/registrationSchedule'
 
 export type OutlookMailboxParseStats = {
   raw_lines?: number
@@ -201,6 +202,7 @@ export type CheckoutTask = {
 }
 
 export type LegacyRegisterConfig = {
+  registration_schedule?: RegistrationSchedule
   openai_free: { timeout_seconds: number }
   jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean }>
   target: RegisterTarget | string
@@ -286,6 +288,9 @@ export const registerApi = {
   },
   retryFreeRegistration(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-registration', { id })
+  },
+  updateSchedule(payload: { enabled: boolean; interval_minutes: number }) {
+    return apiClient.post<any, { schedule: RegistrationSchedule }>('/api/register/schedule', payload)
   },
   getConfig() {
     return apiClient.get<any, { register: LegacyRegisterConfig }>('/api/register')
