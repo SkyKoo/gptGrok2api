@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,15 +15,70 @@ import (
 // progress. Relogin waits for an email OTP and can take several minutes; it
 // also updates one existing account instead of probing a token in place.
 type accountReloginProgress struct {
-	AccountRef string         `json:"account_ref"`
-	Stage      string         `json:"stage"`
-	Done       bool           `json:"done"`
-	Error      string         `json:"error,omitempty"`
-	Result     map[string]any `json:"result,omitempty"`
+	ProgressID     string         `json:"progress_id"`
+	AccountRef     string         `json:"account_ref"`
+	Email          string         `json:"email"`
+	Stage          string         `json:"stage"`
+	StartedAt      string         `json:"started_at"`
+	UpdatedAt      string         `json:"updated_at"`
+	FinishedAt     string         `json:"finished_at,omitempty"`
+	FailedStage    string         `json:"failed_stage,omitempty"`
+	TokenExpiresAt string         `json:"token_expires_at,omitempty"`
+	Done           bool           `json:"done"`
+	Error          string         `json:"error,omitempty"`
+	Result         map[string]any `json:"result,omitempty"`
+}
+
+// List responses intentionally exclude account results and credentials.
+func reloginSummary(progress *accountReloginProgress) accountReloginProgress {
+	summary := *progress
+	summary.Result = nil
+	return summary
+}
+
+func reloginTimeAfter(a, b string) bool {
+	first, _ := time.Parse(time.RFC3339Nano, a)
+	second, _ := time.Parse(time.RFC3339Nano, b)
+	return first.After(second)
+}
+
+// Keep all running tasks and the latest 100 finished tasks in this process.
+// Reading progress never initiates or repeats a login.
+func (s *Server) pruneAccountReloginsLocked() {
+	var finished []*accountReloginProgress
+	for _, p := range s.reloginProgress {
+		if p.Done {
+			finished = append(finished, p)
+		}
+	}
+	sort.Slice(finished, func(i, j int) bool { return reloginTimeAfter(finished[i].FinishedAt, finished[j].FinishedAt) })
+	for i := 100; i < len(finished); i++ {
+		delete(s.reloginProgress, finished[i].ProgressID)
+	}
+}
+
+func (s *Server) accountReloginList(w http.ResponseWriter, r *http.Request) {
+	s.reloginMu.RLock()
+	items := make([]accountReloginProgress, 0, len(s.reloginProgress))
+	for _, progress := range s.reloginProgress {
+		items = append(items, reloginSummary(progress))
+	}
+	s.reloginMu.RUnlock()
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Done != items[j].Done {
+			return !items[i].Done
+		}
+		return reloginTimeAfter(items[i].StartedAt, items[j].StartedAt)
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) accountReloginStart(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method == http.MethodGet {
+		s.accountReloginList(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -50,10 +106,21 @@ func (s *Server) accountReloginStart(w http.ResponseWriter, r *http.Request) {
 	publicRef := accountPublicRef(account)
 	progressID := newChatID()
 	s.reloginMu.Lock()
-	s.reloginProgress[progressID] = &accountReloginProgress{AccountRef: publicRef, Stage: "queued"}
+	for _, existing := range s.reloginProgress {
+		if existing.AccountRef == publicRef && !existing.Done {
+			summary := reloginSummary(existing)
+			s.reloginMu.Unlock()
+			writeJSON(w, http.StatusOK, map[string]any{"progress_id": summary.ProgressID, "account_ref": publicRef, "progress": summary})
+			return
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	progress := &accountReloginProgress{ProgressID: progressID, AccountRef: publicRef, Email: stringValue(account["email"]), Stage: "queued", StartedAt: now, UpdatedAt: now}
+	s.reloginProgress[progressID] = progress
+	summary := reloginSummary(progress)
 	s.reloginMu.Unlock()
 	go s.runAccountRelogin(progressID, publicRef)
-	writeJSON(w, http.StatusOK, map[string]any{"progress_id": progressID, "account_ref": publicRef})
+	writeJSON(w, http.StatusOK, map[string]any{"progress_id": progressID, "account_ref": publicRef, "progress": summary})
 }
 
 func (s *Server) accountReloginProgressAPI(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +153,8 @@ func (s *Server) accountReloginProgressAPI(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) updateAccountReloginStage(id, stage string) {
 	s.reloginMu.Lock()
-	if progress := s.reloginProgress[id]; progress != nil {
+	if progress := s.reloginProgress[id]; progress != nil && !progress.Done {
+		progress.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		progress.Stage = stage
 	}
 	s.reloginMu.Unlock()
@@ -95,14 +163,25 @@ func (s *Server) updateAccountReloginStage(id, stage string) {
 func (s *Server) finishAccountRelogin(id string, result map[string]any, err error) {
 	s.reloginMu.Lock()
 	if progress := s.reloginProgress[id]; progress != nil {
+		previousStage := progress.Stage
 		progress.Done = true
+		progress.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		progress.UpdatedAt = progress.FinishedAt
 		progress.Stage = "completed"
 		progress.Result = result
 		if err != nil {
 			progress.Stage = "failed"
+			progress.FailedStage = previousStage
+			var failure *registerruntime.Failure
+			if errors.As(err, &failure) && failure.Stage != "" {
+				progress.FailedStage = failure.Stage
+			}
 			progress.Error = safeReloginError(err)
+		} else {
+			progress.TokenExpiresAt = stringValue(result["token_expires_at"])
 		}
 	}
+	s.pruneAccountReloginsLocked()
 	s.reloginMu.Unlock()
 }
 
@@ -183,6 +262,7 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		s.finishAccountRelogin(progressID, nil, err)
 		return
 	}
+	s.updateAccountReloginStage(progressID, "config")
 	cfg, mail, flow, err := s.reloginConfig(account)
 	if err != nil {
 		s.finishAccountRelogin(progressID, nil, err)
@@ -212,6 +292,7 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		s.finishAccountRelogin(progressID, nil, err)
 		return
 	}
+	s.updateAccountReloginStage(progressID, "save_session")
 	newToken := stringValue(result["access_token"])
 	oldToken := accountToken(account)
 	if newToken == "" || oldToken == "" {
@@ -249,6 +330,6 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		s.finishAccountRelogin(progressID, nil, err)
 		return
 	}
-	items, _ := s.store.AccountList()
-	s.finishAccountRelogin(progressID, map[string]any{"updated": 1, "item": accountForAPI(updated), "items": accountsForAPI(items)}, nil)
+	claims, _ := jwtClaims(newToken)
+	s.finishAccountRelogin(progressID, map[string]any{"updated": 1, "item": accountForAPI(updated), "token_expires_at": jwtTime(claims["exp"])}, nil)
 }

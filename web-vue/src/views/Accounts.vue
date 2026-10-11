@@ -103,6 +103,17 @@
         </div>
       </div>
 
+      <AccountReloginPanel
+        v-model:expanded="reloginExpanded"
+        :tasks="reloginTasks"
+        :starting="reloginStarting"
+        :busy-ids="reloggingAccountIds"
+        :poll-error="reloginPollError"
+        :now="reloginNow"
+        @retry="reloginAccount"
+        @dismiss="dismissRelogin"
+      />
+
       <PageLoadingState
         v-if="loading && filteredAccounts.length === 0"
         title="正在加载账号"
@@ -147,7 +158,7 @@
               :selected="isSelected(item.id)"
               :refreshing="refreshingAccountId === item.id"
               :resetting="resettingAccountId === item.id"
-              :relogging="reloggingAccountId === item.id"
+              :relogging="reloggingAccountIds.has(item.id)"
               :status-detail-card-class="accountStatusDetailCardClass"
               :status-detail-text="accountStatusDetailText"
               @toggle-select="toggleSelect"
@@ -157,6 +168,7 @@
               @refresh-token="refreshToken"
               @reset-state="resetAccountState"
               @relogin="reloginAccount"
+              @show-relogin="showReloginProgress"
               @copy-final-checkout-link="copyFinalCheckoutLink"
               @open-final-checkout-link="openFinalCheckoutLink"
               @remove="removeAccount"
@@ -181,7 +193,7 @@
           :selected="isSelected(item.id)"
           :refreshing="refreshingAccountId === item.id"
           :resetting="resettingAccountId === item.id"
-          :relogging="reloggingAccountId === item.id"
+          :relogging="reloggingAccountIds.has(item.id)"
           :status-detail-card-class="accountStatusDetailCardClass"
           :status-detail-text="accountStatusDetailText"
           @toggle-select="toggleSelect"
@@ -191,6 +203,7 @@
           @refresh-token="refreshToken"
           @reset-state="resetAccountState"
           @relogin="reloginAccount"
+          @show-relogin="showReloginProgress"
           @copy-final-checkout-link="copyFinalCheckoutLink"
           @open-final-checkout-link="openFinalCheckoutLink"
           @remove="removeAccount"
@@ -1066,6 +1079,7 @@ import {
 } from '@/api/grokAccounts'
 import AccountGridCard from './accounts/AccountGridCard.vue'
 import AccountTableRow from './accounts/AccountTableRow.vue'
+import AccountReloginPanel from './accounts/AccountReloginPanel.vue'
 import GrokAccountConversationTestModal from './accounts/GrokAccountConversationTestModal.vue'
 import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
 import GrokAccountTableRow from './accounts/GrokAccountTableRow.vue'
@@ -1149,7 +1163,14 @@ const {
   viewMode,
   refreshingAccountId,
   resettingAccountId,
-  reloggingAccountId,
+  reloggingAccountIds,
+  reloginTasks,
+  reloginStarting,
+  reloginPollError,
+  reloginExpanded,
+  reloginNow,
+  dismissRelogin,
+  showReloginProgress,
   importBusy,
   exportBusy,
   showImportModal,

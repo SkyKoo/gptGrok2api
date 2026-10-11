@@ -258,3 +258,171 @@ func TestReloginRejectsUnsupportedStoredProfile(t *testing.T) {
 		t.Fatal("blocked legacy imported account without profile")
 	}
 }
+
+func TestReloginConcurrentAccountsAndDuplicateStart(t *testing.T) {
+	arrived, release := make(chan struct{}, 32), make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/auth/login" {
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"success":false,"error":"unauthorized"}`))
+	}))
+	defer upstream.Close()
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	root := t.TempDir()
+	cfg := testConfig()
+	cfg.RootDir, cfg.DataDir = root, root
+	cfg.AccountsPath, cfg.AuthKeysPath = filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json")
+	cfg.ConfigPath, cfg.RegisterPath = filepath.Join(root, "config.json"), filepath.Join(root, "register.json")
+	cfg.OpenAIBaseURL, cfg.OpenAIAuthBaseURL = upstream.URL+"/backend-api", upstream.URL
+	server := New(cfg)
+	_, _, _, err := server.store.AddAccounts(nil, []map[string]any{
+		{"access_token": "private-token-a", "email": "a@example.test", "user_id": "account-a"},
+		{"access_token": "private-token-b", "email": "b@example.test", "user_id": "account-b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = server.registerStore.Update(map[string]any{"target": "openai", "mode": "total", "total": 1, "threads": 1, "proxy": "direct", "mail": map[string]any{"providers": []any{map[string]any{"id": "test", "type": "icloud_hme", "api_base": upstream.URL, "admin_password": "private-hme-password", "account_id": "acc-test", "enable": true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(cfg.AccountsPath)
+	handler := server.Handler()
+	request := func(method, path, body, auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if auth != "" {
+			req.Header.Set("Authorization", "Bearer "+auth)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+	for _, auth := range []string{"", "api-secret"} {
+		if rec := request(http.MethodGet, "/api/accounts/relogin", "", auth); rec.Code == 200 {
+			t.Fatal("progress list is not admin-only")
+		}
+	}
+	var wg sync.WaitGroup
+	ids := make(chan map[string]string, 24)
+	for i := 0; i < 24; i++ {
+		ref := []string{"account-a", "account-b"}[i%2]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := request(http.MethodPost, "/api/accounts/relogin", `{"account_ref":"`+ref+`"}`, "admin-secret")
+			if rec.Code != 200 {
+				t.Errorf("start: %d", rec.Code)
+				return
+			}
+			var response struct {
+				ProgressID string                 `json:"progress_id"`
+				Progress   accountReloginProgress `json:"progress"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Error(err)
+				return
+			}
+			if response.Progress.StartedAt == "" || response.Progress.Email == "" || response.Progress.ProgressID != response.ProgressID {
+				t.Error("missing progress metadata")
+			}
+			ids <- map[string]string{"ref": ref, "id": response.ProgressID}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	byAccount := map[string]string{}
+	for item := range ids {
+		if previous := byAccount[item["ref"]]; previous != "" && previous != item["id"] {
+			t.Fatal("duplicate login started for same account")
+		}
+		byAccount[item["ref"]] = item["id"]
+	}
+	if len(byAccount) != 2 || byAccount["account-a"] == byAccount["account-b"] {
+		t.Fatal("accounts did not get independent tasks")
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("different accounts did not run concurrently")
+		}
+	}
+	list := func() []accountReloginProgress {
+		rec := request(http.MethodGet, "/api/accounts/relogin", "", "admin-secret")
+		if rec.Code != 200 {
+			t.Fatalf("list: %d", rec.Code)
+		}
+		for _, secret := range []string{"private-token", "private-hme", "browser_profile", "result"} {
+			if strings.Contains(rec.Body.String(), secret) {
+				t.Fatalf("list leaked %s", secret)
+			}
+		}
+		var response struct {
+			Items []accountReloginProgress `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response.Items
+	}
+	running := list()
+	if len(running) != 2 || running[0].Done || running[1].Done {
+		t.Fatal("list did not restore both running tasks")
+	}
+	unblock()
+	finished := false
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		tasks := list()
+		if len(tasks) == 2 && tasks[0].Done && tasks[1].Done {
+			for _, task := range tasks {
+				if task.Stage != "failed" || task.FailedStage != "mail" || task.FinishedAt == "" || task.Error == "" {
+					t.Fatalf("missing failure stage/result: %+v", task)
+				}
+			}
+			finished = true
+			break
+		}
+	}
+	if !finished {
+		t.Fatal("tasks did not finish")
+	}
+	after, _ := os.ReadFile(cfg.AccountsPath)
+	if string(after) != string(before) {
+		t.Fatal("failed login altered accounts")
+	}
+	select {
+	case <-arrived:
+		t.Fatal("extra upstream login was launched")
+	default:
+	}
+}
+
+func TestReloginIndependentCompletionAndRetention(t *testing.T) {
+	s := &Server{reloginProgress: map[string]*accountReloginProgress{}}
+	for i := 0; i < 105; i++ {
+		id := fmt.Sprintf("finished-%03d", i)
+		s.reloginProgress[id] = &accountReloginProgress{ProgressID: id, Done: true, FinishedAt: time.Unix(int64(i), 0).UTC().Format(time.RFC3339Nano)}
+	}
+	s.reloginProgress["a"] = &accountReloginProgress{ProgressID: "a", AccountRef: "a", Stage: "wait_code"}
+	s.reloginProgress["b"] = &accountReloginProgress{ProgressID: "b", AccountRef: "b", Stage: "session"}
+	expiry := "2026-10-21T00:00:00Z"
+	s.finishAccountRelogin("b", map[string]any{"token_expires_at": expiry, "item": map[string]any{"email": "b@example.test"}}, nil)
+	if a := s.reloginProgress["a"]; a.Done || a.Stage != "wait_code" {
+		t.Fatal("finishing B changed A")
+	}
+	if b := s.reloginProgress["b"]; !b.Done || b.TokenExpiresAt != expiry || b.FinishedAt == "" {
+		t.Fatal("missing completion metadata")
+	}
+	if len(s.reloginProgress) != 101 || s.reloginProgress["finished-000"] != nil {
+		t.Fatal("retention did not preserve all active plus latest 100 ended tasks")
+	}
+	if summary := reloginSummary(s.reloginProgress["b"]); summary.Result != nil || summary.TokenExpiresAt != expiry {
+		t.Fatal("summary lost expiry or included account result")
+	}
+}

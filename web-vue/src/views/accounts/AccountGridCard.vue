@@ -14,6 +14,7 @@
         <div class="min-w-0">
           <h3 class="truncate text-sm font-medium text-foreground">{{ accountPrimaryText(item) }}</h3>
           <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ accountSecondaryText(item) }}</p>
+          <button v-if="relogging" type="button" class="mt-2 text-xs text-sky-500 hover:underline" @click="emit('show-relogin')">重新登录中 · 查看进度</button>
         </div>
       </div>
       <StatusDetailPill
@@ -123,6 +124,7 @@ const emit = defineEmits<{
   (e: 'refresh-token', id: string): void
   (e: 'reset-state', id: string): void
   (e: 'relogin', id: string): void
+  (e: 'show-relogin'): void
   (e: 'copy-final-checkout-link', item: Account): void
   (e: 'open-final-checkout-link', item: Account): void
   (e: 'remove', id: string): void

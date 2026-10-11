@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "test:log-images": "node --experimental-strip-types --test scripts/log-input-images.test.mjs",
     "test:registration-schedule": "node --experimental-strip-types --test scripts/registration-schedule.test.mjs",
-    "test:account-quotas": "node --experimental-strip-types --test scripts/account-quotas.test.mjs"
+    "test:account-quotas": "node --experimental-strip-types --test scripts/account-quotas.test.mjs",
+    "test:account-relogin": "node --experimental-strip-types --test scripts/account-relogin.test.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",

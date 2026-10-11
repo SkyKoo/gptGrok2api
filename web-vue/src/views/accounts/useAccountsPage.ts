@@ -11,6 +11,7 @@ import { useToast } from '@/composables/useToast'
 import { errorMessage } from '@/lib/errorMessage'
 import { useAccountBulkActionsRuntime } from './accountBulkActionsRuntime'
 import { useAccountBulkProgressRuntime } from './accountBulkProgressRuntime'
+import { useAccountReloginRuntime } from './accountReloginRuntime'
 import { useAccountCrudRuntime } from './accountCrudRuntime'
 import { useAccountExportRuntime } from './accountExportRuntime'
 import { useAccountGroupsRuntime } from './accountGroupsRuntime'
@@ -189,7 +190,20 @@ export function useAccountsPage() {
   const editingId = accountCrud.editingId
   const refreshingAccountId = accountCrud.refreshingAccountId
   const resettingAccountId = accountCrud.resettingAccountId
-  const reloggingAccountId = accountCrud.reloggingAccountId
+  const accountRelogin = useAccountReloginRuntime({
+    emailFor: (id) => accounts.value.find(item => item.id === id)?.email || '',
+    loadData,
+  })
+  const {
+    tasks: reloginTasks,
+    starting: reloginStarting,
+    busyIds: reloggingAccountIds,
+    pollError: reloginPollError,
+    expanded: reloginExpanded,
+    now: reloginNow,
+    dismiss: dismissRelogin,
+    showProgress: showReloginProgress,
+  } = accountRelogin
   const accountStatusOptions = accountCrud.accountStatusOptions
   const form = accountCrud.form
 
@@ -388,7 +402,7 @@ export function useAccountsPage() {
   const toggleEnabled = accountCrud.toggleEnabled
   const refreshToken = accountCrud.refreshToken
   const resetAccountState = accountCrud.resetAccountState
-  const reloginAccount = accountCrud.reloginAccount
+  const reloginAccount = accountRelogin.start
   const removeAccount = accountCrud.removeAccount
 
   const pageLifecycle = useAccountPageLifecycleRuntime({
@@ -446,7 +460,14 @@ export function useAccountsPage() {
     viewMode,
     refreshingAccountId,
     resettingAccountId,
-    reloggingAccountId,
+    reloggingAccountIds,
+    reloginTasks,
+    reloginStarting,
+    reloginPollError,
+    reloginExpanded,
+    reloginNow,
+    dismissRelogin,
+    showReloginProgress,
     importBusy,
     exportBusy,
     showImportModal,

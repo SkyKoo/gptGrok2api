@@ -47,6 +47,7 @@
     <td class="py-4 pr-5 align-middle">
       <p class="max-w-[16rem] truncate text-sm font-medium text-foreground">{{ accountPrimaryText(item) }}</p>
       <p class="mt-1 max-w-[16rem] truncate font-mono text-xs text-muted-foreground">{{ accountSecondaryText(item) }}</p>
+      <button v-if="relogging" type="button" class="mt-2 text-xs text-sky-500 hover:underline" @click="emit('show-relogin')">重新登录中 · 查看进度</button>
     </td>
     <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
       {{ accountCreatedText(item) }}
@@ -132,6 +133,7 @@ const emit = defineEmits<{
   (e: 'refresh-token', id: string): void
   (e: 'reset-state', id: string): void
   (e: 'relogin', id: string): void
+  (e: 'show-relogin'): void
   (e: 'copy-final-checkout-link', item: Account): void
   (e: 'open-final-checkout-link', item: Account): void
   (e: 'remove', id: string): void
