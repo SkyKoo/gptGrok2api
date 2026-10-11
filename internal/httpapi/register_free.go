@@ -109,6 +109,9 @@ func (s *Server) registrationSnapshot() map[string]any {
 		state := s.freeRegister.Snapshot()
 		value["enabled"], value["stats"], value["logs"], value["jobs"] = state["running"], state["stats"], state["logs"], state["jobs"]
 		value["runtime_error"] = state["error"]
+		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
+			value[key] = state[key]
+		}
 	}
 	return value
 }

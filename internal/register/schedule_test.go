@@ -68,7 +68,7 @@ func TestScheduleTimingPersistenceAndNoCatchUp(t *testing.T) {
 
 func TestScheduleSkipsAndFailuresWaitForNextInterval(t *testing.T) {
 	now := time.Now().UTC()
-	for _, code := range []string{"already_running", "maintenance", "openai_target_required", "history_full_archive_completed_jobs_first"} {
+	for _, code := range []string{"already_running", "maintenance", "openai_target_required", "journal_write_failed"} {
 		t.Run(code, func(t *testing.T) {
 			s := NewSchedule(filepath.Join(t.TempDir(), "schedule.json"))
 			if err := s.Configure(true, 1, now); err != nil {
@@ -82,7 +82,7 @@ func TestScheduleSkipsAndFailuresWaitForNextInterval(t *testing.T) {
 			}
 			state := s.Snapshot()
 			want := "skipped"
-			if strings.HasPrefix(code, "history_full") {
+			if code == "journal_write_failed" {
 				want = "failed"
 			}
 			if state.LastResult != want || !strings.Contains(state.LastError, code) {

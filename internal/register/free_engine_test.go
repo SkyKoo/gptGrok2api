@@ -88,6 +88,9 @@ func TestFreeEnginePreservesResultAndRetriesOnlyImport(t *testing.T) {
 		if account["enabled"] != false {
 			t.Error("unverified account enabled")
 		}
+		if profile, ok := ParseBrowserProfile(account["browser_profile"]); !ok || !reflect.DeepEqual(profile, flow.BrowserProfile()) {
+			t.Error("account import lost the durable browser profile")
+		}
 		raw, _ := os.ReadFile(path)
 		if !strings.Contains(string(raw), "PRIVATE-TOKEN") {
 			t.Error("credentials not journaled before import")
@@ -427,5 +430,30 @@ func TestFreeEngineClearFinishedWriteFailureKeepsHistory(t *testing.T) {
 	reloaded := NewFreeEngine(path, nil, nil, nil)
 	if !reflect.DeepEqual(reloaded.jobs, jobs) {
 		t.Fatal("storage failure changed the existing journal")
+	}
+}
+
+func TestRegistrationProfileLookupSurvivesRestartAndChecksMailbox(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	want := browserProfileBase(1728, 1117, 10, 4294967296)
+	raw, _ := json.Marshal([]RegistrationJob{{ID: "job-1", Status: "completed", Mailbox: Mailbox{Email: "alias@example.test"}, BrowserProfile: &want}})
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	engine := NewFreeEngine(path, nil, nil, nil)
+	got, ok := engine.BrowserProfileForAccount("job-1", "Alias@example.test")
+	if !ok || !reflect.DeepEqual(got, want) {
+		t.Fatal("could not reload saved profile")
+	}
+	got.NavigatorLanguages[0] = "changed"
+	again, _ := engine.BrowserProfileForAccount("job-1", "alias@example.test")
+	if !reflect.DeepEqual(again, want) {
+		t.Fatal("lookup mutated journal")
+	}
+	if _, ok := engine.BrowserProfileForAccount("job-1", "other@example.test"); ok {
+		t.Fatal("used another account's profile")
+	}
+	if _, ok := engine.BrowserProfileForAccount("missing", "alias@example.test"); ok {
+		t.Fatal("invented missing profile")
 	}
 }

@@ -37,6 +37,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.resetRegister(w)
 	case path == "/runtime" && r.Method == http.MethodGet:
 		s.registerRuntimeStatus(w)
+	case path == "/openai/jobs" && r.Method == http.MethodGet:
+		writeRegistrationJSON(w, http.StatusOK, s.freeRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
 	case path == "/openai/retry-result" && r.Method == http.MethodPost:
 		s.retryFreeRegistration(w, r)
 	case path == "/openai/retry-registration" && r.Method == http.MethodPost:
@@ -109,7 +111,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
 		return
 	}
-	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "registration_schedule"} {
+	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
 		delete(updates, key)
 	}
 	s.mergeHMEPassword(updates)

@@ -2053,7 +2053,7 @@ func accountForAPI(account map[string]any) map[string]any {
 		item["has_access_token"] = false
 		item["token_preview"] = ""
 	}
-	for _, key := range []string{"access_token", "accessToken", "token", "cookie_header", "session_token", "refresh_token", "id_token", "login_password", "password", "two_factor_secret", "totp_secret"} {
+	for _, key := range []string{"access_token", "accessToken", "token", "cookie_header", "session_token", "refresh_token", "id_token", "login_password", "password", "two_factor_secret", "totp_secret", "browser_profile"} {
 		delete(item, key)
 	}
 	category := accountStatusCategory(item)

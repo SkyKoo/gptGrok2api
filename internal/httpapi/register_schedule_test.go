@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -175,29 +176,62 @@ func TestRegistrationScheduleManualOverlapMaintenanceAndDisable(t *testing.T) {
 	}
 }
 
-func TestRegistrationScheduleFullHistoryPreservesRecovery(t *testing.T) {
-	s := scheduleServer(t)
-	path := filepath.Join(t.TempDir(), "jobs.json")
-	jobs := make([]map[string]any, 100)
-	for i := range jobs {
-		jobs[i] = map[string]any{"id": "saved-job-" + strconv.Itoa(i), "status": "registration_pending", "mailbox": map[string]any{"email": "saved@example.test"}}
-	}
-	raw, _ := json.Marshal(jobs)
-	if err := os.WriteFile(path, raw, 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.freeRegister = registerruntime.NewFreeEngine(path, func(registerruntime.FreeConfig) (registerruntime.MailSource, registerruntime.RegistrationFlow, error) {
-		t.Error("must not create mailbox")
-		return nil, nil, nil
-	}, nil, nil)
-	_ = s.registrationSchedule.Configure(true, 1, time.Now())
-	s.runRegistrationSchedule(scheduleDue(t, s))
-	state := s.registrationSchedule.Snapshot()
-	if state.LastResult != "failed" || !strings.Contains(state.LastError, "history_full") {
-		t.Fatal("history failure missing")
-	}
-	after, _ := os.ReadFile(path)
-	if string(after) != string(raw) {
-		t.Fatal("recovery journal changed")
+func TestRegistrationStartsBeyondOldHistoryLimitAndPreservesRecovery(t *testing.T) {
+	for _, count := range []int{100, 1000} {
+		for _, mode := range []string{"manual", "scheduled"} {
+			t.Run(mode+"-"+strconv.Itoa(count), func(t *testing.T) {
+				s := scheduleServer(t)
+				path := filepath.Join(t.TempDir(), "jobs.json")
+				jobs := make([]registerruntime.RegistrationJob, count)
+				for i := range jobs {
+					jobs[i] = registerruntime.RegistrationJob{ID: "saved-job-" + strconv.Itoa(i), Status: "registration_pending", Mailbox: registerruntime.Mailbox{Email: "saved@example.test"}}
+				}
+				jobs[0].Status = "completed"
+				jobs[1].Status = "import_pending"
+				jobs[1].Account = map[string]any{"access_token": "PRIVATE-SAVED-RESULT"}
+				raw, _ := json.Marshal(jobs)
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				observed := make(chan struct{}, 3)
+				s.freeRegister = registerruntime.NewFreeEngine(path, func(registerruntime.FreeConfig) (registerruntime.MailSource, registerruntime.RegistrationFlow, error) {
+					observed <- struct{}{}
+					return nil, nil, &registerruntime.Failure{Stage: "test", Code: "fixture"}
+				}, nil, nil)
+				if mode == "scheduled" {
+					if err := s.registrationSchedule.Configure(true, 1, time.Now()); err != nil {
+						t.Fatal(err)
+					}
+					s.runRegistrationSchedule(scheduleDue(t, s))
+					if s.registrationSchedule.Snapshot().LastResult != "started" {
+						t.Fatal("history blocked scheduled registration")
+					}
+				} else {
+					res := adminRequest(s.Handler(), http.MethodPost, "/api/register/start", nil)
+					if res.Code != 200 {
+						t.Fatalf("history blocked manual start: %s", res.Body.String())
+					}
+				}
+				scheduleWait(t, s)
+				if len(observed) != 3 {
+					t.Fatal("batch was not started")
+				}
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var stored []registerruntime.RegistrationJob
+				if err := json.Unmarshal(after, &stored); err != nil {
+					t.Fatal(err)
+				}
+				if len(stored) != count+3 || !reflect.DeepEqual(stored[:count], jobs) {
+					t.Fatal("starting a batch changed or discarded older history/recovery data")
+				}
+				reloaded := registerruntime.NewFreeEngine(path, nil, nil, nil)
+				if reloaded.Snapshot()["jobs_total"] != count+3 {
+					t.Fatal("history lost after restart")
+				}
+			})
+		}
 	}
 }

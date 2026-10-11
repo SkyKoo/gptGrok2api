@@ -2,6 +2,7 @@ package register
 
 import (
 	crand "crypto/rand"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -176,4 +177,45 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ParseBrowserProfile restores private account/task state without retaining
+// references to its mutable slices. Unsupported profiles must not be reused.
+func ParseBrowserProfile(value any) (BrowserProfile, bool) {
+	raw, err := json.Marshal(value)
+	var profile BrowserProfile
+	if err != nil || json.Unmarshal(raw, &profile) != nil || !profile.valid() {
+		return BrowserProfile{}, false
+	}
+	if profile.ChromeMajor != "131" || !strings.HasPrefix(profile.ChromeFullVersion, "131.") ||
+		!strings.Contains(profile.UserAgent, "Chrome/"+profile.ChromeFullVersion) {
+		return BrowserProfile{}, false
+	}
+	return profile, true
+}
+
+// BrowserProfileFromFingerprint recovers the exact known template used by
+// older accounts after their registration journal was cleared. Do not infer a
+// different environment from an unknown name or a conflicting saved summary.
+func BrowserProfileFromFingerprint(value any) (BrowserProfile, bool) {
+	fp, ok := value.(map[string]any)
+	if !ok {
+		return BrowserProfile{}, false
+	}
+	for _, candidate := range browserProfilePool {
+		if stringValue(fp["profile"]) != candidate.Name {
+			continue
+		}
+		matches := true
+		for key, want := range candidate.fingerprintMetadata() {
+			if got, exists := fp[key]; exists && stringValue(got) != stringValue(want) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return ParseBrowserProfile(candidate)
+		}
+	}
+	return BrowserProfile{}, false
 }

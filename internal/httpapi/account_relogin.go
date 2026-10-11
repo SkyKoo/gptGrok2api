@@ -123,10 +123,38 @@ func safeReloginError(err error) string {
 	return "relogin_failed"
 }
 
-func (s *Server) reloginConfig() (registerruntime.FreeConfig, *registerruntime.HME, *registerruntime.WebRegistrar, error) {
+func (s *Server) accountReloginProfile(account map[string]any) (*registerruntime.BrowserProfile, error) {
+	if profile, ok := registerruntime.ParseBrowserProfile(account["browser_profile"]); ok {
+		return &profile, nil
+	}
+	if s.freeRegister != nil {
+		if profile, ok := s.freeRegister.BrowserProfileForAccount(stringValue(account["registration_job_id"]), stringValue(account["email"])); ok {
+			return &profile, nil
+		}
+	}
+	if profile, ok := registerruntime.BrowserProfileFromFingerprint(account["fp"]); ok {
+		return &profile, nil
+	}
+	if account["browser_profile"] != nil || stringValue(mapValue(account["fp"])["profile"]) != "" {
+		return nil, &registerruntime.Failure{Stage: "config", Code: "saved_browser_profile_unsupported"}
+	}
+	// Accounts imported without an environment retain the legacy fresh-profile
+	// behavior. A successful login saves it for all subsequent logins.
+	return nil, nil
+}
+
+func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConfig, *registerruntime.HME, *registerruntime.WebRegistrar, error) {
 	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
 	if err != nil {
 		return cfg, nil, nil, err
+	}
+	profile, err := s.accountReloginProfile(account)
+	if err != nil {
+		return cfg, nil, nil, err
+	}
+	var profiles []registerruntime.BrowserProfile
+	if profile != nil {
+		profiles = append(profiles, *profile)
 	}
 	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
 	if err != nil {
@@ -136,8 +164,13 @@ func (s *Server) reloginConfig() (registerruntime.FreeConfig, *registerruntime.H
 	if proxy == "" {
 		proxy = s.proxyManager.Resolve(nil, false)
 	}
-	flow, err := registerruntime.NewWebRegistrar(strings.TrimSuffix(strings.TrimRight(s.cfg.OpenAIBaseURL, "/"), "/backend-api"), s.cfg.OpenAIAuthBaseURL, proxy)
+	flow, err := registerruntime.NewWebRegistrar(strings.TrimSuffix(strings.TrimRight(s.cfg.OpenAIBaseURL, "/"), "/backend-api"), s.cfg.OpenAIAuthBaseURL, proxy, profiles...)
 	if err != nil {
+		mail.Close()
+		return cfg, nil, nil, err
+	}
+	if err := flow.SetDeviceID(stringValue(mapValue(account["fp"])["oai-device-id"])); err != nil {
+		flow.Close()
 		mail.Close()
 		return cfg, nil, nil, err
 	}
@@ -150,7 +183,7 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		s.finishAccountRelogin(progressID, nil, err)
 		return
 	}
-	cfg, mail, flow, err := s.reloginConfig()
+	cfg, mail, flow, err := s.reloginConfig(account)
 	if err != nil {
 		s.finishAccountRelogin(progressID, nil, err)
 		return
@@ -193,6 +226,10 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		s.finishAccountRelogin(progressID, nil, errors.New("account user mismatch"))
 		return
 	}
+	fingerprint := cloneMap(mapValue(account["fp"]))
+	for key, value := range mapValue(result["fp"]) {
+		fingerprint[key] = value
+	}
 	fields := map[string]any{
 		"email":                 firstNonEmpty(stringValue(result["email"]), stringValue(account["email"])),
 		"user_id":               firstNonEmpty(stringValue(result["user_id"]), stringValue(account["user_id"])),
@@ -201,6 +238,8 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		"status":                "正常",
 		"enabled":               boolValue(account["enabled"], true),
 		"registration_verified": true,
+		"browser_profile":       result["browser_profile"],
+		"fp":                    fingerprint,
 	}
 	if expired := stringValue(result["expired"]); expired != "" {
 		fields["expires"] = expired

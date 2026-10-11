@@ -11,7 +11,7 @@ test('schedule outcomes distinguish started, skipped and failed without claiming
   assert.match(registrationScheduleResult(state), /已启动一批/)
   assert.match(registrationScheduleResult({ ...state, last_error: 'task: already_running' }), /跳过/)
   assert.match(registrationScheduleResult({ ...state, last_error: 'task: maintenance' }), /维护/)
-  assert.match(registrationScheduleResult({ ...state, last_error: 'task: history_full_archive_completed_jobs_first' }), /待恢复任务会保留/)
+  assert.match(registrationScheduleResult({ ...state, last_error: 'task: history_full_archive_completed_jobs_first' }), /新版已取消该限制/)
   assert.match(registrationScheduleResult({ ...state, last_error: 'storage: schedule_state_write_failed' }), /存储/)
   assert.match(registrationScheduleResult({ ...state, last_error: 'config: use_total_mode' }), /批次配置/)
   assert.match(registrationScheduleResult({ ...state, last_result: 'pending' }), /不会重复补跑/)

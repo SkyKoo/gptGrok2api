@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -115,11 +117,6 @@ func (e *FreeEngine) Start(raw map[string]any) (string, error) {
 	if e.runCancel != nil || len(e.active) > 0 {
 		e.mu.Unlock()
 		return "", fail("task", "already_running")
-	}
-	// Never evict a pending result just to make space for another registration.
-	if len(e.jobs)+cfg.Total > 100 {
-		e.mu.Unlock()
-		return "", fail("task", "history_full_archive_completed_jobs_first")
 	}
 	id, err := e.createJobLocked()
 	if err != nil {
@@ -373,6 +370,9 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 	if stringValue(account["access_token"]) == "" {
 		return fail("session", "missing_access_token")
 	}
+	if provider, ok := flow.(RegistrationProfileProvider); ok {
+		account["browser_profile"] = provider.BrowserProfile()
+	}
 	account["registration_job_id"] = id
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": box.AccountID, "email": box.Email}
 	account["enabled"] = false
@@ -392,6 +392,21 @@ func (e *FreeEngine) getJob(id string) (RegistrationJob, error) {
 	}
 	return RegistrationJob{}, fail("task", "not_found")
 }
+
+// BrowserProfileForAccount reads only the matching account's private profile.
+// A journal ID alone is insufficient: an imported account must not inherit
+// another mailbox's registration environment.
+func (e *FreeEngine) BrowserProfileForAccount(id, email string) (BrowserProfile, bool) {
+	if id == "" || email == "" {
+		return BrowserProfile{}, false
+	}
+	job, err := e.getJob(id)
+	if err != nil || !strings.EqualFold(job.Mailbox.Email, email) {
+		return BrowserProfile{}, false
+	}
+	return ParseBrowserProfile(job.BrowserProfile)
+}
+
 func (e *FreeEngine) importAndVerify(ctx context.Context, id string) error {
 	j, err := e.getJob(id)
 	if err != nil {
@@ -631,11 +646,29 @@ func (e *FreeEngine) RetryRegistration(raw map[string]any, id string) error {
 	}()
 	return nil
 }
-func (e *FreeEngine) Snapshot() map[string]any {
+
+// RegistrationHistoryPageSize bounds API/SSE payloads, not retained history.
+const RegistrationHistoryPageSize = 50
+
+func (e *FreeEngine) Snapshot() map[string]any { return e.SnapshotPage(1) }
+
+// SnapshotPage keeps full-history counters but sends only one fixed-size page.
+// Page 1 contains the newest jobs; jobs within a page retain creation order.
+func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	jobs := []any{}
-	logs := []JobLog{}
+	total := len(e.jobs)
+	pages := maxInt(1, (total+RegistrationHistoryPageSize-1)/RegistrationHistoryPageSize)
+	if page < 1 {
+		page = 1
+	}
+	if page > pages {
+		page = pages
+	}
+	end := total - (page-1)*RegistrationHistoryPageSize
+	start := maxInt(0, end-RegistrationHistoryPageSize)
+	jobs := make([]any, 0, end-start)
+	logs := make([]JobLog, 0, 200)
 	success, failed := 0, 0
 	activeIDs := make([]string, 0, len(e.active))
 	for _, j := range e.jobs {
@@ -643,19 +676,27 @@ func (e *FreeEngine) Snapshot() map[string]any {
 			activeIDs = append(activeIDs, j.ID)
 		}
 	}
-	for _, j := range e.jobs {
+	for index, j := range e.jobs {
 		if j.Status == "completed" {
 			success++
 		} else if j.Status == "failed" || j.Status == "cancelled" || j.Status == "interrupted" {
 			failed++
 		}
+		if index < start || index >= end {
+			continue
+		}
 		_, active := e.active[j.ID]
 		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Verified && !active})
-		logs = append(logs, j.Logs...)
 	}
-	if len(logs) > 200 {
-		logs = logs[len(logs)-200:]
+	// Gather only the existing 200-line live-log window, without allocating the
+	// logs for the entire retained history on every SSE tick.
+	for i := len(e.jobs) - 1; i >= 0 && len(logs) < 200; i-- {
+		lines := e.jobs[i].Logs
+		for k := len(lines) - 1; k >= 0 && len(logs) < 200; k-- {
+			logs = append(logs, lines[k])
+		}
 	}
+	slices.Reverse(logs)
 	running := len(activeIDs)
 	if e.runCancel != nil && running == 0 {
 		running = 0
@@ -668,7 +709,7 @@ func (e *FreeEngine) Snapshot() map[string]any {
 	if threads == 0 && running > 0 {
 		threads = running
 	}
-	result := map[string]any{"running": e.runCancel != nil || running > 0, "active_job_id": activeID, "active_job_ids": activeIDs, "jobs": jobs, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": running, "threads": threads}}
+	result := map[string]any{"running": e.runCancel != nil || running > 0, "active_job_id": activeID, "active_job_ids": activeIDs, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": running, "threads": threads}}
 	if e.loadError != nil {
 		result["error"] = safeFailure(e.loadError)
 	}

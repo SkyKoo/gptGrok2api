@@ -129,6 +129,9 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     config.value.stats = incoming.stats
     config.value.logs = incoming.logs
     config.value.jobs = incoming.jobs
+    config.value.jobs_total = incoming.jobs_total
+    config.value.jobs_page = incoming.jobs_page
+    config.value.jobs_page_size = incoming.jobs_page_size
     config.value.grok_oauth_logs = incoming.grok_oauth_logs
     config.value.checkout_logs = incoming.checkout_logs
     config.value.checkout_tasks = incoming.checkout_tasks

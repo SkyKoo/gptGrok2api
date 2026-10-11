@@ -73,6 +73,22 @@ func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfil
 }
 func (r *WebRegistrar) Close()                         { r.http.CloseIdleConnections() }
 func (r *WebRegistrar) BrowserProfile() BrowserProfile { return r.profile }
+
+// SetDeviceID must be called before login. Only the stable device identity is
+// restored; the new registrar retains its fresh cookie jar and authorization.
+func (r *WebRegistrar) SetDeviceID(device string) error {
+	if len(device) > 256 {
+		return fail("config", "invalid_saved_device_id")
+	}
+	for _, ch := range device {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_' || ch == '.') {
+			return fail("config", "invalid_saved_device_id")
+		}
+	}
+	r.device = device
+	return nil
+}
+
 func sameOrigin(raw, base string) bool {
 	a, e := url.Parse(raw)
 	b, f := url.Parse(base)
@@ -195,6 +211,12 @@ func (r *WebRegistrar) cookie(rawURL, name, value string) {
 	r.http.SetCookies(u, []*fhttp.Cookie{{Name: name, Value: value, Path: "/", Secure: u.Scheme == "https", HttpOnly: true}})
 }
 func (r *WebRegistrar) begin(ctx context.Context, email string) (time.Time, error) {
+	if r.device != "" {
+		for _, origin := range []string{r.chat, r.auth, r.sentinel} {
+			r.cookie(origin, "oai-did", r.device)
+		}
+	}
+
 	// Match Turb's protocol flow: establish the anonymous ChatGPT context, then
 	// put login_hint on the NextAuth signin request. The authorize redirect is
 	// what enters the email-verification page and triggers the first OTP; do not
@@ -212,15 +234,17 @@ func (r *WebRegistrar) begin(ctx context.Context, email string) (time.Time, erro
 	if csrf.status != 200 || token == "" {
 		return time.Time{}, fail("authorize", "missing_csrf")
 	}
-	deviceBytes := make([]byte, 16)
-	if _, err := rand.Read(deviceBytes); err != nil {
-		return time.Time{}, fail("authorize", "random_failed")
+	if r.device == "" {
+		deviceBytes := make([]byte, 16)
+		if _, err := rand.Read(deviceBytes); err != nil {
+			return time.Time{}, fail("authorize", "random_failed")
+		}
+		r.device = hex.EncodeToString(deviceBytes)
 	}
 	loggingBytes := make([]byte, 16)
 	if _, err := rand.Read(loggingBytes); err != nil {
 		return time.Time{}, fail("authorize", "random_failed")
 	}
-	r.device = hex.EncodeToString(deviceBytes)
 	r.authSessionID = hex.EncodeToString(loggingBytes)
 	query := url.Values{
 		"prompt":                  {"login"},
@@ -243,8 +267,9 @@ func (r *WebRegistrar) begin(ctx context.Context, email string) (time.Time, erro
 		r.device = returnedDevice
 	}
 	r.state = u.Query().Get("state")
-	r.cookie(r.auth, "oai-did", r.device)
-	r.cookie(r.sentinel, "oai-did", r.device)
+	for _, origin := range []string{r.chat, r.auth, r.sentinel} {
+		r.cookie(origin, "oai-did", r.device)
+	}
 	started := time.Now().UTC().Add(-10 * time.Second)
 	landing, err := r.navigate(ctx, "authorize", authorize)
 	if err != nil {
@@ -458,7 +483,7 @@ func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig
 			}
 			fingerprint := r.profile.fingerprintMetadata()
 			fingerprint["oai-device-id"] = r.device
-			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint}, nil
+			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint, "browser_profile": r.BrowserProfile()}, nil
 		}
 		if attempt < 3 {
 			if err = pause(ctx, time.Duration(attempt+1)*time.Second); err != nil {

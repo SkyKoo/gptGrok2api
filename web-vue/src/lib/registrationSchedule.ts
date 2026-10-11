@@ -15,7 +15,7 @@ export function validRegistrationInterval(value: number) {
 export function registrationScheduleResult(schedule: RegistrationSchedule) {
   const error = schedule.last_error
   if (error.includes('schedule_state_')) return '定时状态无法读取或保存，请检查服务器存储。'
-  if (error.includes('history_full_archive_completed_jobs_first')) return '注册历史已满，请先清理已完成记录；待恢复任务会保留。'
+  if (error.includes('history_full_archive_completed_jobs_first')) return '上次启动曾被旧版历史条数限制阻止；新版已取消该限制，可手动启动或等待下次定时。'
   if (error.includes('already_running')) return '上次触发时已有注册任务，已跳过，等待下次定时。'
   if (error.includes('maintenance')) return '上次触发时服务正在维护，已跳过，等待下次定时。'
   if (error.includes('openai_target_required')) return '当前注册目标不是 ChatGPT，已跳过本次定时。'

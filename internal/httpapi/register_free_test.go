@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,5 +161,89 @@ func TestRegistrationCleanupReturnsCountAndKeepsRecovery(t *testing.T) {
 		if body.Removed != want || len(body.Register.Jobs) != 1 || body.Register.Jobs[0].ID != "pending" || body.Register.Jobs[0].Email != "retry@example.test" {
 			t.Fatalf("incorrect cleanup result: %s", res.Body.String())
 		}
+	}
+}
+
+func TestRegistrationHistoryUsesFixedSizePages(t *testing.T) {
+	cfg := adminTestConfig(t.TempDir())
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cfg.DataDir, "openai_registration_tasks.json")
+	jobs := make([]registerruntime.RegistrationJob, 123)
+	for i := range jobs {
+		jobs[i] = registerruntime.RegistrationJob{ID: fmt.Sprintf("job-%d", i), Status: "completed", Stage: "completed", Mailbox: registerruntime.Mailbox{Email: "saved@example.test"}}
+		for k := 0; k < 3; k++ {
+			jobs[i].Logs = append(jobs[i].Logs, registerruntime.JobLog{Text: fmt.Sprintf("job-%d-log-%d", i, k)})
+		}
+	}
+	jobs[0].Status = "import_pending"
+	jobs[0].Account = map[string]any{"access_token": "PRIVATE-TOKEN"}
+	profile := registerruntime.NewBrowserProfile()
+	jobs[0].BrowserProfile = &profile
+	raw, _ := json.Marshal(jobs)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg)
+	if _, err := s.registerStore.Update(map[string]any{"target": "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	for _, tc := range []struct {
+		path              string
+		page, first, last int
+	}{
+		{"/api/register", 1, 73, 122},
+		{"/api/register/openai/jobs?page=1&limit=100000", 1, 73, 122},
+		{"/api/register/openai/jobs?page=2", 2, 23, 72},
+		{"/api/register/openai/jobs?page=3", 3, 0, 22},
+		{"/api/register/openai/jobs?page=9223372036854775807", 3, 0, 22},
+		{"/api/register/openai/jobs?page=-1", 1, 73, 122},
+	} {
+		res := adminRequest(h, http.MethodGet, tc.path, nil)
+		if res.Code != 200 {
+			t.Fatalf("read failed: %d", res.Code)
+		}
+		if strings.Contains(res.Body.String(), "PRIVATE-TOKEN") || strings.Contains(res.Body.String(), "browser_profile") {
+			t.Fatal("private recovery data leaked")
+		}
+		var value map[string]any
+		if err := json.Unmarshal(res.Body.Bytes(), &value); err != nil {
+			t.Fatal(err)
+		}
+		if tc.path == "/api/register" {
+			value = mapValue(value["register"])
+		}
+		pageJobs := anyList(value["jobs"])
+		if len(pageJobs) != tc.last-tc.first+1 || len(pageJobs) > 50 || intValue(value["jobs_total"]) != 123 || intValue(value["jobs_page_size"]) != 50 || intValue(value["jobs_page"]) != tc.page {
+			t.Fatal("unbounded or incorrect page")
+		}
+		if mapValue(pageJobs[0])["id"] != fmt.Sprintf("job-%d", tc.first) || mapValue(pageJobs[len(pageJobs)-1])["id"] != fmt.Sprintf("job-%d", tc.last) {
+			t.Fatal("wrong history window")
+		}
+		if tc.first == 0 && mapValue(pageJobs[0])["can_retry"] != true {
+			t.Fatal("older pending result cannot be retried")
+		}
+		if intValue(mapValue(value["stats"])["success"]) != 122 {
+			t.Fatal("stats counted only visible jobs")
+		}
+		logs := anyList(value["logs"])
+		if len(logs) != 200 || mapValue(logs[0])["text"] != "job-56-log-1" || mapValue(logs[199])["text"] != "job-122-log-2" {
+			t.Fatal("recent log window changed")
+		}
+	}
+	unauth := httptest.NewRecorder()
+	h.ServeHTTP(unauth, httptest.NewRequest(http.MethodGet, "/api/register/openai/jobs?page=2", nil))
+	if unauth.Code != 401 {
+		t.Fatal("history endpoint lacks authentication")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(raw) {
+		t.Fatal("reading pages modified history")
+	}
+	snapshot := s.registrationSnapshot()
+	if len(anyList(snapshot["jobs"])) != 50 {
+		t.Fatal("live snapshot sends full history")
 	}
 }

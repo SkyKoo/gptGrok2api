@@ -205,6 +205,9 @@ export type LegacyRegisterConfig = {
   registration_schedule?: RegistrationSchedule
   openai_free: { timeout_seconds: number }
   jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean }>
+  jobs_total?: number
+  jobs_page?: number
+  jobs_page_size?: number
   target: RegisterTarget | string
   grok: GrokRegisterConfig
   checkout: OpenAICheckoutConfig
@@ -282,7 +285,17 @@ export type GptMailStatus = {
   default_domain?: string
 }
 
+export type RegistrationHistoryPage = {
+  jobs: NonNullable<LegacyRegisterConfig['jobs']>
+  jobs_total: number
+  jobs_page: number
+  jobs_page_size: number
+}
+
 export const registerApi = {
+  getFreeJobs(page: number) {
+    return apiClient.get<any, RegistrationHistoryPage>('/api/register/openai/jobs', { params: { page } })
+  },
   retryFreeResult(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-result', { id })
   },
