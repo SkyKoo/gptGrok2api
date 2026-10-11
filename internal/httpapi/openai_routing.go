@@ -158,6 +158,9 @@ func (t *routingTrace) begin(ctx context.Context, l *accounts.Lease, index, atte
 		}
 		if retry {
 			a.RetryReason = "same_model_account_retry"
+			if provider.IsRetryableImageGenerationError(err) {
+				a.RetryReason = "upstream_image_generation_retry"
+			}
 		}
 		t.publishLocked()
 	}

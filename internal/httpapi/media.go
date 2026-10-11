@@ -228,12 +228,12 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 			defer releaseSlot()
 			excluded := map[string]bool{}
 			var lastAttemptErr error
-			for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
+			for attempt := 0; ; attempt++ {
 				accountStarted := time.Now()
 				s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
 				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, s.supportsChatModel(conversationModel), s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs) + maskCount(masks)})
 				if reserveErr != nil {
-					if lastAttemptErr != nil {
+					if lastAttemptErr != nil && ctx.Err() == nil {
 						reserveErr = lastAttemptErr
 					}
 					sendErr(reserveErr)
@@ -246,15 +246,28 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				attemptCtx, finish := trace.begin(s.quotaContext(ctx, lease), lease, index, attempt)
 				generated, generateErr := s.openAIImage.GenerateWithOptions(attemptCtx, lease.Account, prompt, conversationModel, size, quality, inputs, options, masks...)
 				if generateErr != nil {
-					retry := ctx.Err() == nil && s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)
+					toolFailure := provider.IsRetryableImageGenerationError(generateErr)
+					retry := ctx.Err() == nil && attempt < imageGenerationMaxRetries && (toolFailure || (s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)))
 					finish(generateErr, retry)
 					s.accountPool.Release(lease)
-					if !provider.IsImageOutputError(generateErr) {
+					if !provider.IsImageOutputError(generateErr) && !(toolFailure && retry) {
 						s.routingFeedback(lease, generateErr)
 					}
-					excluded[lease.Account.Token] = true
+					// A transient tool failure does not invalidate the account. Let
+					// the pool rotate normally, or reuse it if it is the only eligible
+					// account. Every retry reserves and accounts for quota again.
+					if !toolFailure {
+						excluded[lease.Account.Token] = true
+					}
 					if retry {
 						lastAttemptErr = generateErr
+						if toolFailure {
+							if err := waitImageGenerationRetry(ctx, attempt); err != nil {
+								sendErr(err)
+								cancel()
+								return
+							}
+						}
 						continue
 					}
 					sendErr(generateErr)

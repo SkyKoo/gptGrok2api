@@ -750,11 +750,12 @@ func openAIImagePollErrorSummary(err error) string {
 	}
 }
 
-// Explicit upstream terminal failures must reach the caller without generating
-// again on another account, even when retryable HTTP statuses are customized.
+// Terminal failures normally must not regenerate, regardless of configured HTTP
+// retry codes. Only a recognized transient image-tool failure opts into retry.
 type imageTerminalError struct {
-	err    error
-	detail ImageErrorDetail
+	err       error
+	detail    ImageErrorDetail
+	retryable bool
 }
 
 func (e *imageTerminalError) Error() string { return e.err.Error() }
@@ -771,7 +772,7 @@ func openAIImageTerminalError(value any, secrets ...string) error {
 	}
 	detail := imageErrorDetail(reason, secrets...)
 	message := imageTerminalPrefix + truncateOpenAIImageReason(strings.TrimPrefix(detail.Message, imageTerminalPrefix))
-	return &imageTerminalError{err: &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}, detail: detail}
+	return &imageTerminalError{err: &protocol.UpstreamError{Status: http.StatusUnprocessableEntity, Message: message, Body: message}, detail: detail, retryable: retryableImageToolFailure(value, reason)}
 }
 
 func openAIImageTerminalReason(value any) string {
