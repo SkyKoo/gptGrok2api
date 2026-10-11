@@ -1,6 +1,7 @@
 <template>
-  <FormSection v-if="jobs?.length" title="注册任务记录" density="normal">
-    <div v-for="job in [...jobs].reverse()" :key="job.id" class="border-b py-3 space-y-1 text-sm">
+  <section class="register-free-jobs">
+    <EmptyState v-if="!jobs?.length" plain title="暂无注册任务" description="启动注册后会在这里显示任务记录。" />
+    <div v-for="job in [...(jobs || [])].reverse()" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words">
       <p>{{ job.email || '等待分配邮箱' }} · {{ labels[job.status] || job.status }}</p>
       <p class="text-xs text-muted-foreground">{{ stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
       <p v-if="job.error" class="text-xs break-all">{{ job.error }}</p>
@@ -8,12 +9,11 @@
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
     <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
-  </FormSection>
+  </section>
 </template>
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Button } from 'nanocat-ui'
-import FormSection from '@/components/ai/FormSection.vue'
+import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 defineProps<{ jobs: LegacyRegisterConfig['jobs']; running: boolean }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()

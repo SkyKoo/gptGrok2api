@@ -178,7 +178,7 @@ watch([showCheckoutLogTab, showOauthLogTab], ([checkoutVisible, oauthVisible]) =
   min-height: 20rem;
 }
 
-.register-runtime-extension :deep(.register-link-tasks) {
+.register-runtime-extension :deep(.register-task-records) {
   flex: 1;
   width: 100%;
 }

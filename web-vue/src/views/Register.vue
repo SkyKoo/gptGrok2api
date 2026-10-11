@@ -110,44 +110,52 @@
               <RegisterSchedulePanel v-if="registerConfig.target === 'openai'" :schedule="registerConfig.registration_schedule"
                 :prepare="registerConfigRuntime.flushAutosave" :config-saving="legacySaving" @saved="applyRegistrationSchedule" />
             </template>
-            <RegisterFreeJobs v-if="registerConfig.target === 'openai'" :jobs="registerConfig.jobs" :running="registerConfig.enabled"
-              @changed="refreshFreeJobs" />
-            <FormSection
-              v-if="hasCheckoutRuntime"
-              id="checkout-runtime"
-              title="提链任务"
-              density="roomy"
-              surface="plain"
-              class="register-link-tasks"
-            >
+            <FormSection v-if="taskRecordTabs.length" title="任务记录" density="roomy" class="register-task-records">
               <template #actions>
-                <MetaChip size="xs" tone="muted">{{ checkoutTasks.length }} 个任务</MetaChip>
-                <Button
-                  v-if="checkoutRetriesActive"
-                  size="sm"
-                  variant="outline"
-                  :disabled="checkoutRetryStopping"
-                  @click="stopCheckoutRetries"
-                >
-                  <Icon icon="lucide:square" class="h-3.5 w-3.5" />
-                  {{ checkoutRetryStopping ? '结束中...' : '结束提链' }}
-                </Button>
-                <Button
-                  v-if="clearableCheckoutTaskCount > 0"
-                  size="sm"
-                  variant="outline"
-                  :disabled="checkoutHistoryClearing"
-                  @click="clearCheckoutHistory"
-                >
-                  <Icon icon="lucide:trash-2" class="h-3.5 w-3.5" />
-                  {{ checkoutHistoryClearing ? '清空中...' : '清空历史' }}
-                </Button>
+                <ConsoleSegmentedTabs
+                  v-if="taskRecordTabs.length > 1"
+                  :model-value="activeTaskRecord"
+                  :options="taskRecordTabs"
+                  aria-label="任务记录类型"
+                  fit="content"
+                  @update:model-value="setActiveTaskRecord"
+                />
               </template>
 
-              <CheckoutTaskTable
-                :tasks="checkoutTasks"
-                @copy-payment-link="copyCheckoutPaymentLink"
-              />
+              <div class="register-task-toolbar">
+                <MetaChip size="xs" tone="muted">
+                  {{ activeTaskRecord === 'register' ? (registerConfig.jobs?.length || 0) : checkoutTasks.length }} 个任务
+                </MetaChip>
+                <template v-if="activeTaskRecord === 'checkout'">
+                  <Button
+                    v-if="checkoutRetriesActive"
+                    size="sm"
+                    variant="outline"
+                    :disabled="checkoutRetryStopping"
+                    @click="stopCheckoutRetries"
+                  >
+                    <Icon icon="lucide:square" class="h-3.5 w-3.5" />
+                    {{ checkoutRetryStopping ? '结束中...' : '结束提链' }}
+                  </Button>
+                  <Button
+                    v-if="clearableCheckoutTaskCount > 0"
+                    size="sm"
+                    variant="outline"
+                    :disabled="checkoutHistoryClearing"
+                    @click="clearCheckoutHistory"
+                  >
+                    <Icon icon="lucide:trash-2" class="h-3.5 w-3.5" />
+                    {{ checkoutHistoryClearing ? '清空中...' : '清空历史' }}
+                  </Button>
+                </template>
+              </div>
+
+              <div v-if="registerConfig.target === 'openai'" v-show="activeTaskRecord === 'register'" role="region" aria-label="注册任务记录">
+                <RegisterFreeJobs :jobs="registerConfig.jobs" :running="registerConfig.enabled" @changed="refreshFreeJobs" />
+              </div>
+              <div v-if="hasCheckoutRuntime" v-show="activeTaskRecord === 'checkout'" id="checkout-runtime" class="register-link-tasks" role="region" aria-label="提链任务记录">
+                <CheckoutTaskTable :tasks="checkoutTasks" @copy-payment-link="copyCheckoutPaymentLink" />
+              </div>
             </FormSection>
           </RegisterRuntimePanel>
         </div>
@@ -163,6 +171,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { Button } from 'nanocat-ui'
 import { registerApi } from '@/api/register'
 import FormSection from '@/components/ai/FormSection.vue'
+import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
@@ -345,6 +354,22 @@ const hasCheckoutRuntime = computed(() => (
   checkoutRetriesActive.value ||
   checkoutTasks.value.length > 0
 ))
+const activeTaskRecord = ref<'register' | 'checkout'>('register')
+const taskRecordTabs = computed(() => [
+  ...(registerTarget.value === 'openai' ? [{ value: 'register', label: '注册任务' }] : []),
+  ...(hasCheckoutRuntime.value ? [{ value: 'checkout', label: '提链任务' }] : []),
+])
+
+function setActiveTaskRecord(value: string | number) {
+  activeTaskRecord.value = value === 'checkout' ? 'checkout' : 'register'
+}
+
+watch(taskRecordTabs, (tabs) => {
+  if (!tabs.some((tab) => tab.value === activeTaskRecord.value)) {
+    setActiveTaskRecord(tabs[0]?.value || 'register')
+  }
+}, { immediate: true })
+
 const registerRuntimeHint = computed(() => buildRegisterRuntimeHint(
   registerConfig.value,
   enabledProviderCount.value,
@@ -485,6 +510,7 @@ async function copyCheckoutPaymentLink(value: string) {
 }
 
 async function focusCheckoutRuntime() {
+  activeTaskRecord.value = 'checkout'
   await nextTick()
   document.getElementById('checkout-runtime')?.scrollIntoView({
     behavior: 'smooth',
@@ -563,6 +589,32 @@ pageRuntime.onShow(() => {
 .register-content {
   display: grid;
   gap: 16px;
+}
+
+.register-task-records {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.register-task-records :deep(.form-section__header) {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.register-task-records :deep(.ui-segmented-btn) {
+  min-height: 28px;
+  padding-inline: 10px;
+}
+
+.register-task-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .register-link-tasks {
