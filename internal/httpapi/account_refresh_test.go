@@ -121,7 +121,7 @@ func TestAccountRefreshAcceptsPublicAccountRef(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/backend-api/me":
-			_ = json.NewEncoder(w).Encode(map[string]any{"email": "public@example.test", "id": "user-public"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "public@example.test", "id": "user-public-ref"})
 		case "/backend-api/conversation/init":
 			_ = json.NewEncoder(w).Encode(map[string]any{"default_model_slug": "gpt-5", "limits_progress": []any{map[string]any{"feature_name": "image_gen", "remaining": 12}}})
 		case "/backend-api/accounts/check/v4-2023-04-27":

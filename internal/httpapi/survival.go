@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	"net/http"
 	"strings"
 	"sync"
@@ -153,7 +155,7 @@ func (s *Server) survivalProbe(account map[string]any, refreshFirst bool) string
 	refreshed := false
 	if refreshFirst && !strings.EqualFold(stringValue(account["source_type"]), "chatgpt_web") && stringValue(account["refresh_token"]) != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		result, err := s.openAIAccountClient().RefreshAccount(ctx, account)
+		result, err := s.refreshValidatedAccount(ctx, account)
 		cancel()
 		if err == nil {
 			updated, _, updateErr := s.store.RotateAccountTokens(token, result.AccessToken, result.RefreshToken, result.IDToken, result.Fields)
@@ -171,13 +173,17 @@ func (s *Server) survivalProbe(account map[string]any, refreshFirst bool) string
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	result, err := s.openAIAccountClient().RefreshAccount(ctx, active)
+	result, err := s.refreshValidatedAccount(ctx, active)
 	if err != nil {
 		status := "error"
-		if strings.Contains(strings.ToLower(err.Error()), "invalid") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
+		if errors.Is(err, provider.ErrInvalidAccessToken) {
 			status = "token_dead"
 		}
-		_, _, _ = s.store.UpdateAccount(accountToken(active), map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_check_error": safeRefreshError(err)})
+		fields := accountRefreshFailureUpdates(err)
+		for key, value := range map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_check_error": safeRefreshError(err)} {
+			fields[key] = value
+		}
+		_, _, _ = s.store.UpdateAccount(accountToken(active), fields)
 		s.recoverInvalidAccount(active, err)
 		return status
 	}

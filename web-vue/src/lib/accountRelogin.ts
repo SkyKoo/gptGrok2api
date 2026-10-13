@@ -14,6 +14,10 @@ export interface AccountReloginTask {
   automatic?: boolean
   session_updated?: boolean
   quotas_refreshed?: boolean
+  validation_only?: boolean
+  validation_attempt?: number
+  next_validation_at?: string
+  diagnostic?: { stage: string; endpoint: string; status?: number; kind: string; message: string; retryable: boolean }
 }
 
 export const reloginSteps = ['准备邮箱', '初始化登录', '等待验证码', '验证验证码', '获取并保存会话']
@@ -29,6 +33,7 @@ export function reloginStageLabel(stage: string): string {
 
 export function reloginErrorText(task: AccountReloginTask): string {
   if (task.unavailable) return '服务重启或记录已过期，无法确认此次结果。请先刷新账号列表核对。'
+  if (task.session_updated && task.next_validation_at) return '新登录凭据已保存，账号保持异常并暂停调度。系统将使用已保存的凭据重试用户信息和额度校验，无需再次邮箱登录。'
   if (task.session_updated) return '新登录凭据已保存，但用户信息或额度刷新未完成。账号已标记异常并暂停调度，请刷新账号信息和额度完成校验。'
   const error = task.error || ''
   if (error.includes('timeout')) return '等待超时，请确认邮箱服务可用后重试。'

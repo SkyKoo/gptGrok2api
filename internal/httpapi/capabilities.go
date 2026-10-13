@@ -68,7 +68,19 @@ func (s *Server) refreshDueCapabilities() {
 			return
 		}
 		a := accounts.Account{Token: accountToken(row), Fields: row}
-		if !isOpenAIAccount(a) || !boolValue(row["enabled"], true) || s.skipAccountRecoveryProbe(row) {
+		if !isOpenAIAccount(a) || !boolValue(row["enabled"], true) {
+			continue
+		}
+		if mapValue(row["relogin_validation"])["pending"] == true {
+			if s.retryAccountValidation(row, time.Now()) {
+				count++
+			}
+			if count >= 4 {
+				break
+			}
+			continue
+		}
+		if s.skipAccountRecoveryProbe(row) {
 			continue
 		}
 		if row["quota_last_used_at"] == nil && row["quota_refresh_needed"] != true {

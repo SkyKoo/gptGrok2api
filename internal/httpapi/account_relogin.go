@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -22,6 +23,11 @@ type accountReloginProgress struct {
 	SessionUpdated    bool `json:"session_updated,omitempty"`
 	QuotasRefreshed   bool `json:"quotas_refreshed,omitempty"`
 	refreshAfterLogin bool
+	failureRecorded   bool
+	ValidationOnly    bool                           `json:"validation_only,omitempty"`
+	ValidationAttempt int                            `json:"validation_attempt,omitempty"`
+	NextValidationAt  string                         `json:"next_validation_at,omitempty"`
+	Diagnostic        *provider.AccountEndpointError `json:"diagnostic,omitempty"`
 	autoJoined        bool
 	accountToken      string
 	ProgressID        string         `json:"progress_id"`
@@ -68,12 +74,40 @@ func (s *Server) pruneAccountReloginsLocked() {
 }
 
 func (s *Server) accountReloginList(w http.ResponseWriter, r *http.Request) {
+	// Pending validation survives process restarts even though login progress is
+	// otherwise in-memory. GET only describes work; it never initiates a login.
+	rows, _ := s.store.AccountList()
+	pending := map[string]accountReloginProgress{}
+	for _, row := range rows {
+		state := mapValue(row["relogin_validation"])
+		if state["pending"] != true || !boolValue(row["enabled"], true) {
+			continue
+		}
+		id := stringValue(state["progress_id"])
+		if id == "" {
+			continue
+		}
+		var diagnostic provider.AccountEndpointError
+		raw, _ := json.Marshal(state["diagnostic"])
+		_ = json.Unmarshal(raw, &diagnostic)
+		pending[id] = accountReloginProgress{ProgressID: id, AccountRef: accountPublicRef(row), Email: stringValue(row["email"]), Stage: "failed", FailedStage: "refresh_account", StartedAt: stringValue(state["started_at"]), UpdatedAt: stringValue(state["updated_at"]), FinishedAt: stringValue(state["updated_at"]), Done: true, SessionUpdated: true, ValidationOnly: true, ValidationAttempt: intValue(state["attempts"]), NextValidationAt: stringValue(state["next_attempt_at"]), Diagnostic: &diagnostic, Error: diagnostic.Error(), accountToken: accountToken(row)}
+	}
 	s.reloginMu.RLock()
-	items := make([]accountReloginProgress, 0, len(s.reloginProgress))
+	items := make([]accountReloginProgress, 0, len(s.reloginProgress)+len(pending))
 	for _, progress := range s.reloginProgress {
-		items = append(items, reloginSummary(progress))
+		summary := reloginSummary(progress)
+		if queued, ok := pending[summary.ProgressID]; ok {
+			if summary.Done && progress.accountToken == queued.accountToken {
+				summary.NextValidationAt = queued.NextValidationAt
+			}
+			delete(pending, summary.ProgressID)
+		}
+		items = append(items, summary)
 	}
 	s.reloginMu.RUnlock()
+	for _, progress := range pending {
+		items = append(items, reloginSummary(&progress))
+	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Done != items[j].Done {
 			return !items[i].Done
@@ -163,7 +197,7 @@ func (s *Server) finishAccountRelogin(id string, result map[string]any, err erro
 	if progress := s.reloginProgress[id]; progress != nil {
 		// Mark the exact credential this task used before publishing completion.
 		// Runtime state blocks scheduling even if the subsequent disk flush fails.
-		if err != nil && progress.accountToken != "" && s.store != nil {
+		if err != nil && !progress.failureRecorded && progress.accountToken != "" && s.store != nil {
 			if _, saveErr := s.store.UpdateAccountRuntime(progress.accountToken, reloginFailureUpdates(err)); saveErr == nil {
 				if flushErr := s.store.FlushAccounts(); flushErr != nil {
 					log.Printf("persist relogin failure status: %v", flushErr)
@@ -189,6 +223,10 @@ func (s *Server) finishAccountRelogin(id string, result map[string]any, err erro
 				progress.FailedStage = failure.Stage
 			}
 			progress.Error = safeReloginError(err)
+			var endpoint *provider.AccountEndpointError
+			if progress.SessionUpdated || errors.As(err, &endpoint) {
+				progress.Diagnostic = validationDiagnostic(err)
+			}
 		}
 	}
 	s.pruneAccountReloginsLocked()
@@ -198,6 +236,10 @@ func (s *Server) finishAccountRelogin(id string, result map[string]any, err erro
 func safeReloginError(err error) string {
 	if err == nil {
 		return ""
+	}
+	var endpoint *provider.AccountEndpointError
+	if errors.As(err, &endpoint) {
+		return endpoint.Error()
 	}
 	var failure *registerruntime.Failure
 	if errors.As(err, &failure) {
@@ -360,42 +402,27 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 			candidate[key] = value
 		}
 		candidate["access_token"] = newToken
+		candidate["relogin_blocked"] = true
+		candidate["refresh_token"] = ""
 		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		refreshed, e := s.openAIAccountClient().RefreshAccount(refreshCtx, candidate)
+		refreshed, e := s.refreshValidatedAccount(refreshCtx, candidate)
 		refreshCancel()
 		refreshErr = e
-		if e == nil && (!strings.EqualFold(stringValue(refreshed.Fields["email"]), stringValue(latest["email"])) ||
-			stringValue(latest["user_id"]) != "" && stringValue(refreshed.Fields["user_id"]) != stringValue(latest["user_id"])) {
-			s.finishAccountRelogin(progressID, nil, &registerruntime.Failure{Stage: "refresh_account", Code: "account_identity_mismatch"})
+		if e != nil && validationDiagnostic(e).Kind == "account_identity_mismatch" {
+			s.finishAccountRelogin(progressID, nil, e)
 			return
 		}
 		if errors.Is(e, provider.ErrInvalidAccessToken) {
-			s.finishAccountRelogin(progressID, nil, &registerruntime.Failure{Stage: "refresh_account", Code: "new_access_token_invalid"})
+			s.finishAccountRelogin(progressID, nil, e)
 			return
-		}
-		limits, hasLimits := refreshed.Fields["limits_progress"].([]any)
-		if e == nil && (!hasLimits || limits == nil) {
-			refreshErr = errors.New("quota snapshot missing")
 		}
 		if refreshErr == nil {
 			for key, value := range refreshed.Fields {
 				fields[key] = value
 			}
-			fields["quota_pending"] = map[string]int{}
-			fields["quota_refresh_needed"] = false
-			fields["quota_refresh_error"] = nil
-			fields["capability_cooldowns"] = map[string]any{}
-			fields["survival_alive"] = true
-			fields["survival_status"] = fields["type"]
-			fields["survival_last_probe_status"] = fields["type"]
-			fields["survival_check_error"] = nil
-			fields["survival_last_checked_at"] = time.Now().UTC().Format(time.RFC3339)
-		} else {
-			// Keep the new browser credential even if the quota service is temporarily
-			// unavailable. Do not claim the old quota snapshot was refreshed.
-			fields["quota_refresh_needed"] = true
-			fields["quota_refresh_error"] = "upstream quota refresh failed; previous snapshot retained"
 		}
+		// On failure, validationFailureFields below preserves the old snapshot and
+		// persists the new credential together with its bounded retry state.
 	}
 	// Keep existing enabled/disabled state in Store rather than copying an old
 	// snapshot over an administrator action during the remote probe.
@@ -405,7 +432,8 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		return
 	}
 	if refreshErr != nil {
-		for key, value := range reloginFailureUpdates(&registerruntime.Failure{Stage: "refresh_account", Code: "account_refresh_failed"}) {
+		state := map[string]any{"id": progressID, "progress_id": progressID, "attempts": 0, "started_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		for key, value := range validationFailureFields(refreshErr, state, time.Now()) {
 			fields[key] = value
 		}
 	}
@@ -417,22 +445,29 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 	s.reloginMu.Lock()
 	if task := s.reloginProgress[progressID]; task != nil {
 		task.accountToken = newToken
+		task.failureRecorded = refreshErr != nil
 	}
 	s.reloginMu.Unlock()
 	claims, _ := jwtClaims(newToken)
 	resultSummary := map[string]any{"updated": 1, "item": accountForAPI(updated), "token_expires_at": jwtTime(claims["exp"]), "session_updated": true, "quotas_refreshed": refreshAfter && refreshErr == nil}
 	if refreshErr != nil {
-		s.finishAccountRelogin(progressID, resultSummary, &registerruntime.Failure{Stage: "refresh_account", Code: "account_refresh_failed"})
+		log.Printf("account validation progress=%s attempt=0: %s", progressID, validationDiagnostic(refreshErr).Error())
+		s.finishAccountRelogin(progressID, resultSummary, refreshErr)
 		return
 	}
 	s.finishAccountRelogin(progressID, resultSummary, nil)
 }
 
 func reloginFailureUpdates(err error) map[string]any {
-	return map[string]any{
+	fields := map[string]any{
 		"status":                "异常",
 		"relogin_blocked":       true,
 		"last_relogin_error":    safeReloginError(err),
 		"last_relogin_error_at": time.Now().UTC().Format(time.RFC3339),
 	}
+	var endpoint *provider.AccountEndpointError
+	if errors.As(err, &endpoint) {
+		fields["last_account_validation_error"] = validationDiagnostic(err)
+	}
+	return fields
 }

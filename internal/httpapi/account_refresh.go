@@ -196,7 +196,7 @@ func (s *Server) refreshOneAccount(parent context.Context, progressID, ref strin
 		return
 	}
 	token := accountToken(account)
-	result, err := s.openAIAccountClient().RefreshAccount(ctx, account)
+	result, err := s.refreshValidatedAccount(ctx, account)
 	if err != nil {
 		if updates := accountRefreshFailureUpdates(err); len(updates) > 0 {
 			_, _, _ = s.store.UpdateAccount(token, updates)
@@ -255,7 +255,7 @@ func (s *Server) recordRefreshError(progressID, ref string, err error) {
 			progress.Result = map[string]any{}
 		}
 		errorsValue, _ := progress.Result["errors"].([]any)
-		errorsValue = append(errorsValue, map[string]any{"token": tokenPreview(ref), "error": safeRefreshError(err)})
+		errorsValue = append(errorsValue, map[string]any{"token": tokenPreview(ref), "error": safeRefreshError(err), "diagnostic": validationDiagnostic(err)})
 		progress.Result["errors"] = errorsValue
 	}
 	s.refreshMu.Unlock()
@@ -317,6 +317,20 @@ func (s *Server) accountByRef(ref string) (map[string]any, error) {
 func accountRefreshFailureUpdates(err error) map[string]any {
 	if err == nil {
 		return nil
+	}
+	var endpoint *provider.AccountEndpointError
+	if errors.As(err, &endpoint) {
+		fields := map[string]any{"last_account_validation_error": validationDiagnostic(err), "last_refresh_warning": endpoint.Error(), "last_refresh_warning_at": time.Now().UTC().Format(time.RFC3339)}
+		if endpoint.Kind == "auth_invalid" || endpoint.Kind == "account_identity_mismatch" {
+			fields["status"] = "异常"
+			fields["relogin_blocked"] = true
+			fields["last_refresh_error"] = endpoint.Error()
+			if endpoint.Kind == "auth_invalid" {
+				fields["last_error_kind"] = "auth_invalid"
+				fields["last_error_status"] = 401
+			}
+		}
+		return fields
 	}
 	message := safeRefreshError(err)
 	lower := strings.ToLower(message)

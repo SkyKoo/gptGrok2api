@@ -90,6 +90,13 @@ func (s *Server) startAccountRelogin(account map[string]any, automatic bool) (ac
 			return empty, err
 		}
 	}
+	// An explicit new login supersedes the previous saved-session validation.
+	// Its later failure must not accidentally revive that old retry job.
+	if latest["relogin_validation"] != nil {
+		if _, _, err := s.store.UpdateAccount(accountToken(latest), map[string]any{"relogin_validation": nil}); err != nil {
+			return empty, err
+		}
+	}
 	id := newChatID()
 	progress := &accountReloginProgress{accountToken: accountToken(latest), ProgressID: id, AccountRef: publicRef, Email: stringValue(latest["email"]), Stage: "queued", StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano), Automatic: automatic, refreshAfterLogin: automatic || s.autoReloginEligible(latest)}
 	s.reloginProgress[id] = progress

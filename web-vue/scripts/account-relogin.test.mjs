@@ -107,3 +107,11 @@ test('partial recovery explains that new credentials are kept but quotas need re
   assert.match(reloginErrorText(partial), /异常.*暂停调度/)
   assert.equal(reloginStep(partial), 4)
 })
+
+
+test('pending validation explains reuse of the saved session without another login', () => {
+  const pending = { ...task('a', 'failed'), session_updated: true, next_validation_at: '2026-10-13T01:00:00Z', error: 'quota failed' }
+  assert.match(reloginErrorText(pending), /已保存.*重试/)
+  assert.match(reloginErrorText(pending), /无需再次邮箱登录/)
+  assert.match(reloginErrorText(pending), /异常.*暂停调度/)
+})

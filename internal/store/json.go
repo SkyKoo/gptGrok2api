@@ -427,13 +427,28 @@ func (s *Store) DeleteAccounts(tokens []string) (int, []map[string]any, error) {
 	return removed, cloneAccountList(filtered), nil
 }
 
+var ErrAccountChanged = errors.New("account changed")
+
 func (s *Store) UpdateAccount(token string, updates map[string]any) (map[string]any, []map[string]any, error) {
+	return s.UpdateAccountIf(token, updates, nil)
+}
+
+// UpdateAccountIf persists only if the current account still matches allow.
+// The predicate runs under the store lock and must not mutate or call Store.
+func (s *Store) UpdateAccountIf(token string, updates map[string]any, allow func(map[string]any) bool) (map[string]any, []map[string]any, error) {
 	s.accountsWriteMu.Lock()
 	defer s.accountsWriteMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadAccountsLocked(); err != nil {
 		return nil, nil, err
+	}
+	if allow != nil {
+		for _, current := range s.accountsCache {
+			if accountToken(current) == token && !allow(current) {
+				return nil, nil, ErrAccountChanged
+			}
+		}
 	}
 	accounts, next, ok := s.updatedAccountsLocked(token, updates)
 	if !ok {
@@ -497,6 +512,10 @@ func (s *Store) FlushAccounts() error {
 // the lookup key. Keeping this operation in Store avoids a race between a
 // refresh-token rotation and another concurrent account update.
 func (s *Store) RotateAccountTokens(oldToken, newToken, refreshToken, idToken string, fields map[string]any) (map[string]any, []map[string]any, error) {
+	return s.RotateAccountTokensIf(oldToken, newToken, refreshToken, idToken, fields, nil)
+}
+
+func (s *Store) RotateAccountTokensIf(oldToken, newToken, refreshToken, idToken string, fields map[string]any, allow func(map[string]any) bool) (map[string]any, []map[string]any, error) {
 	updates := cloneMap(fields)
 	if strings.TrimSpace(newToken) != "" {
 		updates["access_token"] = strings.TrimSpace(newToken)
@@ -511,6 +530,8 @@ func (s *Store) RotateAccountTokens(oldToken, newToken, refreshToken, idToken st
 		updates["relogin_blocked"] = nil
 		updates["last_relogin_error"] = nil
 		updates["last_relogin_error_at"] = nil
+		updates["relogin_validation"] = nil
+		updates["last_account_validation_error"] = nil
 	}
 	updates["last_token_refresh_at"] = time.Now().UTC().Format(time.RFC3339)
 	updates["last_token_refresh_error"] = nil
@@ -534,7 +555,7 @@ func (s *Store) RotateAccountTokens(oldToken, newToken, refreshToken, idToken st
 	} {
 		updates[key] = nil
 	}
-	return s.UpdateAccount(oldToken, updates)
+	return s.UpdateAccountIf(oldToken, updates, allow)
 }
 
 func (s *Store) loadAccountsLocked() error {

@@ -221,7 +221,14 @@ func (c *OpenAIAccountClient) getDefaultAccount(ctx context.Context, token strin
 	return result, nil
 }
 
-func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token string, account map[string]any, body any) (map[string]any, error) {
+func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token string, account map[string]any, body any) (value map[string]any, err error) {
+	status, retryAfter := 0, ""
+	defer func() {
+		if err != nil {
+			endpoint := strings.SplitN(path, "?", 2)[0]
+			err = accountEndpointError(endpoint, status, retryAfter, err, account, token, c.ProxyURL(account))
+		}
+	}()
 	var rawBody []byte
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -263,8 +270,8 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 		return nil, err
 	}
 	if response.StatusCode == http.StatusForbidden && c.ClearanceEnabled && c.FlareSolverrURL != "" {
-		_ = response.Body.Close()
 		if bundle, clearanceErr := c.refreshClearance(ctx, proxyURL, method, c.BaseURL+path, token, account, targetPath); clearanceErr == nil {
+			_ = response.Body.Close()
 			response, err = makeRequest(bundle)
 			if err != nil {
 				return nil, err
@@ -272,15 +279,23 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 		}
 	}
 	defer response.Body.Close()
-	if response.StatusCode == http.StatusUnauthorized {
-		return nil, ErrInvalidAccessToken
-	}
+	status, retryAfter = response.StatusCode, response.Header.Get("Retry-After")
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return nil, fmt.Errorf("openai account endpoint %s returned HTTP %d: %s", path, response.StatusCode, strings.TrimSpace(string(raw)))
+		raw, _ := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+		if len(raw) > 64<<10 {
+			raw = []byte("upstream response body exceeded diagnostic limit")
+		}
+		reason := strings.TrimSpace(string(raw))
+		if status == http.StatusUnauthorized {
+			if reason == "" {
+				return nil, ErrInvalidAccessToken
+			}
+			return nil, fmt.Errorf("%w: %s", ErrInvalidAccessToken, reason)
+		}
+		return nil, errors.New(reason)
 	}
-	var value map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+		status = 0 // HTTP succeeded; decoding/transport failed.
 		return nil, fmt.Errorf("decode OpenAI account response %s: %w", path, err)
 	}
 	return value, nil
