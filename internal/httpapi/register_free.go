@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -109,6 +110,7 @@ func (s *Server) registrationSnapshot() map[string]any {
 		state := s.freeRegister.Snapshot()
 		value["enabled"], value["stats"], value["logs"], value["jobs"] = state["running"], state["stats"], state["logs"], state["jobs"]
 		value["runtime_error"] = state["error"]
+		value["compensation_error"] = state["compensation_error"]
 		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
 			value[key] = state[key]
 		}
@@ -150,6 +152,16 @@ func registrationError(w http.ResponseWriter, err error) {
 	writeError(w, status, err.Error(), "registration_error")
 }
 func (s *Server) retryFreeRegistration(w http.ResponseWriter, r *http.Request) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if s.registrationClosing {
+		writeError(w, 503, "服务正在停止，请稍后重试", "server_error")
+		return
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+		writeError(w, 503, "服务维护中，请稍后重试", "server_error")
+		return
+	}
 	var body struct {
 		ID string `json:"id"`
 	}
@@ -164,6 +176,16 @@ func (s *Server) retryFreeRegistration(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Request) {
+	s.registrationMu.Lock()
+	defer s.registrationMu.Unlock()
+	if s.registrationClosing {
+		writeError(w, 503, "服务正在停止，请稍后重试", "server_error")
+		return
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+		writeError(w, 503, "服务维护中，请稍后重试", "server_error")
+		return
+	}
 	var body struct {
 		ID string `json:"id"`
 	}

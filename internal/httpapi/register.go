@@ -111,7 +111,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
 		return
 	}
-	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
+	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
 		delete(updates, key)
 	}
 	s.mergeHMEPassword(updates)

@@ -1,3 +1,4 @@
+import type { RegistrationCompensation } from '@/lib/registrationCompensation'
 import apiClient from './client'
 import type { RegistrationSchedule } from '@/lib/registrationSchedule'
 
@@ -203,8 +204,9 @@ export type CheckoutTask = {
 
 export type LegacyRegisterConfig = {
   registration_schedule?: RegistrationSchedule
+  compensation_error?: string
   openai_free: { timeout_seconds: number }
-  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean }>
+  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; auto_retry?: RegistrationCompensation | null }>
   jobs_total?: number
   jobs_page?: number
   jobs_page_size?: number

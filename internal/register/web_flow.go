@@ -157,7 +157,7 @@ func (r *WebRegistrar) request(ctx context.Context, stage, method, rawURL, body,
 		if resp.StatusCode == 429 {
 			code = "rate_limited"
 		}
-		return result, &Failure{Stage: stage, Code: code, HTTPStatus: resp.StatusCode}
+		return result, &Failure{Stage: stage, Code: code, HTTPStatus: resp.StatusCode, RetryAfter: hmeRetryAfter(resp.Header.Get("Retry-After"))}
 	}
 	if errorValue := result.data["error"]; errorValue != nil && errorValue != "" {
 		return result, fail(stage, "upstream_rejected")

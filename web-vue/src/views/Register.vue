@@ -151,7 +151,7 @@
               </div>
 
               <div v-if="registerConfig.target === 'openai'" v-show="activeTaskRecord === 'register'" role="region" aria-label="注册任务记录">
-                <RegisterFreeJobs :jobs="registerConfig.jobs" :total="registerConfig.jobs_total" :page-size="registerConfig.jobs_page_size" :running="registerConfig.enabled" @changed="refreshFreeJobs" />
+                <RegisterFreeJobs :jobs="registerConfig.jobs" :total="registerConfig.jobs_total" :page-size="registerConfig.jobs_page_size" :running="registerConfig.enabled" :compensation-error="registerConfig.compensation_error" @changed="refreshFreeJobs" />
               </div>
               <div v-if="hasCheckoutRuntime" v-show="activeTaskRecord === 'checkout'" id="checkout-runtime" class="register-link-tasks" role="region" aria-label="提链任务记录">
                 <CheckoutTaskTable :tasks="checkoutTasks" @copy-payment-link="copyCheckoutPaymentLink" />

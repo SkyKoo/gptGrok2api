@@ -1,0 +1,346 @@
+package register
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var compensationDelays = [...]time.Duration{5 * time.Minute, 30 * time.Minute, 2 * time.Hour}
+
+// Stored on the original job, never on a replacement job. Attempts are claimed
+// durably before network traffic, so a restart cannot reset the retry budget.
+type RegistrationCompensation struct {
+	State         string `json:"state"`
+	Attempts      int    `json:"attempts"`
+	NextAttemptAt string `json:"next_attempt_at,omitempty"`
+	LastAttemptAt string `json:"last_attempt_at,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+}
+
+func compensationSummary(state *RegistrationCompensation) any {
+	if state == nil {
+		return nil
+	}
+	return map[string]any{"state": state.State, "attempts": state.Attempts, "max_attempts": len(compensationDelays), "next_attempt_at": state.NextAttemptAt, "last_attempt_at": state.LastAttemptAt, "reason": state.Reason}
+}
+
+func savedRegistrationMailbox(j RegistrationJob) bool {
+	return j.Status == "registration_pending" && j.Mailbox.Email != "" && !j.Imported && !j.Verified && len(j.Account) == 0
+}
+
+var legacyFailureHTTP = regexp.MustCompile(`\(HTTP ([0-9]{3})\)`)
+var legacyRetryAfter = regexp.MustCompile(`retry_after=("[^"\r\n]*")`)
+
+// Recognize the fixed diagnostics emitted by the registration journal.
+// Unknown errors, challenge/identity failures and cancellations require review.
+func transientRegistrationFailure(message string) bool {
+	if message == "task_timeout" {
+		return true
+	}
+	code := strings.Fields(message)
+	if len(code) < 2 {
+		return false
+	}
+	if code[1] == "verification_required" {
+		return false
+	}
+	if match := legacyFailureHTTP.FindStringSubmatch(message); len(match) > 1 {
+		status, _ := strconv.Atoi(match[1])
+		return status == 408 || status == 429 || status >= 500 && status <= 599
+	}
+	return code[1] == "network_error" || code[1] == "read_error"
+}
+
+func registrationRetryDelay(message string, now time.Time, base time.Duration) time.Duration {
+	match := legacyRetryAfter.FindStringSubmatch(message)
+	if len(match) < 2 {
+		return base
+	}
+	raw, err := strconv.Unquote(match[1])
+	if err != nil {
+		return base
+	}
+	if seconds, err := strconv.ParseUint(raw, 10, 31); err == nil {
+		if delay := time.Duration(seconds) * time.Second; delay > base {
+			return delay
+		}
+	} else if at, err := http.ParseTime(raw); err == nil && at.Sub(now) > base {
+		return at.Sub(now)
+	}
+	return base
+}
+
+func planRegistrationCompensation(j *RegistrationJob, err error, now time.Time) {
+	if !savedRegistrationMailbox(*j) {
+		finishRegistrationCompensation(j, "saved_result")
+		return
+	}
+	if j.AutoRetry == nil {
+		j.AutoRetry = &RegistrationCompensation{}
+	}
+	state := j.AutoRetry
+	state.NextAttemptAt = ""
+	state.State, state.Reason = "manual", "failure_requires_review"
+	if errors.Is(err, context.Canceled) || j.Error == "task_cancelled" {
+		state.Reason = "cancelled"
+		return
+	}
+	if j.BrowserProfile == nil || !j.BrowserProfile.valid() || j.Mailbox.AccountID == "" {
+		state.Reason = "saved_environment_missing"
+		return
+	}
+	if !transientRegistrationFailure(j.Error) {
+		return
+	}
+	if state.Attempts < 0 {
+		state.Reason = "invalid_retry_state"
+		return
+	}
+	if state.Attempts >= len(compensationDelays) {
+		state.State, state.Reason = "exhausted", "retry_limit_reached"
+		return
+	}
+	state.State, state.Reason = "waiting", ""
+	state.NextAttemptAt = now.Add(registrationRetryDelay(j.Error, now, compensationDelays[state.Attempts])).UTC().Format(time.RFC3339Nano)
+}
+
+func finishRegistrationCompensation(j *RegistrationJob, state string) {
+	if j.AutoRetry != nil {
+		j.AutoRetry.State = state
+		j.AutoRetry.NextAttemptAt = ""
+		j.AutoRetry.Reason = ""
+	}
+}
+
+func recoverRegistrationCompensation(j *RegistrationJob, now time.Time) {
+	if j.AutoRetry == nil || j.AutoRetry.State != "running" {
+		return
+	}
+	if !savedRegistrationMailbox(*j) {
+		finishRegistrationCompensation(j, "saved_result")
+		return
+	}
+	if j.AutoRetry.Attempts < 0 {
+		finishRegistrationCompensation(j, "manual")
+		j.AutoRetry.Reason = "invalid_retry_state"
+		return
+	}
+	if j.AutoRetry.Attempts >= len(compensationDelays) {
+		finishRegistrationCompensation(j, "exhausted")
+		return
+	}
+	j.AutoRetry.State = "waiting"
+	// Keep the reserved request deadline + backoff after a crash.
+	if _, err := time.Parse(time.RFC3339Nano, j.AutoRetry.NextAttemptAt); err != nil {
+		j.AutoRetry.NextAttemptAt = now.Add(compensationDelays[j.AutoRetry.Attempts]).UTC().Format(time.RFC3339Nano)
+	}
+}
+
+func (e *FreeEngine) compensationIdleLocked() error {
+	if e.loadError != nil {
+		return e.loadError
+	}
+	if e.closing {
+		return fail("task", "shutting_down")
+	}
+	if e.runCancel != nil || len(e.active) > 0 {
+		return fail("task", "already_running")
+	}
+	return nil
+}
+
+// RunCompensation is called by the maintenance-aware registration scheduler.
+// It never starts a new batch and only launches one existing mailbox at a time.
+func (e *FreeEngine) RunCompensation(raw map[string]any, now time.Time) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := e.compensationIdleLocked(); err != nil {
+		return false, err
+	}
+	e.compensationError = ""
+	if stringValue(raw["target"]) != "openai" {
+		return false, nil
+	}
+	hasPending := false
+	for _, j := range e.jobs {
+		if savedRegistrationMailbox(j) && (j.AutoRetry == nil && transientRegistrationFailure(j.Error) || j.AutoRetry != nil && j.AutoRetry.State == "waiting") {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		return false, nil
+	}
+	cfg, err := ParseFreeConfig(raw)
+	if err != nil {
+		e.compensationError = safeFailure(err)
+		return false, err
+	}
+	// Adopt legacy pending mailboxes once. Start with a full cooldown from this
+	// observation, instead of replaying all overdue history immediately on upgrade.
+	var old []RegistrationJob
+	changed := false
+	for i, j := range e.jobs {
+		if !savedRegistrationMailbox(j) || j.AutoRetry != nil || !transientRegistrationFailure(j.Error) {
+			continue
+		}
+		if !changed {
+			old = append([]RegistrationJob(nil), e.jobs...)
+		}
+		j = cloneJob(j)
+		planRegistrationCompensation(&j, nil, now)
+		e.jobs[i] = j
+		changed = true
+	}
+	if changed {
+		if err := e.saveLocked(); err != nil {
+			e.jobs = old
+			e.loadError = err
+			return false, err
+		}
+	}
+	selected := -1
+	var oldest time.Time
+	for i, j := range e.jobs {
+		if !savedRegistrationMailbox(j) || j.AutoRetry == nil || j.AutoRetry.State != "waiting" {
+			continue
+		}
+		due, err := time.Parse(time.RFC3339Nano, j.AutoRetry.NextAttemptAt)
+		if err != nil || j.AutoRetry.Attempts < 0 || j.AutoRetry.Attempts >= len(compensationDelays) {
+			continue
+		}
+		if j.Mailbox.AccountID != cfg.HME.AccountID || j.MailboxAPIBase != "" && j.MailboxAPIBase != cfg.HME.BaseURL {
+			e.compensationError = "config: saved_mailbox_source_unavailable"
+			continue
+		}
+		if j.BrowserProfile == nil || !j.BrowserProfile.valid() {
+			continue
+		}
+		if now.Before(due) {
+			continue
+		}
+		if selected < 0 || due.Before(oldest) {
+			selected, oldest = i, due
+		}
+	}
+	if selected < 0 {
+		return false, nil
+	}
+	if err := e.startCompensationLocked(selected, cfg, true, now); err != nil {
+		e.compensationError = safeFailure(err)
+		if e.loadError == nil {
+			before := cloneJob(e.jobs[selected])
+			finishRegistrationCompensation(&e.jobs[selected], "manual")
+			e.jobs[selected].AutoRetry.Reason = "failure_requires_review"
+			if safeFailure(err) == "task: mailbox_already_has_saved_account" {
+				e.jobs[selected].AutoRetry.Reason = "saved_account_exists"
+			}
+			if saveErr := e.saveLocked(); saveErr != nil {
+				e.jobs[selected] = before
+				e.loadError = saveErr
+				return false, saveErr
+			}
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// The snapshot, duplicate check, durable claim and active slot share one lock
+// with manual retry/start/cleanup. There is no unlocked stale-job launch window.
+func (e *FreeEngine) startCompensationLocked(index int, cfg FreeConfig, automatic bool, now time.Time) error {
+	job := cloneJob(e.jobs[index])
+	if job.Mailbox.Email == "" || len(job.Account) > 0 || job.Imported || job.Verified {
+		return fail("task", "no_saved_mailbox")
+	}
+	for i, other := range e.jobs {
+		if i != index && strings.EqualFold(other.Mailbox.Email, job.Mailbox.Email) && (other.Verified || other.Imported || len(other.Account) > 0) {
+			return fail("task", "mailbox_already_has_saved_account")
+		}
+	}
+	if job.Mailbox.AccountID != cfg.HME.AccountID || job.MailboxAPIBase != "" && job.MailboxAPIBase != cfg.HME.BaseURL {
+		return fail("config", "saved_mailbox_source_unavailable")
+	}
+	if job.BrowserProfile != nil && job.BrowserProfile.valid() {
+		profile := *job.BrowserProfile
+		cfg.BrowserProfile = &profile
+	}
+	if automatic {
+		if cfg.BrowserProfile == nil {
+			return fail("task", "saved_environment_missing")
+		}
+		job.AutoRetry.Attempts++
+		job.AutoRetry.State, job.AutoRetry.Reason = "running", ""
+		job.AutoRetry.LastAttemptAt = now.UTC().Format(time.RFC3339Nano)
+		delay := compensationDelays[min(job.AutoRetry.Attempts, len(compensationDelays)-1)]
+		job.AutoRetry.NextAttemptAt = now.Add(cfg.Timeout + delay).UTC().Format(time.RFC3339Nano)
+	} else if job.AutoRetry != nil {
+		// An explicit manual retry does not reset the automatic retry budget.
+		finishRegistrationCompensation(&job, "manual_running")
+	}
+	job.Status, job.Stage, job.Error = "running", "compensation", ""
+	job.MailboxAPIBase = cfg.HME.BaseURL
+	job.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+	text := "manual_compensation_started"
+	if automatic {
+		text = "automatic_compensation_started"
+	}
+	job.Logs = append(job.Logs, JobLog{Time: job.UpdatedAt, Text: text, Level: "info"})
+	before := e.jobs[index]
+	e.jobs[index] = job
+	if err := e.saveLocked(); err != nil {
+		e.jobs[index] = before
+		e.loadError = err
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	e.active[job.ID] = &activeRegistration{cancel: cancel, done: make(chan struct{})}
+	go e.runCompensation(ctx, job, cfg)
+	return nil
+}
+
+func (e *FreeEngine) runCompensation(ctx context.Context, job RegistrationJob, cfg FreeConfig) {
+	defer e.finishTask(job.ID)
+	var runErr error
+	defer func() {
+		if recover() != nil {
+			runErr = fail("task", "internal_error")
+		}
+		if runErr != nil {
+			// A cancelled response-body read may have been mapped to read_error.
+			// An explicit stop must never turn into another scheduled attempt.
+			if ctx.Err() != nil {
+				runErr = ctx.Err()
+			}
+			e.failJob(job.ID, runErr)
+		}
+	}()
+	mail, flow, err := e.factory(cfg)
+	if err != nil {
+		runErr = err
+		return
+	}
+	defer mail.Close()
+	defer flow.Close()
+	if provider, ok := flow.(RegistrationProfileProvider); ok && cfg.BrowserProfile == nil {
+		// Manual recovery of legacy jobs can establish a profile for later retries.
+		profile := provider.BrowserProfile()
+		if runErr = e.change(job.ID, func(j *RegistrationJob) { j.BrowserProfile = &profile }); runErr != nil {
+			return
+		}
+	}
+	preparer, ok := mail.(MailSessionPreparer)
+	if !ok {
+		runErr = fail("mail", "resume_not_supported")
+		return
+	}
+	if runErr = preparer.Prepare(ctx, job.Mailbox); runErr != nil {
+		return
+	}
+	runErr = e.runWithMailbox(ctx, job.ID, cfg, mail, flow, job.Mailbox)
+}

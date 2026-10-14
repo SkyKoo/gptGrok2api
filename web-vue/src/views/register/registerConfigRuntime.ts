@@ -128,6 +128,7 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     config.value.enabled = incoming.enabled
     config.value.stats = incoming.stats
     config.value.logs = incoming.logs
+    config.value.compensation_error = incoming.compensation_error
     config.value.jobs = incoming.jobs
     config.value.jobs_total = incoming.jobs_total
     config.value.jobs_page = incoming.jobs_page

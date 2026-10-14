@@ -73,4 +73,10 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 		_, err := s.freeRegister.Start(s.registerStore.Get())
 		return err
 	}) // Storage/launch failures are exposed by the persisted schedule snapshot.
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+		return
+	}
+	// A scheduled/manual batch owns the same engine slot and takes precedence.
+	// Compensation runs even when the new-account batch timer is disabled.
+	_, _ = s.freeRegister.RunCompensation(s.registerStore.Get(), now)
 }

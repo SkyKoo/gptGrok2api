@@ -23,11 +23,13 @@ type RegistrationJob struct {
 	Mailbox   Mailbox `json:"mailbox"`
 	// BrowserProfile is private task state. Snapshot deliberately omits it,
 	// while compensation retries use it to keep the protocol environment stable.
-	BrowserProfile *BrowserProfile `json:"browser_profile,omitempty"`
-	Imported       bool            `json:"imported"`
-	Verified       bool            `json:"verified"`
-	Account        map[string]any  `json:"account,omitempty"` // private recovery journal only
-	Logs           []JobLog        `json:"logs"`
+	BrowserProfile *BrowserProfile           `json:"browser_profile,omitempty"`
+	MailboxAPIBase string                    `json:"mailbox_api_base,omitempty"`
+	AutoRetry      *RegistrationCompensation `json:"auto_retry,omitempty"`
+	Imported       bool                      `json:"imported"`
+	Verified       bool                      `json:"verified"`
+	Account        map[string]any            `json:"account,omitempty"` // private recovery journal only
+	Logs           []JobLog                  `json:"logs"`
 }
 type JobLog struct {
 	Time  string `json:"time"`
@@ -48,18 +50,19 @@ type activeRegistration struct {
 // credentials are recorded before import, so retry/restart cannot accidentally
 // create another account.
 type FreeEngine struct {
-	mu            sync.Mutex
-	path          string
-	jobs          []RegistrationJob
-	active        map[string]*activeRegistration
-	runCancel     context.CancelFunc
-	runDone       chan struct{}
-	runThreads    int
-	loadError     error
-	closing       bool
-	factory       FreeFactory
-	importAccount ImportAccount
-	verifyAccount VerifyAccount
+	mu                sync.Mutex
+	path              string
+	jobs              []RegistrationJob
+	active            map[string]*activeRegistration
+	runCancel         context.CancelFunc
+	runDone           chan struct{}
+	runThreads        int
+	loadError         error
+	compensationError string
+	closing           bool
+	factory           FreeFactory
+	importAccount     ImportAccount
+	verifyAccount     VerifyAccount
 }
 
 func NewFreeEngine(path string, factory FreeFactory, importer ImportAccount, verifier VerifyAccount) *FreeEngine {
@@ -90,6 +93,10 @@ func NewFreeEngine(path string, factory FreeFactory, importer ImportAccount, ver
 					}
 				}
 				j.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				recoverRegistrationCompensation(j, time.Now())
+				if j.AutoRetry != nil && j.AutoRetry.State == "waiting" {
+					j.Error = "process_restarted_compensation_delayed"
+				}
 				changed = true
 			}
 		}
@@ -228,7 +235,7 @@ func (e *FreeEngine) runTask(parent context.Context, id string, cfg FreeConfig) 
 	defer flow.Close()
 	if provider, ok := flow.(RegistrationProfileProvider); ok {
 		profile := provider.BrowserProfile()
-		if err := e.change(id, func(j *RegistrationJob) { j.BrowserProfile = &profile }); err != nil {
+		if err := e.change(id, func(j *RegistrationJob) { j.BrowserProfile = &profile; j.MailboxAPIBase = cfg.HME.BaseURL }); err != nil {
 			e.failJob(id, err)
 			return
 		}
@@ -343,6 +350,9 @@ func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail Ma
 			runErr = fail("task", "internal_error")
 		}
 		if runErr != nil {
+			if ctx.Err() != nil {
+				runErr = ctx.Err()
+			}
 			e.failJob(id, runErr)
 		}
 	}()
@@ -377,7 +387,12 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": box.AccountID, "email": box.Email}
 	account["enabled"] = false
 	account["status"] = "待验证"
-	if err = e.change(id, func(j *RegistrationJob) { j.Account = account; j.Stage = "import"; j.Status = "import_pending" }); err != nil {
+	if err = e.change(id, func(j *RegistrationJob) {
+		j.Account = account
+		j.Stage = "import"
+		j.Status = "import_pending"
+		finishRegistrationCompensation(j, "saved_result")
+	}); err != nil {
 		return err
 	}
 	return e.importAndVerify(ctx, id)
@@ -443,6 +458,7 @@ func (e *FreeEngine) importAndVerify(ctx context.Context, id string) error {
 		j.Stage = "completed"
 		j.Error = ""
 		j.Account = nil
+		finishRegistrationCompensation(j, "completed")
 		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: "account_imported_and_verified", Level: "success"})
 	})
 }
@@ -461,6 +477,12 @@ func (e *FreeEngine) failJob(id string, err error) {
 			} else {
 				j.Status = "import_pending"
 			}
+		}
+		if errors.Is(err, context.Canceled) && e.closing && j.AutoRetry != nil && j.AutoRetry.State == "running" {
+			// Shutdown keeps the durable reservation; an explicit Stop stays manual.
+			recoverRegistrationCompensation(j, time.Now())
+		} else {
+			planRegistrationCompensation(j, err, time.Now())
 		}
 		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: j.Error, Level: "error"})
 	})
@@ -562,89 +584,16 @@ func (e *FreeEngine) RetryRegistration(raw map[string]any, id string) error {
 		return err
 	}
 	e.mu.Lock()
-	if e.loadError != nil {
-		e.mu.Unlock()
-		return e.loadError
-	}
-	if e.closing {
-		e.mu.Unlock()
-		return fail("task", "shutting_down")
-	}
-	if e.runCancel != nil || len(e.active) > 0 {
-		e.mu.Unlock()
-		return fail("task", "already_running")
-	}
-	var job RegistrationJob
-	found := false
-	for i := range e.jobs {
-		if e.jobs[i].ID != id {
-			continue
-		}
-		job = cloneJob(e.jobs[i])
-		if job.Mailbox.Email == "" || len(job.Account) > 0 || job.Verified {
-			e.mu.Unlock()
-			return fail("task", "no_saved_mailbox")
-		}
-		found = true
-		break
-	}
-	if !found {
-		e.mu.Unlock()
-		return fail("task", "not_found")
-	}
-	e.mu.Unlock()
-	if job.BrowserProfile != nil && job.BrowserProfile.valid() {
-		profile := *job.BrowserProfile
-		cfg.BrowserProfile = &profile
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	done := make(chan struct{})
-	e.mu.Lock()
-	// Recheck after the unlocked snapshot so two admin requests cannot resume
-	// the same alias concurrently.
-	if e.runCancel != nil || len(e.active) > 0 {
-		e.mu.Unlock()
-		cancel()
-		return fail("task", "already_running")
-	}
-	e.active[id] = &activeRegistration{cancel: cancel, done: done}
-	e.mu.Unlock()
-	if err := e.change(id, func(j *RegistrationJob) {
-		j.Status = "running"
-		j.Stage = "compensation"
-		j.Error = ""
-	}); err != nil {
-		e.finishTask(id)
+	defer e.mu.Unlock()
+	if err := e.compensationIdleLocked(); err != nil {
 		return err
 	}
-	go func() {
-		defer e.finishTask(id)
-		defer func() {
-			if recover() != nil {
-				e.failJob(id, fail("task", "internal_error"))
-			}
-		}()
-		mail, flow, factoryErr := e.factory(cfg)
-		if factoryErr != nil {
-			e.failJob(id, factoryErr)
-			return
+	for i := range e.jobs {
+		if e.jobs[i].ID == id {
+			return e.startCompensationLocked(i, cfg, false, time.Now())
 		}
-		defer mail.Close()
-		defer flow.Close()
-		preparer, ok := mail.(MailSessionPreparer)
-		if !ok {
-			e.failJob(id, fail("mail", "resume_not_supported"))
-			return
-		}
-		if err := preparer.Prepare(ctx, job.Mailbox); err != nil {
-			e.failJob(id, err)
-			return
-		}
-		if err := e.runWithMailbox(ctx, id, cfg, mail, flow, job.Mailbox); err != nil {
-			e.failJob(id, err)
-		}
-	}()
-	return nil
+	}
+	return fail("task", "not_found")
 }
 
 // RegistrationHistoryPageSize bounds API/SSE payloads, not retained history.
@@ -686,7 +635,7 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[j.ID]
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Verified && !active})
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "auto_retry": compensationSummary(j.AutoRetry)})
 	}
 	// Gather only the existing 200-line live-log window, without allocating the
 	// logs for the entire retained history on every SSE tick.
@@ -710,6 +659,7 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 		threads = running
 	}
 	result := map[string]any{"running": e.runCancel != nil || running > 0, "active_job_id": activeID, "active_job_ids": activeIDs, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": running, "threads": threads}}
+	result["compensation_error"] = e.compensationError
 	if e.loadError != nil {
 		result["error"] = safeFailure(e.loadError)
 	}
