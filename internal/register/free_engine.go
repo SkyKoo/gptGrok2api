@@ -333,8 +333,11 @@ func cloneJob(j RegistrationJob) RegistrationJob {
 	_ = json.Unmarshal(raw, &out)
 	return out
 }
-func (e *FreeEngine) progress(id, stage string) error {
+func (e *FreeEngine) progress(id, stage string, profile ...BrowserProfile) error {
 	return e.change(id, func(j *RegistrationJob) {
+		if len(profile) > 0 {
+			j.BrowserProfile = &profile[0]
+		}
 		j.Status = "running"
 		j.Stage = stage
 		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: stage, Level: "info"})
@@ -373,7 +376,14 @@ func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail Ma
 // runWithMailbox performs the ChatGPT portion using the supplied alias. The
 // caller must have already acquired or prepared the mailbox session.
 func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConfig, mail MailSource, flow RegistrationFlow, box Mailbox) error {
-	account, err := flow.Register(ctx, box, cfg, func(ctx context.Context, after time.Time) (string, error) { return mail.WaitCode(ctx, box, after) }, func(stage string) error { return e.progress(id, stage) })
+	account, err := flow.Register(ctx, box, cfg, func(ctx context.Context, after time.Time) (string, error) { return mail.WaitCode(ctx, box, after) }, func(stage string) error {
+		// Persist the resolved environment before auth requests, including retries
+		// that fail before returning an account. Compensation uses this same path.
+		if provider, ok := flow.(RegistrationProfileProvider); ok {
+			return e.progress(id, stage, provider.BrowserProfile())
+		}
+		return e.progress(id, stage)
+	})
 	if err != nil {
 		return err
 	}

@@ -47,6 +47,9 @@ type WebRegistrar struct {
 	profile              BrowserProfile
 	device, state        string
 	authSessionID        string
+	proxy                string
+	timezone             *time.Location
+	resolveTimezone      func(context.Context, string, string) *time.Location
 }
 
 func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfile) (*WebRegistrar, error) {
@@ -69,10 +72,17 @@ func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfil
 	if err != nil {
 		return nil, fail("config", "http_client_failed")
 	}
-	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client, profile: profile}, nil
+	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client, profile: profile, proxy: proxy, resolveTimezone: provider.ResolveOpenAITimezone}, nil
 }
-func (r *WebRegistrar) Close()                         { r.http.CloseIdleConnections() }
-func (r *WebRegistrar) BrowserProfile() BrowserProfile { return r.profile }
+func (r *WebRegistrar) Close() { r.http.CloseIdleConnections() }
+func (r *WebRegistrar) BrowserProfile() BrowserProfile {
+	profile := r.profile
+	if r.timezone != nil {
+		profile.setTimezone(r.timezone, time.Now())
+	}
+	profile.NavigatorLanguages = append([]string(nil), profile.NavigatorLanguages...)
+	return profile
+}
 
 // SetDeviceID must be called before login. Only the stable device identity is
 // restored; the new registrar retains its fresh cookie jar and authorization.
@@ -418,6 +428,17 @@ func (r *WebRegistrar) LoginExisting(ctx context.Context, box Mailbox, cfg FreeC
 }
 
 func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig, wait func(context.Context, time.Time) (string, error), progress Progress, existingOnly bool) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Resolve once per login attempt, before any auth request. The selected
+	// proxy is fixed by the constructor; saved browser/device identity is retained.
+	if r.resolveTimezone != nil {
+		r.timezone = r.resolveTimezone(ctx, r.chat, r.proxy)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := progress("authorize"); err != nil {
 		return nil, err
 	}
@@ -481,7 +502,7 @@ func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig
 			if email := stringValue(user["email"]); !strings.EqualFold(email, box.Email) {
 				return nil, fail("session", "email_mismatch")
 			}
-			fingerprint := r.profile.fingerprintMetadata()
+			fingerprint := r.BrowserProfile().fingerprintMetadata()
 			fingerprint["oai-device-id"] = r.device
 			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint, "browser_profile": r.BrowserProfile()}, nil
 		}
@@ -504,7 +525,7 @@ func (r *WebRegistrar) challenge(ctx context.Context, flow string) (map[string]s
 	sentinelSID := hex.EncodeToString(id)
 	configuration := []any{
 		3000,
-		time.Now().UTC().Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)"),
+		r.browserDate(time.Now()),
 		r.profile.JSHeapSizeLimit,
 		1,
 		r.profile.UserAgent,

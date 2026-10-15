@@ -383,3 +383,33 @@ func TestOpenAITimezoneAppliedToChatImageAndAccounts(t *testing.T) {
 		t.Fatalf("unexpected calls conversation=%d account=%d lookup=%d", conversations, offsets, lookups)
 	}
 }
+
+func TestAuthenticationTimezoneSharesEgressCache(t *testing.T) {
+	old := sharedOpenAITimezones
+	defer func() { sharedOpenAITimezones = old }()
+	var selected []string
+	phoenix := timezoneLocation(t, "America/Phoenix")
+	tokyo := timezoneLocation(t, "Asia/Tokyo")
+	sharedOpenAITimezones = newOpenAITimezones(func(_ context.Context, proxy string) (*time.Location, error) {
+		selected = append(selected, proxy)
+		if proxy != "" {
+			return tokyo, nil
+		}
+		return phoenix, nil
+	})
+	ctx := context.Background()
+	if ResolveOpenAITimezone(ctx, "https://chat.example.test", "direct") != nil || len(selected) != 0 {
+		t.Fatal("custom origin contacted geolocation")
+	}
+	if ResolveOpenAITimezone(ctx, "https://chatgpt.com", "direct") != phoenix {
+		t.Fatal("direct lookup failed")
+	}
+	// Simulate a subsequent chat/image request through its existing entry point.
+	if openAITimezonesFor("https://chatgpt.com/backend-api").resolve(ctx, "") != phoenix || len(selected) != 1 {
+		t.Fatal("authentication and provider did not share cache")
+	}
+	proxy := "http://proxy.example.test:8080"
+	if ResolveOpenAITimezone(ctx, "https://chatgpt.com", proxy) != tokyo || len(selected) != 2 || selected[1] != proxy {
+		t.Fatal("proxy egress not forwarded or isolated")
+	}
+}

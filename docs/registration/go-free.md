@@ -83,7 +83,7 @@ HTTP 注册参照历史网页流程，包括两次 CSRF/sign-in 初始化、Cook
 
 注册校验使用旧 Python 的 HTTP Sentinel 回退协议及已有 Go 解码器。
 protocol 模式参考 Turb 的 `config/browser.py`，为每个注册任务从候选池选择一组稳定的
-`BrowserProfile`，同时供 tls-client、HTTP Client Hints 和 Sentinel VM 使用；同一任务内不变，
+`BrowserProfile`，同时供 tls-client、HTTP Client Hints 和 Sentinel VM 使用；浏览器参数在同一任务内保持稳定，
 补偿注册从任务恢复文件复用原画像。当前画像池使用 tls-client 已有的 Chrome 131 Profile，
 并随机选择屏幕尺寸、CPU 核数、JS 堆和设备内存组合。它只是在协议层模拟参数，不是完整浏览器
 指纹，也没有引入 Roxy、Cloak、Browser Use 或 Skyvern 等外部浏览器服务。
@@ -146,3 +146,18 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/cfm-register-arm64 ./cmd/
 每次登录仍使用新的 Cookie 会话，重新获取 CSRF、授权 state 和邮件验证码，并生成新的
 登录会话标识。此功能不保存长期登录 Cookie、不获取 refresh_token，也不固定代理出口；
 网络配置沿用当前注册配置。环境复用不代表复用上次的登录授权。
+
+## 注册与重新登录的出口时区
+
+注册、复用邮箱补偿注册和重新登录共用出口时区适配：每次登录开始前，按该次登录实际选定的
+直连或代理出口查询时区，复用聊天/生图已有的缓存。正常结果缓存 10 分钟，查询失败沿用同出口
+最近成功结果；从未查询成功时回退 America/Los_Angeles，1 分钟后可再次查询。查询总耗时最多
+4.5 秒，不向定位服务发送账号凭据或 Cookie，代理查询失败不会改走直连；取消任务会停止查询。
+自定义测试上游不触发公网定位。
+
+同次登录固定 IANA 时区，日期和偏移按当前时间计算（含夏令时），同时用于请求证明中的日期、
+Sentinel VM 的 Date / Intl 和浏览器画像。重试、重新登录若出口变化，会重新校准时区；原 UA、
+TLS、屏幕、语言和设备标识继续按原逻辑复用。原注册记录中的 UTC 画像无需批量迁移。
+
+注册和补偿在发起认证请求前将本次画像写入原任务，失败也保留；登录成功后更新账号私有画像与
+指纹摘要。该功能不新增 Cookie 持久化、不修改服务器系统时区，也不保证解决上游模型 404。

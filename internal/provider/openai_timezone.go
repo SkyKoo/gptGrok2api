@@ -32,6 +32,20 @@ var fallbackOpenAILocation = func() *time.Location {
 }()
 var sharedOpenAITimezones = newOpenAITimezones(lookupOpenAITimezone)
 
+// ResolveOpenAITimezone shares the chat/image egress cache with authentication
+// flows. A custom origin returns nil without geolocation traffic. The caller
+// must pass the same explicit proxy used by its authentication client.
+func ResolveOpenAITimezone(ctx context.Context, baseURL, proxyURL string) *time.Location {
+	resolver := openAITimezonesFor(baseURL)
+	if resolver == nil {
+		return nil
+	}
+	if proxyURL == "direct" {
+		proxyURL = ""
+	}
+	return resolver.resolve(ctx, proxyURL)
+}
+
 type openAITimezoneEntry struct {
 	location *time.Location
 	retryAt  time.Time

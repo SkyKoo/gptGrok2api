@@ -2,10 +2,13 @@ package register
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -15,12 +18,24 @@ import (
 // used after a wait timeout. The profile branch also covers the protocol-only
 // about-you submission used for new accounts.
 func TestWebRegistrationTurbProtocol(t *testing.T) {
-	for _, scenario := range []string{"success", "resend", "profile_required", "existing_profile_required", "wrong_state"} {
+	for _, scenario := range []string{"success", "existing_success", "resend", "profile_required", "existing_profile_required", "wrong_state"} {
 		t.Run(scenario, func(t *testing.T) {
 			var base string
+			var timezoneCalls atomic.Int32
+			savedProfile := browserProfilePool[4]
+			phoenix, err := time.LoadLocation("America/Phoenix")
+			if err != nil {
+				t.Fatal(err)
+			}
 			providers, anonymousSession, csrf, signin, authorize, resend, validate, callback := 0, 0, 0, 0, 0, 0, 0, 0
 			aboutYou, sentinel, createProfile := 0, 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if timezoneCalls.Load() != 1 {
+					t.Error("auth started before timezone resolution or resolved repeatedly")
+				}
+				if r.Header.Get("User-Agent") != savedProfile.UserAgent {
+					t.Error("stable browser identity changed")
+				}
 				write := func(value any) { _ = json.NewEncoder(w).Encode(value) }
 				switch r.URL.Path {
 				case "/api/auth/providers":
@@ -80,6 +95,21 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 					_, _ = w.Write([]byte("sentinel-frame"))
 				case "/backend-api/sentinel/req":
 					sentinel++
+					var challenge map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&challenge); err != nil {
+						t.Error(err)
+					}
+					raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(challenge["p"], "gAAAAAC"))
+					var proof []any
+					if err != nil || json.Unmarshal(raw, &proof) != nil || len(proof) < 2 {
+						t.Error("invalid challenge proof")
+					} else {
+						date, err := time.Parse("Mon Jan 02 2006 15:04:05 GMT-0700 (MST)", stringValue(proof[1]))
+						_, offset := date.Zone()
+						if err != nil || offset != -7*3600 || time.Since(date) > 5*time.Second {
+							t.Errorf("challenge date not aligned to Phoenix: %v", proof[1])
+						}
+					}
 					if r.Method != http.MethodPost {
 						t.Error("sentinel request must be POST")
 					}
@@ -109,16 +139,26 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 			}))
 			defer server.Close()
 			base = server.URL
-			flow, err := NewWebRegistrar(base, base, "direct")
+			flow, err := NewWebRegistrar(base, base, "direct", savedProfile)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer flow.Close()
 			flow.sentinel = base
+			flow.resolveTimezone = func(ctx context.Context, origin, proxy string) *time.Location {
+				if origin != base || proxy != "direct" {
+					t.Error("timezone uses another egress")
+				}
+				timezoneCalls.Add(1)
+				return phoenix
+			}
+			if err := flow.SetDeviceID("did"); err != nil {
+				t.Fatal(err)
+			}
 			stages := []string{}
 			waitCalls := 0
 			login := flow.Register
-			if scenario == "existing_profile_required" {
+			if scenario == "existing_profile_required" || scenario == "existing_success" {
 				login = flow.LoginExisting
 			}
 			account, err := login(context.Background(), Mailbox{Email: "alias@example.test"}, FreeConfig{MailTimeout: 20 * time.Millisecond}, func(ctx context.Context, after time.Time) (string, error) {
@@ -132,9 +172,17 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 			if providers != 1 || anonymousSession != 1 || csrf != 1 || signin != 1 || authorize != 1 {
 				t.Errorf("initialization counts providers=%d session=%d csrf=%d signin=%d authorize=%d", providers, anonymousSession, csrf, signin, authorize)
 			}
-			if scenario == "success" || scenario == "resend" || scenario == "profile_required" {
+			if scenario == "success" || scenario == "existing_success" || scenario == "resend" || scenario == "profile_required" {
 				if err != nil || account["access_token"] != "secret-account-token" {
 					t.Fatalf("unexpected result account=%#v err=%v", account, err)
+				}
+				wantProfile := savedProfile
+				wantProfile.setTimezone(phoenix, time.Now())
+				if got, ok := ParseBrowserProfile(account["browser_profile"]); !ok || !reflect.DeepEqual(got, wantProfile) {
+					t.Error("returned profile lost resolved timezone or changed stable fields")
+				}
+				if fp := object(account["fp"]); fp["timezone"] != "America/Phoenix" || fp["oai-device-id"] != "did" {
+					t.Error("returned fingerprint lost resolved timezone or device identity")
 				}
 				wantResend := 0
 				wantStages := "authorize,wait_code,validate_code,session"

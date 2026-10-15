@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"github.com/bogdanfinn/tls-client/profiles"
 )
@@ -205,6 +206,19 @@ func BrowserProfileFromFingerprint(value any) (BrowserProfile, bool) {
 	for _, candidate := range browserProfilePool {
 		if stringValue(fp["profile"]) != candidate.Name {
 			continue
+		}
+		// Timezone follows egress and is no longer part of the fixed template.
+		// Validate it separately; all stable browser fields must still match.
+		if value, exists := fp["timezone"]; exists {
+			zone := stringValue(value)
+			if zone == "" || zone == "Local" || len(zone) > 100 || strings.Contains(zone, "..") {
+				return BrowserProfile{}, false
+			}
+			loc, err := time.LoadLocation(zone)
+			if err != nil {
+				return BrowserProfile{}, false
+			}
+			candidate.setTimezone(loc, time.Now())
 		}
 		matches := true
 		for key, want := range candidate.fingerprintMetadata() {
