@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -203,6 +204,17 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 				}
 				items, _ = server.store.AccountList()
 				saved := items[0]
+				rawCookies, _ := json.Marshal(saved["web_cookies"])
+				if !strings.Contains(string(rawCookies), "fresh-session") {
+					t.Fatal("new login cookies were not persisted")
+				}
+				if saved["web_cookies_token_hash"] != browserprofile.TokenBinding(stringValue(saved["access_token"])) {
+					t.Fatal("new login cookies not bound to new credentials")
+				}
+				publicCookies, _ := json.Marshal(accountForAPI(saved))
+				if strings.Contains(string(publicCookies), "fresh-session") || strings.Contains(rec.Body.String(), "fresh-session") {
+					t.Fatal("login cookies leaked through API")
+				}
 				got, ok := registerruntime.ParseBrowserProfile(saved["browser_profile"])
 				if !ok {
 					t.Fatal("successful login did not persist full profile")

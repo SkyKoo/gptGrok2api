@@ -389,7 +389,7 @@ func ChatErrorDetails(err error, account accounts.Account) ImageErrorDetail {
 	if err == nil {
 		return ImageErrorDetail{}
 	}
-	secrets := []string{account.Token}
+	secrets := webSessionSecrets(account.Fields, account.Token)
 	for _, key := range []string{"access_token", "accessToken", "token", "refresh_token", "id_token", "cookie_header", "cookie", "cookies", "session_token", "password", "login_password", "email", "user_id"} {
 		secrets = append(secrets, aiString(account.Fields, key))
 	}

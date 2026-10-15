@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -236,7 +237,7 @@ func TestOpenAITimezoneDSTAndSentinelConsistency(t *testing.T) {
 		if p["timezone"] != tc.zone || s.offset() != tc.offset || !strings.Contains(s.date(), tc.fragment) {
 			t.Fatalf("bad timezone snapshot %+v %s", p, s.date())
 		}
-		tokens := []string{buildLegacyRequirementsToken("ua", nil, "build", s), buildProofToken("seed", "ff", "ua", nil, "build", s)}
+		tokens := []string{buildLegacyRequirementsToken(browserprofile.Default(), nil, "build", s), buildProofToken("seed", "ff", browserprofile.Default(), nil, "build", s)}
 		for _, token := range tokens {
 			raw, e := base64.StdEncoding.DecodeString(token[7:])
 			if e != nil {
@@ -286,7 +287,7 @@ func (b *timezoneTrackedBody) Close() error { b.closed = true; return nil }
 func TestOpenAIImageBrowserHTTPErrorPreserved(t *testing.T) {
 	body := &timezoneTrackedBody{Reader: strings.NewReader(`{"detail":"Model not found"}`)}
 	p := NewOpenAIImage("https://chatgpt.com", nil, nil, time.Second)
-	p.browsers[""] = &browserHTTP{client: timezoneBrowserStub{do: func(*fhttp.Request) (*fhttp.Response, error) {
+	p.browsers[accountBrowserKey(p.BaseURL, "", "test", browserprofile.Default(), nil)] = &browserHTTP{client: timezoneBrowserStub{do: func(*fhttp.Request) (*fhttp.Response, error) {
 		return &fhttp.Response{StatusCode: 404, Header: make(fhttp.Header), Body: body}, nil
 	}}}
 	_, _, err := p.start(context.Background(), accounts.Account{Token: "test"}, openAIRequirements{}, "conduit", "draw circle", "gpt-5-6", "auto", "auto", nil)

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"golang.org/x/crypto/sha3"
@@ -478,7 +479,11 @@ func (o *OpenAIImage) chatRequirements(ctx context.Context, account accounts.Acc
 	// Keep the location stable, but obtain a fresh clock sample after uploads.
 	// A slow upload must not make the Sentinel timestamp stale.
 	zone := currentOpenAITimezone(ctx)
-	legacy := buildLegacyRequirementsToken(openAIUserAgent, scripts, build, zone)
+	profile, err := accountBrowserProfile(account.Fields)
+	if err != nil {
+		return openAIRequirements{}, err
+	}
+	legacy := buildLegacyRequirementsToken(profile, scripts, build, zone)
 	prepareBody := map[string]any{"p": legacy}
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/sentinel/chat-requirements/prepare", account, prepareBody, map[string]string{"Content-Type": "application/json"}, false)
 	if err != nil {
@@ -490,13 +495,13 @@ func (o *OpenAIImage) chatRequirements(ctx context.Context, account accounts.Acc
 	}
 	proof := ""
 	if info, ok := prepare["proofofwork"].(map[string]any); ok && boolValue(info["required"]) {
-		proof = buildProofToken(stringValue(info["seed"]), stringValue(info["difficulty"]), openAIUserAgent, scripts, build, zone)
+		proof = buildProofToken(stringValue(info["seed"]), stringValue(info["difficulty"]), profile, scripts, build, zone)
 	}
 	turnstile := ""
 	if info, ok := prepare["turnstile"].(map[string]any); ok && boolValue(info["required"]) {
 		dx := stringValue(info["dx"])
 		if dx != "" {
-			turnstile, err = solveSentinelTurnstileToken(dx, legacy)
+			turnstile, err = solveSentinelTurnstileToken(dx, legacy, profile)
 			if err != nil {
 				return openAIRequirements{}, fmt.Errorf("solve OpenAI sentinel Turnstile: %w", err)
 			}
@@ -638,7 +643,7 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 			return false
 		}
 		notifyUpstreamModel(ctx, value)
-		if terminalErr = openAIImageTerminalError(value, account.Token); terminalErr != nil {
+		if terminalErr = openAIImageTerminalError(value, webSessionSecrets(account.Fields, account.Token)...); terminalErr != nil {
 			return true
 		}
 		collectOpenAIImageRefs(value, &conversationID, &fileIDs)
@@ -665,7 +670,7 @@ func (o *OpenAIImage) pollConversation(ctx context.Context, account accounts.Acc
 			if len(ids) > 0 {
 				return uniqueStrings(ids), nil
 			}
-			if terminal := openAIImageTerminalError(value, account.Token); terminal != nil {
+			if terminal := openAIImageTerminalError(value, webSessionSecrets(account.Fields, account.Token)...); terminal != nil {
 				return nil, terminal
 			}
 			if terminal := openAIImageTextOnlyError(value, account.Token); terminal != nil {
@@ -1235,6 +1240,9 @@ func (o *OpenAIImage) requirementHeaders(requirements openAIRequirements) map[st
 }
 
 func (o *OpenAIImage) do(ctx context.Context, method, path string, account accounts.Account, body any, extra map[string]string, stream bool) (*http.Response, error) {
+	if payload, ok := body.(map[string]any); ok && strings.Contains(path, "conversation") {
+		applyOpenAIBrowserContext(account.Fields, payload)
+	}
 	raw, err := json.Marshal(body)
 	if body != nil {
 		if err != nil {
@@ -1268,6 +1276,9 @@ func (o *OpenAIImage) doRequest(ctx context.Context, method, endpoint, targetPat
 		return nil, err
 	}
 	if authenticated {
+		if _, err := accountBrowserProfile(account.Fields); err != nil {
+			return nil, err
+		}
 		setOpenAIHeaders(request, targetPath, account.Token, account.Fields)
 	}
 	if extra != nil {
@@ -1281,19 +1292,22 @@ func (o *OpenAIImage) doRequest(ctx context.Context, method, endpoint, targetPat
 	client := o.Client
 	var response *http.Response
 	if browserEligible(o.BaseURL) && authenticated {
-		browser, browserErr := o.browserFor(proxyURL)
+		browser, browserErr := o.browserFor(proxyURL, account)
 		if browserErr != nil {
 			return nil, browserErr
 		}
 		response, err = browser.Do(request)
 	} else {
+		if authenticated {
+			applySavedWebCookies(request, o.BaseURL, account.Fields, account.Token)
+		}
 		response, err = client.Do(request)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		upstreamErr := readOpenAIHTTPError(response, targetPath)
+		upstreamErr := readOpenAIHTTPError(response, targetPath, webSessionSecrets(account.Fields, account.Token)...)
 		_ = response.Body.Close()
 		return nil, upstreamErr
 	}
@@ -1324,22 +1338,14 @@ func openAIImageProxyFailure(err error) bool {
 	return false
 }
 
-func (o *OpenAIImage) browserFor(proxyURL string) (*browserHTTP, error) {
+func (o *OpenAIImage) browserFor(proxyURL string, account accounts.Account) (*browserHTTP, error) {
 	o.browserMu.Lock()
 	defer o.browserMu.Unlock()
-	if browser := o.browsers[proxyURL]; browser != nil {
-		return browser, nil
-	}
 	timeout := o.RequestTimeout
 	if timeout <= 0 {
 		timeout = 300 * time.Second
 	}
-	browser, err := newBrowserHTTP(proxyURL, timeout)
-	if err != nil {
-		return nil, err
-	}
-	o.browsers[proxyURL] = browser
-	return browser, nil
+	return accountBrowser(o.browsers, o.BaseURL, proxyURL, account.Token, account.Fields, timeout)
 }
 
 func decodeOpenAIJSON(response *http.Response, value any, target string) error {
@@ -1353,9 +1359,17 @@ func decodeOpenAIJSON(response *http.Response, value any, target string) error {
 	return nil
 }
 
-func readOpenAIHTTPError(response *http.Response, target string) error {
-	raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+func readOpenAIHTTPError(response *http.Response, target string, secrets ...string) error {
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, (64<<10)+1))
+	if len(raw) > 64<<10 {
+		raw = []byte("upstream response body exceeded diagnostic limit")
+	}
 	message := strings.TrimSpace(string(raw))
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[REDACTED]")
+		}
+	}
 	if message == "" {
 		message = fmt.Sprintf("OpenAI endpoint %s returned HTTP %d", target, response.StatusCode)
 	}
@@ -1608,28 +1622,28 @@ func openAIImageModel(model string) string {
 	return strings.TrimSpace(model)
 }
 
-func buildLegacyRequirementsToken(userAgent string, scripts []string, build string, zone openAITimezoneSnapshot) string {
+func buildLegacyRequirementsToken(profile browserprofile.Profile, scripts []string, build string, zone openAITimezoneSnapshot) string {
 	config := []any{
-		"1920x1080", zone.date(),
-		4294705152, 1, userAgent, firstStringValue(map[string]any{"script": firstNonEmptyString(scripts, "https://chatgpt.com/backend-api/sentinel/sdk.js")}, "script"),
-		build, "en-US", "en-US,es-US,en,es", mathrand.Float64(),
+		fmt.Sprintf("%dx%d", profile.ScreenWidth, profile.ScreenHeight), zone.date(),
+		profile.JSHeapSizeLimit, 1, profile.UserAgent, firstStringValue(map[string]any{"script": firstNonEmptyString(scripts, "https://chatgpt.com/backend-api/sentinel/sdk.js")}, "script"),
+		build, profile.NavigatorLanguage, profile.NavigatorLanguagesValue(), mathrand.Float64(),
 		"webdriver-false", "location", "navigator", mathrand.Float64() * 1000, firstUUID(), "",
-		[]int{8, 16, 24, 32}[mathrand.Intn(4)], zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
+		profile.HardwareConcurrency, zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
 	}
 	raw, _ := json.Marshal(config)
 	return "gAAAAAC" + base64.StdEncoding.EncodeToString(raw)
 }
 
-func buildProofToken(seed, difficulty, userAgent string, scripts []string, build string, zone openAITimezoneSnapshot) string {
+func buildProofToken(seed, difficulty string, profile browserprofile.Profile, scripts []string, build string, zone openAITimezoneSnapshot) string {
 	target, err := hexBytes(difficulty)
 	if err != nil || len(target) == 0 {
 		return ""
 	}
 	config := []any{
-		"1920x1080", zone.date(), 4294705152, 0, userAgent,
+		fmt.Sprintf("%dx%d", profile.ScreenWidth, profile.ScreenHeight), zone.date(), profile.JSHeapSizeLimit, 0, profile.UserAgent,
 		firstStringValue(map[string]any{"script": firstNonEmptyString(scripts, "https://chatgpt.com/backend-api/sentinel/sdk.js")}, "script"),
-		build, "en-US", "en-US,es-US,en,es", 0.5, "webdriver-false", "location", "navigator",
-		0, firstUUID(), "", 8, zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
+		build, profile.NavigatorLanguage, profile.NavigatorLanguagesValue(), 0.5, "webdriver-false", "location", "navigator",
+		0, firstUUID(), "", profile.HardwareConcurrency, zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
 	}
 	for i := 0; i < 500000; i++ {
 		config[3] = i

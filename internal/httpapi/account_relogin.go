@@ -372,14 +372,19 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 		fingerprint[key] = value
 	}
 	fields := map[string]any{
-		"email":                 firstNonEmpty(stringValue(result["email"]), stringValue(account["email"])),
-		"user_id":               firstNonEmpty(stringValue(result["user_id"]), stringValue(account["user_id"])),
-		"source_type":           "chatgpt_web",
-		"type":                  firstNonEmpty(stringValue(account["type"]), "free"),
-		"status":                "正常",
-		"registration_verified": true,
-		"browser_profile":       result["browser_profile"],
-		"fp":                    fingerprint,
+		"email":                  firstNonEmpty(stringValue(result["email"]), stringValue(account["email"])),
+		"user_id":                firstNonEmpty(stringValue(result["user_id"]), stringValue(account["user_id"])),
+		"source_type":            "chatgpt_web",
+		"type":                   firstNonEmpty(stringValue(account["type"]), "free"),
+		"status":                 "正常",
+		"registration_verified":  true,
+		"browser_profile":        result["browser_profile"],
+		"web_cookies":            result["web_cookies"],
+		"web_cookies_token_hash": result["web_cookies_token_hash"],
+		"cookie_header":          "",
+		"cookie":                 "",
+		"cookies":                "",
+		"fp":                     fingerprint,
 	}
 	if expired := stringValue(result["expired"]); expired != "" {
 		fields["expires"] = expired

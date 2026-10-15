@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
@@ -21,7 +22,7 @@ func seedValidation(t *testing.T, s *Server) map[string]any {
 	t.Helper()
 	state := map[string]any{"id": "validation-generation", "progress_id": "login-task", "attempts": 0, "started_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	fields := validationFailureFields(&provider.AccountEndpointError{Stage: "quota", Endpoint: "/backend-api/conversation/init", Status: 503, Kind: "upstream_unavailable", Message: "busy", Retryable: true}, state, time.Now().Add(-time.Minute))
-	for k, v := range map[string]any{"access_token": "saved-token", "email": "saved@example.test", "user_id": "user-saved", "source_type": "chatgpt_web", "quota": 9, "enabled": true, "auto_relogin_next_attempt_at": time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339), "fp": map[string]any{"oai-device-id": "saved-device", "user-agent": "saved-agent"}} {
+	for k, v := range map[string]any{"access_token": "saved-token", "email": "saved@example.test", "user_id": "user-saved", "source_type": "chatgpt_web", "browser_profile": browserprofile.Default(), "quota": 9, "enabled": true, "auto_relogin_next_attempt_at": time.Now().Add(30 * time.Minute).UTC().Format(time.RFC3339), "fp": map[string]any{"oai-device-id": "saved-device", "user-agent": browserprofile.Default().UserAgent}} {
 		fields[k] = v
 	}
 	if _, _, _, err := s.store.AddAccounts(nil, []map[string]any{fields}); err != nil {
@@ -35,7 +36,7 @@ func validationUpstream(t *testing.T, status *atomic.Int32, requests *atomic.Int
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.Header.Get("Authorization") != "Bearer saved-token" || r.Header.Get("Oai-Device-Id") != "saved-device" || r.Header.Get("User-Agent") != "saved-agent" {
+		if r.Header.Get("Authorization") != "Bearer saved-token" || r.Header.Get("Oai-Device-Id") != "saved-device" || r.Header.Get("User-Agent") != browserprofile.Default().UserAgent {
 			t.Error("did not reuse saved token/environment")
 		}
 		w.Header().Set("Content-Type", "application/json")

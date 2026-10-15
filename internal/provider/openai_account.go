@@ -262,6 +262,9 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 		if err != nil {
 			return nil, err
 		}
+		if _, err := accountBrowserProfile(account); err != nil {
+			return nil, err
+		}
 		setOpenAIHeaders(req, targetPath, token, account)
 		if rawBody != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -270,11 +273,14 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 			req.Header.Set("Cookie", bundle.Cookie)
 		}
 		if bundle.UserAgent != "" {
+			if hasKnownBrowserProfile(account) && bundle.UserAgent != req.Header.Get("User-Agent") {
+				return nil, fmt.Errorf("clearance browser differs from saved account profile")
+			}
 			req.Header.Set("User-Agent", bundle.UserAgent)
 		}
-		return c.doChatGPT(req, proxyURL)
+		return c.doChatGPT(req, proxyURL, token, account)
 	}
-	response, err := makeRequest(c.cachedClearance(proxyURL))
+	response, err := makeRequest(c.cachedClearance(stableBrowserID("clearance:"+proxyURL, token)))
 	if err != nil {
 		return nil, err
 	}
@@ -310,33 +316,26 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 	return value, nil
 }
 
-func (c *OpenAIAccountClient) doChatGPT(req *http.Request, proxyURL string) (*http.Response, error) {
+func (c *OpenAIAccountClient) doChatGPT(req *http.Request, proxyURL, token string, account map[string]any) (*http.Response, error) {
 	if !browserEligible(c.BaseURL) {
+		applySavedWebCookies(req, c.BaseURL, account, token)
 		return c.HTTP.Do(req)
 	}
-	browser, err := c.browserFor(proxyURL)
+	browser, err := c.browserFor(proxyURL, token, account)
 	if err != nil {
 		return nil, fmt.Errorf("create Chrome TLS client: %w", err)
 	}
 	return browser.Do(req)
 }
 
-func (c *OpenAIAccountClient) browserFor(proxyURL string) (*browserHTTP, error) {
+func (c *OpenAIAccountClient) browserFor(proxyURL, token string, account map[string]any) (*browserHTTP, error) {
 	c.browserMu.Lock()
 	defer c.browserMu.Unlock()
-	if browser := c.browsers[proxyURL]; browser != nil {
-		return browser, nil
-	}
 	timeout := c.HTTP.Timeout
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
-	browser, err := newBrowserHTTP(proxyURL, timeout)
-	if err != nil {
-		return nil, err
-	}
-	c.browsers[proxyURL] = browser
-	return browser, nil
+	return accountBrowser(c.browsers, c.BaseURL, proxyURL, token, account, timeout)
 }
 
 func browserEligible(baseURL string) bool {
@@ -357,7 +356,8 @@ func (c *OpenAIAccountClient) cachedClearance(proxyURL string) clearanceBundle {
 func (c *OpenAIAccountClient) refreshClearance(ctx context.Context, proxyURL, method, targetURL, token string, account map[string]any, targetPath string) (clearanceBundle, error) {
 	c.clearanceMu.Lock()
 	defer c.clearanceMu.Unlock()
-	if bundle := c.clearance[proxyURL]; bundle.Cookie != "" || bundle.UserAgent != "" {
+	cacheKey := stableBrowserID("clearance:"+proxyURL, token)
+	if bundle := c.clearance[cacheKey]; bundle.Cookie != "" || bundle.UserAgent != "" {
 		return bundle, nil
 	}
 	timeout := c.ClearanceTimeout
@@ -437,7 +437,7 @@ func (c *OpenAIAccountClient) refreshClearance(ctx context.Context, proxyURL, me
 		}
 		return clearanceBundle{}, errors.New(detail)
 	}
-	c.clearance[proxyURL] = bundle
+	c.clearance[cacheKey] = bundle
 	return bundle, nil
 }
 
@@ -476,31 +476,23 @@ func (c *OpenAIAccountClient) ProxyURL(account map[string]any) string {
 }
 
 func setOpenAIHeaders(req *http.Request, path, token string, account map[string]any) {
-	fingerprint := buildOpenAIFingerprint(account)
+	fingerprint := buildOpenAIFingerprint(account, token)
+	for key, value := range fingerprint.Profile.Headers() {
+		req.Header.Set(key, value)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", fingerprint.UserAgent)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,en-US;q=0.7")
 	req.Header.Set("Origin", "https://chatgpt.com")
 	req.Header.Set("Referer", "https://chatgpt.com/")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Priority", "u=1, i")
-	req.Header.Set("Sec-CH-UA", fingerprint.SecCHUA)
-	req.Header.Set("Sec-CH-UA-Arch", `"x86"`)
-	req.Header.Set("Sec-CH-UA-Bitness", `"64"`)
-	req.Header.Set("Sec-CH-UA-Full-Version", fingerprint.SecCHUAFullVersion)
-	req.Header.Set("Sec-CH-UA-Full-Version-List", fingerprint.SecCHUAFullVersionList)
-	req.Header.Set("Sec-CH-UA-Mobile", fingerprint.SecCHUAMobile)
-	req.Header.Set("Sec-CH-UA-Model", `""`)
-	req.Header.Set("Sec-CH-UA-Platform", fingerprint.SecCHUAPlatform)
-	req.Header.Set("Sec-CH-UA-Platform-Version", `"19.0.0"`)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.Header.Set("OAI-Device-Id", fingerprint.DeviceID)
 	req.Header.Set("OAI-Session-Id", fingerprint.SessionID)
-	req.Header.Set("OAI-Language", "zh-CN")
+	req.Header.Set("OAI-Language", browserLanguage(fingerprint.Profile))
 	req.Header.Set("OAI-Client-Version", openAIClientVersion)
 	req.Header.Set("OAI-Client-Build-Number", openAIClientBuild)
 	req.Header.Set("X-OpenAI-Target-Path", path)
@@ -580,75 +572,4 @@ func firstUUID() string {
 			hex.EncodeToString(value[10:16]))
 	}
 	return fmt.Sprintf("00000000-0000-4000-8000-%012d", time.Now().UnixNano()%1_000_000_000_000)
-}
-
-type openAIFingerprint struct {
-	UserAgent              string
-	DeviceID               string
-	SessionID              string
-	SecCHUA                string
-	SecCHUAFullVersion     string
-	SecCHUAFullVersionList string
-	SecCHUAMobile          string
-	SecCHUAPlatform        string
-}
-
-func buildOpenAIFingerprint(account map[string]any) openAIFingerprint {
-	// Keep the defaults aligned with the Python curl_cffi client. An imported
-	// account may carry a more precise browser fingerprint under fp.
-	fingerprint := openAIFingerprint{
-		UserAgent:              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
-		DeviceID:               firstUUID(),
-		SessionID:              firstUUID(),
-		SecCHUA:                `"Microsoft Edge";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
-		SecCHUAFullVersion:     `"143.0.3650.96"`,
-		SecCHUAFullVersionList: `"Microsoft Edge";v="143.0.3650.96", "Chromium";v="143.0.7499.147", "Not A(Brand";v="24.0.0.0"`,
-		SecCHUAMobile:          "?0",
-		SecCHUAPlatform:        `"Windows"`,
-	}
-	values := map[string]string{}
-	for key, value := range account {
-		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-			values[strings.ToLower(strings.ReplaceAll(key, "_", "-"))] = strings.TrimSpace(text)
-		}
-	}
-	if raw, ok := account["fp"].(map[string]any); ok {
-		for key, value := range raw {
-			if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-				values[strings.ToLower(strings.ReplaceAll(key, "_", "-"))] = strings.TrimSpace(text)
-			}
-		}
-	}
-	if value := firstFingerprintValue(values, "user-agent"); value != "" {
-		fingerprint.UserAgent = value
-	}
-	if value := firstFingerprintValue(values, "oai-device-id"); value != "" {
-		fingerprint.DeviceID = value
-	}
-	if value := firstFingerprintValue(values, "oai-session-id"); value != "" {
-		fingerprint.SessionID = value
-	}
-	if value := firstFingerprintValue(values, "sec-ch-ua"); value != "" {
-		fingerprint.SecCHUA = value
-	}
-	if value := firstFingerprintValue(values, "sec-ch-ua-full-version"); value != "" {
-		fingerprint.SecCHUAFullVersion = value
-	}
-	if value := firstFingerprintValue(values, "sec-ch-ua-full-version-list"); value != "" {
-		fingerprint.SecCHUAFullVersionList = value
-	}
-	if value := firstFingerprintValue(values, "sec-ch-ua-mobile"); value != "" {
-		fingerprint.SecCHUAMobile = value
-	}
-	if value := firstFingerprintValue(values, "sec-ch-ua-platform"); value != "" {
-		fingerprint.SecCHUAPlatform = value
-	}
-	return fingerprint
-}
-
-func firstFingerprintValue(values map[string]string, key string) string {
-	if value := strings.TrimSpace(values[key]); value != "" {
-		return value
-	}
-	return ""
 }

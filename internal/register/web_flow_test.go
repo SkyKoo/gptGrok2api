@@ -176,6 +176,13 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 				if err != nil || account["access_token"] != "secret-account-token" {
 					t.Fatalf("unexpected result account=%#v err=%v", account, err)
 				}
+				rawCookies, _ := json.Marshal(account["web_cookies"])
+				if !strings.Contains(string(rawCookies), "web-session") {
+					t.Fatal("successful registration omitted private cookies")
+				}
+				if stringValue(account["web_cookies_token_hash"]) == "" {
+					t.Fatal("successful registration omitted cookie credential binding")
+				}
 				wantProfile := savedProfile
 				wantProfile.setTimezone(phoenix, time.Now())
 				if got, ok := ParseBrowserProfile(account["browser_profile"]); !ok || !reflect.DeepEqual(got, wantProfile) {

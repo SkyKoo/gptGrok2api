@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
@@ -44,6 +45,7 @@ type RegistrationProfileProvider interface {
 type WebRegistrar struct {
 	chat, auth, sentinel string
 	http                 tlsclient.HttpClient
+	cookies              *browserprofile.CookieJar
 	profile              BrowserProfile
 	device, state        string
 	authSessionID        string
@@ -64,7 +66,8 @@ func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfil
 		profile = requestedProfile[0]
 		profile.NavigatorLanguages = append([]string(nil), profile.NavigatorLanguages...)
 	}
-	options := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profile.tlsClientProfile()), tlsclient.WithTimeoutSeconds(30), tlsclient.WithNotFollowRedirects(), tlsclient.WithCookieJar(tlsclient.NewCookieJar())}
+	jar := browserprofile.NewCookieJar(chat)
+	options := []tlsclient.HttpClientOption{tlsclient.WithClientProfile(profile.tlsClientProfile()), tlsclient.WithTimeoutSeconds(30), tlsclient.WithNotFollowRedirects(), tlsclient.WithCookieJar(jar)}
 	if proxy != "" && proxy != "direct" {
 		options = append(options, tlsclient.WithProxyUrl(proxy))
 	}
@@ -72,7 +75,7 @@ func NewWebRegistrar(chat, auth, proxy string, requestedProfile ...BrowserProfil
 	if err != nil {
 		return nil, fail("config", "http_client_failed")
 	}
-	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client, profile: profile, proxy: proxy, resolveTimezone: provider.ResolveOpenAITimezone}, nil
+	return &WebRegistrar{chat: strings.TrimRight(chat, "/"), auth: strings.TrimRight(auth, "/"), sentinel: sentinelOrigin, http: client, cookies: jar, profile: profile, proxy: proxy, resolveTimezone: provider.ResolveOpenAITimezone}, nil
 }
 func (r *WebRegistrar) Close() { r.http.CloseIdleConnections() }
 func (r *WebRegistrar) BrowserProfile() BrowserProfile {
@@ -123,7 +126,10 @@ func (r *WebRegistrar) request(ctx context.Context, stage, method, rawURL, body,
 	if err != nil {
 		return result, fail(stage, "invalid_request")
 	}
-	req.Header = fhttp.Header{"user-agent": {r.profile.UserAgent}, "accept": {"application/json"}, "accept-language": {r.profile.AcceptLanguage}, "sec-ch-ua": {r.profile.SecCHUA}, "sec-ch-ua-mobile": {r.profile.SecCHUAMobile}, "sec-ch-ua-platform": {r.profile.SecCHUAPlatform}}
+	req.Header.Set("Accept", "application/json")
+	for key, value := range browserprofile.Profile(r.profile).Headers() {
+		req.Header.Set(key, value)
+	}
 	if strings.HasPrefix(req.URL.Path, "/api/auth/") && sameOrigin(rawURL, r.chat) {
 		req.Header.Set("origin", r.chat)
 		req.Header.Set("referer", r.chat+"/")
@@ -145,6 +151,7 @@ func (r *WebRegistrar) request(ctx context.Context, stage, method, rawURL, body,
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+	browserprofile.SetHeaderOrder(req.Header)
 	resp, err := r.http.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -504,7 +511,7 @@ func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig
 			}
 			fingerprint := r.BrowserProfile().fingerprintMetadata()
 			fingerprint["oai-device-id"] = r.device
-			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint, "browser_profile": r.BrowserProfile()}, nil
+			return map[string]any{"email": box.Email, "access_token": token, "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "created_at": time.Now().UTC().Format(time.RFC3339), "user_id": stringValue(user["id"]), "expired": stringValue(res.data["expires"]), "fp": fingerprint, "browser_profile": r.BrowserProfile(), "web_cookies": r.cookies.Snapshot(), "web_cookies_token_hash": browserprofile.TokenBinding(token)}, nil
 		}
 		if attempt < 3 {
 			if err = pause(ctx, time.Duration(attempt+1)*time.Second); err != nil {

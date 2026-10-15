@@ -2,18 +2,6 @@ package register
 
 import "time"
 
-// Only egress-dependent fields change. Stable TLS/browser/device identity is
-// reused across login attempts; offsets are calculated for the current instant.
-func (p *BrowserProfile) setTimezone(loc *time.Location, at time.Time) {
-	name, seconds := at.In(loc).Zone()
-	p.TimezoneIANA = loc.String()
-	p.TimezoneName = name
-	if p.TimezoneIANA == "UTC" {
-		p.TimezoneName = "Coordinated Universal Time"
-	}
-	p.TimezoneOffsetMinutes = -seconds / 60 // JavaScript getTimezoneOffset sign.
-}
-
 func (r *WebRegistrar) browserDate(at time.Time) string {
 	profile := r.profile
 	loc := r.timezone

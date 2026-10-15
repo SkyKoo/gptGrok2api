@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 )
 
 // solveSentinelTurnstileToken mirrors the small operation VM used by
 // ChatGPT's sentinel endpoint. The dx value is an XOR-obfuscated operation
 // queue; it is not a browser cookie and must be computed for the same p value.
-func solveSentinelTurnstileToken(dx, p string) (string, error) {
+func solveSentinelTurnstileToken(dx, p string, profiles ...browserprofile.Profile) (string, error) {
 	raw, err := decodeSentinelDX(dx, p)
 	if err != nil {
 		return "", err
@@ -28,6 +30,9 @@ func solveSentinelTurnstileToken(dx, p string) (string, error) {
 		values:    map[any]any{},
 		startTime: time.Now(),
 		result:    "",
+	}
+	if len(profiles) > 0 {
+		vm.environment = sentinelBrowserProperties(profiles[0])
 	}
 	vm.values[float64(9)] = tokenList
 	vm.values[float64(10)] = "window"
@@ -74,9 +79,10 @@ type sentinelOrderedMap struct {
 }
 
 type sentinelVM struct {
-	values    map[any]any
-	startTime time.Time
-	result    string
+	values      map[any]any
+	startTime   time.Time
+	result      string
+	environment map[string]any
 }
 
 func (vm *sentinelVM) install() {
@@ -386,6 +392,9 @@ func (vm *sentinelVM) property(object, key any) any {
 		return nil
 	}
 	if text, ok := object.(string); ok {
+		if value, ok := vm.environment[text+"."+vm.toString(key)]; ok {
+			return value
+		}
 		if text == "window.document" && vm.toString(key) == "location" {
 			return "https://chatgpt.com/"
 		}
@@ -488,4 +497,20 @@ func sentinelJSON(value any) string {
 		return "null"
 	}
 	return string(raw)
+}
+
+func sentinelBrowserProperties(p browserprofile.Profile) map[string]any {
+	langs := make([]any, len(p.NavigatorLanguages))
+	for i, v := range p.NavigatorLanguages {
+		langs[i] = v
+	}
+	return map[string]any{
+		"window.navigator.userAgent": p.UserAgent, "window.navigator.platform": p.NavigatorPlatform, "window.navigator.vendor": p.NavigatorVendor,
+		"window.navigator.language": p.NavigatorLanguage, "window.navigator.languages": langs,
+		"window.navigator.hardwareConcurrency": float64(p.HardwareConcurrency), "window.navigator.deviceMemory": float64(p.DeviceMemory),
+		"window.navigator.userAgentData.platform": p.UserAgentDataPlatform, "window.navigator.userAgentData.mobile": false,
+		"window.screen.width": float64(p.ScreenWidth), "window.screen.height": float64(p.ScreenHeight), "window.screen.availWidth": float64(p.AvailWidth), "window.screen.availHeight": float64(p.AvailHeight),
+		"window.innerWidth": float64(p.InnerWidth), "window.innerHeight": float64(p.InnerHeight), "window.outerWidth": float64(p.OuterWidth), "window.outerHeight": float64(p.OuterHeight),
+		"window.devicePixelRatio": float64(p.DevicePixelRatio), "window.performance.memory.jsHeapSizeLimit": float64(p.JSHeapSizeLimit),
+	}
 }

@@ -5,27 +5,31 @@ import (
 	stdhttp "net/http"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 )
 
 // browserHTTP adapts tls-client's fhttp request/response types to the
 // standard library types used by the provider package.
 type browserHTTP struct {
-	client tlsclient.HttpClient
+	client   tlsclient.HttpClient
+	lastUsed time.Time
+	profile  browserprofile.Profile
 }
 
-func newBrowserHTTP(proxyURL string, timeout time.Duration) (*browserHTTP, error) {
+func newBrowserHTTP(origin, proxyURL string, timeout time.Duration, profile browserprofile.Profile, savedCookies any) (*browserHTTP, error) {
 	seconds := int(timeout / time.Second)
 	if seconds < 1 {
 		seconds = 30
 	}
+	jar := browserprofile.NewCookieJar(origin)
+	jar.Restore(savedCookies)
 	options := []tlsclient.HttpClientOption{
-		tlsclient.WithClientProfile(profiles.Chrome_110),
+		tlsclient.WithClientProfile(profile.TLSClientProfile()),
 		tlsclient.WithTimeoutSeconds(seconds),
 		tlsclient.WithNotFollowRedirects(),
-		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
+		tlsclient.WithCookieJar(jar),
 	}
 	if proxyURL != "" {
 		options = append(options, tlsclient.WithProxyUrl(proxyURL))
@@ -34,7 +38,7 @@ func newBrowserHTTP(proxyURL string, timeout time.Duration) (*browserHTTP, error
 	if err != nil {
 		return nil, err
 	}
-	return &browserHTTP{client: client}, nil
+	return &browserHTTP{client: client, profile: profile}, nil
 }
 
 func (c *browserHTTP) Do(req *stdhttp.Request) (*stdhttp.Response, error) {
@@ -62,16 +66,10 @@ func (c *browserHTTP) CloseIdleConnections() {
 
 func cloneFHTTPHeader(source stdhttp.Header) fhttp.Header {
 	target := make(fhttp.Header, len(source)+1)
-	order := make([]string, 0, len(source))
 	for key, values := range source {
 		target[key] = append([]string(nil), values...)
-		if key != "Cookie" && key != "Host" {
-			order = append(order, key)
-		}
 	}
-	if len(order) > 0 {
-		target[fhttp.HeaderOrderKey] = order
-	}
+	browserprofile.SetHeaderOrder(target)
 	return target
 }
 

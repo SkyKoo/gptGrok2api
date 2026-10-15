@@ -46,6 +46,7 @@ func accountEndpointError(path string, status int, retryAfter string, err error,
 	for _, key := range []string{"access_token", "accessToken", "token", "refresh_token", "id_token", "cookie_header", "cookie", "cookies", "session_token", "password", "login_password", "email", "user_id"} {
 		secrets = append(secrets, aiString(account, key))
 	}
+	secrets = append(secrets, webSessionSecrets(account, "")...)
 	// Redact before truncation, including opaque tokens and proxy credentials.
 	message := strings.TrimPrefix(imageErrorDetail(err.Error(), secrets...).Message, imageTerminalPrefix)
 	if runes := []rune(message); len(runes) > 2048 {
