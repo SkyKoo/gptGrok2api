@@ -50,6 +50,7 @@ type OpenAIAccountClient struct {
 	clearance        map[string]clearanceBundle
 	browserMu        sync.Mutex
 	browsers         map[string]*browserHTTP
+	timezones        *openAITimezoneResolver
 }
 
 func NewOpenAIAccountClient(baseURL, oauthURL string, client *http.Client, proxy *proxyruntime.Manager, clearance ...ClearanceConfig) *OpenAIAccountClient {
@@ -70,6 +71,7 @@ func NewOpenAIAccountClient(baseURL, oauthURL string, client *http.Client, proxy
 		ClearanceTimeout: settings.Timeout,
 		clearance:        map[string]clearanceBundle{},
 		browsers:         map[string]*browserHTTP{},
+		timezones:        openAITimezonesFor(baseURL),
 	}
 }
 
@@ -160,6 +162,7 @@ func (c *OpenAIAccountClient) RefreshAccessToken(ctx context.Context, account ma
 }
 
 func (c *OpenAIAccountClient) fetchUserInfo(ctx context.Context, accessToken string, account map[string]any) (map[string]any, error) {
+	ctx = c.withTimezone(ctx, account)
 	me, err := c.getMe(ctx, accessToken, account)
 	if err != nil {
 		return nil, err
@@ -202,13 +205,16 @@ func (c *OpenAIAccountClient) getMe(ctx context.Context, token string, account m
 }
 
 func (c *OpenAIAccountClient) getConversationInit(ctx context.Context, token string, account map[string]any) (map[string]any, error) {
+	ctx = c.withTimezone(ctx, account)
 	return c.getJSON(ctx, http.MethodPost, "/backend-api/conversation/init", token, account, map[string]any{
-		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": -480,
+		"gizmo_id": nil, "requested_default_model": nil, "conversation_id": nil, "timezone_offset_min": currentOpenAITimezone(ctx).offset(),
 	})
 }
 
 func (c *OpenAIAccountClient) getDefaultAccount(ctx context.Context, token string, account map[string]any) (map[string]any, error) {
-	value, err := c.getJSON(ctx, http.MethodGet, "/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=-480", token, account, nil)
+	ctx = c.withTimezone(ctx, account)
+	path := fmt.Sprintf("/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=%d", currentOpenAITimezone(ctx).offset())
+	value, err := c.getJSON(ctx, http.MethodGet, path, token, account, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -222,11 +228,15 @@ func (c *OpenAIAccountClient) getDefaultAccount(ctx context.Context, token strin
 }
 
 func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token string, account map[string]any, body any) (value map[string]any, err error) {
+	proxyURL, selected := proxyruntime.URLSelectionFromContext(ctx)
+	if !selected {
+		proxyURL = c.ProxyURL(account)
+	}
 	status, retryAfter := 0, ""
 	defer func() {
 		if err != nil {
 			endpoint := strings.SplitN(path, "?", 2)[0]
-			err = accountEndpointError(endpoint, status, retryAfter, err, account, token, c.ProxyURL(account))
+			err = accountEndpointError(endpoint, status, retryAfter, err, account, token, proxyURL)
 		}
 	}()
 	var rawBody []byte
@@ -243,7 +253,6 @@ func (c *OpenAIAccountClient) getJSON(ctx context.Context, method, path, token s
 	if parsed, parseErr := url.Parse(path); parseErr == nil && parsed.Path != "" {
 		targetPath = parsed.Path
 	}
-	proxyURL := c.ProxyURL(account)
 	makeRequest := func(bundle clearanceBundle) (*http.Response, error) {
 		var reader io.Reader
 		if rawBody != nil {

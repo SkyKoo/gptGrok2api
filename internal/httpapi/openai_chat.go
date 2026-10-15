@@ -18,12 +18,18 @@ import (
 // runOpenAIChat owns the account lease for upload and conversation together.
 // A retry is safe only before client-visible text has been emitted.
 func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, route model.ChatRoute, images []provider.OpenAIChatImage, onEvent func(provider.OpenAIChatEvent) error) (resultErr error) {
+	var selected accounts.Account
 	defer func() {
 		if resultErr != nil {
 			detail := openAIChatErrorObject(resultErr)
 			s.enrichRequestMonitor(r, map[string]any{"error_status": openAITextChatStatus(resultErr), "error_code": detail["code"]})
+			var upstream *protocol.UpstreamError
+			if errors.As(resultErr, &upstream) && upstream.Endpoint != "" {
+				s.enrichRequestMonitor(r, map[string]any{"upstream_endpoint": upstream.Endpoint})
+			}
 			if outcome, ok := r.Context().Value(monitorOutcomeKey{}).(*monitorOutcome); ok {
 				outcome.errorText = stringValue(detail["message"])
+				outcome.imageError = provider.ChatErrorDetails(resultErr, selected)
 			}
 		}
 	}()
@@ -46,6 +52,7 @@ func (s *Server) runOpenAIChat(r *http.Request, request protocol.ChatRequest, ro
 			}
 			return err
 		}
+		selected = lease.Account
 		s.enrichMonitorAccount(r, lease.Account)
 		s.enrichRequestMonitor(r, map[string]any{"upstream_attempts": attempt + 1})
 		emitted, clientFailed := false, false
@@ -346,6 +353,9 @@ func openAIChatErrorObject(err error) map[string]any {
 	// caller API key or echo upstream credential details to the caller.
 	if upstreamStatus(err) == http.StatusUnauthorized || upstreamStatus(err) == http.StatusForbidden {
 		return map[string]any{"message": "ChatGPT upstream account authentication or access failed; check the CFM account pool.", "type": "server_error", "param": nil, "code": "upstream_authentication_error"}
+	}
+	if provider.IsModelRejected(err) {
+		return map[string]any{"message": "ChatGPT upstream rejected the requested model; refresh the model catalog or try another available model.", "type": "server_error", "param": "model", "code": "upstream_model_unavailable"}
 	}
 	kind, code := "server_error", "server_error"
 	if errors.Is(err, accounts.ErrUnavailable) || upstreamStatus(err) == http.StatusTooManyRequests {

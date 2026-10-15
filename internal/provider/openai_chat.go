@@ -57,6 +57,7 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if _, selected := proxyruntime.URLSelectionFromContext(ctx); !selected && c.Image.Proxy != nil {
 		ctx = proxyruntime.WithURL(ctx, c.Image.Proxy.Resolve(account.Fields, false))
 	}
+	ctx = c.Image.withTimezone(ctx, account)
 	inputs := make([]OpenAIImageInput, len(images))
 	for index, image := range images {
 		inputs[index] = image.Input
@@ -69,6 +70,7 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if err != nil {
 		return err
 	}
+	applyOpenAITimezone(ctx, payload)
 	scripts, build, err := c.Image.bootstrap(ctx, account)
 	if err != nil {
 		return err
@@ -86,7 +88,7 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return readOpenAIHTTPError(response, "conversation")
+		return readOpenAIHTTPError(response, "/backend-api/conversation")
 	}
 	return scanOpenAIChat(response.Body, onEvent, func(v any) { notifyUpstreamModel(ctx, v) })
 }
@@ -297,8 +299,6 @@ func openAIChatPayload(request protocol.ChatRequest) map[string]any {
 		"suggestions":                   []any{},
 		"supported_encodings":           []any{},
 		"system_hints":                  []any{},
-		"timezone":                      "Asia/Shanghai",
-		"timezone_offset_min":           -480,
 		"variant_purpose":               "comparison_implicit",
 		"websocket_request_id":          firstUUID(),
 		"client_contextual_info":        map[string]any{"is_dark_mode": false, "time_since_loaded": 120, "page_height": 900, "page_width": 1400, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560},
@@ -381,4 +381,19 @@ func appendDelta(current *string, candidate string) string {
 	}
 	*current += candidate
 	return candidate
+}
+
+// ChatErrorDetails preserves a bounded, redacted cause for administrator logs.
+// Public responses may map this cause to a stable, user-facing error instead.
+func ChatErrorDetails(err error, account accounts.Account) ImageErrorDetail {
+	if err == nil {
+		return ImageErrorDetail{}
+	}
+	secrets := []string{account.Token}
+	for _, key := range []string{"access_token", "accessToken", "token", "refresh_token", "id_token", "cookie_header", "cookie", "cookies", "session_token", "password", "login_password", "email", "user_id"} {
+		secrets = append(secrets, aiString(account.Fields, key))
+	}
+	detail := imageErrorDetail(err.Error(), secrets...)
+	detail.Message = strings.TrimPrefix(detail.Message, imageTerminalPrefix)
+	return detail
 }

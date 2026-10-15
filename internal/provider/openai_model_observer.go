@@ -82,8 +82,8 @@ func notifyUpstreamModel(ctx context.Context, value any) {
 	visit(value)
 }
 
-// Only explicit model codes are evidence of model rejection. A file 404 or
-// timeout may happen after acceptance and must not trigger duplicate generation.
+// Explicit codes or the conversation endpoint's exact model rejection are
+// evidence of non-acceptance. Other 404s and timeouts must not regenerate work.
 func IsModelRejected(err error) bool {
 	var upstream *protocol.UpstreamError
 	if !errors.As(err, &upstream) || (upstream.Status != http.StatusBadRequest && upstream.Status != http.StatusNotFound) {
@@ -92,6 +92,15 @@ func IsModelRejected(err error) bool {
 	var body map[string]any
 	if json.Unmarshal([]byte(upstream.Body), &body) != nil {
 		return false
+	}
+	// Web also returns {"detail":"Model not found"} without an error code.
+	// Scope this textual variant to conversation submission/prepare endpoints;
+	// upload or download failures must never be treated as a model rejection.
+	switch upstream.Endpoint {
+	case "conversation", "/backend-api/conversation", "/backend-api/f/conversation", "/backend-api/f/conversation/prepare":
+		if detail, ok := body["detail"].(string); ok && strings.EqualFold(strings.TrimSpace(detail), "Model not found") {
+			return true
+		}
 	}
 	for _, obj := range []any{body, body["error"], body["detail"]} {
 		if m, ok := obj.(map[string]any); ok {

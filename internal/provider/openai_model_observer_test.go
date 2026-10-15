@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 )
 
@@ -47,5 +52,48 @@ func TestOnlyDefiniteModelRejection(t *testing.T) {
 	}
 	if IsModelRejected(errors.New("model_not_found")) {
 		t.Fatal("unstructured error accepted")
+	}
+}
+
+func TestTextModelRejectionRequiresConversationEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		path, body string
+		status     int
+		want       bool
+	}{
+		{"/backend-api/conversation", `{"detail":"Model not found"}`, 404, true},
+		{"/backend-api/f/conversation", `{"detail":"Model not found"}`, 404, true},
+		{"/backend-api/f/conversation/prepare", `{"detail":"Model not found"}`, 400, true},
+		{"/backend-api/files/file-test/uploaded", `{"detail":"Model not found"}`, 404, false},
+		{"/backend-api/conversation/private-id", `{"detail":"Model not found"}`, 404, false},
+		{"/backend-api/conversation", `{"detail":"Conversation not found"}`, 404, false},
+		{"/backend-api/conversation", `{"detail":"Model not found"}`, 500, false},
+		{"/backend-api/conversation", `{"message":"Model not found"}`, 404, false},
+	} {
+		t.Run(tc.path+tc.body+http.StatusText(tc.status), func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://chatgpt.com"+tc.path+"?secret=hidden", nil)
+			err := readOpenAIHTTPError(&http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Request: req}, "other stage")
+			var up *protocol.UpstreamError
+			if !errors.As(err, &up) || up.Endpoint != tc.path || up.Body != tc.body {
+				t.Fatalf("lost HTTP diagnostic: %v", err)
+			}
+			if got := IsModelRejected(err); got != tc.want {
+				t.Fatalf("classification=%v want=%v", got, tc.want)
+			}
+			raw, _ := json.Marshal(up)
+			if strings.Contains(string(raw), "Endpoint") || strings.Contains(string(raw), "secret") {
+				t.Fatal("internal endpoint leaked")
+			}
+		})
+	}
+	if IsModelRejected(&protocol.UpstreamError{Status: 404, Body: `{"detail":"Model not found"}`}) {
+		t.Fatal("unscoped text rejection accepted")
+	}
+}
+
+func TestChatDiagnosticRetainsCauseWithoutCredentials(t *testing.T) {
+	detail := ChatErrorDetails(errors.New(`{"detail":"Model not found","token":"opaque-key","email":"person@example.test"}`), accounts.Account{Token: "opaque-key"})
+	if !strings.Contains(detail.Message, "Model not found") || strings.Contains(detail.Message, "opaque-key") || strings.Contains(detail.Message, "person@example.test") || strings.HasPrefix(detail.Message, imageTerminalPrefix) {
+		t.Fatalf("bad diagnostic: %s", detail.Message)
 	}
 }

@@ -118,3 +118,85 @@ func TestModelRejectionRetriesSameModelAndLogsActualModel(t *testing.T) {
 		}
 	}
 }
+
+func TestTextModelRejectionRecoveryAcrossChatAPIs(t *testing.T) {
+	for _, responses := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("responses=%v/stream=%v", responses, stream), func(t *testing.T) {
+				var calls atomic.Int32
+				var rejectedToken string
+				s, uploads := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+					var body map[string]any
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					if body["model"] != "auto" {
+						t.Error("requested auto was changed")
+					}
+					token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+					if calls.Add(1) == 1 {
+						rejectedToken = token
+						w.WriteHeader(404)
+						fmt.Fprint(w, `{"detail":"Model not found"}`)
+						return
+					}
+					if token == rejectedToken {
+						t.Error("rejected account reused")
+					}
+					fmt.Fprintln(w, `data: {"message":{"author":{"role":"assistant"},"content":{"parts":["recovered"]}}}`)
+					fmt.Fprintln(w, "data: [DONE]")
+				})
+				s.cfg.ChatMaxRetries = 1
+				path := "/v1/chat/completions"
+				if responses {
+					path = "/v1/responses"
+				}
+				got := invokeMultimodal(s, path, multimodalRequestBody(t, responses, stream, true))
+				if got.Code != 200 || !strings.Contains(got.Body.String(), "recovered") || calls.Load() != 2 || uploads.Load() != 4 {
+					t.Fatalf("recovery failed: status=%d calls=%d uploads=%d body=%s", got.Code, calls.Load(), uploads.Load(), got.Body.String())
+				}
+				rows, _ := s.store.AccountList()
+				for _, row := range rows {
+					if accountToken(row) == rejectedToken {
+						id := accounts.Identity(accounts.Account{Token: rejectedToken, Fields: row})
+						if s.discovery.Supports(id, "auto") || !s.discovery.Supports(id, "gpt-5-3") {
+							t.Fatal("rejection not scoped to selected model")
+						}
+						if accountStatusCategory(row) == "abnormal" {
+							t.Fatal("model rejection invalidated account")
+						}
+					}
+				}
+				raw, _ := json.Marshal(s.loadCallLogs())
+				if !strings.Contains(string(raw), "same_model_account_retry") {
+					t.Fatal("retry diagnostic absent")
+				}
+			})
+		}
+	}
+}
+
+func TestModelRejectionExhaustionAndOther404(t *testing.T) {
+	for _, body := range []string{`{"detail":"Model not found"}`, `{"detail":"Conversation not found"}`} {
+		t.Run(body, func(t *testing.T) {
+			var calls atomic.Int32
+			s, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(404); fmt.Fprint(w, body) })
+			s.cfg.ChatMaxRetries = 1
+			got := invokeMultimodal(s, "/v1/responses", multimodalRequestBody(t, true, false, false))
+			want := int32(1)
+			if strings.Contains(body, "Model not found") {
+				want = 2
+			}
+			if got.Code != 404 || calls.Load() != want {
+				t.Fatalf("status=%d calls=%d body=%s", got.Code, calls.Load(), got.Body.String())
+			}
+			if want == 2 {
+				if !strings.Contains(got.Body.String(), "upstream_model_unavailable") {
+					t.Fatal("missing model error code")
+				}
+				raw, _ := json.Marshal(s.loadCallLogs())
+				if !strings.Contains(string(raw), `Model not found`) || !strings.Contains(string(raw), `upstream_error`) {
+					t.Fatalf("raw cause lost: %s", raw)
+				}
+			}
+		})
+	}
+}

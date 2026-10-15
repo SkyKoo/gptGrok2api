@@ -77,9 +77,11 @@ type UpstreamEvent struct {
 }
 
 type UpstreamError struct {
-	Status  int
-	Message string
-	Body    string
+	// Endpoint is internal diagnostic context, without host, credentials or query.
+	Endpoint string `json:"-"`
+	Status   int
+	Message  string
+	Body     string
 }
 
 func (e *UpstreamError) Error() string {

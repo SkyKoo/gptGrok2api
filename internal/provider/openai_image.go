@@ -45,6 +45,7 @@ type OpenAIImage struct {
 	RequestTimeout time.Duration
 	browserMu      sync.Mutex
 	browsers       map[string]*browserHTTP
+	timezones      *openAITimezoneResolver
 }
 
 type OpenAIImageInput struct {
@@ -121,6 +122,7 @@ func NewOpenAIImage(baseURL string, client *http.Client, proxy *proxyruntime.Man
 		Proxy:          proxy,
 		RequestTimeout: timeout,
 		browsers:       map[string]*browserHTTP{},
+		timezones:      openAITimezonesFor(baseURL),
 	}
 }
 
@@ -171,6 +173,7 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 		notifyOpenAIImageEgress(ctx, lease.URL)
 		defer func() { lease.Release(openAIImageProxyFailure(err)) }()
 	}
+	ctx = o.withTimezone(ctx, account)
 	prompt = strings.TrimSpace(prompt)
 	if size != "auto" {
 		prompt += "\n\n输出图片尺寸为 " + size + "。"
@@ -472,7 +475,10 @@ func (o *OpenAIImage) bootstrap(ctx context.Context, account accounts.Account) (
 }
 
 func (o *OpenAIImage) chatRequirements(ctx context.Context, account accounts.Account, scripts []string, build string) (openAIRequirements, error) {
-	legacy := buildLegacyRequirementsToken(openAIUserAgent, scripts, build)
+	// Keep the location stable, but obtain a fresh clock sample after uploads.
+	// A slow upload must not make the Sentinel timestamp stale.
+	zone := currentOpenAITimezone(ctx)
+	legacy := buildLegacyRequirementsToken(openAIUserAgent, scripts, build, zone)
 	prepareBody := map[string]any{"p": legacy}
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/sentinel/chat-requirements/prepare", account, prepareBody, map[string]string{"Content-Type": "application/json"}, false)
 	if err != nil {
@@ -484,7 +490,7 @@ func (o *OpenAIImage) chatRequirements(ctx context.Context, account accounts.Acc
 	}
 	proof := ""
 	if info, ok := prepare["proofofwork"].(map[string]any); ok && boolValue(info["required"]) {
-		proof = buildProofToken(stringValue(info["seed"]), stringValue(info["difficulty"]), openAIUserAgent, scripts, build)
+		proof = buildProofToken(stringValue(info["seed"]), stringValue(info["difficulty"]), openAIUserAgent, scripts, build, zone)
 	}
 	turnstile := ""
 	if info, ok := prepare["turnstile"].(map[string]any); ok && boolValue(info["required"]) {
@@ -523,8 +529,6 @@ func (o *OpenAIImage) prepare(ctx context.Context, account accounts.Account, req
 		"parent_message_id":     firstUUID(),
 		"model":                 openAIImageModel(model),
 		"client_prepare_state":  "success",
-		"timezone_offset_min":   -480,
-		"timezone":              "Asia/Shanghai",
 		"conversation_mode":     map[string]any{"kind": "primary_assistant"},
 		"system_hints":          []any{"picture_v2"},
 		"partial_query": map[string]any{
@@ -535,6 +539,7 @@ func (o *OpenAIImage) prepare(ctx context.Context, account accounts.Account, req
 		"supported_encodings":    []any{"v1"},
 		"client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
 	}
+	applyOpenAITimezone(ctx, payload)
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/f/conversation/prepare", account, payload, o.requirementHeaders(requirements), false)
 	if err != nil {
 		return "", err
@@ -598,8 +603,6 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 		"parent_message_id":                    firstUUID(),
 		"model":                                openAIImageModel(model),
 		"client_prepare_state":                 "sent",
-		"timezone_offset_min":                  -480,
-		"timezone":                             "Asia/Shanghai",
 		"conversation_mode":                    map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups":             true,
 		"system_hints":                         []any{"picture_v2"},
@@ -618,6 +621,7 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 	headers := o.requirementHeaders(requirements)
 	headers["X-Conduit-Token"] = conduit
 	headers["Accept"] = "text/event-stream"
+	applyOpenAITimezone(ctx, payload)
 	notifyQuotaSent(ctx, "reason")
 	notifyQuotaSent(ctx, "image_gen")
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/f/conversation", account, payload, headers, true)
@@ -1275,14 +1279,16 @@ func (o *OpenAIImage) doRequest(ctx context.Context, method, endpoint, targetPat
 		request.Header.Set("Accept", "text/event-stream")
 	}
 	client := o.Client
+	var response *http.Response
 	if browserEligible(o.BaseURL) && authenticated {
 		browser, browserErr := o.browserFor(proxyURL)
 		if browserErr != nil {
 			return nil, browserErr
 		}
-		return browser.Do(request)
+		response, err = browser.Do(request)
+	} else {
+		response, err = client.Do(request)
 	}
-	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -1353,7 +1359,11 @@ func readOpenAIHTTPError(response *http.Response, target string) error {
 	if message == "" {
 		message = fmt.Sprintf("OpenAI endpoint %s returned HTTP %d", target, response.StatusCode)
 	}
-	return &protocol.UpstreamError{Status: response.StatusCode, Message: message, Body: message}
+	endpoint := target
+	if response.Request != nil && response.Request.URL != nil {
+		endpoint = response.Request.URL.Path
+	}
+	return &protocol.UpstreamError{Status: response.StatusCode, Message: message, Body: message, Endpoint: endpoint}
 }
 
 func scanOpenAISSE(reader io.Reader, onPayload func([]byte) bool) error {
@@ -1598,28 +1608,28 @@ func openAIImageModel(model string) string {
 	return strings.TrimSpace(model)
 }
 
-func buildLegacyRequirementsToken(userAgent string, scripts []string, build string) string {
+func buildLegacyRequirementsToken(userAgent string, scripts []string, build string, zone openAITimezoneSnapshot) string {
 	config := []any{
-		"1920x1080", time.Now().UTC().Format("Mon Jan 02 2006 15:04:05 GMT+0000 (Coordinated Universal Time)"),
+		"1920x1080", zone.date(),
 		4294705152, 1, userAgent, firstStringValue(map[string]any{"script": firstNonEmptyString(scripts, "https://chatgpt.com/backend-api/sentinel/sdk.js")}, "script"),
 		build, "en-US", "en-US,es-US,en,es", mathrand.Float64(),
 		"webdriver-false", "location", "navigator", mathrand.Float64() * 1000, firstUUID(), "",
-		[]int{8, 16, 24, 32}[mathrand.Intn(4)], time.Now().UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
+		[]int{8, 16, 24, 32}[mathrand.Intn(4)], zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
 	}
 	raw, _ := json.Marshal(config)
 	return "gAAAAAC" + base64.StdEncoding.EncodeToString(raw)
 }
 
-func buildProofToken(seed, difficulty, userAgent string, scripts []string, build string) string {
+func buildProofToken(seed, difficulty, userAgent string, scripts []string, build string, zone openAITimezoneSnapshot) string {
 	target, err := hexBytes(difficulty)
 	if err != nil || len(target) == 0 {
 		return ""
 	}
 	config := []any{
-		"1920x1080", time.Now().UTC().Format(time.RFC3339), 4294705152, 0, userAgent,
+		"1920x1080", zone.date(), 4294705152, 0, userAgent,
 		firstStringValue(map[string]any{"script": firstNonEmptyString(scripts, "https://chatgpt.com/backend-api/sentinel/sdk.js")}, "script"),
 		build, "en-US", "en-US,es-US,en,es", 0.5, "webdriver-false", "location", "navigator",
-		0, firstUUID(), "", 8, time.Now().UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
+		0, firstUUID(), "", 8, zone.at.UnixMilli(), 0, 0, 0, 0, 0, 0, 0, 0,
 	}
 	for i := 0; i < 500000; i++ {
 		config[3] = i

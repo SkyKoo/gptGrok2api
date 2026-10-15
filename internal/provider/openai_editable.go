@@ -69,6 +69,7 @@ func (o *OpenAIImage) ExportEditable(ctx context.Context, account accounts.Accou
 	if kind == "psd" && len(inputs) == 0 {
 		return EditableExportResult{}, fmt.Errorf("PSD export requires at least one image")
 	}
+	ctx = o.withTimezone(ctx, account)
 	prompt := editablePPTPrompt
 	if kind == "psd" {
 		prompt = editablePSDPrompt
@@ -122,15 +123,16 @@ func (o *OpenAIImage) prepareEditable(ctx context.Context, account accounts.Acco
 	}
 	payload := map[string]any{
 		"action": "next", "fork_from_shared_post": false, "parent_message_id": "client-created-root",
-		"model": EditableFileModel, "client_prepare_state": "success", "timezone_offset_min": -480,
-		"timezone": "Asia/Shanghai", "conversation_mode": map[string]any{"kind": "primary_assistant"},
-		"system_hints": []any{}, "partial_query": map[string]any{"id": firstUUID(), "author": map[string]any{"role": "user"}, "content": map[string]any{"content_type": "text", "parts": []any{prompt}}},
+		"model": EditableFileModel, "client_prepare_state": "success",
+		"conversation_mode": map[string]any{"kind": "primary_assistant"},
+		"system_hints":      []any{}, "partial_query": map[string]any{"id": firstUUID(), "author": map[string]any{"role": "user"}, "content": map[string]any{"content_type": "text", "parts": []any{prompt}}},
 		"supports_buffering": true, "supported_encodings": []any{"v1"}, "client_contextual_info": map[string]any{"app_name": "chatgpt.com"},
 		"thinking_effort": editableFileThinkingEffort,
 	}
 	if len(mimeTypes) > 0 {
 		payload["attachment_mime_types"] = mimeTypes
 	}
+	applyOpenAITimezone(ctx, payload)
 	headers := o.requirementHeaders(requirements)
 	headers["X-Conduit-Token"] = "no-token"
 	response, err := o.do(ctx, http.MethodPost, "/backend-api/f/conversation/prepare", account, payload, headers, false)
@@ -167,11 +169,12 @@ func (o *OpenAIImage) startEditable(ctx context.Context, account accounts.Accoun
 	payload := map[string]any{
 		"action": "next", "messages": []any{map[string]any{"id": firstUUID(), "author": map[string]any{"role": "user"}, "create_time": float64(time.Now().UnixNano()) / 1e9, "content": map[string]any{"content_type": contentType, "parts": parts}, "metadata": metadata}},
 		"parent_message_id": "client-created-root", "model": EditableFileModel, "client_prepare_state": "sent",
-		"timezone_offset_min": -480, "timezone": "Asia/Shanghai", "conversation_mode": map[string]any{"kind": "primary_assistant"},
+		"conversation_mode":        map[string]any{"kind": "primary_assistant"},
 		"enable_message_followups": true, "system_hints": []any{}, "supports_buffering": true, "supported_encodings": []any{"v1"},
 		"client_contextual_info":               map[string]any{"is_dark_mode": false, "time_since_loaded": 401, "page_height": 1138, "page_width": 803, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
 		"paragen_cot_summary_display_override": "allow", "force_parallel_switch": "auto", "thinking_effort": editableFileThinkingEffort,
 	}
+	applyOpenAITimezone(ctx, payload)
 	headers := o.requirementHeaders(requirements)
 	headers["X-Conduit-Token"] = conduit
 	headers["Accept"] = "text/event-stream"
