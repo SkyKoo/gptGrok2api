@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { onUnmounted, ref } from 'vue'
 
 import { accountsApi } from '@/api/accounts'
 import { accountImportsApi } from '@/api/accountImports'
@@ -6,7 +6,7 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import type { useAccountBulkProgressRuntime } from './accountBulkProgressRuntime'
 
-export type AccountImportMode = 'oauth_login' | 'access_token' | 'session_json' | 'cpa_json' | 'remote_cpa' | 'sub2api'
+export type AccountImportMode = 'oauth_login' | 'codex_oauth' | 'access_token' | 'session_json' | 'cpa_json' | 'remote_cpa' | 'sub2api'
 
 const IMPORT_BATCH_SIZE = 20
 
@@ -96,13 +96,22 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
   const oauthSessionId = ref('')
   const oauthAuthorizeUrl = ref('')
   const oauthRedirectUriPrefix = ref('')
+  const codexAccountRef = ref('')
+  const codexCPAPoolID = ref('')
+  const codexCPAPools = ref<Array<{ id: string; name: string; base_url: string }>>([])
+  const codexOAuthStage = ref('')
+  const codexOAuthMessage = ref('')
+  let codexProgressTimer: ReturnType<typeof setInterval> | null = null
   const manualTokenText = ref('')
   const sessionJsonText = ref('')
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
 
+  onUnmounted(() => stopCodexOAuthProgressPolling())
+
   const importModeOptions = [
     { label: 'OAuth 登录已有账号', value: 'oauth_login' },
+    { label: 'Codex OAuth + CPA', value: 'codex_oauth' },
     { label: '导入 Access Token', value: 'access_token' },
     { label: '导入 Session JSON', value: 'session_json' },
     { label: '导入 CPA JSON 文件', value: 'cpa_json' },
@@ -121,6 +130,7 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
 
   function closeImportModal() {
     if (importBusy.value) return
+    stopCodexOAuthProgressPolling()
     showImportModal.value = false
   }
 
@@ -296,6 +306,121 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     }
   }
 
+  async function startCodexOAuthLogin() {
+    if (!codexAccountRef.value.trim()) {
+      toast.warning('请填写要绑定的 CFM 账号 ID、邮箱或账号引用')
+      return
+    }
+    importBusy.value = true
+    try {
+      if (!codexCPAPools.value.length) {
+        const response = await accountImportsApi.listCPAPools()
+        codexCPAPools.value = response.pools || []
+      }
+      if (!codexCPAPoolID.value && codexCPAPools.value.length) codexCPAPoolID.value = codexCPAPools.value[0].id
+      const result = await accountImportsApi.startCodexOAuthLogin({
+        account_ref: codexAccountRef.value.trim(),
+        email_hint: oauthEmailHint.value.trim() || undefined,
+        cpa_pool_id: codexCPAPoolID.value || undefined,
+      })
+      oauthSessionId.value = String(result.session_id || '')
+      oauthAuthorizeUrl.value = String(result.authorize_url || '')
+      oauthRedirectUriPrefix.value = String(result.redirect_uri_prefix || '')
+      oauthCallbackText.value = ''
+      codexOAuthStage.value = String(result.stage || 'waiting_authorization')
+      codexOAuthMessage.value = String(result.message || '')
+      if (!oauthSessionId.value || !oauthAuthorizeUrl.value) throw new Error('后端没有返回完整的 Codex OAuth 授权会话')
+      startCodexOAuthProgressPolling(oauthSessionId.value)
+      window.open(oauthAuthorizeUrl.value, '_blank', 'noopener,noreferrer')
+      toast.success('Codex 授权页面已打开；请在页面内完成手机验证码和需要时的 2FA')
+    } catch (error) {
+      options.setError('生成 Codex OAuth 授权链接失败', error)
+    } finally {
+      importBusy.value = false
+    }
+  }
+
+  async function finishCodexOAuthLogin() {
+    const sessionId = oauthSessionId.value.trim()
+    const callback = oauthCallbackText.value.trim()
+    if (!sessionId || !callback) {
+      toast.warning('请先完成授权并粘贴 callback URL')
+      return
+    }
+    importBusy.value = true
+    try {
+      stopCodexOAuthProgressPolling()
+      codexOAuthStage.value = 'exchanging_token'
+      const result = await accountImportsApi.finishCodexOAuthLogin({
+        session_id: sessionId,
+        callback,
+        account_ref: codexAccountRef.value.trim(),
+        cpa_pool_id: codexCPAPoolID.value || undefined,
+      })
+      await options.loadData({ silentErrorToast: true })
+      if (result.ok === false) toast.warning(result.message || 'Codex 登录成功，但 CPA 同步失败，可稍后重试')
+      else toast.success('Codex 登录并同步 CPA 完成')
+      oauthSessionId.value = ''
+      oauthAuthorizeUrl.value = ''
+      oauthCallbackText.value = ''
+      codexOAuthStage.value = result.ok === false ? 'cpa_sync_failed' : 'done'
+      codexOAuthMessage.value = result.message || ''
+    } catch (error) {
+      options.setError('Codex OAuth 登录失败', error)
+    } finally {
+      importBusy.value = false
+    }
+  }
+
+  async function syncCodexCredentialToCPA() {
+    const accountRef = codexAccountRef.value.trim()
+    if (!accountRef) {
+      toast.warning('请填写要同步的 CFM 账号引用')
+      return
+    }
+    importBusy.value = true
+    try {
+      const result = await accountImportsApi.syncCodexCPA(accountRef, codexCPAPoolID.value)
+      await options.loadData({ silentErrorToast: true })
+      if (result.ok === false) {
+        codexOAuthStage.value = 'cpa_sync_failed'
+        codexOAuthMessage.value = result.error || 'CPA 同步失败，可稍后重试'
+        toast.warning(codexOAuthMessage.value)
+      } else {
+        codexOAuthStage.value = 'done'
+        codexOAuthMessage.value = 'Codex 凭据已同步到 CPA'
+        toast.success(codexOAuthMessage.value)
+      }
+    } catch (error) {
+      options.setError('同步 Codex 凭据到 CPA 失败', error)
+    } finally {
+      importBusy.value = false
+    }
+  }
+
+  function stopCodexOAuthProgressPolling() {
+    if (codexProgressTimer !== null) {
+      clearInterval(codexProgressTimer)
+      codexProgressTimer = null
+    }
+  }
+
+  function startCodexOAuthProgressPolling(sessionId: string) {
+    stopCodexOAuthProgressPolling()
+    const poll = async () => {
+      try {
+        const progress = await accountImportsApi.getCodexOAuthProgress(sessionId)
+        codexOAuthStage.value = progress.stage || codexOAuthStage.value
+        codexOAuthMessage.value = progress.error || progress.message || codexOAuthMessage.value
+        if (progress.status === 'completed' || progress.status === 'failed') stopCodexOAuthProgressPolling()
+      } catch {
+        // The callback can still be submitted while a progress read is delayed.
+      }
+    }
+    void poll()
+    codexProgressTimer = setInterval(() => void poll(), 1000)
+  }
+
   function openOAuthAuthorizeUrl() {
     if (!oauthAuthorizeUrl.value) {
       void startOAuthLogin()
@@ -384,6 +509,11 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     oauthSessionId,
     oauthAuthorizeUrl,
     oauthRedirectUriPrefix,
+    codexAccountRef,
+    codexCPAPoolID,
+    codexCPAPools,
+    codexOAuthStage,
+    codexOAuthMessage,
     manualTokenText,
     sessionJsonText,
     setImportMode,
@@ -393,9 +523,12 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
     importTokenTextFile,
     importSessionJson,
     startOAuthLogin,
+    startCodexOAuthLogin,
     openOAuthAuthorizeUrl,
     copyOAuthAuthorizeUrl,
     finishOAuthLogin,
+    finishCodexOAuthLogin,
+    syncCodexCredentialToCPA,
     importLocalCPAFiles,
   }
 }

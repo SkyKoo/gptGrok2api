@@ -122,6 +122,7 @@ export function accountRowSignature(item: Account): string {
     boundedSignatureText(item.cookie, 48),
     item.type,
     item.source_type,
+    JSON.stringify(item.codex_credential),
     item.group_id,
     item.proxy,
     item.checkout_link_status,
