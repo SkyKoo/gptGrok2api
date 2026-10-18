@@ -17,7 +17,7 @@
       <MetricStrip :items="metricItems" columns-class="grid-cols-2 md:grid-cols-4" density="compact" />
 
       <SurfaceBox tone="muted" density="compact" wrap>
-        授权过程由你在上游页面手动完成手机验证码；如果上游要求 2FA，再输入 TOTP。CFM 不接入自动短信平台，Token 与 Web 登录 Token 分开保存。
+        点击授权后由 CFM 自动推进 Codex OAuth。只有上游明确要求时才会显示手机号、短信验证码或 2FA 输入框；手机号和验证码只保留在本次授权会话中，不写入账号数据。
       </SurfaceBox>
 
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -36,7 +36,7 @@
       <PageLoadingState v-if="loading && !accounts.length" title="正在加载 Codex 账号" description="读取 Web Free 账号和 Codex 授权状态。" compact dashed />
       <EmptyState v-else-if="!filteredAccounts.length" plain title="暂无可授权账号" description="请先在“注册账号”完成 Web Free 注册并入库，账号随后会出现在这里。" />
       <div v-else class="overflow-x-auto">
-        <table class="min-w-[980px] w-full text-left text-sm">
+        <table class="min-w-[900px] w-full text-left text-sm">
           <thead class="text-xs uppercase tracking-[0.14em] text-muted-foreground">
             <tr>
               <th class="py-3 pr-5">Web Free 账号</th>
@@ -89,7 +89,7 @@
           </div>
         </div>
         <SurfaceBox tone="muted" density="compact" wrap>
-          1. 点击“打开授权页”；2. 在上游完成手机验证码，若出现 2FA 则输入 TOTP；3. 授权完成后复制回调地址，粘贴到下方提交。不要把 Token 粘贴到页面或聊天中。
+          1. 点击“开始授权”；2. CFM 自动推进上游流程；3. 只有当前步骤需要人工输入时才填写对应信息；4. 完成后自动保存 Token 并同步 CPA。
         </SurfaceBox>
         <div class="grid gap-3 md:grid-cols-[1fr_auto]">
           <label class="space-y-1 text-sm">
@@ -100,19 +100,34 @@
             </select>
           </label>
           <div class="flex items-end">
-            <Button size="sm" variant="primary" :disabled="busy || Boolean(authorizeUrl)" @click="startAuthorize">{{ busy && !authorizeUrl ? '准备中...' : '生成授权链接' }}</Button>
+            <Button size="sm" variant="primary" :disabled="busy || Boolean(sessionId)" @click="startAuthorize">{{ busy && !sessionId ? '准备中...' : '开始授权' }}</Button>
           </div>
         </div>
-        <div v-if="authorizeUrl" class="space-y-3 rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
+        <div v-if="sessionId" class="space-y-3 rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <div class="text-sm font-medium">授权页已准备</div>
+              <div class="text-sm font-medium">授权流程进行中</div>
               <div class="mt-1 text-xs text-muted-foreground">当前阶段：{{ progressMessage || progressStage || '等待授权' }}</div>
             </div>
-            <Button size="sm" variant="outline" @click="openAuthorizeUrl">打开授权页</Button>
+            <Button v-if="authorizeUrl && progressStage === 'waiting_authorization'" size="sm" variant="outline" @click="openAuthorizeUrl">打开授权页</Button>
           </div>
-          <Input v-model.trim="callbackText" type="text" placeholder="粘贴完成授权后得到的 callback URL" block :disabled="busy" />
-          <Button size="sm" variant="primary" :disabled="busy || !callbackText" @click="finishAuthorize">{{ busy ? '提交中...' : '提交回调并保存' }}</Button>
+          <div v-if="progressStage === 'waiting_phone'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input v-model.trim="phoneText" type="tel" placeholder="输入手机号，例如 +8613800138000" block :disabled="busy" @keyup.enter="submitPhone" />
+            <Button size="sm" variant="primary" :disabled="busy || !phoneText" @click="submitPhone">{{ busy ? '提交中...' : '提交手机号' }}</Button>
+          </div>
+          <div v-else-if="progressStage === 'waiting_sms_code'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input v-model.trim="smsCode" inputmode="numeric" type="text" placeholder="输入短信验证码" block :disabled="busy" @keyup.enter="submitSMS" />
+            <Button size="sm" variant="primary" :disabled="busy || !smsCode" @click="submitSMS">{{ busy ? '验证中...' : '验证短信验证码' }}</Button>
+          </div>
+          <div v-else-if="progressStage === 'waiting_2fa'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input v-model.trim="twoFactorCode" inputmode="numeric" type="text" placeholder="输入 2FA 一次性验证码" block :disabled="busy" @keyup.enter="submit2FA" />
+            <Button size="sm" variant="primary" :disabled="busy || !twoFactorCode" @click="submit2FA">{{ busy ? '验证中...' : '提交 2FA' }}</Button>
+          </div>
+          <div v-else-if="progressStage === 'waiting_authorization' && authorizeUrl" class="space-y-2">
+            <p class="text-xs text-muted-foreground">当前上游要求在授权页面继续操作。完成后如页面提供 callback 地址，可粘贴到这里作为兼容兜底。</p>
+            <Input v-model.trim="callbackText" type="text" placeholder="可选：粘贴 callback URL" block :disabled="busy" />
+            <Button size="sm" variant="primary" :disabled="busy || !callbackText" @click="finishAuthorize">{{ busy ? '提交中...' : '提交回调并保存' }}</Button>
+          </div>
         </div>
         <SurfaceBox v-if="progressError" tone="danger" density="compact" wrap>{{ progressError }}</SurfaceBox>
         <SurfaceBox v-else-if="progressMessage && progressStage !== 'waiting_authorization'" tone="muted" density="compact" wrap>{{ progressMessage }}</SurfaceBox>
@@ -152,6 +167,9 @@ const cpaPoolId = ref('')
 const sessionId = ref('')
 const authorizeUrl = ref('')
 const callbackText = ref('')
+const phoneText = ref('')
+const smsCode = ref('')
+const twoFactorCode = ref('')
 const progressStage = ref('')
 const progressMessage = ref('')
 const progressError = ref('')
@@ -165,9 +183,9 @@ const filterOptions = [
   { label: '失败待处理', value: 'failed' },
 ]
 const oauthSteps = [
-  { key: 'authorize', index: '1', label: '打开授权页' },
-  { key: 'phone', index: '2', label: '手机验证码 / 2FA' },
-  { key: 'callback', index: '3', label: '提交回调' },
+  { key: 'authorize', index: '1', label: '自动进入授权' },
+  { key: 'phone', index: '2', label: '按需输入手机号' },
+  { key: 'sms', index: '3', label: '短信验证码 / 2FA' },
   { key: 'cpa', index: '4', label: '保存并同步 CPA' },
 ]
 
@@ -220,10 +238,10 @@ function codexStatusLabel(account: Account) { const status = account.codex_crede
 function codexStatusTone(account: Account) { return account.codex_credential?.status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'success' : 'muted' }
 function cpaStatusLabel(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? '已同步' : status === 'failed' ? '同步失败' : account.codex_credential?.has_access_token ? '待同步' : '—' }
 function cpaStatusTone(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? 'success' : status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'warning' : 'muted' }
-function formatDate(value?: string | number) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString() }
+function formatDate(value?: string | number) { if (!value) return '—'; const numeric = typeof value === 'number' || /^\d+$/.test(String(value)); const date = numeric ? new Date(Number(value) < 10_000_000_000 ? Number(value) * 1000 : Number(value)) : new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString() }
 function stepClass(key: string) { if (progressStage.value === 'done' && key === 'cpa') return 'border-emerald-500/50 bg-emerald-500/5'; if (progressStage.value === key || (key === 'authorize' && authorizeUrl.value)) return 'border-sky-500/50 bg-sky-500/5'; return 'border-border/60' }
 function openAuthorize(account: Account) { selectedAccount.value = account; cpaPoolId.value = account.codex_credential?.cpa_pool_id || cpaPools.value[0]?.id || ''; resetProgress() }
-function resetProgress() { stopPolling(); sessionId.value = ''; authorizeUrl.value = ''; callbackText.value = ''; progressStage.value = ''; progressMessage.value = ''; progressError.value = '' }
+function resetProgress() { stopPolling(); sessionId.value = ''; authorizeUrl.value = ''; callbackText.value = ''; phoneText.value = ''; smsCode.value = ''; twoFactorCode.value = ''; progressStage.value = ''; progressMessage.value = ''; progressError.value = '' }
 function closeAuthorize() { if (busy.value) return; selectedAccount.value = null; resetProgress() }
 async function startAuthorize() {
   if (!selectedAccount.value) return
@@ -233,8 +251,8 @@ async function startAuthorize() {
     sessionId.value = String(result.session_id || ''); authorizeUrl.value = String(result.authorize_url || '')
     progressStage.value = String(result.stage || 'waiting_authorization'); progressMessage.value = String(result.message || '')
     if (!sessionId.value || !authorizeUrl.value) throw new Error('后端没有返回完整的 Codex OAuth 授权会话')
-    startPolling(); openAuthorizeUrl(); toast.success('Codex 授权页面已打开')
-  } catch (e: any) { progressError.value = e?.message || '生成 Codex 授权链接失败' } finally { busy.value = false }
+    startPolling(); if (progressStage.value === 'waiting_authorization') openAuthorizeUrl(); toast.success('Codex 授权流程已启动')
+  } catch (e: any) { progressError.value = e?.message || '启动 Codex OAuth 失败' } finally { busy.value = false }
 }
 function openAuthorizeUrl() { if (authorizeUrl.value) window.open(authorizeUrl.value, '_blank', 'noopener,noreferrer') }
 async function finishAuthorize() {
@@ -246,6 +264,24 @@ async function finishAuthorize() {
     await loadAccounts()
   } catch (e: any) { progressError.value = e?.message || 'Codex OAuth 失败' } finally { busy.value = false }
 }
+async function submitProtocolInput(kind: 'phone' | 'sms' | '2fa', value: string) {
+  if (!sessionId.value || !selectedAccount.value || !value.trim()) return
+  busy.value = true; progressError.value = ''
+  try {
+    const payload = { session_id: sessionId.value, value: value.trim(), account_ref: selectedAccount.value.id, cpa_pool_id: cpaPoolId.value || undefined }
+    const result = kind === 'phone' ? await accountImportsApi.submitCodexPhone(payload) : kind === 'sms' ? await accountImportsApi.submitCodexSMSCode(payload) : await accountImportsApi.submitCodex2FA(payload)
+    progressStage.value = String(result.stage || progressStage.value)
+    progressMessage.value = String(result.message || progressMessage.value)
+    if (result.ok === true) { toast.success(result.message || 'Codex 授权完成'); await loadAccounts() }
+    if (kind === 'phone') phoneText.value = ''
+    if (kind === 'sms') smsCode.value = ''
+    if (kind === '2fa') twoFactorCode.value = ''
+    startPolling()
+  } catch (e: any) { progressError.value = e?.message || '提交授权信息失败' } finally { busy.value = false }
+}
+function submitPhone() { return submitProtocolInput('phone', phoneText.value) }
+function submitSMS() { return submitProtocolInput('sms', smsCode.value) }
+function submit2FA() { return submitProtocolInput('2fa', twoFactorCode.value) }
 async function syncCPA(account: Account) {
   busy.value = true; error.value = ''
   try {

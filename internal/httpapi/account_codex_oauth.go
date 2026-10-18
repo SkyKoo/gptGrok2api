@@ -44,13 +44,14 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		AccountRef        string `json:"account_ref"`
 		EmailHint         string `json:"email_hint"`
+		Password          string `json:"password"`
 		CPAPoolID         string `json:"cpa_pool_id"`
 		RegistrationJobID string `json:"registration_job_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	body.AccountRef, body.EmailHint, body.CPAPoolID, body.RegistrationJobID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.EmailHint), strings.TrimSpace(body.CPAPoolID), strings.TrimSpace(body.RegistrationJobID)
+	body.AccountRef, body.EmailHint, body.Password, body.CPAPoolID, body.RegistrationJobID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.EmailHint), strings.TrimSpace(body.Password), strings.TrimSpace(body.CPAPoolID), strings.TrimSpace(body.RegistrationJobID)
 	if body.RegistrationJobID != "" {
 		account, err := s.accountByRegistrationJob(body.RegistrationJobID)
 		if err != nil {
@@ -61,25 +62,128 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		if body.EmailHint == "" {
 			body.EmailHint = stringValue(account["email"])
 		}
+		if body.Password == "" {
+			body.Password = firstNonEmpty(stringValue(account["login_password"]), stringValue(account["password"]))
+		}
 	}
 	if body.AccountRef != "" {
-		if _, err := s.accountByRef(body.AccountRef); err != nil {
+		account, err := s.accountByRef(body.AccountRef)
+		if err != nil {
 			writeError(w, http.StatusNotFound, "account not found", "not_found")
 			return
 		}
+		if body.EmailHint == "" {
+			body.EmailHint = stringValue(account["email"])
+		}
+		if body.Password == "" {
+			body.Password = firstNonEmpty(stringValue(account["login_password"]), stringValue(account["password"]))
+		}
 	}
-	result, err := s.codexLogin.Start(body.EmailHint)
+	if body.EmailHint == "" {
+		writeError(w, http.StatusBadRequest, "email_hint or account_ref is required", "invalid_request_error")
+		return
+	}
+	result, err := s.codexProtocolLogin.Start(r.Context(), body.EmailHint, body.Password)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error(), "not_configured")
+		writeError(w, http.StatusBadGateway, safeOAuthError(err), "upstream_error")
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: "waiting_authorization", Status: "running", Message: "请在授权页面完成手机验证码；如果上游要求 2FA，再输入 TOTP。完成后粘贴 callback URL。CFM 不接入自动短信平台。", StartedAt: now, UpdatedAt: now}
+	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: result["stage"], Status: "running", Message: result["message"], StartedAt: now, UpdatedAt: now}
 	s.codexMu.Lock()
 	s.codexProgress[progress.SessionID] = progress
 	s.codexMu.Unlock()
 	result["stage"], result["message"] = progress.Stage, progress.Message
 	s.saveRegistrationCodexProgress(progress)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) codexOAuthSubmitPhone(w http.ResponseWriter, r *http.Request) {
+	s.codexOAuthSubmitInput(w, r, "phone")
+}
+
+func (s *Server) codexOAuthSubmitSMS(w http.ResponseWriter, r *http.Request) {
+	s.codexOAuthSubmitInput(w, r, "sms_code")
+}
+
+func (s *Server) codexOAuthSubmit2FA(w http.ResponseWriter, r *http.Request) {
+	s.codexOAuthSubmitInput(w, r, "two_factor_code")
+}
+
+func (s *Server) codexOAuthSubmitInput(w http.ResponseWriter, r *http.Request, kind string) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	var body struct {
+		SessionID  string `json:"session_id"`
+		Value      string `json:"value"`
+		AccountRef string `json:"account_ref"`
+		CPAPoolID  string `json:"cpa_pool_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	body.SessionID, body.Value, body.AccountRef, body.CPAPoolID = strings.TrimSpace(body.SessionID), strings.TrimSpace(body.Value), strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.CPAPoolID)
+	if body.SessionID == "" || body.Value == "" {
+		writeError(w, http.StatusBadRequest, "session_id and value are required", "invalid_request_error")
+		return
+	}
+	s.codexMu.RLock()
+	progress, ok := s.codexProgress[body.SessionID]
+	var stored codexOAuthProgress
+	if ok && progress != nil {
+		stored = *progress
+	}
+	s.codexMu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "codex oauth session not found", "not_found")
+		return
+	}
+	if body.AccountRef == "" {
+		body.AccountRef = stored.AccountRef
+	}
+	if body.CPAPoolID == "" {
+		body.CPAPoolID = stored.CPAPoolID
+	}
+
+	var result map[string]string
+	var err error
+	switch kind {
+	case "phone":
+		s.setCodexProgress(body.SessionID, "sending_phone", "running", "正在提交手机号", "")
+		result, err = s.codexProtocolLogin.SubmitPhone(r.Context(), body.SessionID, body.Value)
+	case "sms_code":
+		s.setCodexProgress(body.SessionID, "verifying_sms", "running", "正在验证短信验证码", "")
+		result, err = s.codexProtocolLogin.SubmitSMSCode(r.Context(), body.SessionID, body.Value)
+	case "two_factor_code":
+		s.setCodexProgress(body.SessionID, "verifying_2fa", "running", "正在验证 2FA", "")
+		result, err = s.codexProtocolLogin.Submit2FA(r.Context(), body.SessionID, body.Value)
+	default:
+		err = fmt.Errorf("unsupported codex input")
+	}
+	if err != nil {
+		s.setCodexProgress(body.SessionID, "failed", "failed", "Codex OAuth 失败", safeOAuthError(err))
+		writeError(w, http.StatusBadRequest, safeOAuthError(err), "invalid_request_error")
+		return
+	}
+	if access := result["access_token"]; access != "" {
+		response, finishErr := s.finishCodexTokens(r.Context(), body.SessionID, body.AccountRef, body.CPAPoolID, stored.RegistrationJobID, result)
+		if finishErr != nil {
+			writeError(w, http.StatusBadGateway, safeOAuthError(finishErr), "upstream_error")
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
+	stage, message := result["stage"], result["message"]
+	if stage == "" {
+		stage = "waiting_authorization"
+	}
+	s.setCodexProgress(body.SessionID, stage, "running", message, "")
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -152,48 +256,53 @@ func (s *Server) codexOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, safeOAuthError(err), "invalid_request_error")
 		return
 	}
+	result, finishErr := s.finishCodexTokens(r.Context(), body.SessionID, body.AccountRef, body.CPAPoolID, body.RegistrationJobID, tokens)
+	if finishErr != nil {
+		writeError(w, http.StatusBadGateway, safeOAuthError(finishErr), "upstream_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) finishCodexTokens(ctx context.Context, sessionID, accountRef, poolID, registrationJobID string, tokens map[string]string) (map[string]any, error) {
 	email, accountID := codexTokenIdentity(tokens["id_token"], tokens["access_token"])
-	if body.AccountRef == "" && email != "" {
+	if accountRef == "" && email != "" {
 		if account, lookupErr := s.accountByRef(email); lookupErr == nil {
-			body.AccountRef = accountPublicRef(account)
+			accountRef = accountPublicRef(account)
 		}
 	}
-	if body.AccountRef == "" {
-		err = fmt.Errorf("account_ref is required; Codex OAuth email %q is not linked to a CFM account", email)
-		s.setCodexProgress(body.SessionID, "failed", "failed", "未绑定 CFM 账号", err.Error())
-		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
-		return
+	if accountRef == "" {
+		err := fmt.Errorf("account_ref is required; Codex OAuth email %q is not linked to a CFM account", email)
+		s.setCodexProgress(sessionID, "failed", "failed", "未绑定 CFM 账号", err.Error())
+		return nil, err
 	}
-	account, err := s.accountByRef(body.AccountRef)
+	account, err := s.accountByRef(accountRef)
 	if err != nil {
-		s.setCodexProgress(body.SessionID, "failed", "failed", "CFM 账号不存在", err.Error())
-		writeError(w, http.StatusNotFound, err.Error(), "not_found")
-		return
+		s.setCodexProgress(sessionID, "failed", "failed", "CFM 账号不存在", err.Error())
+		return nil, err
 	}
-	if body.RegistrationJobID == "" {
-		body.RegistrationJobID = stringValue(account["registration_job_id"])
+	if registrationJobID == "" {
+		registrationJobID = stringValue(account["registration_job_id"])
 	}
 	credential := codexCredential(tokens, email, accountID)
 	credential["status"], credential["cpa_sync_status"] = "authorized", "pending"
 	updated, _, err := s.store.UpdateAccount(accountToken(account), map[string]any{"codex_credential": credential})
 	if err != nil {
-		s.setCodexProgress(body.SessionID, "failed", "failed", "Codex 凭据保存失败", err.Error())
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-		return
+		s.setCodexProgress(sessionID, "failed", "failed", "Codex 凭据保存失败", err.Error())
+		return nil, err
 	}
-	s.setCodexProgress(body.SessionID, "syncing_cpa", "running", "Codex 凭据已保存，正在同步 CPA", "")
-	syncResult, syncErr := s.syncCodexCredential(r.Context(), updated, body.CPAPoolID)
+	s.setCodexProgress(sessionID, "syncing_cpa", "running", "Codex 凭据已保存，正在同步 CPA", "")
+	syncResult, syncErr := s.syncCodexCredential(ctx, updated, poolID)
 	if syncErr != nil {
 		credential["cpa_sync_status"], credential["cpa_last_error"], credential["cpa_last_error_at"] = "failed", safeOAuthError(syncErr), time.Now().UTC().Format(time.RFC3339)
 		_, _, _ = s.store.UpdateAccount(accountToken(updated), map[string]any{"codex_credential": credential})
-		s.setCodexProgress(body.SessionID, "cpa_sync_failed", "failed", "Token 已保存，但 CPA 同步失败，可单独重试", safeOAuthError(syncErr))
-		latest, _ := s.accountByRef(body.AccountRef)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "message": "Codex 登录成功，但 CPA 同步失败；凭据已保留", "cpa_sync": syncResult, "item": accountForAPI(latest)})
-		return
+		s.setCodexProgress(sessionID, "cpa_sync_failed", "failed", "Token 已保存，但 CPA 同步失败，可单独重试", safeOAuthError(syncErr))
+		latest, _ := s.accountByRef(accountRef)
+		return map[string]any{"ok": false, "message": "Codex 登录成功，但 CPA 同步失败；凭据已保留", "cpa_sync": syncResult, "item": accountForAPI(latest)}, nil
 	}
-	s.setCodexProgress(body.SessionID, "done", "completed", "Codex 登录并同步 CPA 完成", "")
-	latest, _ := s.accountByRef(body.AccountRef)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "Codex 登录并同步 CPA 完成", "cpa_sync": syncResult, "item": accountForAPI(latest)})
+	s.setCodexProgress(sessionID, "done", "completed", "Codex 登录并同步 CPA 完成", "")
+	latest, _ := s.accountByRef(accountRef)
+	return map[string]any{"ok": true, "message": "Codex 登录并同步 CPA 完成", "cpa_sync": syncResult, "item": accountForAPI(latest)}, nil
 }
 
 func (s *Server) codexSync(w http.ResponseWriter, r *http.Request) {

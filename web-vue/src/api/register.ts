@@ -320,6 +320,15 @@ export const registerApi = {
   startCodexOAuth(registrationJobId: string) {
     return apiClient.post<any, { session_id?: string; authorize_url?: string; redirect_uri_prefix?: string; stage?: string; message?: string }>('/api/register/openai/codex/start', { registration_job_id: registrationJobId })
   },
+  submitCodexPhone(payload: { session_id: string; value: string; registration_job_id?: string }) {
+    return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/phone', payload)
+  },
+  submitCodexSMSCode(payload: { session_id: string; value: string; registration_job_id?: string }) {
+    return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/sms-code', payload)
+  },
+  submitCodex2FA(payload: { session_id: string; value: string; registration_job_id?: string }) {
+    return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/2fa', payload)
+  },
   finishCodexOAuth(payload: { session_id: string; callback: string; registration_job_id?: string }) {
     return apiClient.post<any, { ok?: boolean; message?: string; cpa_sync?: Record<string, unknown> }>('/api/register/openai/codex/finish', payload)
   },

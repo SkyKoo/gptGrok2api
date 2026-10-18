@@ -59,6 +59,7 @@ type Server struct {
 	oauthStore         *oauth.Store
 	openAILogin        *oauth.OpenAILogin
 	codexLogin         *oauth.CodexLogin
+	codexProtocolLogin *oauth.CodexProtocolLogin
 	agentIdentityStore *agentidentity.Store
 	deviceOAuth        *oauth.DeviceService
 	taskQueue          tasks.QueueAPI
@@ -156,6 +157,7 @@ func New(cfg config.Config) *Server {
 		registerRuntime:    registerruntime.NewRuntime(),
 		codexProgress:      map[string]*codexOAuthProgress{},
 	}
+	server.codexProtocolLogin = oauth.NewCodexProtocolLogin(server.codexLogin)
 	server.initFreeRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
@@ -327,6 +329,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/oauth/finish", s.accountOAuthFinish)
 	mux.HandleFunc("/api/accounts/codex/oauth/start", s.codexOAuthStart)
 	mux.HandleFunc("/api/accounts/codex/oauth/finish", s.codexOAuthFinish)
+	mux.HandleFunc("/api/accounts/codex/oauth/phone", s.codexOAuthSubmitPhone)
+	mux.HandleFunc("/api/accounts/codex/oauth/sms-code", s.codexOAuthSubmitSMS)
+	mux.HandleFunc("/api/accounts/codex/oauth/2fa", s.codexOAuthSubmit2FA)
 	mux.HandleFunc("/api/accounts/codex/oauth/progress/", s.codexOAuthProgressAPI)
 	mux.HandleFunc("/api/accounts/codex/sync", s.codexSync)
 	mux.HandleFunc("/api/accounts/export", s.accountExport)

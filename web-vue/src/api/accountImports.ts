@@ -122,6 +122,15 @@ export const accountImportsApi = {
       payload,
     ),
 
+  submitCodexPhone: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/phone', payload),
+
+  submitCodexSMSCode: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/sms-code', payload),
+
+  submitCodex2FA: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/2fa', payload),
+
   getCodexOAuthProgress: (sessionId: string) =>
     apiClient.get<never, CodexOAuthProgress>(`/api/accounts/codex/oauth/progress/${encodeURIComponent(sessionId)}`),
 
