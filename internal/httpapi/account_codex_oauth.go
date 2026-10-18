@@ -235,15 +235,22 @@ func (s *Server) codexSync(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) setCodexProgress(id, stage, status, message, failure string) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	var snapshot codexOAuthProgress
+	found := false
 	s.codexMu.Lock()
-	defer s.codexMu.Unlock()
 	if item := s.codexProgress[id]; item != nil {
 		item.Stage, item.Status, item.Message, item.Error, item.UpdatedAt = stage, status, message, failure, now
 		if status == "completed" || status == "failed" {
 			item.FinishedAt = now
 		}
-		copy := *item
-		go s.saveRegistrationCodexProgress(&copy)
+		snapshot = *item
+		found = true
+	}
+	s.codexMu.Unlock()
+	// Persist in call order. This keeps the registration record from ending up
+	// at an older stage when several OAuth milestones complete back-to-back.
+	if found {
+		s.saveRegistrationCodexProgress(&snapshot)
 	}
 }
 func codexProgressJSON(item *codexOAuthProgress) map[string]any {
