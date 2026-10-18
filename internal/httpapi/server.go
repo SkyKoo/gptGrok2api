@@ -97,6 +97,7 @@ type Server struct {
 	registrationClosing  bool
 	codexMu              sync.RWMutex
 	codexProgress        map[string]*codexOAuthProgress
+	codexEmailMu         sync.Mutex
 }
 
 func New(cfg config.Config) *Server {

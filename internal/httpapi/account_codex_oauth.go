@@ -24,6 +24,11 @@ type codexOAuthProgress struct {
 	AccountRef        string
 	CPAPoolID         string
 	RegistrationJobID string
+	EmailCodeSource   string
+	MailboxEmail      string
+	MailboxAccountID  string
+	EmailWaitAfter    time.Time
+	EmailAutoStarted  bool
 	Stage             string
 	Status            string
 	Message           string
@@ -52,8 +57,10 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.AccountRef, body.EmailHint, body.Password, body.CPAPoolID, body.RegistrationJobID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.EmailHint), strings.TrimSpace(body.Password), strings.TrimSpace(body.CPAPoolID), strings.TrimSpace(body.RegistrationJobID)
+	var account map[string]any
 	if body.RegistrationJobID != "" {
-		account, err := s.accountByRegistrationJob(body.RegistrationJobID)
+		var err error
+		account, err = s.accountByRegistrationJob(body.RegistrationJobID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "registered account not found", "not_found")
 			return
@@ -67,7 +74,8 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.AccountRef != "" {
-		account, err := s.accountByRef(body.AccountRef)
+		var err error
+		account, err = s.accountByRef(body.AccountRef)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "account not found", "not_found")
 			return
@@ -83,18 +91,36 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "email_hint or account_ref is required", "invalid_request_error")
 		return
 	}
+	startedAt := time.Now().UTC()
 	result, err := s.codexProtocolLogin.Start(r.Context(), body.EmailHint, body.Password)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, safeOAuthError(err), "upstream_error")
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: result["stage"], Status: "running", Message: result["message"], StartedAt: now, UpdatedAt: now}
+	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: result["stage"], Status: "running", Message: result["message"], StartedAt: startedAt.Format(time.RFC3339Nano), UpdatedAt: now, EmailWaitAfter: startedAt}
+	if mailbox, ok := codexHMEMailbox(account); ok {
+		progress.EmailCodeSource = "hme"
+		progress.MailboxEmail = mailbox.Email
+		progress.MailboxAccountID = mailbox.AccountID
+		if progress.Stage == "waiting_email_code" {
+			progress.Message = "上游要求邮箱验证码，正在从 HME 自动获取；也可手动输入"
+		}
+	} else {
+		progress.EmailCodeSource = "manual"
+	}
 	s.codexMu.Lock()
 	s.codexProgress[progress.SessionID] = progress
 	s.codexMu.Unlock()
 	result["stage"], result["message"] = progress.Stage, progress.Message
+	result["email_code_source"] = progress.EmailCodeSource
+	if progress.EmailCodeSource == "hme" {
+		result["email_code_auto"] = "true"
+	} else {
+		result["email_code_auto"] = "false"
+	}
 	s.saveRegistrationCodexProgress(progress)
+	s.maybeStartCodexEmailAuto(progress.SessionID)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -164,8 +190,7 @@ func (s *Server) codexOAuthSubmitInput(w http.ResponseWriter, r *http.Request, k
 		s.setCodexProgress(body.SessionID, "verifying_sms", "running", "正在验证短信验证码", "")
 		result, err = s.codexProtocolLogin.SubmitSMSCode(r.Context(), body.SessionID, body.Value)
 	case "email_code":
-		s.setCodexProgress(body.SessionID, "verifying_email_code", "running", "正在验证邮箱验证码", "")
-		result, err = s.codexProtocolLogin.SubmitEmailCode(r.Context(), body.SessionID, body.Value)
+		result, err = s.submitCodexEmailCode(r.Context(), body.SessionID, body.Value, false)
 	case "two_factor_code":
 		s.setCodexProgress(body.SessionID, "verifying_2fa", "running", "正在验证 2FA", "")
 		result, err = s.codexProtocolLogin.Submit2FA(r.Context(), body.SessionID, body.Value)
@@ -192,6 +217,152 @@ func (s *Server) codexOAuthSubmitInput(w http.ResponseWriter, r *http.Request, k
 	}
 	s.setCodexProgress(body.SessionID, stage, "running", message, "")
 	writeJSON(w, http.StatusOK, result)
+}
+
+// submitCodexEmailCode serializes manual and HME-submitted codes for one
+// process.  This prevents a code arriving from HME at the same time as a
+// manually entered code from advancing the upstream session twice.
+func (s *Server) submitCodexEmailCode(ctx context.Context, sessionID, code string, automatic bool) (map[string]string, error) {
+	s.codexEmailMu.Lock()
+	defer s.codexEmailMu.Unlock()
+	if automatic {
+		s.codexMu.RLock()
+		progress := s.codexProgress[sessionID]
+		stage := ""
+		if progress != nil {
+			stage = progress.Stage
+		}
+		s.codexMu.RUnlock()
+		if stage != "waiting_email_code" {
+			return nil, nil
+		}
+	}
+	s.setCodexProgress(sessionID, "verifying_email_code", "running", "正在验证邮箱验证码", "")
+	return s.codexProtocolLogin.SubmitEmailCode(ctx, sessionID, code)
+}
+
+// maybeStartCodexEmailAuto starts HME polling only for an account whose
+// registration record explicitly identifies an iCloud HME mailbox. Accounts
+// imported from another source retain the manual input path.
+func (s *Server) maybeStartCodexEmailAuto(sessionID string) {
+	s.codexMu.Lock()
+	progress := s.codexProgress[sessionID]
+	if progress == nil || progress.EmailCodeSource != "hme" || progress.Stage != "waiting_email_code" || progress.MailboxEmail == "" || progress.MailboxAccountID == "" {
+		s.codexMu.Unlock()
+		return
+	}
+	if progress.EmailAutoStarted {
+		s.codexMu.Unlock()
+		return
+	}
+	if progress.EmailWaitAfter.IsZero() {
+		if parsed, err := time.Parse(time.RFC3339Nano, progress.StartedAt); err == nil {
+			progress.EmailWaitAfter = parsed
+		} else {
+			progress.EmailWaitAfter = time.Now().UTC()
+		}
+	}
+	progress.EmailAutoStarted = true
+	progress.Message = "HME 正在获取邮箱验证码，也可手动输入"
+	progress.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	copyProgress := *progress
+	s.codexMu.Unlock()
+	s.saveRegistrationCodexProgress(&copyProgress)
+	go s.autoSubmitCodexEmailCode(copyProgress)
+}
+
+func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
+	if s.registerStore == nil {
+		s.keepCodexEmailManual(progress.SessionID, "HME 未配置，请手动输入邮箱验证码")
+		return
+	}
+	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
+	if err != nil {
+		s.keepCodexEmailManual(progress.SessionID, "HME 配置不可用，请手动输入邮箱验证码")
+		return
+	}
+	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+	if err != nil {
+		s.keepCodexEmailManual(progress.SessionID, "HME 连接不可用，请手动输入邮箱验证码")
+		return
+	}
+	defer mail.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.MailTimeout)
+	defer cancel()
+	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID}
+	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
+		if err := preparer.Prepare(ctx, box); err != nil {
+			s.keepCodexEmailManual(progress.SessionID, "HME 邮箱会话不可用，请手动输入邮箱验证码")
+			return
+		}
+	}
+	code, err := mail.WaitCode(ctx, box, progress.EmailWaitAfter)
+	if err != nil {
+		s.keepCodexEmailManual(progress.SessionID, "HME 未获取到邮箱验证码，请手动输入")
+		return
+	}
+	result, err := s.submitCodexEmailCode(context.Background(), progress.SessionID, code, true)
+	if err != nil {
+		// Keep the session alive. A valid HME message can still be rejected by
+		// the upstream challenge, in which case the operator may submit a code
+		// manually after inspecting the progress details.
+		s.keepCodexEmailManual(progress.SessionID, "HME 验证码提交失败，请手动输入邮箱验证码")
+		return
+	}
+	if result == nil {
+		return
+	}
+	if access := result["access_token"]; access != "" {
+		stored := s.codexStoredProgress(progress.SessionID)
+		if stored == nil {
+			return
+		}
+		if _, finishErr := s.finishCodexTokens(context.Background(), progress.SessionID, stored.AccountRef, stored.CPAPoolID, stored.RegistrationJobID, result); finishErr != nil {
+			return
+		}
+		return
+	}
+	stage, message := result["stage"], result["message"]
+	if stage == "" {
+		stage = "waiting_authorization"
+	}
+	s.setCodexProgress(progress.SessionID, stage, "running", message, "")
+}
+
+func (s *Server) keepCodexEmailManual(sessionID, message string) {
+	s.codexMu.Lock()
+	item := s.codexProgress[sessionID]
+	if item == nil || item.Status != "running" || (item.Stage != "waiting_email_code" && item.Stage != "verifying_email_code") {
+		s.codexMu.Unlock()
+		return
+	}
+	item.Stage, item.Status, item.Message, item.Error, item.UpdatedAt = "waiting_email_code", "running", message, "", time.Now().UTC().Format(time.RFC3339Nano)
+	snapshot := *item
+	s.codexMu.Unlock()
+	s.saveRegistrationCodexProgress(&snapshot)
+}
+
+func (s *Server) codexStoredProgress(sessionID string) *codexOAuthProgress {
+	s.codexMu.RLock()
+	defer s.codexMu.RUnlock()
+	item := s.codexProgress[sessionID]
+	if item == nil {
+		return nil
+	}
+	copyItem := *item
+	return &copyItem
+}
+
+func codexHMEMailbox(account map[string]any) (registerruntime.Mailbox, bool) {
+	if account == nil {
+		return registerruntime.Mailbox{}, false
+	}
+	mailbox := mapValue(account["registration_mailbox"])
+	if !strings.EqualFold(stringValue(mailbox["provider"]), "icloud_hme") {
+		return registerruntime.Mailbox{}, false
+	}
+	box := registerruntime.Mailbox{Email: strings.TrimSpace(stringValue(mailbox["email"])), AccountID: strings.TrimSpace(stringValue(mailbox["account_id"]))}
+	return box, box.Email != "" && box.AccountID != ""
 }
 
 func (s *Server) codexOAuthProgressAPI(w http.ResponseWriter, r *http.Request) {
@@ -367,10 +538,11 @@ func (s *Server) setCodexProgress(id, stage, status, message, failure string) {
 	// at an older stage when several OAuth milestones complete back-to-back.
 	if found {
 		s.saveRegistrationCodexProgress(&snapshot)
+		s.maybeStartCodexEmailAuto(id)
 	}
 }
 func codexProgressJSON(item *codexOAuthProgress) map[string]any {
-	return map[string]any{"session_id": item.SessionID, "account_ref": item.AccountRef, "cpa_pool_id": item.CPAPoolID, "registration_job_id": item.RegistrationJobID, "stage": item.Stage, "status": item.Status, "message": item.Message, "error": item.Error, "started_at": item.StartedAt, "updated_at": item.UpdatedAt, "finished_at": item.FinishedAt}
+	return map[string]any{"session_id": item.SessionID, "account_ref": item.AccountRef, "cpa_pool_id": item.CPAPoolID, "registration_job_id": item.RegistrationJobID, "email_code_source": item.EmailCodeSource, "email_code_auto": item.EmailCodeSource == "hme", "stage": item.Stage, "status": item.Status, "message": item.Message, "error": item.Error, "started_at": item.StartedAt, "updated_at": item.UpdatedAt, "finished_at": item.FinishedAt}
 }
 
 func (s *Server) accountByRegistrationJob(jobID string) (map[string]any, error) {

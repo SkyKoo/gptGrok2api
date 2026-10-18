@@ -19,12 +19,16 @@ export interface CodexOAuthStartResponse extends OAuthLoginStartResponse {
   state?: string
   stage?: string
   message?: string
+  email_code_source?: 'hme' | 'manual' | string
+  email_code_auto?: boolean | string
 }
 
 export interface CodexOAuthProgress {
   session_id: string
   account_ref?: string
   cpa_pool_id?: string
+  email_code_source?: 'hme' | 'manual' | string
+  email_code_auto?: boolean
   stage: string
   status: 'running' | 'completed' | 'failed' | string
   message?: string

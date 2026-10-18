@@ -273,6 +273,8 @@ export type CodexOAuthTask = {
   stage?: string
   message?: string
   error?: string
+  email_code_source?: 'hme' | 'manual' | string
+  email_code_auto?: boolean
   cpa_sync_status?: string
   cpa_pool_id?: string
   started_at?: string

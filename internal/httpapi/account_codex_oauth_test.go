@@ -10,7 +10,45 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
+
+func TestCodexHMEMailboxOnlyUsesRegisteredHMEAccounts(t *testing.T) {
+	box, ok := codexHMEMailbox(map[string]any{
+		"registration_mailbox": map[string]any{
+			"provider":   "icloud_hme",
+			"account_id": "hme-account",
+			"email":      "alias@example.test",
+		},
+	})
+	if !ok || box != (registerruntime.Mailbox{Email: "alias@example.test", AccountID: "hme-account"}) {
+		t.Fatalf("expected HME mailbox, got %#v, ok=%v", box, ok)
+	}
+	for _, account := range []map[string]any{
+		{"registration_mailbox": map[string]any{"provider": "manual", "account_id": "hme-account", "email": "alias@example.test"}},
+		{"registration_mailbox": map[string]any{"provider": "icloud_hme", "account_id": "", "email": "alias@example.test"}},
+		{"registration_mailbox": map[string]any{"provider": "icloud_hme", "account_id": "hme-account", "email": ""}},
+		{},
+	} {
+		if box, ok := codexHMEMailbox(account); ok {
+			t.Fatalf("expected manual fallback for account %#v, got %#v", account, box)
+		}
+	}
+}
+
+func TestCodexProgressJSONReportsEmailCodeSource(t *testing.T) {
+	item := &codexOAuthProgress{SessionID: "session", EmailCodeSource: "hme"}
+	result := codexProgressJSON(item)
+	if result["email_code_source"] != "hme" || result["email_code_auto"] != true {
+		t.Fatalf("expected HME auto source, got %#v", result)
+	}
+	item.EmailCodeSource = "manual"
+	result = codexProgressJSON(item)
+	if result["email_code_source"] != "manual" || result["email_code_auto"] != false {
+		t.Fatalf("expected manual source, got %#v", result)
+	}
+}
 
 func TestPublicCodexCredentialRedactsTokens(t *testing.T) {
 	public := publicCodexCredential(map[string]any{
