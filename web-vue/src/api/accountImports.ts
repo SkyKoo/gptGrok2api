@@ -15,6 +15,25 @@ export interface OAuthLoginStartResponse {
   redirect_uri_prefix: string
 }
 
+export interface CodexOAuthStartResponse extends OAuthLoginStartResponse {
+  state?: string
+  stage?: string
+  message?: string
+}
+
+export interface CodexOAuthProgress {
+  session_id: string
+  account_ref?: string
+  cpa_pool_id?: string
+  stage: string
+  status: 'running' | 'completed' | 'failed' | string
+  message?: string
+  error?: string
+  started_at?: string
+  updated_at?: string
+  finished_at?: string
+}
+
 export interface CPAImportJob {
   job_id: string
   status: 'pending' | 'running' | 'completed' | 'failed'
@@ -92,6 +111,24 @@ export const accountImportsApi = {
     apiClient.post<{ session_id: string; callback: string }, AccountMutationResponse>(
       '/api/accounts/oauth/finish',
       { session_id: sessionId, callback },
+    ),
+
+  startCodexOAuthLogin: (payload: { account_ref?: string; email_hint?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, CodexOAuthStartResponse>('/api/accounts/codex/oauth/start', payload),
+
+  finishCodexOAuthLogin: (payload: { session_id: string; callback: string; account_ref?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, { ok?: boolean; message?: string; cpa_sync?: Record<string, unknown>; item?: Record<string, unknown> }>(
+      '/api/accounts/codex/oauth/finish',
+      payload,
+    ),
+
+  getCodexOAuthProgress: (sessionId: string) =>
+    apiClient.get<never, CodexOAuthProgress>(`/api/accounts/codex/oauth/progress/${encodeURIComponent(sessionId)}`),
+
+  syncCodexCPA: (accountRef: string, cpaPoolId = '') =>
+    apiClient.post<{ account_ref: string; cpa_pool_id?: string }, { ok?: boolean; error?: string; cpa_sync?: Record<string, unknown>; item?: Record<string, unknown> }>(
+      '/api/accounts/codex/sync',
+      { account_ref: accountRef, cpa_pool_id: cpaPoolId || undefined },
     ),
 
   listCPAPools: () =>

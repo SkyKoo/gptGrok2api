@@ -7,6 +7,23 @@ export type AccountBackendStatus = '正常' | '限流' | '异常' | '禁用'
 export type AccountStatusCategory = 'normal' | 'limited' | 'abnormal' | 'disabled'
 export type CheckoutLinkStatus = 'ready' | 'failed' | 'pending' | 'processing' | ''
 
+export interface CodexCredential {
+  email?: string
+  account_id?: string
+  status?: string
+  expires_at?: string
+  updated_at?: string
+  cpa_sync_status?: string
+  cpa_pool_id?: string
+  cpa_file_name?: string
+  cpa_synced_at?: string
+  cpa_last_error?: string
+  cpa_last_error_at?: string
+  has_access_token?: boolean
+  has_refresh_token?: boolean
+  has_id_token?: boolean
+}
+
 export interface Account {
  capability_quotas?: Record<string, { remaining: number | null; reset_at?: string }>
  quota_pending?: Record<string, number>
@@ -25,6 +42,7 @@ export interface Account {
   two_factor_secret?: string
   type?: string
   source_type?: string
+  codex_credential?: CodexCredential
   agent_identity_status?: string
   agent_runtime_id?: string
   survival_status?: string
