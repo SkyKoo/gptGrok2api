@@ -451,6 +451,30 @@ function optionalBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
+function mapCodexCredential(value: unknown): CodexCredential | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const source = value as Record<string, unknown>
+  const result: CodexCredential = {
+    email: cleanString(source.email),
+    account_id: cleanString(source.account_id),
+    status: cleanString(source.status),
+    expires_at: cleanString(source.expires_at),
+    updated_at: cleanString(source.updated_at),
+    cpa_sync_status: cleanString(source.cpa_sync_status),
+    cpa_pool_id: cleanString(source.cpa_pool_id),
+    cpa_file_name: cleanString(source.cpa_file_name),
+    cpa_synced_at: cleanString(source.cpa_synced_at),
+    cpa_last_error: cleanString(source.cpa_last_error),
+    cpa_last_error_at: cleanString(source.cpa_last_error_at),
+    has_access_token: source.has_access_token === true,
+    has_refresh_token: source.has_refresh_token === true,
+    has_id_token: source.has_id_token === true,
+  }
+  return Object.values(result).some((item) => item !== undefined && item !== '' && item !== false)
+    ? result
+    : undefined
+}
+
 function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<string>): Account {
   const accessToken = cleanString(item.access_token || item.accessToken)
   const tokenPreview = cleanString(item.token_preview)
@@ -495,6 +519,7 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     two_factor_secret: cleanString(item.two_factor_secret),
     type,
     source_type: sourceType,
+    codex_credential: mapCodexCredential(item.codex_credential),
     agent_identity_status: cleanString(item.agent_identity_status),
     agent_runtime_id: cleanString(item.agent_runtime_id),
     survival_status: cleanString(item.survival_status),

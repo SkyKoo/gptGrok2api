@@ -32,6 +32,12 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'codex-oauth',
+          name: 'codex-oauth',
+          component: () => import('@/views/CodexOAuth.vue'),
+          meta: { adminOnly: true },
+        },
+        {
           path: 'grok-runtime',
           name: 'grok-runtime',
           redirect: { name: 'accounts', query: { platform: 'grok' } },
