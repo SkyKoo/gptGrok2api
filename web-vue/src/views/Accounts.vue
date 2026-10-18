@@ -940,6 +940,63 @@
                   </div>
                 </div>
 
+                <div v-else-if="importMode === 'codex_oauth'" class="space-y-3">
+                  <ImportModePanel
+                    title="Codex OAuth 登录并同步 CPA"
+                    description="绑定已有 CFM 账号。授权页面中手动完成手机验证码；只有上游要求时才输入 2FA。登录成功后自动将 Codex Token 同步到 CPA。"
+                  />
+                  <div class="grid grid-cols-1 gap-3">
+                    <label class="block text-xs">
+                      <span class="ui-field-label">绑定的 CFM 账号引用</span>
+                      <Input
+                        :model-value="codexAccountRef"
+                        block
+                        placeholder="账号 ID、邮箱或 account_ref"
+                        :disabled="importBusy"
+                        @update:model-value="codexAccountRef = $event.trim()"
+                      />
+                    </label>
+                    <label class="block text-xs">
+                      <span class="ui-field-label">Codex 账号邮箱（可选）</span>
+                      <Input
+                        :model-value="oauthEmailHint"
+                        type="email"
+                        block
+                        placeholder="name@example.com"
+                        :disabled="importBusy"
+                        @update:model-value="oauthEmailHint = $event.trim()"
+                      />
+                    </label>
+                    <label v-if="codexCPAPools.length" class="block text-xs">
+                      <span class="ui-field-label">CPA 连接</span>
+                      <select v-model="codexCPAPoolID" class="ui-input w-full" :disabled="importBusy">
+                        <option v-for="pool in codexCPAPools" :key="pool.id" :value="pool.id">{{ pool.name || pool.base_url }}</option>
+                      </select>
+                    </label>
+                    <SurfaceBox tone="muted" density="compact" wrap>
+                      {{ codexOAuthMessage || '生成授权链接后，在 Codex 页面完成手机号验证和可选 2FA。CFM 不接入自动短信平台。' }}
+                      <span v-if="codexOAuthStage">当前阶段：{{ codexOAuthStage }}</span>
+                    </SurfaceBox>
+                    <div class="flex flex-wrap gap-2">
+                      <Button size="xs" variant="primary" :disabled="importBusy || !codexAccountRef.trim()" @click="startCodexOAuthLogin">
+                        {{ oauthAuthorizeUrl ? '重新生成 Codex 授权链接' : '生成并打开 Codex 授权页面' }}
+                      </Button>
+                      <Button v-if="oauthAuthorizeUrl" size="xs" variant="outline" :disabled="importBusy" @click="openOAuthAuthorizeUrl">打开授权页面</Button>
+                      <Button v-if="oauthAuthorizeUrl" size="xs" variant="outline" :disabled="importBusy" @click="copyOAuthAuthorizeUrl">复制授权链接</Button>
+                      <Button size="xs" variant="outline" :disabled="importBusy || !codexAccountRef.trim()" @click="syncCodexCredentialToCPA">重试 CPA 同步</Button>
+                    </div>
+                    <label class="block text-xs">
+                      <span class="ui-field-label">Codex Callback URL / Code</span>
+                      <textarea v-model.trim="oauthCallbackText" rows="5" class="ui-textarea-sm font-mono" placeholder="粘贴最终跳转的 http://localhost:1455/auth/callback?..." :disabled="importBusy || !oauthSessionId"></textarea>
+                    </label>
+                    <div class="flex justify-end">
+                      <Button size="xs" variant="primary" :disabled="importBusy || !oauthSessionId || !oauthCallbackText.trim()" @click="finishCodexOAuthLogin">
+                        {{ importBusy ? '同步中...' : '完成 Codex 登录并同步 CPA' }}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
                 <div v-else-if="importMode === 'access_token'" class="space-y-3">
                   <ImportModePanel
                     title="导入 Access Token"
@@ -1181,6 +1238,11 @@ const {
   oauthSessionId,
   oauthAuthorizeUrl,
   oauthRedirectUriPrefix,
+  codexAccountRef,
+  codexCPAPoolID,
+  codexCPAPools,
+  codexOAuthStage,
+  codexOAuthMessage,
   manualTokenText,
   sessionJsonText,
   accountGroups,
@@ -1245,9 +1307,12 @@ const {
   importTokenTextFile,
   importSessionJson,
   startOAuthLogin,
+  startCodexOAuthLogin,
   openOAuthAuthorizeUrl,
   copyOAuthAuthorizeUrl,
   finishOAuthLogin,
+  finishCodexOAuthLogin,
+  syncCodexCredentialToCPA,
   importLocalCPAFiles,
   refreshAllAccounts,
   requestStopRefreshProgress,

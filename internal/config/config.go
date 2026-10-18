@@ -29,6 +29,11 @@ type Config struct {
 	OpenAIPlatformBaseURL  string
 	OpenAILoginTokenURL    string
 	OpenAIAgentRegisterURL string
+	CodexOAuthAuthURL      string
+	CodexOAuthTokenURL     string
+	CodexOAuthClientID     string
+	CodexOAuthRedirectURI  string
+	CodexOAuthScope        string
 	GrokChatURL            string
 	GrokRateLimitsURL      string
 	XAICLIBaseURL          string
@@ -168,6 +173,11 @@ func Load(root string) (Config, error) {
 		OpenAIPlatformBaseURL:  strings.TrimRight(env("GO_OPENAI_PLATFORM_BASE_URL", "https://platform.openai.com"), "/"),
 		OpenAILoginTokenURL:    env("GO_OPENAI_LOGIN_TOKEN_URL", "https://auth.openai.com/api/accounts/oauth/token"),
 		OpenAIAgentRegisterURL: env("GO_OPENAI_AGENT_REGISTER_URL", "https://auth.openai.com/api/accounts/v1/agent/register"),
+		CodexOAuthAuthURL:      env("GO_CODEX_OAUTH_AUTH_URL", "https://auth.openai.com/oauth/authorize"),
+		CodexOAuthTokenURL:     env("GO_CODEX_OAUTH_TOKEN_URL", "https://auth.openai.com/oauth/token"),
+		CodexOAuthClientID:     env("GO_CODEX_OAUTH_CLIENT_ID", "app_EMoamEEZ73f0CkXaXp7hrann"),
+		CodexOAuthRedirectURI:  env("GO_CODEX_OAUTH_REDIRECT_URI", "http://localhost:1455/auth/callback"),
+		CodexOAuthScope:        env("GO_CODEX_OAUTH_SCOPE", "openid email profile offline_access"),
 		GrokChatURL:            env("GO_GROK_CHAT_URL", "https://grok.com/rest/app-chat/conversations/new"),
 		GrokRateLimitsURL:      env("GO_GROK_RATE_LIMITS_URL", "https://grok.com/rest/rate-limits"),
 		XAICLIBaseURL:          strings.TrimRight(env("GO_XAI_CLI_BASE_URL", "https://cli-chat-proxy.grok.com/v1"), "/"),

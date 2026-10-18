@@ -14,6 +14,14 @@
         <div class="min-w-0">
           <h3 class="truncate text-sm font-medium text-foreground">{{ accountPrimaryText(item) }}</h3>
           <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ accountSecondaryText(item) }}</p>
+          <StatusPill
+            v-if="item.codex_credential"
+            class="mt-2"
+            :label="item.codex_credential.cpa_sync_status === 'synced' ? 'Codex · CPA 已同步' : 'Codex · 待同步'"
+            tone-class="border-violet-500/40 bg-violet-500/10 text-violet-600"
+            title="Codex OAuth 状态"
+            :detail="item.codex_credential.cpa_file_name || item.codex_credential.cpa_last_error || 'Codex 凭据已保存'"
+          />
           <button v-if="relogging" type="button" class="mt-2 text-xs text-sky-500 hover:underline" @click="emit('show-relogin')">重新登录中 · 查看进度</button>
         </div>
       </div>

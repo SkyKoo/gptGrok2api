@@ -58,6 +58,7 @@ type Server struct {
 	proxyManager       *proxyruntime.Manager
 	oauthStore         *oauth.Store
 	openAILogin        *oauth.OpenAILogin
+	codexLogin         *oauth.CodexLogin
 	agentIdentityStore *agentidentity.Store
 	deviceOAuth        *oauth.DeviceService
 	taskQueue          tasks.QueueAPI
@@ -93,6 +94,8 @@ type Server struct {
 	registrationSchedule *registerruntime.Schedule
 	registrationStop     chan struct{}
 	registrationClosing  bool
+	codexMu              sync.RWMutex
+	codexProgress        map[string]*codexOAuthProgress
 }
 
 func New(cfg config.Config) *Server {
@@ -145,11 +148,13 @@ func New(cfg config.Config) *Server {
 		probeWake:          make(chan struct{}, 1),
 		oauthStore:         oauth.NewStore(cfg.OAuthPath, firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
 		openAILogin:        oauth.NewOpenAILogin(cfg.OpenAIAuthBaseURL, cfg.OpenAIPlatformBaseURL, cfg.OpenAILoginTokenURL, requestClient),
+		codexLogin:         oauth.NewCodexLogin(cfg.CodexOAuthAuthURL, cfg.CodexOAuthTokenURL, cfg.CodexOAuthClientID, cfg.CodexOAuthRedirectURI, cfg.CodexOAuthScope, requestClient),
 		agentIdentityStore: agentidentity.NewStore(cfg.DataDir, cfg.OpenAIAgentRegisterURL, requestClient),
 		taskQueue:          taskQueue,
 		monitor:            newRuntimeMonitor(),
 		registerStore:      registerruntime.New(cfg.RegisterPath, cfg.GrokAccountsPath),
 		registerRuntime:    registerruntime.NewRuntime(),
+		codexProgress:      map[string]*codexOAuthProgress{},
 	}
 	server.initFreeRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
@@ -320,6 +325,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/relogin/progress/", s.accountReloginProgressAPI)
 	mux.HandleFunc("/api/accounts/oauth/start", s.accountOAuthStart)
 	mux.HandleFunc("/api/accounts/oauth/finish", s.accountOAuthFinish)
+	mux.HandleFunc("/api/accounts/codex/oauth/start", s.codexOAuthStart)
+	mux.HandleFunc("/api/accounts/codex/oauth/finish", s.codexOAuthFinish)
+	mux.HandleFunc("/api/accounts/codex/oauth/progress/", s.codexOAuthProgressAPI)
+	mux.HandleFunc("/api/accounts/codex/sync", s.codexSync)
 	mux.HandleFunc("/api/accounts/export", s.accountExport)
 	mux.HandleFunc("/api/accounts/import-api", s.importAccountsAPI)
 	mux.HandleFunc("/api/accounts/agent-identities", s.agentIdentities)
@@ -2041,6 +2050,9 @@ func positiveInt(raw string, fallback int) int {
 
 func accountForAPI(account map[string]any) map[string]any {
 	item := cloneMap(account)
+	if credential := mapValue(item["codex_credential"]); len(credential) > 0 {
+		item["codex_credential"] = publicCodexCredential(credential)
+	}
 	if item["capability_quotas"] == nil {
 		item["capability_quotas"] = accounts.Quotas(account["limits_progress"], time.Time{})
 	}
@@ -2068,6 +2080,19 @@ func accountForAPI(account map[string]any) map[string]any {
 		"disabled": "禁用",
 	}[category]
 	return item
+}
+
+func publicCodexCredential(credential map[string]any) map[string]any {
+	result := map[string]any{}
+	for _, key := range []string{"email", "account_id", "status", "expires_at", "updated_at", "cpa_sync_status", "cpa_pool_id", "cpa_file_name", "cpa_synced_at", "cpa_last_error", "cpa_last_error_at"} {
+		if value, ok := credential[key]; ok && value != nil {
+			result[key] = value
+		}
+	}
+	result["has_access_token"] = stringValue(credential["access_token"]) != ""
+	result["has_refresh_token"] = stringValue(credential["refresh_token"]) != ""
+	result["has_id_token"] = stringValue(credential["id_token"]) != ""
+	return result
 }
 
 func accountsForAPI(items []map[string]any) []map[string]any {
