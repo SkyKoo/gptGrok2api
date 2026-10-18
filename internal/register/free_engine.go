@@ -29,7 +29,22 @@ type RegistrationJob struct {
 	Imported       bool                      `json:"imported"`
 	Verified       bool                      `json:"verified"`
 	Account        map[string]any            `json:"account,omitempty"` // private recovery journal only
-	Logs           []JobLog                  `json:"logs"`
+	// CodexOAuth is a credential-free progress record for the optional Codex
+	// OAuth step that can be run after Web Free registration completes.
+	CodexOAuth *CodexOAuthTask `json:"codex_oauth,omitempty"`
+	Logs       []JobLog        `json:"logs"`
+}
+type CodexOAuthTask struct {
+	SessionID  string `json:"session_id,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Stage      string `json:"stage,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Error      string `json:"error,omitempty"`
+	CPAStatus  string `json:"cpa_sync_status,omitempty"`
+	CPAPoolID  string `json:"cpa_pool_id,omitempty"`
+	StartedAt  string `json:"started_at,omitempty"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
+	FinishedAt string `json:"finished_at,omitempty"`
 }
 type JobLog struct {
 	Time  string `json:"time"`
@@ -418,6 +433,19 @@ func (e *FreeEngine) getJob(id string) (RegistrationJob, error) {
 	return RegistrationJob{}, fail("task", "not_found")
 }
 
+// SetCodexOAuth persists the user-visible state of the optional Codex step.
+// Tokens and other credentials never enter the registration journal.
+func (e *FreeEngine) SetCodexOAuth(id string, task *CodexOAuthTask) error {
+	return e.change(id, func(j *RegistrationJob) {
+		if task == nil {
+			j.CodexOAuth = nil
+			return
+		}
+		copy := *task
+		j.CodexOAuth = &copy
+	})
+}
+
 // BrowserProfileForAccount reads only the matching account's private profile.
 // A journal ID alone is insufficient: an imported account must not inherit
 // another mailbox's registration environment.
@@ -645,7 +673,7 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[j.ID]
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "auto_retry": compensationSummary(j.AutoRetry)})
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "auto_retry": compensationSummary(j.AutoRetry)})
 	}
 	// Gather only the existing 200-line live-log window, without allocating the
 	// logs for the entire retained history on every SSE tick.

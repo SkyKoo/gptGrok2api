@@ -206,7 +206,7 @@ export type LegacyRegisterConfig = {
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
   openai_free: { timeout_seconds: number }
-  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; auto_retry?: RegistrationCompensation | null }>
+  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; auto_retry?: RegistrationCompensation | null }>
   jobs_total?: number
   jobs_page?: number
   jobs_page_size?: number
@@ -267,6 +267,19 @@ export type LegacyRegisterConfig = {
   checkout_retry_job_count?: number
 }
 
+export type CodexOAuthTask = {
+  session_id?: string
+  status?: string
+  stage?: string
+  message?: string
+  error?: string
+  cpa_sync_status?: string
+  cpa_pool_id?: string
+  started_at?: string
+  updated_at?: string
+  finished_at?: string
+}
+
 export type GptMailStatus = {
   ok?: boolean
   key_mode?: string
@@ -303,6 +316,15 @@ export const registerApi = {
   },
   retryFreeRegistration(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-registration', { id })
+  },
+  startCodexOAuth(registrationJobId: string) {
+    return apiClient.post<any, { session_id?: string; authorize_url?: string; redirect_uri_prefix?: string; stage?: string; message?: string }>('/api/register/openai/codex/start', { registration_job_id: registrationJobId })
+  },
+  finishCodexOAuth(payload: { session_id: string; callback: string; registration_job_id?: string }) {
+    return apiClient.post<any, { ok?: boolean; message?: string; cpa_sync?: Record<string, unknown> }>('/api/register/openai/codex/finish', payload)
+  },
+  getCodexOAuthProgress(sessionId: string) {
+    return apiClient.get<never, { session_id?: string; registration_job_id?: string; stage?: string; status?: string; message?: string; error?: string }>(`/api/accounts/codex/oauth/progress/${encodeURIComponent(sessionId)}`)
   },
   updateSchedule(payload: { enabled: boolean; interval_minutes: number }) {
     return apiClient.post<any, { schedule: RegistrationSchedule }>('/api/register/schedule', payload)
