@@ -17,7 +17,7 @@
       <MetricStrip :items="metricItems" columns-class="grid-cols-2 md:grid-cols-4" density="compact" />
 
       <SurfaceBox tone="muted" density="compact" wrap>
-        点击授权后由 CFM 自动推进 Codex OAuth。只有上游明确要求时才会显示手机号、短信验证码或 2FA 输入框；手机号和验证码只保留在本次授权会话中，不写入账号数据。
+          点击授权后由 CFM 自动推进 Codex OAuth。只有上游明确要求时才会显示邮箱验证码、手机号、短信验证码或 2FA 输入框；这些验证码只保留在本次授权会话中，不写入账号数据。
       </SurfaceBox>
 
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -115,6 +115,10 @@
             <Input v-model.trim="phoneText" type="tel" placeholder="输入手机号，例如 +8613800138000" block :disabled="busy" @keyup.enter="submitPhone" />
             <Button size="sm" variant="primary" :disabled="busy || !phoneText" @click="submitPhone">{{ busy ? '提交中...' : '提交手机号' }}</Button>
           </div>
+          <div v-else-if="progressStage === 'waiting_email_code'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input v-model.trim="emailCode" inputmode="numeric" type="text" placeholder="输入邮箱验证码" block :disabled="busy" @keyup.enter="submitEmailCode" />
+            <Button size="sm" variant="primary" :disabled="busy || !emailCode" @click="submitEmailCode">{{ busy ? '验证中...' : '验证邮箱验证码' }}</Button>
+          </div>
           <div v-else-if="progressStage === 'waiting_sms_code'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
             <Input v-model.trim="smsCode" inputmode="numeric" type="text" placeholder="输入短信验证码" block :disabled="busy" @keyup.enter="submitSMS" />
             <Button size="sm" variant="primary" :disabled="busy || !smsCode" @click="submitSMS">{{ busy ? '验证中...' : '验证短信验证码' }}</Button>
@@ -168,6 +172,7 @@ const sessionId = ref('')
 const authorizeUrl = ref('')
 const callbackText = ref('')
 const phoneText = ref('')
+const emailCode = ref('')
 const smsCode = ref('')
 const twoFactorCode = ref('')
 const progressStage = ref('')
@@ -185,7 +190,7 @@ const filterOptions = [
 const oauthSteps = [
   { key: 'authorize', index: '1', label: '自动进入授权' },
   { key: 'phone', index: '2', label: '按需输入手机号' },
-  { key: 'sms', index: '3', label: '短信验证码 / 2FA' },
+  { key: 'sms', index: '3', label: '邮箱 / 短信验证码 / 2FA' },
   { key: 'cpa', index: '4', label: '保存并同步 CPA' },
 ]
 
@@ -239,9 +244,15 @@ function codexStatusTone(account: Account) { return account.codex_credential?.st
 function cpaStatusLabel(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? '已同步' : status === 'failed' ? '同步失败' : account.codex_credential?.has_access_token ? '待同步' : '—' }
 function cpaStatusTone(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? 'success' : status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'warning' : 'muted' }
 function formatDate(value?: string | number) { if (!value) return '—'; const numeric = typeof value === 'number' || /^\d+$/.test(String(value)); const date = numeric ? new Date(Number(value) < 10_000_000_000 ? Number(value) * 1000 : Number(value)) : new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString() }
-function stepClass(key: string) { if (progressStage.value === 'done' && key === 'cpa') return 'border-emerald-500/50 bg-emerald-500/5'; if (progressStage.value === key || (key === 'authorize' && authorizeUrl.value)) return 'border-sky-500/50 bg-sky-500/5'; return 'border-border/60' }
+function stepClass(key: string) {
+  if (progressStage.value === 'done' && key === 'cpa') return 'border-emerald-500/50 bg-emerald-500/5'
+  const verificationStages = ['waiting_email_code', 'verifying_email_code', 'waiting_sms_code', 'verifying_sms', 'waiting_2fa', 'verifying_2fa']
+  if (key === 'sms' && verificationStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
+  if (progressStage.value === key || (key === 'authorize' && authorizeUrl.value)) return 'border-sky-500/50 bg-sky-500/5'
+  return 'border-border/60'
+}
 function openAuthorize(account: Account) { selectedAccount.value = account; cpaPoolId.value = account.codex_credential?.cpa_pool_id || cpaPools.value[0]?.id || ''; resetProgress() }
-function resetProgress() { stopPolling(); sessionId.value = ''; authorizeUrl.value = ''; callbackText.value = ''; phoneText.value = ''; smsCode.value = ''; twoFactorCode.value = ''; progressStage.value = ''; progressMessage.value = ''; progressError.value = '' }
+function resetProgress() { stopPolling(); sessionId.value = ''; authorizeUrl.value = ''; callbackText.value = ''; phoneText.value = ''; emailCode.value = ''; smsCode.value = ''; twoFactorCode.value = ''; progressStage.value = ''; progressMessage.value = ''; progressError.value = '' }
 function closeAuthorize() { if (busy.value) return; selectedAccount.value = null; resetProgress() }
 async function startAuthorize() {
   if (!selectedAccount.value) return
@@ -264,22 +275,24 @@ async function finishAuthorize() {
     await loadAccounts()
   } catch (e: any) { progressError.value = e?.message || 'Codex OAuth 失败' } finally { busy.value = false }
 }
-async function submitProtocolInput(kind: 'phone' | 'sms' | '2fa', value: string) {
+async function submitProtocolInput(kind: 'phone' | 'email' | 'sms' | '2fa', value: string) {
   if (!sessionId.value || !selectedAccount.value || !value.trim()) return
   busy.value = true; progressError.value = ''
   try {
     const payload = { session_id: sessionId.value, value: value.trim(), account_ref: selectedAccount.value.id, cpa_pool_id: cpaPoolId.value || undefined }
-    const result = kind === 'phone' ? await accountImportsApi.submitCodexPhone(payload) : kind === 'sms' ? await accountImportsApi.submitCodexSMSCode(payload) : await accountImportsApi.submitCodex2FA(payload)
+    const result = kind === 'phone' ? await accountImportsApi.submitCodexPhone(payload) : kind === 'email' ? await accountImportsApi.submitCodexEmailCode(payload) : kind === 'sms' ? await accountImportsApi.submitCodexSMSCode(payload) : await accountImportsApi.submitCodex2FA(payload)
     progressStage.value = String(result.stage || progressStage.value)
     progressMessage.value = String(result.message || progressMessage.value)
     if (result.ok === true) { toast.success(result.message || 'Codex 授权完成'); await loadAccounts() }
     if (kind === 'phone') phoneText.value = ''
+    if (kind === 'email') emailCode.value = ''
     if (kind === 'sms') smsCode.value = ''
     if (kind === '2fa') twoFactorCode.value = ''
     startPolling()
   } catch (e: any) { progressError.value = e?.message || '提交授权信息失败' } finally { busy.value = false }
 }
 function submitPhone() { return submitProtocolInput('phone', phoneText.value) }
+function submitEmailCode() { return submitProtocolInput('email', emailCode.value) }
 function submitSMS() { return submitProtocolInput('sms', smsCode.value) }
 function submit2FA() { return submitProtocolInput('2fa', twoFactorCode.value) }
 async function syncCPA(account: Account) {

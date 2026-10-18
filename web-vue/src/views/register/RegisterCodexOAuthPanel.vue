@@ -3,7 +3,7 @@
     <ModalHeader title="补跑 Codex OAuth" subtitle="Web Free 注册完成后，可单独为该账号获取 Codex Token" compact @close="close" />
     <ModalBody density="compact" class="space-y-3">
       <p class="text-sm">账号：{{ job?.email || '已注册账号' }}</p>
-      <p class="text-xs text-muted-foreground">CFM 会自动推进授权流程；只有上游要求时才填写手机号、短信验证码或可选 2FA。手机号和验证码只保留在本次会话中。</p>
+      <p class="text-xs text-muted-foreground">CFM 会自动推进授权流程；只有上游要求时才填写邮箱验证码、手机号、短信验证码或可选 2FA。这些验证码只保留在本次会话中。</p>
       <div class="rounded border p-3 text-sm" role="status">
         <p>阶段：{{ stageLabel }}</p>
         <p v-if="message" class="mt-1 text-xs text-muted-foreground break-words">{{ message }}</p>
@@ -16,6 +16,10 @@
       <label v-if="stage === 'waiting_phone'" class="block text-xs">
         <span class="ui-field-label">手机号</span>
         <input v-model.trim="phone" type="tel" class="ui-input-sm w-full" placeholder="例如 +8613800138000" :disabled="busy || !sessionId" @keyup.enter="submitPhone" />
+      </label>
+      <label v-else-if="stage === 'waiting_email_code'" class="block text-xs">
+        <span class="ui-field-label">邮箱验证码</span>
+        <input v-model.trim="emailCode" inputmode="numeric" type="text" class="ui-input-sm w-full" placeholder="输入邮箱验证码" :disabled="busy || !sessionId" @keyup.enter="submitEmailCode" />
       </label>
       <label v-else-if="stage === 'waiting_sms_code'" class="block text-xs">
         <span class="ui-field-label">短信验证码</span>
@@ -35,6 +39,7 @@
       <div class="flex gap-2">
         <Button size="sm" variant="outline" :disabled="busy || !job" @click="start">重新生成授权链接</Button>
         <Button v-if="stage === 'waiting_phone'" size="sm" variant="primary" :disabled="busy || !sessionId || !phone" @click="submitPhone">提交手机号</Button>
+        <Button v-else-if="stage === 'waiting_email_code'" size="sm" variant="primary" :disabled="busy || !sessionId || !emailCode" @click="submitEmailCode">验证邮箱验证码</Button>
         <Button v-else-if="stage === 'waiting_sms_code'" size="sm" variant="primary" :disabled="busy || !sessionId || !smsCode" @click="submitSMS">验证短信验证码</Button>
         <Button v-else-if="stage === 'waiting_2fa'" size="sm" variant="primary" :disabled="busy || !sessionId || !twoFactorCode" @click="submit2FA">提交 2FA</Button>
         <Button v-else size="sm" variant="primary" :disabled="busy || !sessionId || !callback" @click="finish">提交回调并保存</Button>
@@ -55,30 +60,32 @@ import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 type Job = NonNullable<LegacyRegisterConfig['jobs']>[number]
 const props = defineProps<{ job: Job | null }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'changed'): void }>()
-const sessionId = ref(''), authorizeUrl = ref(''), callback = ref(''), phone = ref(''), smsCode = ref(''), twoFactorCode = ref(''), stage = ref(''), message = ref(''), error = ref('')
+const sessionId = ref(''), authorizeUrl = ref(''), callback = ref(''), phone = ref(''), emailCode = ref(''), smsCode = ref(''), twoFactorCode = ref(''), stage = ref(''), message = ref(''), error = ref('')
 const busy = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
-const stageLabel = computed(() => ({ starting: '正在进入授权', waiting_authorization: '等待上游授权', waiting_phone: '等待输入手机号', waiting_sms_code: '等待输入短信验证码', waiting_2fa: '等待输入 2FA', waiting_email_code: '等待邮箱验证码（暂未接入）', exchanging_token: '交换 Token', syncing_cpa: '同步 CPA', cpa_sync_failed: 'CPA 同步失败（Token 已保存）', done: '已完成', failed: '失败' } as Record<string, string>)[stage.value] || stage.value || '准备中')
+const stageLabel = computed(() => ({ starting: '正在进入授权', waiting_authorization: '等待上游授权', waiting_phone: '等待输入手机号', waiting_email_code: '等待输入邮箱验证码', waiting_sms_code: '等待输入短信验证码', waiting_2fa: '等待输入 2FA', exchanging_token: '交换 Token', syncing_cpa: '同步 CPA', cpa_sync_failed: 'CPA 同步失败（Token 已保存）', done: '已完成', failed: '失败' } as Record<string, string>)[stage.value] || stage.value || '准备中')
 
 watch(() => props.job, (job) => { if (job) { resetFromJob(job); void start() } else stopPolling() }, { immediate: true })
 onBeforeUnmount(stopPolling)
 
 function resetFromJob(job: Job) {
   const task = job.codex_oauth
-  sessionId.value = ''; authorizeUrl.value = ''; callback.value = ''; phone.value = ''; smsCode.value = ''; twoFactorCode.value = ''; stage.value = task?.stage || ''; message.value = task?.message || ''; error.value = task?.error || ''
+  sessionId.value = ''; authorizeUrl.value = ''; callback.value = ''; phone.value = ''; emailCode.value = ''; smsCode.value = ''; twoFactorCode.value = ''; stage.value = task?.stage || ''; message.value = task?.message || ''; error.value = task?.error || ''
 }
-async function submitInput(kind: 'phone' | 'sms-code' | '2fa', value: string) {
+async function submitInput(kind: 'phone' | 'email-code' | 'sms-code' | '2fa', value: string) {
   if (!sessionId.value || !value.trim()) return
   busy.value = true; error.value = ''; stopPolling()
   try {
     const payload = { session_id: sessionId.value, value: value.trim(), registration_job_id: props.job?.id }
-    const result = kind === 'phone' ? await registerApi.submitCodexPhone(payload) : kind === 'sms-code' ? await registerApi.submitCodexSMSCode(payload) : await registerApi.submitCodex2FA(payload)
+    const result = kind === 'phone' ? await registerApi.submitCodexPhone(payload) : kind === 'email-code' ? await registerApi.submitCodexEmailCode(payload) : kind === 'sms-code' ? await registerApi.submitCodexSMSCode(payload) : await registerApi.submitCodex2FA(payload)
     stage.value = result.stage || stage.value; message.value = result.message || ''; if (stage.value !== 'done') startPolling()
     if (kind === 'phone') phone.value = ''; if (kind === 'sms-code') smsCode.value = ''; if (kind === '2fa') twoFactorCode.value = ''
+    if (kind === 'email-code') emailCode.value = ''
     emit('changed')
   } catch (e: any) { error.value = e?.message || '提交验证信息失败' } finally { busy.value = false }
 }
 function submitPhone() { return submitInput('phone', phone.value) }
+function submitEmailCode() { return submitInput('email-code', emailCode.value) }
 function submitSMS() { return submitInput('sms-code', smsCode.value) }
 function submit2FA() { return submitInput('2fa', twoFactorCode.value) }
 async function start() {

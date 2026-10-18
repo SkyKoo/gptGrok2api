@@ -331,6 +331,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/codex/oauth/finish", s.codexOAuthFinish)
 	mux.HandleFunc("/api/accounts/codex/oauth/phone", s.codexOAuthSubmitPhone)
 	mux.HandleFunc("/api/accounts/codex/oauth/sms-code", s.codexOAuthSubmitSMS)
+	mux.HandleFunc("/api/accounts/codex/oauth/email-code", s.codexOAuthSubmitEmail)
 	mux.HandleFunc("/api/accounts/codex/oauth/2fa", s.codexOAuthSubmit2FA)
 	mux.HandleFunc("/api/accounts/codex/oauth/progress/", s.codexOAuthProgressAPI)
 	mux.HandleFunc("/api/accounts/codex/sync", s.codexSync)

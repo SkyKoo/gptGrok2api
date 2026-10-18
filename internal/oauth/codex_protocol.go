@@ -217,6 +217,25 @@ func (s *CodexProtocolLogin) SubmitSMSCode(ctx context.Context, id, code string)
 	return s.advanceResult(ctx, session, result)
 }
 
+// SubmitEmailCode continues a login when OpenAI asks for the mailbox OTP.
+// Email verification is a separate challenge from the optional phone/SMS
+// challenge, so keep it as its own state and endpoint in the UI as well.
+func (s *CodexProtocolLogin) SubmitEmailCode(ctx context.Context, id, code string) (map[string]string, error) {
+	session, err := s.session(id)
+	if err != nil {
+		return nil, err
+	}
+	code = strings.TrimSpace(code)
+	if !codePattern.MatchString(code) {
+		return nil, fmt.Errorf("%w: invalid email verification code", ErrCodexOAuth)
+	}
+	result, err := s.postJSON(ctx, session, "/api/accounts/email-otp/validate", map[string]string{"code": code}, session.AuthBase+"/email-verification")
+	if err != nil {
+		return nil, err
+	}
+	return s.advanceResult(ctx, session, result)
+}
+
 func (s *CodexProtocolLogin) Submit2FA(ctx context.Context, id, code string) (map[string]string, error) {
 	session, err := s.session(id)
 	if err != nil {
@@ -308,9 +327,9 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		s.setStage(session, "waiting_phone")
 		return map[string]string{"session_id": session.ID, "stage": "waiting_phone", "message": "上游要求手机号，请输入手机号"}, nil
 	}
-	if strings.Contains(text, "email-verification") || strings.Contains(text, "email_otp") || strings.Contains(text, "email-otp") {
+	if strings.Contains(text, "email-verification") || strings.Contains(text, "email_verification") || strings.Contains(text, "email_otp") || strings.Contains(text, "email-otp") {
 		s.setStage(session, "waiting_email_code")
-		return map[string]string{"session_id": session.ID, "stage": "waiting_email_code", "message": "上游要求邮箱验证码；当前页面未接入邮箱验证码输入"}, nil
+		return map[string]string{"session_id": session.ID, "stage": "waiting_email_code", "message": "上游要求邮箱验证码，请输入邮箱验证码"}, nil
 	}
 	if !session.WorkspaceSelected {
 		if workspaceID := findWorkspaceID(result); workspaceID != "" {

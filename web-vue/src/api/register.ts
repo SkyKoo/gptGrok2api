@@ -326,6 +326,9 @@ export const registerApi = {
   submitCodexSMSCode(payload: { session_id: string; value: string; registration_job_id?: string }) {
     return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/sms-code', payload)
   },
+  submitCodexEmailCode(payload: { session_id: string; value: string; registration_job_id?: string }) {
+    return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/email-code', payload)
+  },
   submitCodex2FA(payload: { session_id: string; value: string; registration_job_id?: string }) {
     return apiClient.post<any, { session_id?: string; stage?: string; message?: string }>('/api/accounts/codex/oauth/2fa', payload)
   },

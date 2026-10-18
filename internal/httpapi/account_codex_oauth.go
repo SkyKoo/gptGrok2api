@@ -106,6 +106,10 @@ func (s *Server) codexOAuthSubmitSMS(w http.ResponseWriter, r *http.Request) {
 	s.codexOAuthSubmitInput(w, r, "sms_code")
 }
 
+func (s *Server) codexOAuthSubmitEmail(w http.ResponseWriter, r *http.Request) {
+	s.codexOAuthSubmitInput(w, r, "email_code")
+}
+
 func (s *Server) codexOAuthSubmit2FA(w http.ResponseWriter, r *http.Request) {
 	s.codexOAuthSubmitInput(w, r, "two_factor_code")
 }
@@ -159,6 +163,9 @@ func (s *Server) codexOAuthSubmitInput(w http.ResponseWriter, r *http.Request, k
 	case "sms_code":
 		s.setCodexProgress(body.SessionID, "verifying_sms", "running", "正在验证短信验证码", "")
 		result, err = s.codexProtocolLogin.SubmitSMSCode(r.Context(), body.SessionID, body.Value)
+	case "email_code":
+		s.setCodexProgress(body.SessionID, "verifying_email_code", "running", "正在验证邮箱验证码", "")
+		result, err = s.codexProtocolLogin.SubmitEmailCode(r.Context(), body.SessionID, body.Value)
 	case "two_factor_code":
 		s.setCodexProgress(body.SessionID, "verifying_2fa", "running", "正在验证 2FA", "")
 		result, err = s.codexProtocolLogin.Submit2FA(r.Context(), body.SessionID, body.Value)

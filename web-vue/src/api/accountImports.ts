@@ -128,6 +128,9 @@ export const accountImportsApi = {
   submitCodexSMSCode: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
     apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/sms-code', payload),
 
+  submitCodexEmailCode: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
+    apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/email-code', payload),
+
   submitCodex2FA: (payload: { session_id: string; value: string; account_ref?: string; cpa_pool_id?: string }) =>
     apiClient.post<typeof payload, Record<string, any>>('/api/accounts/codex/oauth/2fa', payload),
 
