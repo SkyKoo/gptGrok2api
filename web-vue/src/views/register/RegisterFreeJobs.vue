@@ -7,9 +7,11 @@
       <p>{{ job.email || '等待分配邮箱' }} · {{ labels[job.status] || job.status }}</p>
       <p class="text-xs text-muted-foreground">{{ stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
       <p v-if="job.error" class="text-xs break-all">{{ job.error }}</p>
+      <p v-if="job.codex_oauth" class="text-xs text-muted-foreground">Codex OAuth：{{ codexOAuthText(job.codex_oauth) }}</p>
       <p v-if="registrationCompensationText(job.auto_retry, running, now)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now) }}</p>
       <Button v-if="job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
+      <Button v-if="job.can_codex_oauth" size="sm" variant="outline" :disabled="running || busy" @click="openCodexOAuth(job)">补跑 Codex OAuth</Button>
     </div>
     <div v-if="totalCount > pageSize" class="flex flex-wrap items-center justify-between gap-3 pt-4 text-sm">
       <span class="text-muted-foreground">每页 {{ pageSize }} 条 · 共 {{ totalCount }} 条</span>
@@ -21,6 +23,7 @@
     </div>
     <p v-if="loadError" class="text-sm text-red-500">{{ loadError }}</p>
     <p v-if="error" class="text-sm text-red-500">{{ error }}</p>
+    <RegisterCodexOAuthPanel :job="codexJob" @close="codexJob = null" @changed="emit('changed')" />
   </section>
 </template>
 <script setup lang="ts">
@@ -28,11 +31,14 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationCompensationText } from '@/lib/registrationCompensation'
+import RegisterCodexOAuthPanel from './RegisterCodexOAuthPanel.vue'
+import type { CodexOAuthTask } from '@/api/register'
 const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
 const clock = setInterval(() => { now.value = Date.now() }, 1000)
 const busy = ref(false), error = ref('')
+const codexJob = ref<NonNullable<LegacyRegisterConfig['jobs']>[number] | null>(null)
 const page = ref(1), loading = ref(false), loadError = ref('')
 const historyJobs = ref<NonNullable<LegacyRegisterConfig['jobs']>>([])
 const pageSize = computed(() => props.pageSize || 50)
@@ -67,6 +73,8 @@ watch(() => props.jobs, () => {
 onBeforeUnmount(() => { loadSequence++; clearInterval(clock) })
 const labels: Record<string, string> = { queued: '等待执行', running: '进行中', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断，需核查', registration_pending: '邮箱已创建，等待补偿注册', import_pending: '等待入库', verification_pending: '等待校验' }
 const stages: Record<string, string> = { queued: '等待执行', mailbox: '创建邮箱别名', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', import: '导入账号', verify: '校验账号', completed: '账号可用' }
+function codexOAuthText(task?: CodexOAuthTask | null) { if (!task) return ''; if (task.status === 'completed') return '已完成'; if (task.stage === 'cpa_sync_failed') return 'Token 已保存，CPA 同步失败'; return task.message || task.stage || '待执行' }
+function openCodexOAuth(job: NonNullable<LegacyRegisterConfig['jobs']>[number]) { codexJob.value = job }
 async function retry(id: string) {
   busy.value = true; error.value = ''
   try { await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }

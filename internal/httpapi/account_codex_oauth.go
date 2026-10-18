@@ -12,22 +12,25 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
 var codexSensitiveErrorPattern = regexp.MustCompile(`(?i)((?:access|refresh|id)_token["']?\s*[:=]\s*["']?)([^"'\s,}]+)`)
 var codexJWTErrorPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 
 type codexOAuthProgress struct {
-	SessionID  string
-	AccountRef string
-	CPAPoolID  string
-	Stage      string
-	Status     string
-	Message    string
-	Error      string
-	StartedAt  string
-	UpdatedAt  string
-	FinishedAt string
+	SessionID         string
+	AccountRef        string
+	CPAPoolID         string
+	RegistrationJobID string
+	Stage             string
+	Status            string
+	Message           string
+	Error             string
+	StartedAt         string
+	UpdatedAt         string
+	FinishedAt        string
 }
 
 func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -39,14 +42,26 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		AccountRef string `json:"account_ref"`
-		EmailHint  string `json:"email_hint"`
-		CPAPoolID  string `json:"cpa_pool_id"`
+		AccountRef        string `json:"account_ref"`
+		EmailHint         string `json:"email_hint"`
+		CPAPoolID         string `json:"cpa_pool_id"`
+		RegistrationJobID string `json:"registration_job_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	body.AccountRef, body.EmailHint, body.CPAPoolID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.EmailHint), strings.TrimSpace(body.CPAPoolID)
+	body.AccountRef, body.EmailHint, body.CPAPoolID, body.RegistrationJobID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.EmailHint), strings.TrimSpace(body.CPAPoolID), strings.TrimSpace(body.RegistrationJobID)
+	if body.RegistrationJobID != "" {
+		account, err := s.accountByRegistrationJob(body.RegistrationJobID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "registered account not found", "not_found")
+			return
+		}
+		body.AccountRef = accountPublicRef(account)
+		if body.EmailHint == "" {
+			body.EmailHint = stringValue(account["email"])
+		}
+	}
 	if body.AccountRef != "" {
 		if _, err := s.accountByRef(body.AccountRef); err != nil {
 			writeError(w, http.StatusNotFound, "account not found", "not_found")
@@ -59,11 +74,12 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, Stage: "waiting_authorization", Status: "running", Message: "请在授权页面完成手机验证码；如果上游要求 2FA，再输入 TOTP。完成后粘贴 callback URL。", StartedAt: now, UpdatedAt: now}
+	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: "waiting_authorization", Status: "running", Message: "请在授权页面完成手机验证码；如果上游要求 2FA，再输入 TOTP。完成后粘贴 callback URL。CFM 不接入自动短信平台。", StartedAt: now, UpdatedAt: now}
 	s.codexMu.Lock()
 	s.codexProgress[progress.SessionID] = progress
 	s.codexMu.Unlock()
 	result["stage"], result["message"] = progress.Stage, progress.Message
+	s.saveRegistrationCodexProgress(progress)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -99,15 +115,16 @@ func (s *Server) codexOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		SessionID  string `json:"session_id"`
-		Callback   string `json:"callback"`
-		AccountRef string `json:"account_ref"`
-		CPAPoolID  string `json:"cpa_pool_id"`
+		SessionID         string `json:"session_id"`
+		Callback          string `json:"callback"`
+		AccountRef        string `json:"account_ref"`
+		CPAPoolID         string `json:"cpa_pool_id"`
+		RegistrationJobID string `json:"registration_job_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	body.SessionID, body.Callback, body.AccountRef, body.CPAPoolID = strings.TrimSpace(body.SessionID), strings.TrimSpace(body.Callback), strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.CPAPoolID)
+	body.SessionID, body.Callback, body.AccountRef, body.CPAPoolID, body.RegistrationJobID = strings.TrimSpace(body.SessionID), strings.TrimSpace(body.Callback), strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.CPAPoolID), strings.TrimSpace(body.RegistrationJobID)
 	s.codexMu.RLock()
 	progress, ok := s.codexProgress[body.SessionID]
 	var stored codexOAuthProgress
@@ -124,6 +141,9 @@ func (s *Server) codexOAuthFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.CPAPoolID == "" {
 		body.CPAPoolID = stored.CPAPoolID
+	}
+	if body.RegistrationJobID == "" {
+		body.RegistrationJobID = stored.RegistrationJobID
 	}
 	s.setCodexProgress(body.SessionID, "exchanging_token", "running", "正在交换 Codex OAuth Token", "")
 	tokens, err := s.codexLogin.Finish(r.Context(), body.SessionID, body.Callback)
@@ -149,6 +169,9 @@ func (s *Server) codexOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		s.setCodexProgress(body.SessionID, "failed", "failed", "CFM 账号不存在", err.Error())
 		writeError(w, http.StatusNotFound, err.Error(), "not_found")
 		return
+	}
+	if body.RegistrationJobID == "" {
+		body.RegistrationJobID = stringValue(account["registration_job_id"])
 	}
 	credential := codexCredential(tokens, email, accountID)
 	credential["status"], credential["cpa_sync_status"] = "authorized", "pending"
@@ -182,13 +205,21 @@ func (s *Server) codexSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		AccountRef string `json:"account_ref"`
-		CPAPoolID  string `json:"cpa_pool_id"`
+		AccountRef        string `json:"account_ref"`
+		CPAPoolID         string `json:"cpa_pool_id"`
+		RegistrationJobID string `json:"registration_job_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	account, err := s.accountByRef(strings.TrimSpace(body.AccountRef))
+	body.AccountRef, body.RegistrationJobID = strings.TrimSpace(body.AccountRef), strings.TrimSpace(body.RegistrationJobID)
+	var account map[string]any
+	var err error
+	if body.RegistrationJobID != "" {
+		account, err = s.accountByRegistrationJob(body.RegistrationJobID)
+	} else {
+		account, err = s.accountByRef(body.AccountRef)
+	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error(), "not_found")
 		return
@@ -211,10 +242,44 @@ func (s *Server) setCodexProgress(id, stage, status, message, failure string) {
 		if status == "completed" || status == "failed" {
 			item.FinishedAt = now
 		}
+		copy := *item
+		go s.saveRegistrationCodexProgress(&copy)
 	}
 }
 func codexProgressJSON(item *codexOAuthProgress) map[string]any {
-	return map[string]any{"session_id": item.SessionID, "account_ref": item.AccountRef, "cpa_pool_id": item.CPAPoolID, "stage": item.Stage, "status": item.Status, "message": item.Message, "error": item.Error, "started_at": item.StartedAt, "updated_at": item.UpdatedAt, "finished_at": item.FinishedAt}
+	return map[string]any{"session_id": item.SessionID, "account_ref": item.AccountRef, "cpa_pool_id": item.CPAPoolID, "registration_job_id": item.RegistrationJobID, "stage": item.Stage, "status": item.Status, "message": item.Message, "error": item.Error, "started_at": item.StartedAt, "updated_at": item.UpdatedAt, "finished_at": item.FinishedAt}
+}
+
+func (s *Server) accountByRegistrationJob(jobID string) (map[string]any, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return nil, fmt.Errorf("registration_job_id is required")
+	}
+	items, err := s.store.AccountList()
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if stringValue(item["registration_job_id"]) == jobID {
+			return item, nil
+		}
+	}
+	return nil, fmt.Errorf("registered account not found")
+}
+
+func (s *Server) saveRegistrationCodexProgress(item *codexOAuthProgress) {
+	if item == nil || item.RegistrationJobID == "" || s.freeRegister == nil {
+		return
+	}
+	task := &registerruntime.CodexOAuthTask{SessionID: item.SessionID, Status: item.Status, Stage: item.Stage, Message: item.Message, Error: item.Error, CPAPoolID: item.CPAPoolID, StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt, FinishedAt: item.FinishedAt}
+	if item.Status == "completed" {
+		task.CPAStatus = "synced"
+	} else if item.Stage == "cpa_sync_failed" {
+		task.CPAStatus = "failed"
+	} else {
+		task.CPAStatus = "pending"
+	}
+	_ = s.freeRegister.SetCodexOAuth(item.RegistrationJobID, task)
 }
 
 func codexCredential(tokens map[string]string, email, accountID string) map[string]any {
