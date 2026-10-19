@@ -10,18 +10,21 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	"github.com/auucoder/gptgrok2api-go/internal/register"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
 )
@@ -31,10 +34,17 @@ var (
 	codePattern  = regexp.MustCompile(`^[0-9]{4,8}$`)
 )
 
+const (
+	codexSentinelOrigin  = "https://sentinel.openai.com"
+	codexSentinelVersion = "20260810913b"
+)
+
 type CodexProtocolLogin struct {
-	standard *CodexLogin
-	mu       sync.Mutex
-	sessions map[string]*codexProtocolSession
+	standard        *CodexLogin
+	sentinelOrigin  string
+	sentinelVersion string
+	mu              sync.Mutex
+	sessions        map[string]*codexProtocolSession
 }
 
 type codexProtocolSession struct {
@@ -58,7 +68,12 @@ type codexProtocolSession struct {
 // transport with the regular PKCE implementation.  Each login gets a private
 // cookie jar so concurrent accounts never share auth state.
 func NewCodexProtocolLogin(standard *CodexLogin) *CodexProtocolLogin {
-	return &CodexProtocolLogin{standard: standard, sessions: map[string]*codexProtocolSession{}}
+	return &CodexProtocolLogin{
+		standard:        standard,
+		sentinelOrigin:  codexSentinelOrigin,
+		sentinelVersion: codexSentinelVersion,
+		sessions:        map[string]*codexProtocolSession{},
+	}
 }
 
 // Start creates a protocol session, opens the authorization redirect chain,
@@ -229,7 +244,15 @@ func (s *CodexProtocolLogin) SubmitEmailCode(ctx context.Context, id, code strin
 	if !codePattern.MatchString(code) {
 		return nil, fmt.Errorf("%w: invalid email verification code", ErrCodexOAuth)
 	}
-	result, err := s.postJSON(ctx, session, "/api/accounts/email-otp/validate", map[string]string{"code": code}, session.AuthBase+"/email-verification")
+	// Sentinel is generated immediately before the one-time-code submission so
+	// its challenge, cookies and browser profile are bound to this same auth
+	// session. Reusing a token created before the user entered the code causes
+	// the upstream login_failed response.
+	sentinelHeaders, err := s.emailOTPSentinelHeaders(ctx, session)
+	if err != nil {
+		return nil, fmt.Errorf("%w: email OTP sentinel: %v", ErrCodexOAuth, err)
+	}
+	result, err := s.postJSONWithHeaders(ctx, session, "/api/accounts/email-otp/validate", map[string]string{"code": code}, session.AuthBase+"/email-verification", sentinelHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -394,6 +417,10 @@ func (s *CodexProtocolLogin) follow(ctx context.Context, session *codexProtocolS
 }
 
 func (s *CodexProtocolLogin) postJSON(ctx context.Context, session *codexProtocolSession, path string, body any, referer string) (map[string]any, error) {
+	return s.postJSONWithHeaders(ctx, session, path, body, referer, nil)
+}
+
+func (s *CodexProtocolLogin) postJSONWithHeaders(ctx context.Context, session *codexProtocolSession, path string, body any, referer string, extra map[string]string) (map[string]any, error) {
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -403,6 +430,11 @@ func (s *CodexProtocolLogin) postJSON(ctx context.Context, session *codexProtoco
 		return nil, err
 	}
 	setProtocolHeaders(req, session.Profile, session.DeviceID, session.AuthSessionID, referer)
+	for key, value := range extra {
+		if strings.TrimSpace(value) != "" {
+			req.Header.Set(key, value)
+		}
+	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := session.Client.Do(req)
 	if err != nil {
@@ -416,6 +448,258 @@ func (s *CodexProtocolLogin) postJSON(ctx context.Context, session *codexProtoco
 		return nil, protocolBodyError(resp.StatusCode, payload, data)
 	}
 	return payload, nil
+}
+
+// emailOTPSentinelHeaders follows the same authorize_continue sequence used by
+// Turb: load the Sentinel frame, request a challenge, execute the vendored
+// Node runner and return the headers for exactly one email-OTP request.
+func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, session *codexProtocolSession) (map[string]string, error) {
+	sentinelSID, err := randomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("generate sentinel sid: %w", err)
+	}
+	origin, version := s.sentinelConfig()
+	requirements := codexSentinelRequirements(session.Profile, sentinelSID, origin, version, time.Now())
+	frameURL := origin + "/backend-api/sentinel/frame.html?sv=" + version
+	if _, _, _, err := s.sentinelRequest(ctx, session, http.MethodGet, frameURL, nil, map[string]string{
+		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+		"Referer":                   session.AuthBase + "/",
+		"Sec-Fetch-Site":            "same-site",
+		"Sec-Fetch-Mode":            "navigate",
+		"Sec-Fetch-Dest":            "iframe",
+		"Upgrade-Insecure-Requests": "1",
+	}); err != nil {
+		return nil, fmt.Errorf("load sentinel frame: %w", err)
+	}
+	body, err := json.Marshal(map[string]string{"p": requirements, "id": session.DeviceID, "flow": "authorize_continue"})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sentinel request: %w", err)
+	}
+	challenge, responseHeaders, status, err := s.sentinelRequest(ctx, session, http.MethodPost, origin+"/backend-api/sentinel/req", body, map[string]string{
+		"Accept":         "*/*",
+		"Content-Type":   "text/plain;charset=UTF-8",
+		"Origin":         origin,
+		"Referer":        frameURL,
+		"Sec-Fetch-Site": "same-origin",
+		"Sec-Fetch-Mode": "cors",
+		"Sec-Fetch-Dest": "empty",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("request sentinel challenge: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("sentinel challenge HTTP %d", status)
+	}
+	token := stringValueAny(challenge["token"])
+	if token == "" {
+		return nil, fmt.Errorf("sentinel challenge has no token")
+	}
+	// The challenge response can rotate oai-sc. Make the new value available
+	// on both the Sentinel and auth origins while retaining the same cookie jar.
+	cookie := cookieFromHeaders(responseHeaders, "oai-sc")
+	if cookie == "" {
+		cookie = cookieFromClient(session.Client, origin, "oai-sc")
+	}
+	if cookie == "" {
+		cookie = cookieFromClient(session.Client, session.AuthBase, "oai-sc")
+	}
+	if cookie == "" {
+		return nil, fmt.Errorf("sentinel challenge has no session cookie")
+	}
+	if u, parseErr := url.Parse(origin); parseErr == nil {
+		session.Client.SetCookies(u, []*fhttp.Cookie{{Name: "oai-sc", Value: cookie, Path: "/", Secure: true, HttpOnly: true}})
+	}
+	if u, parseErr := url.Parse(session.AuthBase); parseErr == nil {
+		session.Client.SetCookies(u, []*fhttp.Cookie{{Name: "oai-sc", Value: cookie, Path: "/", Secure: true, HttpOnly: true}})
+	}
+
+	runnerHeaders, err := register.SentinelHeadersFromRunner(ctx, register.SentinelRunnerOptions{
+		Flow: "authorize_continue",
+		// Keep the original p used by /sentinel/req. The Node SDK performs any
+		// challenge-specific PoW/Turnstile work against that exact proof.
+		Requirements:    requirements,
+		SentinelSID:     sentinelSID,
+		Cookie:          cookie,
+		DeviceID:        session.DeviceID,
+		SentinelOrigin:  origin,
+		SentinelVersion: version,
+		ScriptSrc:       origin + "/backend-api/sentinel/sdk.js",
+		PageURL:         session.AuthBase + "/email-verification",
+		CookieHeader:    protocolCookieHeader(session, origin, cookie),
+		Profile:         session.Profile,
+		Challenge:       challenge,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("run sentinel sdk: %w", err)
+	}
+	if so := codexObject(challenge["so"]); codexBool(so["required"]) && runnerHeaders["openai-sentinel-so-token"] == "" {
+		return nil, fmt.Errorf("sentinel session observer token is missing")
+	}
+	return runnerHeaders, nil
+}
+
+func (s *CodexProtocolLogin) sentinelRequest(ctx context.Context, session *codexProtocolSession, method, rawURL string, body []byte, extra map[string]string) (map[string]any, fhttp.Header, int, error) {
+	req, err := fhttp.NewRequestWithContext(ctx, method, rawURL, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	referer := extra["Referer"]
+	setProtocolHeaders(req, session.Profile, session.DeviceID, session.AuthSessionID, referer)
+	for key, value := range extra {
+		req.Header.Set(key, value)
+	}
+	resp, err := session.Client.Do(req)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("sentinel request: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if readErr != nil {
+		return nil, resp.Header, resp.StatusCode, readErr
+	}
+	data := map[string]any{}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &data)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return data, resp.Header, resp.StatusCode, protocolBodyError(resp.StatusCode, data, raw)
+	}
+	return data, resp.Header, resp.StatusCode, nil
+}
+
+func cookieFromHeaders(headers fhttp.Header, name string) string {
+	for _, line := range headers.Values("Set-Cookie") {
+		response := fhttp.Response{Header: fhttp.Header{"Set-Cookie": {line}}}
+		for _, cookie := range response.Cookies() {
+			if cookie.Name == name {
+				return cookie.Value
+			}
+		}
+	}
+	return ""
+}
+
+func cookieFromClient(client tlsclient.HttpClient, origin, name string) string {
+	u, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	for _, cookie := range client.GetCookies(u) {
+		if cookie.Name == name {
+			return cookie.Value
+		}
+	}
+	return ""
+}
+
+func protocolCookieHeader(session *codexProtocolSession, sentinelOrigin, sentinelCookie string) string {
+	values := map[string]string{"oai-did": session.DeviceID, "oai-sc": sentinelCookie}
+	for _, origin := range []string{session.AuthBase, sentinelOrigin} {
+		u, err := url.Parse(origin)
+		if err != nil {
+			continue
+		}
+		for _, cookie := range session.Client.GetCookies(u) {
+			if cookie != nil && cookie.Name != "" {
+				values[cookie.Name] = cookie.Value
+			}
+		}
+	}
+	keys := make([]string, 0, len(values))
+	for name := range values {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, name := range keys {
+		if values[name] != "" {
+			parts = append(parts, name+"="+values[name])
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func codexObject(value any) map[string]any {
+	if object, ok := value.(map[string]any); ok {
+		return object
+	}
+	return map[string]any{}
+}
+
+func codexBool(value any) bool {
+	boolValue, ok := value.(bool)
+	return ok && boolValue
+}
+
+func (s *CodexProtocolLogin) sentinelConfig() (string, string) {
+	origin := s.sentinelOrigin
+	if origin == "" {
+		origin = codexSentinelOrigin
+	}
+	version := s.sentinelVersion
+	if version == "" {
+		version = codexSentinelVersion
+	}
+	return origin, version
+}
+
+func codexSentinelRequirements(profile browserprofile.Profile, sentinelSID, origin, version string, at time.Time) string {
+	encoded, err := codexSentinelEncode(codexSentinelConfiguration(profile, sentinelSID, origin, version, 0, 0, at))
+	if err != nil {
+		return "gAAAAAC"
+	}
+	return "gAAAAAC" + encoded
+}
+
+func codexSentinelConfiguration(profile browserprofile.Profile, sentinelSID, origin, version string, attempt int, elapsed int64, at time.Time) []any {
+	date := at
+	loc, err := time.LoadLocation(profile.TimezoneIANA)
+	if err == nil {
+		date = at.In(loc)
+	}
+	zoneName := profile.TimezoneName
+	if zoneName == "" {
+		zoneName, _ = date.Zone()
+	}
+	if profile.TimezoneIANA == "UTC" {
+		zoneName = "Coordinated Universal Time"
+	}
+	dateString := date.Format("Mon Jan 02 2006 15:04:05 GMT-0700") + " (" + zoneName + ")"
+	if attempt == 0 {
+		attempt = 1
+	}
+	if elapsed == 0 {
+		elapsed = 1
+	}
+	return []any{
+		profile.ScreenWidth + profile.ScreenHeight,
+		dateString,
+		profile.JSHeapSizeLimit,
+		attempt,
+		profile.UserAgent,
+		origin + "/sentinel/" + version + "/sdk.js",
+		nil,
+		profile.NavigatorLanguage,
+		profile.NavigatorLanguagesValue(),
+		elapsed,
+		"hardwareConcurrency",
+		"location",
+		"Object",
+		1000,
+		sentinelSID,
+		"",
+		profile.DeviceMemory,
+		at.UnixMilli() - 1000,
+		0, 0, 0, 0, 0, 0,
+	}
+}
+
+func codexSentinelEncode(value any) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
 func setProtocolHeaders(req *fhttp.Request, profile browserprofile.Profile, deviceID, authSessionID, referer string) {

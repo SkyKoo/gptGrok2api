@@ -8,12 +8,33 @@ import (
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 )
 
-// sentinelHeadersFromRunner runs the same SDK path Turb uses for the
-// oauth_create_account flow. The runner returns the main token plus an
-// optional _so payload produced by sessionObserverToken.
-func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requirements, sentinelSID, cookie string, challenge map[string]any) (map[string]string, error) {
+// SentinelRunnerOptions describes the browser/session context used to execute
+// the vendored Sentinel runner. The challenge and cookies must belong to the
+// same upstream session as the request that will carry the returned headers.
+type SentinelRunnerOptions struct {
+	Flow            string
+	Requirements    string
+	SentinelSID     string
+	Cookie          string
+	DeviceID        string
+	SentinelOrigin  string
+	SentinelVersion string
+	ScriptSrc       string
+	PageURL         string
+	CookieHeader    string
+	Profile         browserprofile.Profile
+	Challenge       map[string]any
+}
+
+// SentinelHeadersFromRunner runs the vendored Turb-compatible runner. The
+// runner loads sdk.js itself and returns the Sentinel headers for one request.
+// It intentionally accepts a plain browser profile so OAuth and registration
+// flows can share exactly the same JS implementation without sharing sessions.
+func SentinelHeadersFromRunner(ctx context.Context, options SentinelRunnerOptions) (map[string]string, error) {
 	runner := os.Getenv("CFM_SENTINEL_RUNNER")
 	if runner == "" {
 		runner = "/app/sentinel/sentinel-runner.js"
@@ -40,26 +61,46 @@ func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requ
 	defer os.Remove(challengePath)
 	defer challengeFile.Close()
 	_ = challengeFile.Chmod(0600)
-	if err := json.NewEncoder(challengeFile).Encode(challenge); err != nil {
+	if err := json.NewEncoder(challengeFile).Encode(options.Challenge); err != nil {
 		return nil, err
 	}
 	if err := challengeFile.Close(); err != nil {
 		return nil, err
 	}
 
+	origin := options.SentinelOrigin
+	if origin == "" {
+		origin = sentinelOrigin
+	}
+	version := options.SentinelVersion
+	if version == "" {
+		version = sentinelVersion
+	}
+	pageURL := options.PageURL
+	if pageURL == "" {
+		pageURL = "https://auth.openai.com/about-you"
+	}
+	scriptSrc := options.ScriptSrc
+	if scriptSrc == "" {
+		scriptSrc = origin + "/sentinel/" + version + "/sdk.js"
+	}
+	cookieHeader := options.CookieHeader
+	if cookieHeader == "" {
+		cookieHeader = "oai-did=" + options.DeviceID + "; oai-sc=" + options.Cookie
+	}
+	profile := options.Profile
 	runnerCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	profile := r.BrowserProfile()
 	args := []string{
 		runner,
 		"--challenge-file", challengePath,
-		"--flow", flow,
-		"--device-id", r.device,
-		"--sentinel-sid", sentinelSID,
-		"--challenge-proof", requirements,
+		"--flow", options.Flow,
+		"--device-id", options.DeviceID,
+		"--sentinel-sid", options.SentinelSID,
+		"--challenge-proof", options.Requirements,
 		"--sdk", sdk,
-		"--script-src", r.sentinel + "/sentinel/" + sentinelVersion + "/sdk.js",
-		"--page-url", r.auth + "/about-you",
+		"--script-src", scriptSrc,
+		"--page-url", pageURL,
 		"--user-agent", profile.UserAgent,
 		"--browser-family", profile.BrowserFamily,
 		"--navigator-platform", profile.NavigatorPlatform,
@@ -88,11 +129,11 @@ func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requ
 		"--sec-ch-ua-bitness", profile.SecCHUABitness,
 		"--sec-ch-ua-model", profile.SecCHUAModel,
 		"--language", profile.NavigatorLanguage,
-		"--languages", profile.navigatorLanguagesValue(),
+		"--languages", profile.NavigatorLanguagesValue(),
 		"--time-zone", profile.TimezoneIANA,
 		"--timezone-name", profile.TimezoneName,
 		"--timezone-offset-minutes", strconv.Itoa(profile.TimezoneOffsetMinutes),
-		"--cookie", "oai-did=" + r.device + "; oai-sc=" + cookie,
+		"--cookie", cookieHeader,
 	}
 	out, err := exec.CommandContext(runnerCtx, node, args...).Output()
 	if err != nil {
@@ -108,15 +149,16 @@ func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requ
 	if len(payload["p"]) == 0 || len(payload["c"]) == 0 {
 		return nil, fmt.Errorf("sentinel runner token is incomplete")
 	}
-	soRaw, ok := payload["_so"]
-	if !ok || len(soRaw) == 0 || string(soRaw) == "null" {
-		return nil, fmt.Errorf("sentinel runner returned no session observer token")
-	}
+	soRaw, hasSO := payload["_so"]
 	delete(payload, "_so")
 	delete(payload, "so")
 	mainToken, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
+	}
+	headers := map[string]string{"openai-sentinel-token": string(mainToken)}
+	if !hasSO || len(soRaw) == 0 || string(soRaw) == "null" {
+		return headers, nil
 	}
 	var soValue any
 	if err := json.Unmarshal(soRaw, &soValue); err != nil {
@@ -127,16 +169,27 @@ func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requ
 			soValue = inner
 		}
 	}
-	var c string
-	if err := json.Unmarshal(payload["c"], &c); err != nil || c == "" {
+	var challengeID string
+	if err := json.Unmarshal(payload["c"], &challengeID); err != nil || challengeID == "" {
 		return nil, fmt.Errorf("sentinel runner token has no challenge id")
 	}
-	soToken, err := json.Marshal(map[string]any{"so": soValue, "c": c, "id": r.device, "flow": flow})
+	soToken, err := json.Marshal(map[string]any{"so": soValue, "c": challengeID, "id": options.DeviceID, "flow": options.Flow})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]string{
-		"openai-sentinel-token":    string(mainToken),
-		"openai-sentinel-so-token": string(soToken),
-	}, nil
+	headers["openai-sentinel-so-token"] = string(soToken)
+	return headers, nil
+}
+
+// sentinelHeadersFromRunner runs the same SDK path Turb uses for the
+// oauth_create_account flow. The runner returns the main token plus an
+// optional _so payload produced by sessionObserverToken. The main header is
+// still valid when the upstream challenge does not require session observer.
+func (r *WebRegistrar) sentinelHeadersFromRunner(ctx context.Context, flow, requirements, sentinelSID, cookie string, challenge map[string]any) (map[string]string, error) {
+	return SentinelHeadersFromRunner(ctx, SentinelRunnerOptions{
+		Flow: flow, Requirements: requirements, SentinelSID: sentinelSID,
+		Cookie: cookie, DeviceID: r.device, SentinelOrigin: r.sentinel,
+		SentinelVersion: sentinelVersion, ScriptSrc: r.sentinel + "/sentinel/" + sentinelVersion + "/sdk.js", PageURL: r.auth + "/about-you",
+		Profile: browserprofile.Profile(r.BrowserProfile()), Challenge: challenge,
+	})
 }
