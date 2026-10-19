@@ -913,6 +913,9 @@ func phoneRejectionText(value string) bool {
 	text := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", " "))
 	for _, marker := range []string{
 		"invalid phone",
+		"fraud guard",
+		"suspicious behavior from phone numbers",
+		"phone numbers similar to yours",
 		"phone number is not valid",
 		"phone number already used",
 		"phone number has already been used",

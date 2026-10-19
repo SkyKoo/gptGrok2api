@@ -131,6 +131,12 @@ func TestPhoneStepRequiresStructuredPhonePage(t *testing.T) {
 	if !isExplicitPhoneRejectionResult(map[string]any{"error": map[string]any{"code": "phone_number_already_used"}}) {
 		t.Fatal("explicit phone rejection must be detected")
 	}
+	if !isExplicitPhoneRejectionResult(map[string]any{"error": map[string]any{
+		"code":    "fraud_guard",
+		"message": "We've detected suspicious behavior from phone numbers similar to yours.",
+	}}) {
+		t.Fatal("fraud_guard phone rejection must be detected")
+	}
 	if isExplicitPhoneRejectionResult(map[string]any{"page": map[string]any{"type": "add_phone"}, "message": "enter your phone number"}) {
 		t.Fatal("ordinary add_phone prompt must not be treated as a phone rejection")
 	}
