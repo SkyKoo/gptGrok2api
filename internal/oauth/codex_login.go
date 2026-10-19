@@ -25,7 +25,10 @@ const (
 	CodexOAuthScope       = "openid email profile offline_access"
 )
 
-var ErrCodexOAuth = errors.New("codex oauth login failed")
+var (
+	ErrCodexOAuth               = errors.New("codex oauth login failed")
+	ErrCodexOAuthSessionInvalid = errors.New("codex oauth session invalid")
+)
 
 // CodexLogin implements the standard Codex OAuth PKCE flow. Authentication
 // challenges (including phone verification and optional 2FA) are completed by

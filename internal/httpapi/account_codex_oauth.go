@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -694,6 +696,9 @@ func uploadCodexAuthFile(ctx context.Context, pool externalCPAPool, filename str
 func safeOAuthError(err error) string {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, oauth.ErrCodexOAuthSessionInvalid) {
+		return "授权会话已失效，请重新开始授权"
 	}
 	message := strings.TrimSpace(err.Error())
 	message = codexSensitiveErrorPattern.ReplaceAllString(message, `${1}[redacted]`)

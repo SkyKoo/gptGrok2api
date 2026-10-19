@@ -64,6 +64,9 @@ type codexProtocolSession struct {
 	FactorID             string
 	WorkspaceSelected    bool
 	Stage                string
+	LastPhone            string
+	PendingPhone         string
+	PhonePromptCount     int
 	CreatedAt            time.Time
 }
 
@@ -222,11 +225,32 @@ func (s *CodexProtocolLogin) SubmitPhone(ctx context.Context, id, phone string) 
 	if !strings.HasPrefix(phone, "+") {
 		phone = "+" + phone
 	}
+	s.mu.Lock()
+	lastPhone, pendingPhone := session.LastPhone, session.PendingPhone
+	if pendingPhone != "" {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: 本次授权会话的手机号正在提交，请等待当前请求结束", ErrCodexOAuth)
+	}
+	if lastPhone != "" && phone == lastPhone {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: 本次授权会话已提交过该手机号，请重新开始授权或使用新的手机号", ErrCodexOAuth)
+	}
+	session.PendingPhone = phone
+	s.mu.Unlock()
 	_, err = s.postJSON(ctx, session, "/api/accounts/add-phone/send", map[string]string{"phone_number": phone, "channel": "sms"}, session.AuthBase+"/add-phone")
 	if err != nil {
+		s.mu.Lock()
+		if session.PendingPhone == phone {
+			session.PendingPhone = ""
+		}
+		s.mu.Unlock()
 		return nil, err
 	}
-	s.setStage(session, "waiting_sms_code")
+	s.mu.Lock()
+	session.LastPhone = phone
+	session.PendingPhone = ""
+	session.Stage = "waiting_sms_code"
+	s.mu.Unlock()
 	return map[string]string{"session_id": id, "stage": "waiting_sms_code", "message": "验证码已发送，请输入短信验证码"}, nil
 }
 
@@ -239,8 +263,10 @@ func (s *CodexProtocolLogin) SubmitSMSCode(ctx context.Context, id, code string)
 	if !codePattern.MatchString(code) {
 		return nil, fmt.Errorf("%w: invalid SMS code", ErrCodexOAuth)
 	}
+	s.setStage(session, "verifying_sms")
 	result, err := s.postJSON(ctx, session, "/api/accounts/phone-otp/validate", map[string]string{"code": code}, session.AuthBase+"/phone-verification")
 	if err != nil {
+		s.setStage(session, "waiting_sms_code")
 		return nil, err
 	}
 	return s.advanceResult(ctx, session, result)
@@ -361,7 +387,15 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		return s.advanceResult(ctx, session, verified)
 	}
 	if strings.Contains(text, "add-phone") || strings.Contains(text, "add_phone") || strings.Contains(text, "phone_verification") || strings.Contains(text, "phone_otp") {
-		s.setStage(session, "waiting_phone")
+		s.mu.Lock()
+		session.PhonePromptCount++
+		repeated := session.PhonePromptCount > 1
+		session.Stage = "waiting_phone"
+		s.mu.Unlock()
+		if repeated {
+			s.setStage(session, "waiting_phone_retry")
+			return map[string]string{"session_id": session.ID, "stage": "waiting_phone_retry", "message": "上游再次要求手机号，请输入新的手机号；不要重复提交本次授权中已经使用过的手机号"}, nil
+		}
 		return map[string]string{"session_id": session.ID, "stage": "waiting_phone", "message": "上游要求手机号，请输入手机号"}, nil
 	}
 	if strings.Contains(text, "email-verification") || strings.Contains(text, "email_verification") || strings.Contains(text, "email_otp") || strings.Contains(text, "email-otp") {
@@ -795,11 +829,18 @@ func protocolHTTPError(name string, resp *fhttp.Response) error {
 
 func protocolBodyError(status int, payload map[string]any, raw []byte) error {
 	detail := codexString(payload, "error_description", "error", "message", "detail")
+	code := ""
+	if nested, ok := payload["error"].(map[string]any); ok {
+		code = codexString(nested, "code")
+	}
 	if detail == "" {
 		detail = strings.TrimSpace(string(raw))
 	}
 	if len(detail) > 300 {
 		detail = detail[:300]
+	}
+	if status == http.StatusConflict && strings.EqualFold(code, "invalid_state") {
+		return fmt.Errorf("%w: %s", ErrCodexOAuthSessionInvalid, detail)
 	}
 	return fmt.Errorf("%w: protocol HTTP %d: %s", ErrCodexOAuth, status, detail)
 }

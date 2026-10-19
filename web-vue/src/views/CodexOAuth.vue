@@ -111,8 +111,8 @@
             </div>
             <Button v-if="authorizeUrl && progressStage === 'waiting_authorization'" size="sm" variant="outline" @click="openAuthorizeUrl">打开授权页</Button>
           </div>
-          <div v-if="progressStage === 'waiting_phone'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
-            <Input v-model.trim="phoneText" type="tel" placeholder="输入手机号，例如 +8613800138000" block :disabled="busy" @keyup.enter="submitPhone" />
+          <div v-if="progressStage === 'waiting_phone' || progressStage === 'waiting_phone_retry'" class="grid gap-2 sm:grid-cols-[1fr_auto]">
+            <Input v-model.trim="phoneText" type="tel" :placeholder="progressStage === 'waiting_phone_retry' ? '输入新的手机号，不要重复上次号码' : '输入手机号，例如 +8613800138000'" block :disabled="busy" @keyup.enter="submitPhone" />
             <Button size="sm" variant="primary" :disabled="busy || !phoneText" @click="submitPhone">{{ busy ? '提交中...' : '提交手机号' }}</Button>
           </div>
           <div v-else-if="progressStage === 'waiting_email_code'" class="grid gap-2 sm:grid-cols-[1fr_auto]">

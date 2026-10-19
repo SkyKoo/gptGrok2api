@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,7 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	t.Setenv("CFM_SENTINEL_NODE", node)
 	t.Setenv("CFM_SENTINEL_RUNNER", runner)
 	t.Setenv("CFM_SENTINEL_SDK", sdk)
+	phoneSends, smsValidations := 0, 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -44,9 +46,15 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 		case "/api/accounts/authorize/continue":
 			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}})
 		case "/api/accounts/add-phone/send":
+			phoneSends++
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/accounts/phone-otp/validate":
-			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "mfa_challenge"}, "factor_id": "factor-1"})
+			smsValidations++
+			if smsValidations == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "mfa_challenge"}, "factor_id": "factor-1"})
+			}
 		case "/api/accounts/mfa/issue_challenge":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/api/accounts/mfa/verify":
@@ -80,12 +88,32 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	if phone["stage"] != "waiting_sms_code" {
 		t.Fatalf("stage after phone = %q", phone["stage"])
 	}
+	firstSMS, err := protocol.SubmitSMSCode(ctx, id, "123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstSMS["stage"] != "waiting_phone_retry" {
+		t.Fatalf("stage after repeated phone response = %q", firstSMS["stage"])
+	}
+	if _, err := protocol.SubmitPhone(ctx, id, "+8613800138000"); err == nil || !strings.Contains(err.Error(), "已提交过该手机号") {
+		t.Fatalf("same phone must be rejected locally, got %v", err)
+	}
+	if phoneSends != 1 {
+		t.Fatalf("same phone must not reach upstream, sends=%d", phoneSends)
+	}
+	secondPhone, err := protocol.SubmitPhone(ctx, id, "+8613800138001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondPhone["stage"] != "waiting_sms_code" {
+		t.Fatalf("stage after replacement phone = %q", secondPhone["stage"])
+	}
 	twoFA, err := protocol.SubmitSMSCode(ctx, id, "123456")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if twoFA["stage"] != "waiting_2fa" {
-		t.Fatalf("stage after SMS = %q", twoFA["stage"])
+		t.Fatalf("stage after replacement SMS = %q", twoFA["stage"])
 	}
 	tokens, err := protocol.Submit2FA(ctx, id, "654321")
 	if err != nil {
@@ -93,6 +121,18 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	}
 	if tokens["access_token"] != "access-1" || tokens["refresh_token"] != "refresh-1" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
+	}
+	if phoneSends != 2 || smsValidations != 2 {
+		t.Fatalf("unexpected upstream phone flow counts: sends=%d sms=%d", phoneSends, smsValidations)
+	}
+}
+
+func TestProtocolBodyErrorDetectsInvalidState(t *testing.T) {
+	err := protocolBodyError(http.StatusConflict, map[string]any{
+		"error": map[string]any{"code": "invalid_state", "message": "Your sign-in session is no longer valid"},
+	}, nil)
+	if !errors.Is(err, ErrCodexOAuthSessionInvalid) {
+		t.Fatalf("expected invalid session error, got %v", err)
 	}
 }
 

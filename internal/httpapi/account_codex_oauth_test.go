@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -76,6 +77,13 @@ func TestSafeOAuthErrorRedactsCredentialValues(t *testing.T) {
 	err := safeOAuthError(fmt.Errorf(`{"access_token":"access-secret","refresh_token":"refresh-secret"} eyJabcdefghijklmnopqrstuvwxyz123456.abcdefghijklmnopqrstuvwxyz123456.abcdefghijklmnopqrstuvwxyz123456`))
 	if strings.Contains(err, "access-secret") || strings.Contains(err, "refresh-secret") || strings.Contains(err, "eyJabcdefghijklmnopqrstuvwxyz") {
 		t.Fatalf("credential leaked in error: %s", err)
+	}
+}
+
+func TestSafeOAuthErrorExplainsInvalidSession(t *testing.T) {
+	err := safeOAuthError(fmt.Errorf("wrapped: %w", oauth.ErrCodexOAuthSessionInvalid))
+	if err != "授权会话已失效，请重新开始授权" {
+		t.Fatalf("unexpected invalid-session message: %q", err)
 	}
 }
 
