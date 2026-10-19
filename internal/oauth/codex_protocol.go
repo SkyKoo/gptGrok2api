@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -48,20 +49,22 @@ type CodexProtocolLogin struct {
 }
 
 type codexProtocolSession struct {
-	ID                string
-	Email             string
-	Password          string
-	State             string
-	Verifier          string
-	AuthBase          string
-	Client            tlsclient.HttpClient
-	Profile           browserprofile.Profile
-	DeviceID          string
-	AuthSessionID     string
-	FactorID          string
-	WorkspaceSelected bool
-	Stage             string
-	CreatedAt         time.Time
+	ID                   string
+	Email                string
+	Password             string
+	State                string
+	Verifier             string
+	AuthBase             string
+	Client               tlsclient.HttpClient
+	Profile              browserprofile.Profile
+	DeviceID             string
+	AuthSessionID        string
+	SentinelSID          string
+	SentinelRequirements string
+	FactorID             string
+	WorkspaceSelected    bool
+	Stage                string
+	CreatedAt            time.Time
 }
 
 // NewCodexProtocolLogin creates a protocol controller sharing the configured
@@ -113,6 +116,10 @@ func (s *CodexProtocolLogin) Start(ctx context.Context, emailHint, password stri
 	if err != nil {
 		return nil, fmt.Errorf("%w: generate auth session id: %v", ErrCodexOAuth, err)
 	}
+	sentinelSID, err := randomHex(16)
+	if err != nil {
+		return nil, fmt.Errorf("%w: generate sentinel sid: %v", ErrCodexOAuth, err)
+	}
 	query := authURL.Query()
 	query.Set("ext-oai-did", deviceID)
 	query.Set("auth_session_logging_id", authSessionID)
@@ -123,7 +130,7 @@ func (s *CodexProtocolLogin) Start(ctx context.Context, emailHint, password stri
 		return nil, fmt.Errorf("%w: create auth client: %v", ErrCodexOAuth, err)
 	}
 	client.SetCookies(authURL, []*fhttp.Cookie{{Name: "oai-did", Value: deviceID, Path: "/", Secure: authURL.Scheme == "https"}})
-	session := &codexProtocolSession{ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, Stage: "starting", CreatedAt: time.Now().UTC()}
+	session := &codexProtocolSession{ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, SentinelSID: sentinelSID, Stage: "starting", CreatedAt: time.Now().UTC()}
 	s.mu.Lock()
 	s.purgeLocked(time.Now().UTC())
 	s.sessions[sessionID] = session
@@ -183,7 +190,14 @@ func (s *CodexProtocolLogin) bootstrap(ctx context.Context, session *codexProtoc
 	if resp.StatusCode >= 400 {
 		return nil, protocolHTTPError("authorize", resp)
 	}
-	result, err := s.postJSON(ctx, session, "/api/accounts/authorize/continue", map[string]any{"username": map[string]string{"kind": "email", "value": session.Email}}, "https://auth.openai.com/log-in")
+	// The initial email submission is itself an authorize_continue challenge.
+	// Turb generates the Sentinel headers before this request; without them Auth
+	// returns login_failed before it can send an email OTP.
+	sentinelHeaders, err := s.sentinelHeadersForFlow(ctx, session, "authorize_continue")
+	if err != nil {
+		return nil, fmt.Errorf("%w: initial email sentinel: %v", ErrCodexOAuth, err)
+	}
+	result, err := s.postJSONWithHeaders(ctx, session, "/api/accounts/authorize/continue", map[string]any{"username": map[string]string{"kind": "email", "value": session.Email}}, "https://auth.openai.com/log-in", sentinelHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -450,16 +464,26 @@ func (s *CodexProtocolLogin) postJSONWithHeaders(ctx context.Context, session *c
 	return payload, nil
 }
 
-// emailOTPSentinelHeaders follows the same authorize_continue sequence used by
-// Turb: load the Sentinel frame, request a challenge, execute the vendored
-// Node runner and return the headers for exactly one email-OTP request.
-func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, session *codexProtocolSession) (map[string]string, error) {
-	sentinelSID, err := randomHex(16)
-	if err != nil {
-		return nil, fmt.Errorf("generate sentinel sid: %w", err)
-	}
+// sentinelHeadersForFlow follows Turb's sequence: load the Sentinel frame,
+// request a challenge, execute the vendored Node runner and return headers for
+// one Auth request. The SID and p value are shared by all top-level Auth flows
+// in this browser session.
+func (s *CodexProtocolLogin) sentinelHeadersForFlow(ctx context.Context, session *codexProtocolSession, flow string) (map[string]string, error) {
 	origin, version := s.sentinelConfig()
-	requirements := codexSentinelRequirements(session.Profile, sentinelSID, origin, version, time.Now())
+	sentinelSID := session.SentinelSID
+	if sentinelSID == "" {
+		var err error
+		sentinelSID, err = randomHex(16)
+		if err != nil {
+			return nil, fmt.Errorf("generate sentinel sid: %w", err)
+		}
+		session.SentinelSID = sentinelSID
+	}
+	requirements := session.SentinelRequirements
+	if requirements == "" {
+		requirements = codexSentinelRequirements(session.Profile, sentinelSID, origin, version, time.Now())
+		session.SentinelRequirements = requirements
+	}
 	frameURL := origin + "/backend-api/sentinel/frame.html?sv=" + version
 	if _, _, _, err := s.sentinelRequest(ctx, session, http.MethodGet, frameURL, nil, map[string]string{
 		"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -471,7 +495,7 @@ func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, sessio
 	}); err != nil {
 		return nil, fmt.Errorf("load sentinel frame: %w", err)
 	}
-	body, err := json.Marshal(map[string]string{"p": requirements, "id": session.DeviceID, "flow": "authorize_continue"})
+	body, err := json.Marshal(map[string]string{"p": requirements, "id": session.DeviceID, "flow": flow})
 	if err != nil {
 		return nil, fmt.Errorf("marshal sentinel request: %w", err)
 	}
@@ -514,7 +538,7 @@ func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, sessio
 	}
 
 	runnerHeaders, err := register.SentinelHeadersFromRunner(ctx, register.SentinelRunnerOptions{
-		Flow: "authorize_continue",
+		Flow: flow,
 		// Keep the original p used by /sentinel/req. The Node SDK performs any
 		// challenge-specific PoW/Turnstile work against that exact proof.
 		Requirements:    requirements,
@@ -536,6 +560,13 @@ func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, sessio
 		return nil, fmt.Errorf("sentinel session observer token is missing")
 	}
 	return runnerHeaders, nil
+}
+
+// emailOTPSentinelHeaders is kept as a named wrapper for the manual/HME OTP
+// path; it deliberately reuses the same top-level Sentinel context created by
+// the initial authorize_continue request.
+func (s *CodexProtocolLogin) emailOTPSentinelHeaders(ctx context.Context, session *codexProtocolSession) (map[string]string, error) {
+	return s.sentinelHeadersForFlow(ctx, session, "authorize_continue")
 }
 
 func (s *CodexProtocolLogin) sentinelRequest(ctx context.Context, session *codexProtocolSession, method, rawURL string, body []byte, extra map[string]string) (map[string]any, fhttp.Header, int, error) {
@@ -648,7 +679,40 @@ func codexSentinelRequirements(profile browserprofile.Profile, sentinelSID, orig
 	if err != nil {
 		return "gAAAAAC"
 	}
-	return "gAAAAAC" + encoded
+	return "gAAAAAC" + encoded + "~S"
+}
+
+var (
+	codexSentinelNavigatorSamples = []string{
+		"createAuctionNonce−function createAuctionNonce() { [native code] }",
+		"clearOriginJoinedAdInterestGroups−function clearOriginJoinedAdInterestGroups() { [native code] }",
+		"updateAdInterestGroups−function updateAdInterestGroups() { [native code] }",
+		"canLoadAdAuctionFencedFrame−function canLoadAdAuctionFencedFrame() { [native code] }",
+		"gpu−[object GPU]",
+		"getBattery−function getBattery() { [native code] }",
+		"getGamepads−function getGamepads() { [native code] }",
+		"javaEnabled−function javaEnabled() { [native code] }",
+		"sendBeacon−function sendBeacon() { [native code] }",
+		"vibrate−function vibrate() { [native code] }",
+		"login−[object NavigatorLogin]",
+	}
+	codexSentinelDocumentSamples = []string{
+		"currentScript", "scripts", "cookie", "URL", "documentURI", "referrer", "title", "characterSet", "charset", "compatMode", "contentType", "readyState", "visibilityState", "hidden", "hasFocus", "documentElement", "body", "addEventListener", "removeEventListener", "querySelector", "querySelectorAll", "getElementById", "getElementsByTagName", "createElement",
+	}
+	codexSentinelWindowSamples = []string{
+		"window", "self", "top", "parent", "frames", "navigator", "screen", "location", "localStorage", "sessionStorage", "history", "innerWidth", "innerHeight", "outerWidth", "outerHeight", "devicePixelRatio", "chrome", "performance", "crypto", "TextEncoder", "URL", "URLSearchParams", "AbortController", "locationbar", "scrollX", "scrollY", "ondevicemotion", "requestAnimationFrame", "queueMicrotask", "onfocus", "onblur", "onpageshow",
+	}
+)
+
+func codexSentinelRandomInt(max int) int {
+	if max <= 1 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return 0
+	}
+	return int(n.Int64())
 }
 
 func codexSentinelConfiguration(profile browserprofile.Profile, sentinelSID, origin, version string, attempt int, elapsed int64, at time.Time) []any {
@@ -671,6 +735,7 @@ func codexSentinelConfiguration(profile browserprofile.Profile, sentinelSID, ori
 	if elapsed == 0 {
 		elapsed = 1
 	}
+	perfNow := int64(1000 + codexSentinelRandomInt(7001))
 	return []any{
 		profile.ScreenWidth + profile.ScreenHeight,
 		dateString,
@@ -681,15 +746,15 @@ func codexSentinelConfiguration(profile browserprofile.Profile, sentinelSID, ori
 		nil,
 		profile.NavigatorLanguage,
 		profile.NavigatorLanguagesValue(),
-		elapsed,
-		"hardwareConcurrency",
-		"location",
-		"Object",
-		1000,
+		int64(1 + codexSentinelRandomInt(100)),
+		codexSentinelNavigatorSamples[codexSentinelRandomInt(len(codexSentinelNavigatorSamples))],
+		codexSentinelDocumentSamples[codexSentinelRandomInt(len(codexSentinelDocumentSamples))],
+		codexSentinelWindowSamples[codexSentinelRandomInt(len(codexSentinelWindowSamples))],
+		perfNow,
 		sentinelSID,
 		"",
 		profile.DeviceMemory,
-		at.UnixMilli() - 1000,
+		at.UnixMilli() - perfNow,
 		0, 0, 0, 0, 0, 0,
 	}
 }

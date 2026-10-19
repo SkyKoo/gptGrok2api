@@ -13,11 +13,34 @@ import (
 )
 
 func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node is required for the Sentinel runner test")
+	}
+	runner, err := filepath.Abs("../register/sentinel-runner.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdk := filepath.Join(t.TempDir(), "probe.js")
+	if err := os.WriteFile(sdk, []byte(`var SentinelSDK = {
+ token: async () => JSON.stringify({p:"probe",c:"challenge-token"}),
+ sessionObserverToken: async () => "probe-so"
+};`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CFM_SENTINEL_NODE", node)
+	t.Setenv("CFM_SENTINEL_RUNNER", runner)
+	t.Setenv("CFM_SENTINEL_SDK", sdk)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/oauth/authorize":
 			w.WriteHeader(http.StatusOK)
+		case "/log-in", "/backend-api/sentinel/frame.html":
+			w.WriteHeader(http.StatusOK)
+		case "/backend-api/sentinel/req":
+			http.SetCookie(w, &http.Cookie{Name: "oai-sc", Value: "challenge-session", Path: "/"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"token": "challenge-token", "so": map[string]any{"required": false}})
 		case "/api/accounts/authorize/continue":
 			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}})
 		case "/api/accounts/add-phone/send":
@@ -39,6 +62,8 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	defer server.Close()
 	standard := NewCodexLogin(server.URL+"/oauth/authorize", server.URL+"/oauth/token", "client", "http://localhost:1455/auth/callback", "openid offline_access", server.Client())
 	protocol := NewCodexProtocolLogin(standard)
+	protocol.sentinelOrigin = server.URL
+	protocol.sentinelVersion = "test-version"
 	ctx := context.Background()
 	started, err := protocol.Start(ctx, "person@example.test", "")
 	if err != nil {
@@ -90,16 +115,26 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	t.Setenv("CFM_SENTINEL_NODE", node)
 	t.Setenv("CFM_SENTINEL_RUNNER", runner)
 	t.Setenv("CFM_SENTINEL_SDK", sdk)
+	var sentinelRequirements []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/oauth/authorize", "/log-in":
 			w.WriteHeader(http.StatusOK)
 		case "/api/accounts/authorize/continue":
+			if !strings.Contains(r.Header.Get("Openai-Sentinel-Token"), `"p":"probe"`) {
+				t.Fatalf("initial authorize_continue request is missing the bound Sentinel header: %q", r.Header.Get("Openai-Sentinel-Token"))
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "email_verification"}})
 		case "/backend-api/sentinel/frame.html":
 			_, _ = w.Write([]byte("sentinel-frame"))
 		case "/backend-api/sentinel/req":
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["flow"] != "authorize_continue" || !strings.HasSuffix(body["p"], "~S") {
+				t.Fatalf("unexpected initial/OTP Sentinel request: %#v", body)
+			}
+			sentinelRequirements = append(sentinelRequirements, body["p"])
 			http.SetCookie(w, &http.Cookie{Name: "oai-sc", Value: "challenge-session", Path: "/"})
 			_ = json.NewEncoder(w).Encode(map[string]any{"token": "challenge-token", "so": map[string]any{"required": false}})
 		case "/api/accounts/email-otp/validate":
@@ -139,6 +174,9 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	}
 	if tokens["access_token"] != "access-1" || tokens["refresh_token"] != "refresh-1" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
+	}
+	if len(sentinelRequirements) != 2 || sentinelRequirements[0] != sentinelRequirements[1] {
+		t.Fatalf("initial and OTP Sentinel requests must reuse one top-level p: %#v", sentinelRequirements)
 	}
 }
 
