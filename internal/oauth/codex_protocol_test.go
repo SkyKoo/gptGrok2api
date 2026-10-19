@@ -47,14 +47,15 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}})
 		case "/api/accounts/add-phone/send":
 			phoneSends++
-			w.WriteHeader(http.StatusNoContent)
+			if phoneSends == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "phone_number_already_used", "message": "phone number already used"}})
+			} else {
+				w.WriteHeader(http.StatusNoContent)
+			}
 		case "/api/accounts/phone-otp/validate":
 			smsValidations++
-			if smsValidations == 1 {
-				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}})
-			} else {
-				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "mfa_challenge"}, "factor_id": "factor-1"})
-			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "mfa_challenge"}, "factor_id": "factor-1", "metadata": "phone_otp"})
 		case "/api/accounts/mfa/issue_challenge":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 		case "/api/accounts/mfa/verify":
@@ -85,35 +86,28 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if phone["stage"] != "waiting_phone_retry" {
+		t.Fatalf("stage after rejected phone = %q", phone["stage"])
+	}
+	phone, err = protocol.SubmitPhone(ctx, id, "+8613800138001")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if phone["stage"] != "waiting_sms_code" {
-		t.Fatalf("stage after phone = %q", phone["stage"])
+		t.Fatalf("stage after replacement phone = %q", phone["stage"])
 	}
-	firstSMS, err := protocol.SubmitSMSCode(ctx, id, "123456")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := protocol.SubmitPhone(ctx, id, "+8613800138001"); err == nil || !strings.Contains(err.Error(), "已提交过该手机号") {
+		t.Fatalf("same accepted phone must be rejected locally, got %v", err)
 	}
-	if firstSMS["stage"] != "waiting_phone_retry" {
-		t.Fatalf("stage after repeated phone response = %q", firstSMS["stage"])
-	}
-	if _, err := protocol.SubmitPhone(ctx, id, "+8613800138000"); err == nil || !strings.Contains(err.Error(), "已提交过该手机号") {
-		t.Fatalf("same phone must be rejected locally, got %v", err)
-	}
-	if phoneSends != 1 {
-		t.Fatalf("same phone must not reach upstream, sends=%d", phoneSends)
-	}
-	secondPhone, err := protocol.SubmitPhone(ctx, id, "+8613800138001")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if secondPhone["stage"] != "waiting_sms_code" {
-		t.Fatalf("stage after replacement phone = %q", secondPhone["stage"])
+	if phoneSends != 2 {
+		t.Fatalf("same accepted phone must not reach upstream again, sends=%d", phoneSends)
 	}
 	twoFA, err := protocol.SubmitSMSCode(ctx, id, "123456")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if twoFA["stage"] != "waiting_2fa" {
-		t.Fatalf("stage after replacement SMS = %q", twoFA["stage"])
+		t.Fatalf("stage after accepted SMS = %q", twoFA["stage"])
 	}
 	tokens, err := protocol.Submit2FA(ctx, id, "654321")
 	if err != nil {
@@ -122,8 +116,23 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	if tokens["access_token"] != "access-1" || tokens["refresh_token"] != "refresh-1" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
 	}
-	if phoneSends != 2 || smsValidations != 2 {
+	if phoneSends != 2 || smsValidations != 1 {
 		t.Fatalf("unexpected upstream phone flow counts: sends=%d sms=%d", phoneSends, smsValidations)
+	}
+}
+
+func TestPhoneStepRequiresStructuredPhonePage(t *testing.T) {
+	if isPhoneInputStep(map[string]any{"metadata": "phone_otp", "next": "https://auth.openai.com/phone-verification"}) {
+		t.Fatal("phone OTP metadata must not be treated as a new phone input step")
+	}
+	if !isPhoneInputStep(map[string]any{"page": map[string]any{"type": "add_phone"}}) {
+		t.Fatal("structured add_phone page must be treated as a phone input step")
+	}
+	if !isExplicitPhoneRejectionResult(map[string]any{"error": map[string]any{"code": "phone_number_already_used"}}) {
+		t.Fatal("explicit phone rejection must be detected")
+	}
+	if isExplicitPhoneRejectionResult(map[string]any{"page": map[string]any{"type": "add_phone"}, "message": "enter your phone number"}) {
+		t.Fatal("ordinary add_phone prompt must not be treated as a phone rejection")
 	}
 }
 

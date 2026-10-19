@@ -13,9 +13,9 @@
         <a class="text-xs text-sky-600 break-all" :href="authorizeUrl" target="_blank" rel="noreferrer">打开 Codex 授权页面</a>
         <Button size="xs" variant="outline" :disabled="busy" @click="openAuthorize">重新打开授权页面</Button>
       </div>
-      <label v-if="stage === 'waiting_phone'" class="block text-xs">
+      <label v-if="stage === 'waiting_phone' || stage === 'waiting_phone_retry'" class="block text-xs">
         <span class="ui-field-label">手机号</span>
-        <input v-model.trim="phone" type="tel" class="ui-input-sm w-full" placeholder="例如 +8613800138000" :disabled="busy || !sessionId" @keyup.enter="submitPhone" />
+        <input v-model.trim="phone" type="tel" class="ui-input-sm w-full" :placeholder="stage === 'waiting_phone_retry' ? '输入其他手机号，例如 +8613800138000' : '例如 +8613800138000'" :disabled="busy || !sessionId" @keyup.enter="submitPhone" />
       </label>
       <label v-else-if="stage === 'waiting_email_code'" class="block text-xs">
         <span class="ui-field-label">邮箱验证码</span>
@@ -38,7 +38,7 @@
       <Button size="sm" variant="ghost" :disabled="busy" @click="close">关闭</Button>
       <div class="flex gap-2">
         <Button size="sm" variant="outline" :disabled="busy || !job" @click="start">重新生成授权链接</Button>
-        <Button v-if="stage === 'waiting_phone'" size="sm" variant="primary" :disabled="busy || !sessionId || !phone" @click="submitPhone">提交手机号</Button>
+        <Button v-if="stage === 'waiting_phone' || stage === 'waiting_phone_retry'" size="sm" variant="primary" :disabled="busy || !sessionId || !phone" @click="submitPhone">{{ stage === 'waiting_phone_retry' ? '提交其他手机号' : '提交手机号' }}</Button>
         <Button v-else-if="stage === 'waiting_email_code'" size="sm" variant="primary" :disabled="busy || !sessionId || !emailCode" @click="submitEmailCode">验证邮箱验证码</Button>
         <Button v-else-if="stage === 'waiting_sms_code'" size="sm" variant="primary" :disabled="busy || !sessionId || !smsCode" @click="submitSMS">验证短信验证码</Button>
         <Button v-else-if="stage === 'waiting_2fa'" size="sm" variant="primary" :disabled="busy || !sessionId || !twoFactorCode" @click="submit2FA">提交 2FA</Button>
@@ -63,7 +63,7 @@ const emit = defineEmits<{ (e: 'close'): void; (e: 'changed'): void }>()
 const sessionId = ref(''), authorizeUrl = ref(''), callback = ref(''), phone = ref(''), emailCode = ref(''), smsCode = ref(''), twoFactorCode = ref(''), stage = ref(''), message = ref(''), error = ref('')
 const busy = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
-const stageLabel = computed(() => ({ starting: '正在进入授权', waiting_authorization: '等待上游授权', waiting_phone: '等待输入手机号', waiting_email_code: '等待输入邮箱验证码', waiting_sms_code: '等待输入短信验证码', waiting_2fa: '等待输入 2FA', exchanging_token: '交换 Token', syncing_cpa: '同步 CPA', cpa_sync_failed: 'CPA 同步失败（Token 已保存）', done: '已完成', failed: '失败' } as Record<string, string>)[stage.value] || stage.value || '准备中')
+const stageLabel = computed(() => ({ starting: '正在进入授权', waiting_authorization: '等待上游授权', waiting_phone: '等待输入手机号', waiting_phone_retry: '手机号被上游拒绝，请更换手机号', waiting_email_code: '等待输入邮箱验证码', waiting_sms_code: '等待输入短信验证码', waiting_2fa: '等待输入 2FA', exchanging_token: '交换 Token', syncing_cpa: '同步 CPA', cpa_sync_failed: 'CPA 同步失败（Token 已保存）', done: '已完成', failed: '失败' } as Record<string, string>)[stage.value] || stage.value || '准备中')
 
 watch(() => props.job, (job) => { if (job) { resetFromJob(job); void start() } else stopPolling() }, { immediate: true })
 onBeforeUnmount(stopPolling)

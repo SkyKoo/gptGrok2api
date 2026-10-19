@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -244,6 +245,13 @@ func (s *CodexProtocolLogin) SubmitPhone(ctx context.Context, id, phone string) 
 			session.PendingPhone = ""
 		}
 		s.mu.Unlock()
+		if isExplicitPhoneRejection(err) {
+			s.mu.Lock()
+			session.LastPhone = phone
+			session.Stage = "waiting_phone_retry"
+			s.mu.Unlock()
+			return map[string]string{"session_id": id, "stage": "waiting_phone_retry", "message": "上游拒绝了该手机号，请输入其他手机号"}, nil
+		}
 		return nil, err
 	}
 	s.mu.Lock()
@@ -267,6 +275,10 @@ func (s *CodexProtocolLogin) SubmitSMSCode(ctx context.Context, id, code string)
 	result, err := s.postJSON(ctx, session, "/api/accounts/phone-otp/validate", map[string]string{"code": code}, session.AuthBase+"/phone-verification")
 	if err != nil {
 		s.setStage(session, "waiting_sms_code")
+		if isExplicitPhoneRejection(err) {
+			s.setStage(session, "waiting_phone_retry")
+			return map[string]string{"session_id": id, "stage": "waiting_phone_retry", "message": "上游拒绝了该手机号，请输入其他手机号"}, nil
+		}
 		return nil, err
 	}
 	return s.advanceResult(ctx, session, result)
@@ -365,6 +377,10 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		s.remove(session.ID)
 		return tokens, nil
 	}
+	if isExplicitPhoneRejectionResult(result) {
+		s.setStage(session, "waiting_phone_retry")
+		return map[string]string{"session_id": session.ID, "stage": "waiting_phone_retry", "message": "上游拒绝了该手机号，请输入其他手机号"}, nil
+	}
 	text := strings.ToLower(jsonText(result))
 	if strings.Contains(text, "mfa-challenge") || strings.Contains(text, "mfa_challenge") || strings.Contains(text, "totp") {
 		session.FactorID = factorID(result)
@@ -386,7 +402,7 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		}
 		return s.advanceResult(ctx, session, verified)
 	}
-	if strings.Contains(text, "add-phone") || strings.Contains(text, "add_phone") || strings.Contains(text, "phone_verification") || strings.Contains(text, "phone_otp") {
+	if isPhoneInputStep(result) {
 		s.mu.Lock()
 		session.PhonePromptCount++
 		repeated := session.PhonePromptCount > 1
@@ -827,6 +843,19 @@ func protocolHTTPError(name string, resp *fhttp.Response) error {
 	return protocolBodyError(resp.StatusCode, nil, data)
 }
 
+type codexProtocolHTTPError struct {
+	status int
+	code   string
+	detail string
+	base   error
+}
+
+func (e *codexProtocolHTTPError) Error() string {
+	return fmt.Sprintf("%v: protocol HTTP %d: %s", e.base, e.status, e.detail)
+}
+
+func (e *codexProtocolHTTPError) Unwrap() error { return e.base }
+
 func protocolBodyError(status int, payload map[string]any, raw []byte) error {
 	detail := codexString(payload, "error_description", "error", "message", "detail")
 	code := ""
@@ -839,10 +868,82 @@ func protocolBodyError(status int, payload map[string]any, raw []byte) error {
 	if len(detail) > 300 {
 		detail = detail[:300]
 	}
+	base := ErrCodexOAuth
 	if status == http.StatusConflict && strings.EqualFold(code, "invalid_state") {
-		return fmt.Errorf("%w: %s", ErrCodexOAuthSessionInvalid, detail)
+		base = ErrCodexOAuthSessionInvalid
 	}
-	return fmt.Errorf("%w: protocol HTTP %d: %s", ErrCodexOAuth, status, detail)
+	return &codexProtocolHTTPError{status: status, code: code, detail: detail, base: base}
+}
+
+func isExplicitPhoneRejection(err error) bool {
+	var protocolErr *codexProtocolHTTPError
+	if !errors.As(err, &protocolErr) {
+		return false
+	}
+	return phoneRejectionText(protocolErr.code) || phoneRejectionText(protocolErr.detail)
+}
+
+func isExplicitPhoneRejectionResult(result map[string]any) bool {
+	var rejected bool
+	var walk func(any, string)
+	walk = func(value any, key string) {
+		if rejected {
+			return
+		}
+		switch item := value.(type) {
+		case map[string]any:
+			for childKey, child := range item {
+				walk(child, strings.ToLower(childKey))
+			}
+		case []any:
+			for _, child := range item {
+				walk(child, key)
+			}
+		case string:
+			if key == "code" || key == "error" || key == "error_code" || key == "reason" || key == "message" || key == "detail" || key == "error_description" {
+				rejected = phoneRejectionText(item)
+			}
+		}
+	}
+	walk(result, "")
+	return rejected
+}
+
+func phoneRejectionText(value string) bool {
+	text := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), "_", " "))
+	for _, marker := range []string{
+		"invalid phone",
+		"phone number is not valid",
+		"phone number already used",
+		"phone number has already been used",
+		"phone number cannot be used",
+		"phone number not allowed",
+		"phone rejected",
+		"phone verification failed",
+		"phone already used",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPhoneInputStep(result map[string]any) bool {
+	page := pageType(result)
+	if page == "add_phone" || page == "phone" || page == "phone_number" || page == "phone_entry" {
+		return true
+	}
+	next := nextURL(result)
+	if next == "" {
+		return false
+	}
+	parsed, err := url.Parse(next)
+	if err != nil {
+		return false
+	}
+	path := strings.TrimRight(strings.ToLower(parsed.Path), "/")
+	return path == "/add-phone" || strings.HasSuffix(path, "/add-phone")
 }
 
 func (s *CodexProtocolLogin) session(id string) (*codexProtocolSession, error) {
