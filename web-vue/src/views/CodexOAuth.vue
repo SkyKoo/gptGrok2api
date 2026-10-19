@@ -82,7 +82,7 @@
     <ModalShell :open="Boolean(selectedAccount)" max-width="52rem" :close-on-backdrop="!busy" @close="closeAuthorize">
       <div v-if="selectedAccount" class="space-y-5 p-6">
         <ModalHeader title="Codex OAuth 授权" :subtitle="selectedAccount.email || selectedAccount.name" compact @close="closeAuthorize" />
-        <div class="grid gap-3 md:grid-cols-4">
+        <div class="grid gap-3 md:grid-cols-5">
           <div v-for="step in oauthSteps" :key="step.key" class="rounded-lg border p-3" :class="stepClass(step.key)">
             <div class="text-xs text-muted-foreground">{{ step.index }}</div>
             <div class="mt-1 text-sm font-medium">{{ step.label }}</div>
@@ -189,9 +189,10 @@ const filterOptions = [
 ]
 const oauthSteps = [
   { key: 'authorize', index: '1', label: '自动进入授权' },
-  { key: 'phone', index: '2', label: '按需输入手机号' },
-  { key: 'sms', index: '3', label: '邮箱 / 短信验证码 / 2FA' },
-  { key: 'cpa', index: '4', label: '保存并同步 CPA' },
+  { key: 'email', index: '2', label: '按需输入邮箱验证码' },
+  { key: 'phone', index: '3', label: '按需输入手机号' },
+  { key: 'sms', index: '4', label: '短信验证码 / 可选 2FA' },
+  { key: 'cpa', index: '5', label: '保存并同步 CPA' },
 ]
 
 const eligibleAccounts = computed(() => accounts.value.filter((item) => {
@@ -246,8 +247,12 @@ function cpaStatusTone(account: Account) { const status = account.codex_credenti
 function formatDate(value?: string | number) { if (!value) return '—'; const numeric = typeof value === 'number' || /^\d+$/.test(String(value)); const date = numeric ? new Date(Number(value) < 10_000_000_000 ? Number(value) * 1000 : Number(value)) : new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString() }
 function stepClass(key: string) {
   if (progressStage.value === 'done' && key === 'cpa') return 'border-emerald-500/50 bg-emerald-500/5'
-  const verificationStages = ['waiting_email_code', 'verifying_email_code', 'waiting_sms_code', 'verifying_sms', 'waiting_2fa', 'verifying_2fa']
-  if (key === 'sms' && verificationStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
+  const emailStages = ['waiting_email_code', 'verifying_email_code']
+  const phoneStages = ['waiting_phone', 'waiting_phone_retry', 'sending_phone']
+  const smsStages = ['waiting_sms_code', 'verifying_sms', 'waiting_2fa', 'verifying_2fa']
+  if (key === 'email' && emailStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
+  if (key === 'phone' && phoneStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
+  if (key === 'sms' && smsStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
   if (progressStage.value === key || (key === 'authorize' && authorizeUrl.value)) return 'border-sky-500/50 bg-sky-500/5'
   return 'border-border/60'
 }

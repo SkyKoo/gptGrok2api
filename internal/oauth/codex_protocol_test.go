@@ -140,6 +140,12 @@ func TestPhoneStepRequiresStructuredPhonePage(t *testing.T) {
 	if isExplicitPhoneRejectionResult(map[string]any{"page": map[string]any{"type": "add_phone"}, "message": "enter your phone number"}) {
 		t.Fatal("ordinary add_phone prompt must not be treated as a phone rejection")
 	}
+	if !isEmailInputStep(map[string]any{"page": map[string]any{"type": "email_verification"}}) {
+		t.Fatal("structured email verification page must be treated as an email input step")
+	}
+	if isEmailInputStep(map[string]any{"metadata": "email_otp", "message": "phone OTP accepted"}) {
+		t.Fatal("email OTP metadata must not reset a later phone/SMS step")
+	}
 }
 
 func TestProtocolBodyErrorDetectsInvalidState(t *testing.T) {
@@ -202,7 +208,11 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 			if !strings.Contains(sentinel, `"p":"probe"`) || !strings.Contains(sentinel, `"c":"challenge-token"`) {
 				t.Fatalf("email OTP request is missing the bound Sentinel header: %q", sentinel)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": []any{map[string]any{"id": "workspace-1", "name": "Personal"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}, "metadata": "email_otp accepted"})
+		case "/api/accounts/add-phone/send":
+			w.WriteHeader(http.StatusNoContent)
+		case "/api/accounts/phone-otp/validate":
+			_ = json.NewEncoder(w).Encode(map[string]any{"workspaces": []any{map[string]any{"id": "workspace-1", "name": "Personal"}}, "metadata": "email_otp is not a new email step"})
 		case "/api/accounts/workspace/select":
 			_ = json.NewEncoder(w).Encode(map[string]any{"callback_url": "http://localhost:1455/auth/callback?code=code-1"})
 		case "/oauth/token":
@@ -223,7 +233,21 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	if started["stage"] != "waiting_email_code" {
 		t.Fatalf("stage after start = %q", started["stage"])
 	}
-	tokens, err := protocol.SubmitEmailCode(context.Background(), started["session_id"], "987654")
+	phone, err := protocol.SubmitEmailCode(context.Background(), started["session_id"], "987654")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phone["stage"] != "waiting_phone" {
+		t.Fatalf("stage after email code = %q", phone["stage"])
+	}
+	sms, err := protocol.SubmitPhone(context.Background(), started["session_id"], "+8613800138000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sms["stage"] != "waiting_sms_code" {
+		t.Fatalf("stage after phone = %q", sms["stage"])
+	}
+	tokens, err := protocol.SubmitSMSCode(context.Background(), started["session_id"], "123456")
 	if err != nil {
 		t.Fatal(err)
 	}

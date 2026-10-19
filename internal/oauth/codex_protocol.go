@@ -414,7 +414,7 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		}
 		return map[string]string{"session_id": session.ID, "stage": "waiting_phone", "message": "上游要求手机号，请输入手机号"}, nil
 	}
-	if strings.Contains(text, "email-verification") || strings.Contains(text, "email_verification") || strings.Contains(text, "email_otp") || strings.Contains(text, "email-otp") {
+	if isEmailInputStep(result) {
 		s.setStage(session, "waiting_email_code")
 		return map[string]string{"session_id": session.ID, "stage": "waiting_email_code", "message": "上游要求邮箱验证码，请输入邮箱验证码"}, nil
 	}
@@ -947,6 +947,29 @@ func isPhoneInputStep(result map[string]any) bool {
 	}
 	path := strings.TrimRight(strings.ToLower(parsed.Path), "/")
 	return path == "/add-phone" || strings.HasSuffix(path, "/add-phone")
+}
+
+func isEmailInputStep(result map[string]any) bool {
+	page := pageType(result)
+	switch page {
+	case "email", "email_entry", "email_otp", "email_code", "email_verification", "email_verification_code":
+		return true
+	}
+	next := nextURL(result)
+	if next == "" {
+		return false
+	}
+	parsed, err := url.Parse(next)
+	if err != nil {
+		return false
+	}
+	path := strings.TrimRight(strings.ToLower(parsed.Path), "/")
+	for _, suffix := range []string{"/email-otp", "/email-verification", "/verify-email"} {
+		if path == suffix || strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *CodexProtocolLogin) session(id string) (*codexProtocolSession, error) {
