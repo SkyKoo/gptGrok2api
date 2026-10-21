@@ -45,6 +45,11 @@ func (s *Server) autoReloginEligible(account map[string]any) bool {
 // Manual and automatic starts share the same per-account task, including the
 // follow-up account refresh when automatic recovery joins an existing login.
 func (s *Server) startAccountRelogin(account map[string]any, automatic bool) (accountReloginProgress, error) {
+	s.authStartMu.Lock()
+	defer s.authStartMu.Unlock()
+	if s.twoFAActive(accountPublicRef(account)) {
+		return accountReloginProgress{}, errors.New("该账号正在开启 2FA")
+	}
 	s.reloginMu.Lock()
 	defer s.reloginMu.Unlock()
 	empty := accountReloginProgress{}

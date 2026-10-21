@@ -247,3 +247,22 @@ func TestRegistrationHistoryUsesFixedSizePages(t *testing.T) {
 		t.Fatal("live snapshot sends full history")
 	}
 }
+
+func TestRegistrationAutoTwoFAConfigPersistence(t *testing.T) {
+	cfg := adminTestConfig(t.TempDir())
+	s := New(cfg)
+	if boolValue(mapValue(s.registerStore.Get()["openai_free"])["auto_twofa"], false) {
+		t.Fatal("default enabled")
+	}
+	for _, enabled := range []bool{true, false} {
+		payload := fmt.Sprintf(`{"openai_free":{"timeout_seconds":600,"auto_twofa":%t}}`, enabled)
+		res := adminRequest(s.Handler(), http.MethodPost, "/api/register", strings.NewReader(payload))
+		if res.Code != 200 {
+			t.Fatal(res.Body.String())
+		}
+		reloaded := registerruntime.New(cfg.RegisterPath, cfg.GrokAccountsPath)
+		if boolValue(mapValue(reloaded.Get()["openai_free"])["auto_twofa"], !enabled) != enabled {
+			t.Fatal("switch not persisted")
+		}
+	}
+}

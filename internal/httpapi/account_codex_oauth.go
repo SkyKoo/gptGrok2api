@@ -22,6 +22,7 @@ var codexSensitiveErrorPattern = regexp.MustCompile(`(?i)((?:access|refresh|id)_
 var codexJWTErrorPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 
 type codexOAuthProgress struct {
+	Email             string
 	SessionID         string
 	AccountRef        string
 	CPAPoolID         string
@@ -89,8 +90,17 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 			body.Password = firstNonEmpty(stringValue(account["login_password"]), stringValue(account["password"]))
 		}
 	}
+	if account != nil {
+		body.AccountRef = accountPublicRef(account)
+	}
 	if body.EmailHint == "" {
 		writeError(w, http.StatusBadRequest, "email_hint or account_ref is required", "invalid_request_error")
+		return
+	}
+	s.authStartMu.Lock()
+	defer s.authStartMu.Unlock()
+	if s.twoFAActive(firstNonEmpty(body.AccountRef, body.EmailHint)) {
+		writeError(w, http.StatusConflict, "该账号正在开启 2FA", "invalid_request_error")
 		return
 	}
 	startedAt := time.Now().UTC()
@@ -100,7 +110,7 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	progress := &codexOAuthProgress{SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: result["stage"], Status: "running", Message: result["message"], StartedAt: startedAt.Format(time.RFC3339Nano), UpdatedAt: now, EmailWaitAfter: startedAt}
+	progress := &codexOAuthProgress{Email: body.EmailHint, SessionID: result["session_id"], AccountRef: body.AccountRef, CPAPoolID: body.CPAPoolID, RegistrationJobID: body.RegistrationJobID, Stage: result["stage"], Status: "running", Message: result["message"], StartedAt: startedAt.Format(time.RFC3339Nano), UpdatedAt: now, EmailWaitAfter: startedAt}
 	if mailbox, ok := codexHMEMailbox(account); ok {
 		progress.EmailCodeSource = "hme"
 		progress.MailboxEmail = mailbox.Email

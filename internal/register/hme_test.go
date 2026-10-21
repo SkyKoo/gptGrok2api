@@ -246,3 +246,42 @@ func TestHMEAcceptsOpenAIForwarderAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestHMESecondOTPDoesNotReuseRegistrationMessage(t *testing.T) {
+	for _, withID := range []bool{true, false} {
+		t.Run(map[bool]string{true: "message_id", false: "legacy_without_id"}[withID], func(t *testing.T) {
+			stamp := time.Now().UTC().Format(time.RFC3339)
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				old := map[string]string{"from": "noreply@openai.com", "to": "alias@example.test", "date": stamp, "subject": "Code 111111", "folder": "inbox"}
+				fresh := map[string]string{"from": "noreply@openai.com", "to": "alias@example.test", "date": stamp, "subject": "Code 222222", "folder": "inbox"}
+				if withID {
+					old["id"], fresh["id"] = "registration-message", "2fa-message"
+				}
+				messages := []map[string]string{old}
+				if calls > 1 {
+					messages = append(messages, fresh)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"messages": messages}})
+			}))
+			defer server.Close()
+			h, err := NewHME(HMEConfig{BaseURL: server.URL, Password: "test", AccountID: "acc-test"}, time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			box := Mailbox{Email: "alias@example.test", AccountID: "acc-test"}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			first, err := h.WaitCode(ctx, box, time.Now().Add(-10*time.Second))
+			if err != nil || first != "111111" {
+				t.Fatalf("registration code: %q %v", first, err)
+			}
+			second, err := h.WaitCode(ctx, box, time.Now().Add(-10*time.Second))
+			if err != nil || second != "222222" {
+				t.Fatalf("2FA reused registration OTP: %q %v", second, err)
+			}
+		})
+	}
+}

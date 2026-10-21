@@ -1,4 +1,4 @@
-﻿import apiClient from './client'
+import apiClient from './client'
 import type { ProxyGroup } from './proxy'
 import type { AccountReloginTask } from '@/lib/accountRelogin'
 
@@ -24,6 +24,19 @@ export interface CodexCredential {
   has_id_token?: boolean
 }
 
+export interface AccountTwoFATask {
+  progress_id: string
+  account_ref: string
+  email: string
+  stage: string
+  status: string
+  message: string
+  error?: string
+  started_at: string
+  updated_at: string
+  pending: boolean
+}
+
 export interface Account {
  capability_quotas?: Record<string, { remaining: number | null; reset_at?: string }>
  quota_pending?: Record<string, number>
@@ -40,6 +53,8 @@ export interface Account {
   user_id?: string
   login_password?: string
   two_factor_secret?: string
+  has_two_factor_secret?: boolean
+  twofa_pending_activation?: boolean
   type?: string
   source_type?: string
   codex_credential?: CodexCredential
@@ -517,6 +532,8 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     user_id: userId,
     login_password: cleanString(item.login_password),
     two_factor_secret: cleanString(item.two_factor_secret),
+    has_two_factor_secret: Boolean(item.has_two_factor_secret),
+    twofa_pending_activation: Boolean(item.twofa_pending_activation),
     type,
     source_type: sourceType,
     codex_credential: mapCodexCredential(item.codex_credential),
@@ -957,6 +974,12 @@ export const accountsApi = {
     return { status: 'ok', account: undefined as unknown as Account }
   },
 
+  getTwoFACode: (accountId: string) => apiClient.post<never, { code: string; server_time: number; expires_at: number }>('/api/accounts/twofa/code', { account_ref: accountId }),
+
+  startTwoFA: (accountId: string) => apiClient.post<never, { progress: AccountTwoFATask }>('/api/accounts/twofa', { account_ref: accountId }),
+  listTwoFA: () => apiClient.get<never, { items: AccountTwoFATask[] }>('/api/accounts/twofa'),
+  twoFAAction: (progressId: string, action: 'code' | 'cancel', code = '') => apiClient.post<never, { ok: boolean }>('/api/accounts/twofa', { progress_id: progressId, action, code }),
+
   startRelogin: (accountId: string) => apiClient.post<never, { progress: AccountReloginTask }>(
     '/api/accounts/relogin', { account_ref: accountId },
   ),
@@ -1032,7 +1055,7 @@ export const accountsApi = {
   getAccountSecrets: async (accountIdOrToken: string) => {
     const response = await apiClient.post<
       { access_token: string },
-      { access_token?: string; account_ref?: string; email?: string; user_id?: string; login_password?: string; two_factor_secret?: string }
+      { access_token?: string; account_ref?: string; email?: string; user_id?: string; login_password?: string; two_factor_secret?: string; two_factor_pending_secret?: string }
     >('/api/accounts/token', { access_token: resolveToken(accountIdOrToken) })
     return {
       access_token: cleanString(response.access_token),
@@ -1040,6 +1063,7 @@ export const accountsApi = {
       user_id: cleanString(response.user_id),
       login_password: cleanString(response.login_password),
       two_factor_secret: cleanString(response.two_factor_secret),
+      two_factor_pending_secret: cleanString(response.two_factor_pending_secret),
     }
   },
 

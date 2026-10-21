@@ -2,7 +2,7 @@
   <tr
     class="border-t border-border transition-colors"
     :class="[rowClass(item), selected ? 'bg-primary/5' : '']"
-    v-memo="[signature, detailSignature, selected, refreshing, resetting, relogging]"
+    v-memo="[signature, detailSignature, selected, refreshing, resetting, relogging, twofaBusy]"
   >
     <td class="py-4 pr-4 align-middle">
       <Checkbox
@@ -57,6 +57,9 @@
       />
       <button v-if="relogging" type="button" class="mt-2 text-xs text-sky-500 hover:underline" @click="emit('show-relogin')">重新登录中 · 查看进度</button>
     </td>
+    <td class="py-4 pr-5 align-middle">
+      <AccountTwoFACode :item="item" />
+    </td>
     <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
       {{ accountCreatedText(item) }}
     </td>
@@ -79,12 +82,14 @@
         :refreshing="refreshing"
         :resetting="resetting"
         :relogging="relogging"
+        :twofa-busy="twofaBusy"
         align="end"
         @edit="emit('edit', item)"
         @toggle-enabled="emit('toggle-enabled', item)"
         @refresh-token="emit('refresh-token', item.id)"
         @reset-state="emit('reset-state', item.id)"
         @relogin="emit('relogin', item.id)"
+        @twofa="emit('twofa', item.id)"
         @copy-final-checkout-link="emit('copy-final-checkout-link', item)"
         @open-final-checkout-link="emit('open-final-checkout-link', item)"
         @remove="emit('remove', item.id)"
@@ -98,6 +103,7 @@ import { computed } from 'vue'
 import { Checkbox, StatusDetailPill, StatusPill } from 'nanocat-ui'
 
 import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
+import AccountTwoFACode from './AccountTwoFACode.vue'
 import QuotaBadge from '@/components/ai/QuotaBadge.vue'
 import type { Account } from '@/api/accounts'
 import {
@@ -121,12 +127,14 @@ const props = withDefaults(defineProps<{
   refreshing?: boolean
   resetting?: boolean
   relogging?: boolean
+  twofaBusy?: boolean
   statusDetailCardClass?: string
   statusDetailText: (item: Account) => string
 }>(), {
   refreshing: false,
   resetting: false,
   relogging: false,
+  twofaBusy: false,
   statusDetailCardClass: '',
 })
 
@@ -141,6 +149,7 @@ const emit = defineEmits<{
   (e: 'refresh-token', id: string): void
   (e: 'reset-state', id: string): void
   (e: 'relogin', id: string): void
+  (e: 'twofa', id: string): void
   (e: 'show-relogin'): void
   (e: 'copy-final-checkout-link', item: Account): void
   (e: 'open-final-checkout-link', item: Account): void

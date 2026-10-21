@@ -37,6 +37,9 @@ import (
 )
 
 type Server struct {
+	authStartMu        sync.Mutex
+	twofaMu            sync.Mutex
+	twofaTasks         map[string]*accountTwoFATask
 	cfg                config.Config
 	auth               *auth.Validator
 	store              *store.Store
@@ -324,6 +327,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/refresh", s.accountRefreshStart)
 	mux.HandleFunc("/api/accounts/refresh-at", s.accountAccessTokenRefresh)
 	mux.HandleFunc("/api/accounts/refresh/progress/", s.accountRefreshProgressAPI)
+	mux.HandleFunc("/api/accounts/twofa", s.accountTwoFAAPI)
+	mux.HandleFunc("/api/accounts/twofa/code", s.accountTwoFACode)
 	mux.HandleFunc("/api/accounts/relogin", s.accountReloginStart)
 	mux.HandleFunc("/api/accounts/relogin/progress/", s.accountReloginProgressAPI)
 	mux.HandleFunc("/api/accounts/oauth/start", s.accountOAuthStart)
@@ -1445,6 +1450,7 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) accountToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if !s.requireAdmin(w, r) {
 		return
 	}
@@ -1483,14 +1489,15 @@ func (s *Server) accountToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token":      tokens[0],
-		"account_ref":       accountRefForToken(items, tokens[0]),
-		"token_preview":     tokenPreview(tokens[0]),
-		"has_access_token":  true,
-		"user_id":           stringValue(account["user_id"]),
-		"email":             stringValue(account["email"]),
-		"login_password":    firstNonEmpty(stringValue(account["login_password"]), stringValue(account["password"])),
-		"two_factor_secret": firstNonEmpty(stringValue(account["two_factor_secret"]), stringValue(account["totp_secret"])),
+		"access_token":              tokens[0],
+		"account_ref":               accountRefForToken(items, tokens[0]),
+		"token_preview":             tokenPreview(tokens[0]),
+		"has_access_token":          true,
+		"user_id":                   stringValue(account["user_id"]),
+		"email":                     stringValue(account["email"]),
+		"login_password":            firstNonEmpty(stringValue(account["login_password"]), stringValue(account["password"])),
+		"two_factor_secret":         firstNonEmpty(stringValue(account["two_factor_secret"]), stringValue(account["totp_secret"])),
+		"two_factor_pending_secret": stringValue(mapValue(account["twofa_pending"])["secret"]),
 	})
 }
 
@@ -1644,6 +1651,15 @@ func (s *Server) deleteAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens, missing := resolveAccountRefTokens(items, body.Tokens)
+	s.authStartMu.Lock()
+	defer s.authStartMu.Unlock()
+	for _, token := range tokens {
+		if s.twoFAActive(accountRefForToken(items, token)) {
+			writeError(w, http.StatusConflict, "该账号正在开启 2FA，请等待或先取消任务", "invalid_request_error")
+			return
+		}
+	}
+
 	removed, items, err := s.store.DeleteAccounts(tokens)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -1680,12 +1696,31 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := tokens[0]
+	s.authStartMu.Lock()
+	defer s.authStartMu.Unlock()
+	if s.twoFAActive(accountRefForToken(current, token)) {
+		writeError(w, http.StatusConflict, "该账号正在开启 2FA，请等待或先取消任务", "invalid_request_error")
+		return
+	}
+
 	updates := map[string]any{}
 	for _, key := range []string{"type", "source_type", "status", "quota", "proxy", "group_id", "enabled", "email", "user_id", "login_password", "two_factor_secret"} {
 		if value, ok := body[key]; ok {
 			updates[key] = value
 		}
 	}
+	if key := strings.TrimSpace(stringValue(updates["two_factor_secret"])); key != "" {
+		for _, row := range current {
+			if accountToken(row) == token && key == stringValue(mapValue(row["twofa_pending"])["secret"]) {
+				updates["twofa_pending"] = nil
+				state := cloneMap(mapValue(row["twofa_setup"]))
+				state["status"], state["stage"], state["message"], state["error"] = "completed", "completed", "管理员已确认并保存 2FA 密钥", ""
+				state["updated_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+				updates["twofa_setup"] = state
+			}
+		}
+	}
+
 	if len(updates) == 0 {
 		writeError(w, http.StatusBadRequest, "no updates provided", "invalid_request_error")
 		return
@@ -2057,6 +2092,9 @@ func positiveInt(raw string, fallback int) int {
 
 func accountForAPI(account map[string]any) map[string]any {
 	item := cloneMap(account)
+	item["has_two_factor_secret"] = firstNonEmpty(stringValue(account["two_factor_secret"]), stringValue(account["totp_secret"])) != ""
+	item["twofa_pending_activation"] = len(mapValue(account["twofa_pending"])) > 0
+	delete(item, "twofa_pending")
 	if credential := mapValue(item["codex_credential"]); len(credential) > 0 {
 		item["codex_credential"] = publicCodexCredential(credential)
 	}

@@ -186,7 +186,7 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
 }
 
 export const defaultRegisterConfig: LegacyRegisterConfig = {
-  openai_free: { timeout_seconds: 600 },
+  openai_free: { timeout_seconds: 600, auto_twofa: false },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
   checkout: {
@@ -553,7 +553,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
   return {
     ...defaultRegisterConfig,
     ...raw,
-    openai_free: { timeout_seconds: raw.openai_free?.timeout_seconds || defaultRegisterConfig.openai_free.timeout_seconds },
+    openai_free: { timeout_seconds: raw.openai_free?.timeout_seconds || defaultRegisterConfig.openai_free.timeout_seconds, auto_twofa: raw.openai_free?.auto_twofa === true },
     target,
     grok: normalizeGrokRegisterConfig(raw.grok),
     mode: target === 'grok' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
@@ -724,7 +724,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
   const checkoutChannel = config.checkout?.channel === 'pix' ? 'pix' : 'upi'
   return {
     target,
-    openai_free: { timeout_seconds: config.openai_free.timeout_seconds },
+    openai_free: { timeout_seconds: config.openai_free.timeout_seconds, auto_twofa: Boolean(config.openai_free.auto_twofa) },
     grok,
     checkout: {
       enabled: Boolean(config.checkout?.enabled),

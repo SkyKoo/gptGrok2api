@@ -100,6 +100,7 @@ export function boundedSignatureText(value: unknown, limit = 160): string {
 
 export function accountRowSignature(item: Account): string {
   return [
+    item.has_two_factor_secret, item.twofa_pending_activation,
     item.id,
     rowClass(item),
     accountTokenPreview(item),

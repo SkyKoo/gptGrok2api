@@ -56,6 +56,7 @@ type FreeConfig struct {
 	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
+	AutoTwoFA                          bool
 	// BrowserProfile is selected by the registration flow factory. It is not
 	// user configuration; compensation retries may set it to the saved task
 	// profile so the same protocol environment is reused.
@@ -86,6 +87,7 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 		}
 	}
 	profile := object(raw["openai_free"])
+	c.AutoTwoFA = boolValue(profile["auto_twofa"], false)
 	if value := intValue(profile["timeout_seconds"]); value != 0 {
 		if value < 60 || value > 1800 {
 			return c, fail("config", "timeout_must_be_60_to_1800_seconds")

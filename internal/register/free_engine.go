@@ -29,6 +29,7 @@ type RegistrationJob struct {
 	Imported       bool                      `json:"imported"`
 	Verified       bool                      `json:"verified"`
 	Account        map[string]any            `json:"account,omitempty"` // private recovery journal only
+	TwoFA          *RegistrationTwoFAState   `json:"twofa,omitempty"`
 	// CodexOAuth is a credential-free progress record for the optional Codex
 	// OAuth step that can be run after Web Free registration completes.
 	CodexOAuth *CodexOAuthTask `json:"codex_oauth,omitempty"`
@@ -95,6 +96,15 @@ func NewFreeEngine(path string, factory FreeFactory, importer ImportAccount, ver
 		changed := false
 		for i := range e.jobs {
 			j := &e.jobs[i]
+			if j.TwoFA != nil && j.TwoFA.Status == "running" {
+				j.TwoFA.Status, j.TwoFA.Stage = "interrupted", "interrupted"
+				j.TwoFA.Message = "服务重启中断，请在账号管理中核对或补充开启 2FA"
+				j.TwoFA.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+				if len(j.Account) > 0 {
+					j.Account["twofa_setup"] = registrationTwoFAAccountState(j.TwoFA)
+				}
+				changed = true
+			}
 			if j.Status == "running" || j.Status == "queued" {
 				j.Status = "interrupted"
 				j.Error = "process_restarted_no_automatic_registration_retry"
@@ -420,6 +430,11 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 	}); err != nil {
 		return err
 	}
+	if cfg.AutoTwoFA {
+		if err = e.enableRegistrationTwoFA(ctx, id, cfg, mail, flow, box); err != nil {
+			return err
+		}
+	}
 	return e.importAndVerify(ctx, id)
 }
 func (e *FreeEngine) getJob(id string) (RegistrationJob, error) {
@@ -503,6 +518,15 @@ func (e *FreeEngine) importAndVerify(ctx context.Context, id string) error {
 func (e *FreeEngine) failJob(id string, err error) {
 	_ = e.change(id, func(j *RegistrationJob) {
 		j.Error = safeFailure(err)
+		if j.TwoFA != nil && j.TwoFA.Status == "running" {
+			j.TwoFA.Status, j.TwoFA.Stage = "failed", "interrupted"
+			j.TwoFA.Error = safeFailure(err)
+			j.TwoFA.Message = "2FA 步骤已中断，请在账号管理中核对或补充开启"
+			j.TwoFA.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+			if len(j.Account) > 0 {
+				j.Account["twofa_setup"] = registrationTwoFAAccountState(j.TwoFA)
+			}
+		}
 		j.Status = "failed"
 		if errors.Is(err, context.Canceled) {
 			j.Status = "cancelled"
@@ -673,7 +697,7 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[j.ID]
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "auto_retry": compensationSummary(j.AutoRetry)})
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "twofa": registrationTwoFASummary(j.TwoFA), "auto_retry": compensationSummary(j.AutoRetry)})
 	}
 	// Gather only the existing 200-line live-log window, without allocating the
 	// logs for the entire retained history on every SSE tick.

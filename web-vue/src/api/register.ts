@@ -205,8 +205,8 @@ export type CheckoutTask = {
 export type LegacyRegisterConfig = {
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
-  openai_free: { timeout_seconds: number }
-  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; auto_retry?: RegistrationCompensation | null }>
+  openai_free: { timeout_seconds: number; auto_twofa?: boolean }
+  jobs?: Array<{ id: string; status: string; stage: string; error?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; twofa?: { status: string; stage: string; message: string; error?: string; pending: boolean } | null; auto_retry?: RegistrationCompensation | null }>
   jobs_total?: number
   jobs_page?: number
   jobs_page_size?: number

@@ -131,6 +131,22 @@
       </div>
     </FormSection>
 
+    <FormSection v-if="config.target === 'openai'" title="账号安全" density="roomy">
+      <label class="register-toggle">
+        <Checkbox
+          :model-value="Boolean(config.openai_free.auto_twofa)"
+          :disabled="config.enabled"
+          aria-label="注册成功后自动开启 2FA"
+          @update:model-value="config.openai_free.auto_twofa = Boolean($event)"
+        />
+        <span>
+          <strong>注册成功后自动开启 2FA</strong>
+          <small>默认关闭。开启后复用本次注册的会话和邮箱验证，保存密钥后激活；结果在任务记录中展示。</small>
+          <small>失败仍保留新账号，可到账号管理中补充开启；待激活密钥会保留供核对和续跑。</small>
+        </span>
+      </label>
+    </FormSection>
+
     <FormSection v-if="config.target === 'openai'" title="Checkout / 支付链接" density="roomy">
       <div class="register-form-grid">
         <label class="register-toggle register-field--full">

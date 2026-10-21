@@ -2,7 +2,7 @@
   <article
     class="ui-card flex h-full flex-col gap-4 transition-all"
     :class="[rowClass(item), selected ? 'ring-2 ring-primary/30' : 'hover:border-primary/30']"
-    v-memo="[signature, detailSignature, selected, refreshing, resetting, relogging]"
+    v-memo="[signature, detailSignature, selected, refreshing, resetting, relogging, twofaBusy]"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
@@ -22,6 +22,7 @@
             title="Codex OAuth 状态"
             :detail="item.codex_credential.cpa_file_name || item.codex_credential.cpa_last_error || 'Codex 凭据已保存'"
           />
+          <AccountTwoFACode class="mt-2" :item="item" />
           <button v-if="relogging" type="button" class="mt-2 text-xs text-sky-500 hover:underline" @click="emit('show-relogin')">重新登录中 · 查看进度</button>
         </div>
       </div>
@@ -73,11 +74,13 @@
       :refreshing="refreshing"
       :resetting="resetting"
       :relogging="relogging"
+      :twofa-busy="twofaBusy"
       @edit="emit('edit', item)"
       @toggle-enabled="emit('toggle-enabled', item)"
       @refresh-token="emit('refresh-token', item.id)"
       @reset-state="emit('reset-state', item.id)"
       @relogin="emit('relogin', item.id)"
+      @twofa="emit('twofa', item.id)"
       @copy-final-checkout-link="emit('copy-final-checkout-link', item)"
       @open-final-checkout-link="emit('open-final-checkout-link', item)"
       @remove="emit('remove', item.id)"
@@ -90,6 +93,7 @@ import { computed } from 'vue'
 import { Checkbox, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
 
 import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
+import AccountTwoFACode from './AccountTwoFACode.vue'
 import QuotaBadge from '@/components/ai/QuotaBadge.vue'
 import type { Account } from '@/api/accounts'
 import {
@@ -112,12 +116,14 @@ const props = withDefaults(defineProps<{
   refreshing?: boolean
   resetting?: boolean
   relogging?: boolean
+  twofaBusy?: boolean
   statusDetailCardClass?: string
   statusDetailText: (item: Account) => string
 }>(), {
   refreshing: false,
   resetting: false,
   relogging: false,
+  twofaBusy: false,
   statusDetailCardClass: '',
 })
 
@@ -132,6 +138,7 @@ const emit = defineEmits<{
   (e: 'refresh-token', id: string): void
   (e: 'reset-state', id: string): void
   (e: 'relogin', id: string): void
+  (e: 'twofa', id: string): void
   (e: 'show-relogin'): void
   (e: 'copy-final-checkout-link', item: Account): void
   (e: 'open-final-checkout-link', item: Account): void

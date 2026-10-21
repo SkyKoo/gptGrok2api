@@ -55,6 +55,7 @@ type HME struct {
 	http     *http.Client
 	csrf     string
 	interval time.Duration
+	consumed map[string]bool
 }
 
 func NewHME(c HMEConfig, interval time.Duration) (*HME, error) {
@@ -287,14 +288,28 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 			return a.After(b)
 		})
 		for _, m := range inbox.Messages {
+			key := box.Email + "|" + m.Folder + "|" + m.ID
+			if m.ID == "" {
+				key += "|" + m.Date + "|" + m.From + "|" + m.Subject
+			}
+			if h.consumed[key] {
+				continue
+			}
+			consume := func(code string) string {
+				if h.consumed == nil {
+					h.consumed = map[string]bool{}
+				}
+				h.consumed[key] = true
+				return code
+			}
 			if !suitableMessage(m, box, after) {
 				continue
 			}
 			if code := mailCode(m.Subject); code != "" {
-				return code, nil
+				return consume(code), nil
 			}
 			if code := mailCode(m.Preview); code != "" {
-				return code, nil
+				return consume(code), nil
 			}
 			if m.ID == "" || (m.Folder != "inbox" && m.Folder != "junk") || (inbox.Method != "imap" && inbox.Method != "web_api") {
 				continue
@@ -306,7 +321,7 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 			}
 			if suitableMessage(full, box, after) {
 				if code := mailCode(full.Body); code != "" {
-					return code, nil
+					return consume(code), nil
 				}
 			}
 		}

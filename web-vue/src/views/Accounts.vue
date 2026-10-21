@@ -103,6 +103,19 @@
         </div>
       </div>
 
+      <AccountTwoFAPanel
+        v-model:expanded="twofa.expanded"
+        :tasks="twofa.tasks"
+        :starting="twofa.starting"
+        :poll-error="twofa.pollError"
+        :busy-ids="twofa.busyIds"
+        :submitting="twofa.submitting"
+        @retry="twofa.start"
+        @dismiss="twofa.dismiss"
+        @cancel="task => twofa.submit(task, 'cancel')"
+        @code="(task, code) => twofa.submit(task, 'code', code)"
+      />
+
       <AccountReloginPanel
         v-model:expanded="reloginExpanded"
         :tasks="reloginTasks"
@@ -134,6 +147,7 @@
               <th class="py-3 pr-5">类型 / 来源</th>
               <th class="py-3 pr-5">状态</th>
               <th class="py-3 pr-5">账户信息</th>
+              <th class="py-3 pr-5">2FA</th>
               <th class="py-3 pr-5">创建时间</th>
               <th class="py-3 pr-5">能力额度</th>
               <th class="py-3 pr-5">图片恢复时间</th>
@@ -143,7 +157,7 @@
           </thead>
           <tbody class="text-sm text-foreground">
             <tr v-if="!loading && filteredAccounts.length === 0">
-              <td colspan="10" class="py-6">
+              <td colspan="11" class="py-6">
                 <EmptyState
                   plain
                   title="暂无账号数据"
@@ -159,6 +173,7 @@
               :refreshing="refreshingAccountId === item.id"
               :resetting="resettingAccountId === item.id"
               :relogging="reloggingAccountIds.has(item.id)"
+              :twofa-busy="twofa.busyIds.has(item.id)"
               :status-detail-card-class="accountStatusDetailCardClass"
               :status-detail-text="accountStatusDetailText"
               @toggle-select="toggleSelect"
@@ -168,6 +183,7 @@
               @refresh-token="refreshToken"
               @reset-state="resetAccountState"
               @relogin="reloginAccount"
+              @twofa="twofa.start"
               @show-relogin="showReloginProgress"
               @copy-final-checkout-link="copyFinalCheckoutLink"
               @open-final-checkout-link="openFinalCheckoutLink"
@@ -194,6 +210,7 @@
           :refreshing="refreshingAccountId === item.id"
           :resetting="resettingAccountId === item.id"
           :relogging="reloggingAccountIds.has(item.id)"
+          :twofa-busy="twofa.busyIds.has(item.id)"
           :status-detail-card-class="accountStatusDetailCardClass"
           :status-detail-text="accountStatusDetailText"
           @toggle-select="toggleSelect"
@@ -203,6 +220,7 @@
           @refresh-token="refreshToken"
           @reset-state="resetAccountState"
           @relogin="reloginAccount"
+          @twofa="twofa.start"
           @show-relogin="showReloginProgress"
           @copy-final-checkout-link="copyFinalCheckoutLink"
           @open-final-checkout-link="openFinalCheckoutLink"
@@ -558,6 +576,10 @@
                         </Button>
                       </div>
                     </label>
+                    <div v-if="form.two_factor_pending_secret" class="space-y-2 rounded-lg border border-amber-500/30 p-3 text-xs md:col-span-2">
+                      <p class="text-amber-600">2FA 待激活密钥已保留，激活结果需要核对。此密钥与已确认启用的 2FA 分开保存。</p>
+                      <Button type="button" size="sm" variant="outline" @click="copyCredential(form.two_factor_pending_secret, '2FA 待激活密钥')">复制待激活密钥</Button>
+                    </div>
                     <label class="text-xs">
                       <span class="ui-field-label">2FA Secret</span>
                       <div class="flex gap-2">
@@ -1136,6 +1158,7 @@ import {
 } from '@/api/grokAccounts'
 import AccountGridCard from './accounts/AccountGridCard.vue'
 import AccountTableRow from './accounts/AccountTableRow.vue'
+import AccountTwoFAPanel from './accounts/AccountTwoFAPanel.vue'
 import AccountReloginPanel from './accounts/AccountReloginPanel.vue'
 import GrokAccountConversationTestModal from './accounts/GrokAccountConversationTestModal.vue'
 import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
@@ -1221,6 +1244,7 @@ const {
   refreshingAccountId,
   resettingAccountId,
   reloggingAccountIds,
+  twofa,
   reloginTasks,
   reloginStarting,
   reloginPollError,

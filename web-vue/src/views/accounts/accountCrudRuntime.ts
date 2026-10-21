@@ -10,6 +10,7 @@ export type AccountForm = {
   email: string
   user_id: string
   login_password: string
+  two_factor_pending_secret: string
   two_factor_secret: string
   type: string
   source_type: string
@@ -40,6 +41,7 @@ function createDefaultForm(): AccountForm {
     email: '',
     user_id: '',
     login_password: '',
+    two_factor_pending_secret: '',
     two_factor_secret: '',
     type: 'free',
     source_type: 'web',
@@ -92,6 +94,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     form.email = item.email || ''
     form.user_id = item.user_id || ''
     form.login_password = item.login_password || ''
+    form.two_factor_pending_secret = ''
     form.two_factor_secret = item.two_factor_secret || ''
     form.type = item.type || 'free'
     form.source_type = item.source_type || 'web'
@@ -109,6 +112,7 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
       form.email = secrets.email || form.email
       form.user_id = secrets.user_id || form.user_id
       form.login_password = secrets.login_password
+      form.two_factor_pending_secret = secrets.two_factor_pending_secret
       form.two_factor_secret = secrets.two_factor_secret
     } catch (error) {
       options.setError('读取账号凭据失败', error)

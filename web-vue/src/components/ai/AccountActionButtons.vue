@@ -35,11 +35,13 @@ const props = withDefaults(defineProps<{
   refreshing?: boolean
   resetting?: boolean
   relogging?: boolean
+  twofaBusy?: boolean
   align?: 'start' | 'end'
 }>(), {
   refreshing: false,
   resetting: false,
   relogging: false,
+  twofaBusy: false,
   align: 'start',
 })
 
@@ -49,6 +51,7 @@ const emit = defineEmits<{
   (e: 'refresh-token'): void
   (e: 'reset-state'): void
   (e: 'relogin'): void
+  (e: 'twofa'): void
   (e: 'copy-final-checkout-link'): void
   (e: 'open-final-checkout-link'): void
   (e: 'remove'): void
@@ -95,7 +98,12 @@ const menuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
     {
       key: 'relogin',
       label: props.relogging ? '重新登录中...' : '重新登录并更新会话',
-      disabled: props.relogging,
+      disabled: props.relogging || props.twofaBusy,
+    },
+    {
+      key: 'twofa',
+      label: props.twofaBusy ? '2FA 开启中 · 查看进度' : props.item.has_two_factor_secret ? '已配置 2FA' : props.item.twofa_pending_activation ? '续跑 2FA 激活' : '开启 2FA',
+      disabled: props.item.has_two_factor_secret || props.relogging || !props.item.email,
     },
   ],
   [
@@ -120,6 +128,7 @@ function handleSelect(key: string) {
   if (key === 'refresh-token') emit('refresh-token')
   if (key === 'reset-state') emit('reset-state')
   if (key === 'relogin') emit('relogin')
+  if (key === 'twofa') emit('twofa')
   if (key === 'remove') emit('remove')
 }
 </script>

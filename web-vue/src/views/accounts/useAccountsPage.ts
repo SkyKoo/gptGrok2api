@@ -1,3 +1,4 @@
+import { useAccountTwoFARuntime } from './accountTwoFARuntime'
 import { computed, ref, toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { accountsApi } from '@/api/accounts'
@@ -190,6 +191,7 @@ export function useAccountsPage() {
   const editingId = accountCrud.editingId
   const refreshingAccountId = accountCrud.refreshingAccountId
   const resettingAccountId = accountCrud.resettingAccountId
+  const twofa = useAccountTwoFARuntime({ loadData, errorMessage: normalizeErrorMessage })
   const accountRelogin = useAccountReloginRuntime({
     emailFor: (id) => accounts.value.find(item => item.id === id)?.email || '',
     loadData,
@@ -435,6 +437,7 @@ export function useAccountsPage() {
   const setViewMode = pageLifecycle.setViewMode
 
   return {
+    twofa,
     loading,
     saving,
     showModal,
