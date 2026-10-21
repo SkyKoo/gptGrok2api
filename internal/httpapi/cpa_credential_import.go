@@ -91,7 +91,8 @@ func parseCPACredential(payload map[string]any) (map[string]any, error) {
 			return nil, errors.New("凭据到期时间格式无效")
 		}
 	}
-	return map[string]any{"access_token": access, "refresh_token": refresh, "id_token": id, "email": email, "account_id": accountID, "expires_at": expiry, "updated_at": cpaString(payload, "last_refresh"), "token_type": firstNonEmpty(cpaString(payload, "token_type"), "Bearer"), "status": "authorized"}, nil
+	_, plan := codexCPAAccountPlan(map[string]any{"access_token": access, "id_token": id, "plan_type": cpaString(payload, "plan_type")})
+	return map[string]any{"plan_type": plan, "access_token": access, "refresh_token": refresh, "id_token": id, "email": email, "account_id": accountID, "expires_at": expiry, "updated_at": cpaString(payload, "last_refresh"), "token_type": firstNonEmpty(cpaString(payload, "token_type"), "Bearer"), "status": "authorized"}, nil
 }
 
 func downloadCPACredential(ctx context.Context, pool externalCPAPool, name string) (map[string]any, error) {

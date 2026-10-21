@@ -647,6 +647,7 @@ func codexCredential(tokens map[string]string, email, accountID string) map[stri
 			credential["expires_at"] = value
 		}
 	}
+	_, credential["plan_type"] = codexCPAAccountPlan(credential)
 	return credential
 }
 func codexTokenIdentity(idToken, accessToken string) (string, string) {
@@ -683,15 +684,13 @@ func (s *Server) syncCodexCredential(ctx context.Context, account map[string]any
 		return map[string]any{"status": "not_configured"}, fmt.Errorf("未配置 CPA 连接")
 	}
 	item := map[string]string{"type": "codex", "email": firstNonEmpty(stringValue(credential["email"]), stringValue(account["email"])), "account_id": stringValue(credential["account_id"]), "access_token": access, "refresh_token": refresh, "id_token": stringValue(credential["id_token"]), "expired": stringValue(credential["expires_at"]), "last_refresh": stringValue(credential["updated_at"])}
-	name := "codex-" + safeExportName(firstNonEmpty(item["email"], item["account_id"], accountPublicRef(account)), "account") + ".json"
-	if stringValue(credential["cpa_source_pool_id"]) == pool.ID {
-		sourceName := stringValue(credential["cpa_source_file_name"])
-		if !cpaFileNameValid(sourceName) {
-			return nil, fmt.Errorf("原始 CPA 文件名无效，请重新导入")
-		}
-		name = sourceName
+	_, plan := codexCPAAccountPlan(credential)
+	item["plan_type"] = plan
+	name, err := codexCPAResolveSyncFileName(ctx, account, credential, pool)
+	if err != nil {
+		return nil, err
 	}
-	_, err := uploadCodexAuthFile(ctx, pool, name, item)
+	_, err = uploadCodexAuthFile(ctx, pool, name, item)
 	if err != nil {
 		return map[string]any{"status": "failed", "pool_id": pool.ID, "pool_name": pool.Name, "file_name": name}, err
 	}
