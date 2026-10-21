@@ -4,7 +4,7 @@
       <PanelHeader title="Codex 授权" align="start">
         <template #copy>
           <p class="mt-1 text-sm text-muted-foreground">
-            Web Free 注册完成后，在这里独立获取 Codex OAuth 凭据并同步到 CPA。账号管理页面只负责 Web 登录 Token。
+            在这里获取或管理 Codex OAuth 凭据，并手动同步到 CPA。已从远程 CPA 绑定的凭据无需重新授权。
           </p>
         </template>
         <template #actions>
@@ -17,7 +17,7 @@
       <MetricStrip :items="metricItems" columns-class="grid-cols-2 md:grid-cols-4" density="compact" />
 
       <SurfaceBox tone="muted" density="compact" wrap>
-          点击授权后由 CFM 自动推进 Codex OAuth。只有上游明确要求时才会显示邮箱验证码、手机号、短信验证码或 2FA 输入框；这些验证码只保留在本次授权会话中，不写入账号数据。
+          点击授权后由 CFM 自动推进 Codex OAuth。按上游要求依次验证邮箱、已有 2FA，再进行手机号和短信验证；已保存 2FA 密钥时自动生成验证码，未保存时才需要手动输入。此流程只验证已有 2FA，不会开启或重新绑定 2FA。
       </SurfaceBox>
 
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -33,13 +33,13 @@
     </PagePanel>
 
     <PagePanel>
-      <PageLoadingState v-if="loading && !accounts.length" title="正在加载 Codex 账号" description="读取 Web Free 账号和 Codex 授权状态。" compact dashed />
-      <EmptyState v-else-if="!filteredAccounts.length" plain title="暂无可授权账号" description="请先在“注册账号”完成 Web Free 注册并入库，账号随后会出现在这里。" />
+      <PageLoadingState v-if="loading && !accounts.length" title="正在加载 Codex 账号" description="读取账号和 Codex 授权状态。" compact dashed />
+      <EmptyState v-else-if="!filteredAccounts.length" plain title="暂无可授权账号" description="请先注册账号并入库，或在账号管理中将远程 CPA 凭据绑定到已有账号。" />
       <div v-else class="overflow-x-auto">
         <table class="min-w-[900px] w-full text-left text-sm">
           <thead class="text-xs uppercase tracking-[0.14em] text-muted-foreground">
             <tr>
-              <th class="py-3 pr-5">Web Free 账号</th>
+              <th class="py-3 pr-5">ChatGPT 账号</th>
               <th class="py-3 pr-5">Web 登录状态</th>
               <th class="py-3 pr-5">Codex OAuth</th>
               <th class="py-3 pr-5">CPA 同步</th>
@@ -82,14 +82,14 @@
     <ModalShell :open="Boolean(selectedAccount)" max-width="52rem" :close-on-backdrop="!busy" @close="closeAuthorize">
       <div v-if="selectedAccount" class="space-y-5 p-6">
         <ModalHeader title="Codex OAuth 授权" :subtitle="selectedAccount.email || selectedAccount.name" compact @close="closeAuthorize" />
-        <div class="grid gap-3 md:grid-cols-5">
+        <div class="grid gap-3 md:grid-cols-6">
           <div v-for="step in oauthSteps" :key="step.key" class="rounded-lg border p-3" :class="stepClass(step.key)">
             <div class="text-xs text-muted-foreground">{{ step.index }}</div>
             <div class="mt-1 text-sm font-medium">{{ step.label }}</div>
           </div>
         </div>
         <SurfaceBox tone="muted" density="compact" wrap>
-          1. 点击“开始授权”；2. CFM 自动推进上游流程；3. 只有当前步骤需要人工输入时才填写对应信息；4. 完成后自动保存 Token 并同步 CPA。
+          1. 点击“开始授权”；2. CFM 自动推进上游流程；3. 已保存密钥的 2FA 自动验证，其他验证步骤按上游要求处理；4. 完成后自动保存 Token 并同步 CPA，不会开启 2FA。
         </SurfaceBox>
         <div class="grid gap-3 md:grid-cols-[1fr_auto]">
           <label class="space-y-1 text-sm">
@@ -106,7 +106,7 @@
         <div v-if="sessionId" class="space-y-3 rounded-lg border border-sky-500/40 bg-sky-500/5 p-4">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <div class="text-sm font-medium">授权流程进行中</div>
+              <div class="text-sm font-medium">{{ progressStage === 'failed' ? '授权已停止' : progressStage === 'done' ? '授权已完成' : '授权流程进行中' }}</div>
               <div class="mt-1 text-xs text-muted-foreground">当前阶段：{{ progressMessage || progressStage || '等待授权' }}</div>
             </div>
             <Button v-if="authorizeUrl && progressStage === 'waiting_authorization'" size="sm" variant="outline" @click="openAuthorizeUrl">打开授权页</Button>
@@ -189,16 +189,17 @@ const filterOptions = [
 ]
 const oauthSteps = [
   { key: 'authorize', index: '1', label: '自动进入授权' },
-  { key: 'email', index: '2', label: '按需输入邮箱验证码' },
-  { key: 'phone', index: '3', label: '按需输入手机号' },
-  { key: 'sms', index: '4', label: '短信验证码 / 可选 2FA' },
-  { key: 'cpa', index: '5', label: '保存并同步 CPA' },
+  { key: 'email', index: '2', label: '按需验证邮箱' },
+  { key: '2fa', index: '3', label: '自动验证 2FA' },
+  { key: 'phone', index: '4', label: '输入手机号' },
+  { key: 'sms', index: '5', label: '验证短信' },
+  { key: 'cpa', index: '6', label: '保存并同步 CPA' },
 ]
 
 const eligibleAccounts = computed(() => accounts.value.filter((item) => {
   const type = String(item.type || '').toLowerCase()
   const source = String(item.source_type || '').toLowerCase()
-  return type === 'free' || source.includes('chatgpt') || source === 'web'
+  return Boolean(item.codex_credential?.has_access_token) || type === 'free' || source.includes('chatgpt') || source === 'web'
 }))
 const filteredAccounts = computed(() => {
   const term = keyword.value.toLowerCase()
@@ -219,7 +220,7 @@ const metricItems = computed(() => {
   const synced = list.filter((item) => item.codex_credential?.cpa_sync_status === 'synced').length
   const failed = list.filter((item) => item.codex_credential?.status === 'failed' || item.codex_credential?.cpa_sync_status === 'failed').length
   return [
-    { key: 'total', label: '可授权 Web Free', value: list.length },
+    { key: 'total', label: 'Codex 账号', value: list.length },
     { key: 'authorized', label: '已获得 Codex Token', value: authorized },
     { key: 'synced', label: 'CPA 已同步', value: synced },
     { key: 'failed', label: '待处理失败', value: failed, valueClass: failed ? 'text-rose-600' : '' },
@@ -242,14 +243,15 @@ function accountStatusLabel(account: Account) { return account.status_label || (
 function accountStatusTone(account: Account) { return account.status_category === 'abnormal' ? 'danger' : account.status_category === 'limited' ? 'warning' : account.enabled ? 'success' : 'muted' }
 function codexStatusLabel(account: Account) { const status = account.codex_credential?.status; return status === 'failed' ? '授权失败' : account.codex_credential?.has_access_token ? '已授权' : '待授权' }
 function codexStatusTone(account: Account) { return account.codex_credential?.status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'success' : 'muted' }
-function cpaStatusLabel(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? '已同步' : status === 'failed' ? '同步失败' : account.codex_credential?.has_access_token ? '待同步' : '—' }
-function cpaStatusTone(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'synced' ? 'success' : status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'warning' : 'muted' }
+function cpaStatusLabel(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'imported' ? '从 CPA 导入' : status === 'synced' ? '已同步' : status === 'failed' ? '同步失败' : account.codex_credential?.has_access_token ? '待同步' : '—' }
+function cpaStatusTone(account: Account) { const status = account.codex_credential?.cpa_sync_status; return status === 'imported' ? 'info' : status === 'synced' ? 'success' : status === 'failed' ? 'danger' : account.codex_credential?.has_access_token ? 'warning' : 'muted' }
 function formatDate(value?: string | number) { if (!value) return '—'; const numeric = typeof value === 'number' || /^\d+$/.test(String(value)); const date = numeric ? new Date(Number(value) < 10_000_000_000 ? Number(value) * 1000 : Number(value)) : new Date(value); return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString() }
 function stepClass(key: string) {
   if (progressStage.value === 'done' && key === 'cpa') return 'border-emerald-500/50 bg-emerald-500/5'
   const emailStages = ['waiting_email_code', 'verifying_email_code']
   const phoneStages = ['waiting_phone', 'waiting_phone_retry', 'sending_phone']
-  const smsStages = ['waiting_sms_code', 'verifying_sms', 'waiting_2fa', 'verifying_2fa']
+  const smsStages = ['waiting_sms_code', 'verifying_sms']
+  if (key === '2fa' && ['waiting_2fa', 'verifying_2fa'].includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
   if (key === 'email' && emailStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
   if (key === 'phone' && phoneStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'
   if (key === 'sms' && smsStages.includes(progressStage.value)) return 'border-sky-500/50 bg-sky-500/5'

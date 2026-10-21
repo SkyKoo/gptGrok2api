@@ -48,6 +48,9 @@ func (s *Server) twoFAActive(ref string) bool {
 }
 
 func (s *Server) twoFAConflictingAuth(ref, email string) bool {
+	if s.cpaSyncActive(ref, email) {
+		return true
+	}
 	s.reloginMu.RLock()
 	for _, t := range s.reloginProgress {
 		if t.AccountRef == ref && !t.Done {

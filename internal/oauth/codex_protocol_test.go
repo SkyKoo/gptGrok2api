@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -158,6 +159,14 @@ func TestProtocolBodyErrorDetectsInvalidState(t *testing.T) {
 }
 
 func TestCodexProtocolManualEmailCode(t *testing.T) {
+	testCodexProtocolEmailCode(t, false)
+}
+
+func TestCodexProtocolAutomatic2FAAfterEmail(t *testing.T) {
+	testCodexProtocolEmailCode(t, true)
+}
+
+func testCodexProtocolEmailCode(t *testing.T, automatic2FA bool) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node is required for the Sentinel runner test")
@@ -177,7 +186,13 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	t.Setenv("CFM_SENTINEL_RUNNER", runner)
 	t.Setenv("CFM_SENTINEL_SDK", sdk)
 	var sentinelRequirements []string
+	var mu sync.Mutex
+	var paths []string
+	var generated, verified int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		paths = append(paths, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/oauth/authorize", "/log-in":
@@ -208,7 +223,34 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 			if !strings.Contains(sentinel, `"p":"probe"`) || !strings.Contains(sentinel, `"c":"challenge-token"`) {
 				t.Fatalf("email OTP request is missing the bound Sentinel header: %q", sentinel)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}, "metadata": "email_otp accepted"})
+			if automatic2FA {
+				http.SetCookie(w, &http.Cookie{Name: "email-accepted", Value: "yes", Path: "/"})
+				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "mfa_challenge", "payload": map[string]any{"id": "factor-email"}}, "continue_url": "/mfa-challenge/factor-email"})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}, "metadata": "email_otp accepted"})
+			}
+		case "/api/accounts/mfa/issue_challenge", "/api/accounts/mfa/verify":
+			if !automatic2FA {
+				t.Error("MFA must not run unless the upstream requests it")
+			}
+			cookie, err := r.Cookie("email-accepted")
+			if err != nil || cookie.Value != "yes" {
+				t.Error("MFA lost the email verification cookie jar")
+			}
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["id"] != "factor-email" || body["type"] != "totp" {
+				t.Errorf("MFA factor/type incorrect: %#v", body)
+			}
+			if r.URL.Path == "/api/accounts/mfa/verify" {
+				verified++
+				if body["code"] != "654321" {
+					t.Error("automatic code was not submitted")
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"page": map[string]any{"type": "add_phone"}, "metadata": map[string]any{"authentication_method": "totp"}})
+			} else {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+			}
 		case "/api/accounts/add-phone/send":
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/accounts/phone-otp/validate":
@@ -226,7 +268,19 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	protocol := NewCodexProtocolLogin(standard)
 	protocol.sentinelOrigin = server.URL
 	protocol.sentinelVersion = "test-version"
-	started, err := protocol.Start(context.Background(), "person@example.test", "")
+	var generate func(string) (string, error)
+	if automatic2FA {
+		generate = func(id string) (string, error) {
+			if id == "" {
+				t.Error("missing session id")
+			}
+			mu.Lock()
+			generated++
+			mu.Unlock()
+			return "654321", nil
+		}
+	}
+	started, err := protocol.StartWithTOTP(context.Background(), "person@example.test", "", generate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,6 +293,9 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	}
 	if phone["stage"] != "waiting_phone" {
 		t.Fatalf("stage after email code = %q", phone["stage"])
+	}
+	if _, err := protocol.SubmitEmailCode(context.Background(), started["session_id"], "987654"); err == nil {
+		t.Fatal("email OTP cannot be resubmitted after advancing to phone")
 	}
 	sms, err := protocol.SubmitPhone(context.Background(), started["session_id"], "+8613800138000")
 	if err != nil {
@@ -253,6 +310,23 @@ func TestCodexProtocolManualEmailCode(t *testing.T) {
 	}
 	if tokens["access_token"] != "access-1" || tokens["refresh_token"] != "refresh-1" {
 		t.Fatalf("unexpected tokens: %#v", tokens)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if automatic2FA {
+		if generated != 1 || verified != 1 {
+			t.Fatalf("MFA attempts: generated=%d verified=%d", generated, verified)
+		}
+		var authPaths []string
+		for _, path := range paths {
+			if strings.HasPrefix(path, "/api/accounts/") {
+				authPaths = append(authPaths, path)
+			}
+		}
+		expected := "/api/accounts/authorize/continue,/api/accounts/email-otp/validate,/api/accounts/mfa/issue_challenge,/api/accounts/mfa/verify,/api/accounts/add-phone/send,/api/accounts/phone-otp/validate,/api/accounts/workspace/select"
+		if strings.Join(authPaths, ",") != expected {
+			t.Fatalf("unexpected authorization sequence: %v", authPaths)
+		}
 	}
 	if len(sentinelRequirements) != 2 || sentinelRequirements[0] != sentinelRequirements[1] {
 		t.Fatalf("initial and OTP Sentinel requests must reuse one top-level p: %#v", sentinelRequirements)

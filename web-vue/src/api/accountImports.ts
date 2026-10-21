@@ -64,6 +64,37 @@ export interface CPARemoteFile {
   email: string
 }
 
+export interface CPABindingCandidate {
+  account_ref: string
+  email: string
+  target_version: string
+  has_credential: boolean
+  identical: boolean
+  conflict: string
+}
+
+export interface CPACredentialPreview {
+  name: string
+  email?: string
+  account_id?: string
+  expires_at?: string
+  has_access_token?: boolean
+  has_refresh_token?: boolean
+  has_id_token?: boolean
+  source_version?: string
+  suggested_ref: string
+  candidates: CPABindingCandidate[]
+  error: string
+}
+
+export interface CPACredentialBinding {
+  name: string
+  account_ref: string
+  source_version: string
+  target_version: string
+  replace: boolean
+}
+
 export interface Sub2APIServer {
   id: string
   name: string
@@ -172,10 +203,14 @@ export const accountImportsApi = {
       `/api/cpa/pools/${encodeURIComponent(poolId)}/files`,
     ),
 
-  startCPAImport: (poolId: string, names: string[]) =>
-    apiClient.post<{ names: string[] }, { import_job: CPAImportJob | null }>(
-      `/api/cpa/pools/${encodeURIComponent(poolId)}/import`,
-      { names },
+  previewCPACredentials: (poolId: string, names: string[]) =>
+    apiClient.post<{ names: string[] }, { items: CPACredentialPreview[] }>(
+      `/api/cpa/pools/${encodeURIComponent(poolId)}/preview`, { names },
+    ),
+
+  bindCPACredential: (poolId: string, binding: CPACredentialBinding) =>
+    apiClient.post<CPACredentialBinding, { status: 'bound' | 'skipped'; message: string; account_ref?: string }>(
+      `/api/cpa/pools/${encodeURIComponent(poolId)}/bind`, binding,
     ),
 
   getCPAImportJob: (poolId: string) =>

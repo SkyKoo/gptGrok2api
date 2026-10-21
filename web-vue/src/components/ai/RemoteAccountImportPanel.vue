@@ -173,10 +173,16 @@
       </template>
     </SelectableListPanel>
 
+    <CPACredentialBindingPanel
+      v-if="activeMode === 'cpa' && cpaPreview.length"
+      :key="selectedCPAPoolId + cpaPreview.map(row => row.source_version || row.name).join()"
+      :pool-id="selectedCPAPoolId" :rows="cpaPreview"
+      @busy-change="busy = $event" @imported="emit('imported')"
+    />
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <p class="text-xs text-muted-foreground">{{ progressText }}</p>
+      <p class="text-xs text-muted-foreground">{{ activeMode === 'cpa' ? '只绑定已有账号，原 Session、密码和 2FA 保持不变' : progressText }}</p>
       <Button size="xs" variant="primary" :disabled="busy || selectedCount === 0" @click="startImport">
-        {{ busy ? '处理中...' : '导入选中' }}
+        {{ busy ? '处理中...' : activeMode === 'cpa' ? '预览选中文件的绑定' : '导入选中' }}
       </Button>
     </div>
   </section>
@@ -189,6 +195,7 @@ import { Icon } from '@iconify/vue'
 import { accountImportsApi } from '@/api/accountImports'
 import type {
   CPAImportJob,
+  CPACredentialPreview,
   CPAPool,
   CPARemoteFile,
   Sub2APIImportGroupBinding,
@@ -201,6 +208,7 @@ import { useToast } from '@/composables/useToast'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import ImportModePanel from './ImportModePanel.vue'
 import SelectableListPanel from './SelectableListPanel.vue'
+import CPACredentialBindingPanel from './CPACredentialBindingPanel.vue'
 
 type RemoteImportMode = 'cpa' | 'sub2api'
 type Sub2APIAccountGroup = {
@@ -238,6 +246,9 @@ const activeMode = ref<RemoteImportMode>(props.mode)
 const busy = ref(false)
 const cpaPools = ref<CPAPool[]>([])
 const remoteCPAFiles = ref<CPARemoteFile[]>([])
+const cpaPreview = ref<CPACredentialPreview[]>([])
+const cpaLoadState = ref<'idle' | 'loaded' | 'failed'>('idle')
+const cpaLoadError = ref('')
 const selectedCPAPoolId = ref('')
 const selectedCPAFileNames = ref<string[]>([])
 const remoteCPADuplicateCount = ref(0)
@@ -263,7 +274,7 @@ const panelTitle = computed(() => (
 
 const panelDescription = computed(() => (
   activeMode.value === 'cpa'
-    ? '读取已保存 CPA 连接里的账号文件，勾选后导入本地号池。'
+    ? '勾选 Codex 授权文件，预览后绑定已有 CFM 账号；无需重新授权。每次最多预览 20 个文件。'
     : '读取已保存 Sub2API 连接里的账号；选择“全部账号”时会按远端分组折叠加载，导入时可自动创建或复用同名本地分组。'
 ))
 
@@ -395,7 +406,11 @@ const allSelected = computed(() => (
 const emptyText = computed(() => {
   if (busy.value) return '正在加载...'
   if (!canLoadItems.value) return activeMode.value === 'cpa' ? '请选择 CPA 连接' : '请选择 Sub2API 连接'
-  return activeMode.value === 'cpa' ? '暂无可导入文件' : '暂无可导入账号'
+  if (activeMode.value === 'cpa') {
+    if (cpaLoadState.value === 'failed') return `加载失败：${cpaLoadError.value}，请点击加载文件重试`
+    return cpaLoadState.value === 'idle' ? '尚未加载，请点击加载文件' : 'CPA 中暂无授权文件'
+  }
+  return '暂无可导入账号'
 })
 
 const progressText = computed(() => {
@@ -405,6 +420,7 @@ const progressText = computed(() => {
 })
 
 watch(busy, (value) => emit('busy-change', value))
+watch(selectedCPAFileNames, () => { cpaPreview.value = [] }, { deep: true })
 
 watch(() => props.mode, (mode) => {
   if (activeMode.value === mode) return
@@ -460,6 +476,9 @@ function applyInitialSelection() {
 }
 
 function resetItems() {
+  cpaPreview.value = []
+  cpaLoadState.value = 'idle'
+  cpaLoadError.value = ''
   remoteCPAFiles.value = []
   selectedCPAFileNames.value = []
   remoteCPADuplicateCount.value = 0
@@ -482,8 +501,12 @@ function setCPAPool(value: string | string[]) {
   selectedCPAPoolId.value = Array.isArray(value) ? String(value[0] || '') : String(value || '')
   remoteCPAFiles.value = []
   selectedCPAFileNames.value = []
+  cpaPreview.value = []
+  cpaLoadState.value = 'idle'
+  cpaLoadError.value = ''
   remoteCPADuplicateCount.value = 0
   importJob.value = null
+  if (selectedCPAPoolId.value) void runBusy(loadCPAFiles)
 }
 
 function setSub2APIServer(value: string | string[]) {
@@ -523,7 +546,7 @@ async function refreshSources(autoLoadItems = false) {
   await runBusy(async () => {
     if (activeMode.value === 'cpa') {
       await loadCPAPools()
-      if (autoLoadItems && selectedCPAPoolId.value) await loadCPAFiles()
+      if (selectedCPAPoolId.value) await loadCPAFiles()
       return
     }
     await loadSub2APIServers()
@@ -557,13 +580,20 @@ async function loadCPAFiles() {
     return
   }
   try {
+    cpaPreview.value = []
     const response = await accountImportsApi.listCPAPoolFiles(poolId)
+    cpaLoadState.value = 'loaded'
+    cpaLoadError.value = ''
     const normalized = uniqueRemoteCPAFiles(response.files || [])
     remoteCPAFiles.value = normalized.items
     remoteCPADuplicateCount.value = normalized.duplicates
     selectedCPAFileNames.value = []
   } catch (error: any) {
-    toast.error(error.message || '加载 CPA 文件失败')
+    remoteCPAFiles.value = []
+    selectedCPAFileNames.value = []
+    cpaLoadState.value = 'failed'
+    cpaLoadError.value = error.message || '加载 CPA 文件失败'
+    toast.error(cpaLoadError.value)
   }
 }
 
@@ -799,23 +829,13 @@ async function startCPAImport() {
   const availableNames = new Set(remoteCPAFiles.value.map((file) => file.name))
   const names = Array.from(new Set(selectedCPAFileNames.value.filter((name) => availableNames.has(name))))
   if (!poolId || !names.length) return
-  const confirmed = await confirmDialog.ask({
-    title: '确认远程 CPA 导入',
-    message: `即将从 CPA 连接导入 ${names.length} 个文件里的账号，并写入本地号池。`,
-    confirmText: '开始导入',
-    cancelText: '取消',
-  })
-  if (!confirmed) return
-
+  if (names.length > 20) { toast.warning('每次最多预览 20 个文件，请减少勾选数量'); return }
   await runBusy(async () => {
+    cpaPreview.value = []
     try {
-      const start = await accountImportsApi.startCPAImport(poolId, names)
-      importJob.value = start.import_job || null
-      const job = await pollImportJob(poolId)
-      showImportResult('远程 CPA 导入完成', job)
-      emit('imported')
+      cpaPreview.value = (await accountImportsApi.previewCPACredentials(poolId, names)).items || []
     } catch (error: any) {
-      toast.error(error.message || '远程 CPA 导入失败')
+      toast.error(error.message || '预览 CPA 凭据失败')
     }
   })
 }

@@ -91,6 +91,10 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if account != nil {
+		if !strings.EqualFold(body.EmailHint, stringValue(account["email"])) {
+			writeError(w, http.StatusBadRequest, "授权邮箱与绑定账号不一致", "invalid_request_error")
+			return
+		}
 		body.AccountRef = accountPublicRef(account)
 	}
 	if body.EmailHint == "" {
@@ -99,12 +103,16 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.authStartMu.Lock()
 	defer s.authStartMu.Unlock()
+	if s.cpaSyncActive(body.AccountRef, body.EmailHint) {
+		writeError(w, http.StatusConflict, "该账号正在同步 CPA，请完成后再授权", "conflict")
+		return
+	}
 	if s.twoFAActive(firstNonEmpty(body.AccountRef, body.EmailHint)) {
 		writeError(w, http.StatusConflict, "该账号正在开启 2FA", "invalid_request_error")
 		return
 	}
 	startedAt := time.Now().UTC()
-	result, err := s.codexProtocolLogin.Start(r.Context(), body.EmailHint, body.Password)
+	result, err := s.codexProtocolLogin.StartWithTOTP(r.Context(), body.EmailHint, body.Password, s.codexTOTPProvider(account))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, safeOAuthError(err), "upstream_error")
 		return
@@ -183,6 +191,10 @@ func (s *Server) codexOAuthSubmitInput(w http.ResponseWriter, r *http.Request, k
 	s.codexMu.RUnlock()
 	if !ok {
 		writeError(w, http.StatusNotFound, "codex oauth session not found", "not_found")
+		return
+	}
+	if stored.AccountRef != "" && body.AccountRef != "" && body.AccountRef != stored.AccountRef {
+		writeError(w, http.StatusBadRequest, "授权会话不能更换绑定账号，请重新授权", "invalid_request_error")
 		return
 	}
 	if body.AccountRef == "" {
@@ -315,6 +327,9 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 	}
 	result, err := s.submitCodexEmailCode(context.Background(), progress.SessionID, code, true)
 	if err != nil {
+		if s.stopCodexEmailContinuation(progress.SessionID, err) {
+			return
+		}
 		// Keep the session alive. A valid HME message can still be rejected by
 		// the upstream challenge, in which case the operator may submit a code
 		// manually after inspecting the progress details.
@@ -339,6 +354,16 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 		stage = "waiting_authorization"
 	}
 	s.setCodexProgress(progress.SessionID, stage, "running", message, "")
+}
+
+// An error after entering MFA must not restore the already accepted email step.
+func (s *Server) stopCodexEmailContinuation(sessionID string, err error) bool {
+	current := s.codexStoredProgress(sessionID)
+	if !errors.Is(err, oauth.ErrCodexMFA) && (current == nil || current.Stage != "verifying_2fa") {
+		return false
+	}
+	s.setCodexProgress(sessionID, "failed", "failed", "Codex 授权后续验证失败，已停止本次授权", safeOAuthError(err))
+	return true
 }
 
 func (s *Server) keepCodexEmailManual(sessionID, message string) {
@@ -430,6 +455,10 @@ func (s *Server) codexOAuthFinish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "codex oauth session not found", "not_found")
 		return
 	}
+	if stored.AccountRef != "" && body.AccountRef != "" && body.AccountRef != stored.AccountRef {
+		writeError(w, http.StatusBadRequest, "授权会话不能更换绑定账号，请重新授权", "invalid_request_error")
+		return
+	}
 	if body.AccountRef == "" {
 		body.AccountRef = stored.AccountRef
 	}
@@ -482,10 +511,11 @@ func (s *Server) finishCodexTokens(ctx context.Context, sessionID, accountRef, p
 		return nil, err
 	}
 	s.setCodexProgress(sessionID, "syncing_cpa", "running", "Codex 凭据已保存，正在同步 CPA", "")
+	version := cpaTargetVersion(updated)
 	syncResult, syncErr := s.syncCodexCredential(ctx, updated, poolID)
 	if syncErr != nil {
 		credential["cpa_sync_status"], credential["cpa_last_error"], credential["cpa_last_error_at"] = "failed", safeOAuthError(syncErr), time.Now().UTC().Format(time.RFC3339)
-		_, _, _ = s.store.UpdateAccount(accountToken(updated), map[string]any{"codex_credential": credential})
+		_, _, _ = s.store.UpdateAccountIf(accountToken(updated), map[string]any{"codex_credential": credential}, func(current map[string]any) bool { return cpaTargetVersion(current) == version })
 		s.setCodexProgress(sessionID, "cpa_sync_failed", "failed", "Token 已保存，但 CPA 同步失败，可单独重试", safeOAuthError(syncErr))
 		latest, _ := s.accountByRef(accountRef)
 		return map[string]any{"ok": false, "message": "Codex 登录成功，但 CPA 同步失败；凭据已保留", "cpa_sync": syncResult, "item": accountForAPI(latest)}, nil
@@ -521,6 +551,24 @@ func (s *Server) codexSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error(), "not_found")
+		return
+	}
+	s.authStartMu.Lock()
+	if s.twoFAActive(accountPublicRef(account)) || s.twoFAConflictingAuth(accountPublicRef(account), stringValue(account["email"])) {
+		s.authStartMu.Unlock()
+		writeError(w, http.StatusConflict, "账号正在登录、授权或设置 2FA，请完成后再同步", "conflict")
+		return
+	}
+	refKey, emailKey := "ref:"+accountPublicRef(account), "email:"+strings.ToLower(stringValue(account["email"]))
+	s.cpaSyncing.Store(refKey, true)
+	s.cpaSyncing.Store(emailKey, true)
+	s.authStartMu.Unlock()
+	defer s.cpaSyncing.Delete(refKey)
+	defer s.cpaSyncing.Delete(emailKey)
+	// 取得占用后重新读取，避免预读账号与其他绑定交错。
+	account, err = s.accountByRef(accountPublicRef(account))
+	if err != nil {
+		writeError(w, http.StatusConflict, "账号已变化，请刷新后重试", "conflict")
 		return
 	}
 	result, syncErr := s.syncCodexCredential(r.Context(), account, strings.TrimSpace(body.CPAPoolID))
@@ -618,7 +666,8 @@ func codexTokenIdentity(idToken, accessToken string) (string, string) {
 }
 
 func (s *Server) syncCodexCredential(ctx context.Context, account map[string]any, poolID string) (map[string]any, error) {
-	credential := mapValue(account["codex_credential"])
+	version := cpaTargetVersion(account)
+	credential := cloneMap(mapValue(account["codex_credential"]))
 	access, refresh := stringValue(credential["access_token"]), stringValue(credential["refresh_token"])
 	if access == "" || refresh == "" {
 		return nil, fmt.Errorf("Codex 凭据不完整，缺少 access_token 或 refresh_token")
@@ -635,6 +684,13 @@ func (s *Server) syncCodexCredential(ctx context.Context, account map[string]any
 	}
 	item := map[string]string{"type": "codex", "email": firstNonEmpty(stringValue(credential["email"]), stringValue(account["email"])), "account_id": stringValue(credential["account_id"]), "access_token": access, "refresh_token": refresh, "id_token": stringValue(credential["id_token"]), "expired": stringValue(credential["expires_at"]), "last_refresh": stringValue(credential["updated_at"])}
 	name := "codex-" + safeExportName(firstNonEmpty(item["email"], item["account_id"], accountPublicRef(account)), "account") + ".json"
+	if stringValue(credential["cpa_source_pool_id"]) == pool.ID {
+		sourceName := stringValue(credential["cpa_source_file_name"])
+		if !cpaFileNameValid(sourceName) {
+			return nil, fmt.Errorf("原始 CPA 文件名无效，请重新导入")
+		}
+		name = sourceName
+	}
 	_, err := uploadCodexAuthFile(ctx, pool, name, item)
 	if err != nil {
 		return map[string]any{"status": "failed", "pool_id": pool.ID, "pool_name": pool.Name, "file_name": name}, err
@@ -642,7 +698,7 @@ func (s *Server) syncCodexCredential(ctx context.Context, account map[string]any
 	syncedAt := time.Now().UTC().Format(time.RFC3339)
 	credential["cpa_sync_status"], credential["cpa_pool_id"], credential["cpa_file_name"], credential["cpa_synced_at"], credential["cpa_last_error"], credential["cpa_last_error_at"] = "synced", pool.ID, name, syncedAt, nil, nil
 	updated := map[string]any{"status": "synced", "pool_id": pool.ID, "pool_name": pool.Name, "file_name": name, "synced_at": syncedAt}
-	_, _, updateErr := s.store.UpdateAccount(accountToken(account), map[string]any{"codex_credential": credential})
+	_, _, updateErr := s.store.UpdateAccountIf(accountToken(account), map[string]any{"codex_credential": credential}, func(current map[string]any) bool { return cpaTargetVersion(current) == version })
 	return updated, updateErr
 }
 
@@ -717,4 +773,29 @@ func safeOAuthError(err error) string {
 		message = message[:400]
 	}
 	return message
+}
+
+// Only a bound account supplies its existing seed; generated codes are returned
+// on the request stack and never written to credentials, progress or responses.
+func (s *Server) codexTOTPProvider(account map[string]any) func(string) (string, error) {
+	if account == nil {
+		return nil
+	}
+	ref, email, version := accountPublicRef(account), cpaString(account, "email"), cpaVersion(accountToken(account))
+	return func(sessionID string) (string, error) {
+		current, err := s.accountByRef(ref)
+		if err != nil || cpaVersion(accountToken(current)) != version || !strings.EqualFold(cpaString(current, "email"), email) {
+			return "", errors.New("account changed")
+		}
+		secret := cpaString(current, "two_factor_secret")
+		if secret == "" {
+			return "", nil
+		}
+		code, err := registerruntime.TOTPCode(secret, time.Now())
+		if err != nil {
+			return "", errors.New("invalid saved 2FA seed")
+		}
+		s.setCodexProgress(sessionID, "verifying_2fa", "running", "正在使用已保存的密钥自动验证 2FA", "")
+		return code, nil
+	}
 }

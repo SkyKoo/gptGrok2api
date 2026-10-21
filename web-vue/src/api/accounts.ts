@@ -18,6 +18,9 @@ export interface CodexCredential {
   cpa_file_name?: string
   cpa_synced_at?: string
   cpa_last_error?: string
+  cpa_source_pool_id?: string
+  cpa_source_file_name?: string
+  imported_at?: string
   cpa_last_error_at?: string
   has_access_token?: boolean
   has_refresh_token?: boolean
@@ -481,6 +484,9 @@ function mapCodexCredential(value: unknown): CodexCredential | undefined {
     cpa_synced_at: cleanString(source.cpa_synced_at),
     cpa_last_error: cleanString(source.cpa_last_error),
     cpa_last_error_at: cleanString(source.cpa_last_error_at),
+    cpa_source_pool_id: cleanString(source.cpa_source_pool_id),
+    cpa_source_file_name: cleanString(source.cpa_source_file_name),
+    imported_at: cleanString(source.imported_at),
     has_access_token: source.has_access_token === true,
     has_refresh_token: source.has_refresh_token === true,
     has_id_token: source.has_id_token === true,

@@ -81,30 +81,21 @@ func (s *Server) cpaPoolAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"pool_id": id, "files": files})
 		return
 	}
+	if suffix == "preview" {
+		s.cpaCredentialPreview(w, r, item)
+		return
+	}
+	if suffix == "bind" {
+		s.cpaCredentialBind(w, r, item)
+		return
+	}
 	if suffix == "import" {
 		if r.Method == http.MethodGet {
 			writeJSON(w, 200, map[string]any{"import_job": item.ImportJob})
 			return
 		}
 		if r.Method == http.MethodPost {
-			var body struct {
-				Names []string `json:"names"`
-			}
-			if !decodeJSON(w, r, &body) {
-				return
-			}
-			names := uniqueStrings(body.Names)
-			if len(names) == 0 {
-				writeError(w, 400, "selected files is required", "invalid_request_error")
-				return
-			}
-			job := jobFor(len(names))
-			if err := s.updateCPAJob(id, job); err != nil {
-				writeError(w, 500, err.Error(), "server_error")
-				return
-			}
-			go s.runCPAImport(item, names, job)
-			writeJSON(w, 200, map[string]any{"import_job": job})
+			writeError(w, 400, "请先预览 CPA 文件并绑定已有 CFM 账号", "invalid_request_error")
 			return
 		}
 		writeError(w, 405, "method not allowed", "invalid_request_error")
@@ -190,34 +181,6 @@ func (s *Server) cpaRemoteFiles(pool externalCPAPool) ([]map[string]any, error) 
 		}
 	}
 	return result, nil
-}
-
-func (s *Server) runCPAImport(pool externalCPAPool, names []string, job map[string]any) {
-	update := func(values map[string]any) { updateJob(job, values); _ = s.updateCPAJob(pool.ID, job) }
-	update(map[string]any{"status": "running"})
-	for _, name := range names {
-		payload, _, err := remoteJSON(remoteClient(true), http.MethodGet, pool.BaseURL+"/v0/management/auth-files/download", map[string]string{"Authorization": "Bearer " + pool.SecretKey, "Accept": "application/json"}, url.Values{"name": []string{name}}, nil)
-		if err != nil {
-			appendJobError(job, name, err.Error())
-		} else if token := stringValue(payload["access_token"]); token != "" {
-			added, skipped, _, addErr := s.store.AddAccounts([]string{token}, nil)
-			if addErr != nil {
-				appendJobError(job, name, addErr.Error())
-			} else {
-				job["added"] = intValue(job["added"]) + added
-				job["skipped"] = intValue(job["skipped"]) + skipped
-			}
-		} else {
-			appendJobError(job, name, "missing access_token")
-		}
-		job["completed"] = intValue(job["completed"]) + 1
-		update(map[string]any{})
-	}
-	status := "completed"
-	if intValue(job["added"]) == 0 && intValue(job["skipped"]) == 0 {
-		status = "failed"
-	}
-	update(map[string]any{"status": status})
 }
 
 func (s *Server) sub2APIServersAPI(w http.ResponseWriter, r *http.Request) {

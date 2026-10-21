@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
@@ -34,6 +35,7 @@ import (
 var (
 	phonePattern = regexp.MustCompile(`^\+?[0-9][0-9 .()-]{6,20}$`)
 	codePattern  = regexp.MustCompile(`^[0-9]{4,8}$`)
+	ErrCodexMFA  = errors.New("Codex 2FA verification failed")
 )
 
 const (
@@ -50,6 +52,9 @@ type CodexProtocolLogin struct {
 }
 
 type codexProtocolSession struct {
+	operationMu          sync.Mutex
+	TOTPCode             func(string) (string, error)
+	MFAAttempted         bool
 	ID                   string
 	Email                string
 	Password             string
@@ -86,6 +91,12 @@ func NewCodexProtocolLogin(standard *CodexLogin) *CodexProtocolLogin {
 // Start creates a protocol session, opens the authorization redirect chain,
 // submits the account email and returns the first upstream-required step.
 func (s *CodexProtocolLogin) Start(ctx context.Context, emailHint, password string) (map[string]string, error) {
+	return s.StartWithTOTP(ctx, emailHint, password, nil)
+}
+
+// StartWithTOTP resolves an existing authenticator code only when Auth requires MFA.
+// The callback retains an account reference, never the seed or a generated code.
+func (s *CodexProtocolLogin) StartWithTOTP(ctx context.Context, emailHint, password string, code func(string) (string, error)) (map[string]string, error) {
 	if s == nil || s.standard == nil {
 		return nil, fmt.Errorf("%w: protocol login is not configured", ErrCodexOAuth)
 	}
@@ -134,7 +145,7 @@ func (s *CodexProtocolLogin) Start(ctx context.Context, emailHint, password stri
 		return nil, fmt.Errorf("%w: create auth client: %v", ErrCodexOAuth, err)
 	}
 	client.SetCookies(authURL, []*fhttp.Cookie{{Name: "oai-did", Value: deviceID, Path: "/", Secure: authURL.Scheme == "https"}})
-	session := &codexProtocolSession{ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, SentinelSID: sentinelSID, Stage: "starting", CreatedAt: time.Now().UTC()}
+	session := &codexProtocolSession{TOTPCode: code, ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, SentinelSID: sentinelSID, Stage: "starting", CreatedAt: time.Now().UTC()}
 	s.mu.Lock()
 	s.purgeLocked(time.Now().UTC())
 	s.sessions[sessionID] = session
@@ -213,6 +224,8 @@ func (s *CodexProtocolLogin) SubmitPhone(ctx context.Context, id, phone string) 
 	if err != nil {
 		return nil, err
 	}
+	session.operationMu.Lock()
+	defer session.operationMu.Unlock()
 	phone = strings.TrimSpace(phone)
 	if !phonePattern.MatchString(phone) {
 		return nil, fmt.Errorf("%w: invalid phone number", ErrCodexOAuth)
@@ -235,6 +248,10 @@ func (s *CodexProtocolLogin) SubmitPhone(ctx context.Context, id, phone string) 
 	if lastPhone != "" && phone == lastPhone {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: 本次授权会话已提交过该手机号，请重新开始授权或使用新的手机号", ErrCodexOAuth)
+	}
+	if session.Stage != "waiting_phone" && session.Stage != "waiting_phone_retry" {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: 当前授权阶段不接受手机号", ErrCodexOAuth)
 	}
 	session.PendingPhone = phone
 	s.mu.Unlock()
@@ -267,6 +284,11 @@ func (s *CodexProtocolLogin) SubmitSMSCode(ctx context.Context, id, code string)
 	if err != nil {
 		return nil, err
 	}
+	session.operationMu.Lock()
+	defer session.operationMu.Unlock()
+	if session.Stage != "waiting_sms_code" {
+		return nil, fmt.Errorf("%w: 当前授权阶段不接受短信验证码", ErrCodexOAuth)
+	}
 	code = strings.TrimSpace(code)
 	if !codePattern.MatchString(code) {
 		return nil, fmt.Errorf("%w: invalid SMS code", ErrCodexOAuth)
@@ -292,6 +314,11 @@ func (s *CodexProtocolLogin) SubmitEmailCode(ctx context.Context, id, code strin
 	if err != nil {
 		return nil, err
 	}
+	session.operationMu.Lock()
+	defer session.operationMu.Unlock()
+	if session.Stage != "waiting_email_code" {
+		return nil, fmt.Errorf("%w: 当前授权阶段不接受邮箱验证码", ErrCodexOAuth)
+	}
 	code = strings.TrimSpace(code)
 	if !codePattern.MatchString(code) {
 		return nil, fmt.Errorf("%w: invalid email verification code", ErrCodexOAuth)
@@ -316,19 +343,39 @@ func (s *CodexProtocolLogin) Submit2FA(ctx context.Context, id, code string) (ma
 	if err != nil {
 		return nil, err
 	}
+	session.operationMu.Lock()
+	defer session.operationMu.Unlock()
+	if session.Stage != "waiting_2fa" {
+		return nil, mfaFailure("当前授权阶段不接受 2FA 验证码")
+	}
+	return s.verify2FA(ctx, session, code)
+}
+
+func mfaFailure(message string) error {
+	return fmt.Errorf("%w: %w: %s", ErrCodexOAuth, ErrCodexMFA, message)
+}
+
+// One verification attempt per authorization session, including upstream rejection
+// and unknown results. This never enrolls or activates an authenticator.
+func (s *CodexProtocolLogin) verify2FA(ctx context.Context, session *codexProtocolSession, code string) (map[string]string, error) {
 	code = strings.TrimSpace(code)
 	if !codePattern.MatchString(code) {
-		return nil, fmt.Errorf("%w: invalid 2FA code", ErrCodexOAuth)
+		return nil, mfaFailure("2FA 验证码格式无效")
 	}
 	if session.FactorID == "" {
-		return nil, fmt.Errorf("%w: MFA factor is missing", ErrCodexOAuth)
+		return nil, mfaFailure("未能读取本次 MFA 验证因子，请重新授权")
 	}
-	if _, err = s.postJSON(ctx, session, "/api/accounts/mfa/issue_challenge", map[string]any{"id": session.FactorID, "type": "totp", "force_fresh_challenge": false}, session.AuthBase+"/mfa-challenge"); err != nil {
-		return nil, err
+	if session.MFAAttempted {
+		return nil, mfaFailure("本次授权已尝试验证 2FA，请重新授权")
+	}
+	session.MFAAttempted = true
+	s.setStage(session, "verifying_2fa")
+	if _, err := s.postJSON(ctx, session, "/api/accounts/mfa/issue_challenge", map[string]any{"id": session.FactorID, "type": "totp", "force_fresh_challenge": false}, session.AuthBase+"/mfa-challenge"); err != nil {
+		return nil, mfaFailure("2FA 挑战请求失败，已停止本次尝试；请重新授权")
 	}
 	result, err := s.postJSON(ctx, session, "/api/accounts/mfa/verify", map[string]string{"id": session.FactorID, "type": "totp", "code": code}, session.AuthBase+"/mfa-challenge/"+url.PathEscape(session.FactorID))
 	if err != nil {
-		return nil, err
+		return nil, mfaFailure("上游未接受 2FA 验证，已停止本次尝试；请核对验证器后重新授权")
 	}
 	return s.advanceResult(ctx, session, result)
 }
@@ -338,6 +385,8 @@ func (s *CodexProtocolLogin) FinishCallback(ctx context.Context, id, callback st
 	if err != nil {
 		return nil, err
 	}
+	session.operationMu.Lock()
+	defer session.operationMu.Unlock()
 	code, state, err := codexExtractCallback(callback)
 	if err != nil {
 		return nil, err
@@ -381,15 +430,36 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		s.setStage(session, "waiting_phone_retry")
 		return map[string]string{"session_id": session.ID, "stage": "waiting_phone_retry", "message": "上游拒绝了该手机号，请输入其他手机号"}, nil
 	}
-	text := strings.ToLower(jsonText(result))
-	if strings.Contains(text, "mfa-challenge") || strings.Contains(text, "mfa_challenge") || strings.Contains(text, "totp") {
-		session.FactorID = factorID(result)
-		if session.FactorID == "" {
-			return nil, fmt.Errorf("%w: MFA factor is missing", ErrCodexOAuth)
+	if codexMFARequired(result) {
+		s.setStage(session, "verifying_2fa")
+		if session.MFAAttempted {
+			return nil, mfaFailure("验证后上游仍要求 MFA，已停止本次尝试；请重新授权")
+		}
+		if next := nextURL(result); next != "" {
+			base, _ := url.Parse(session.AuthBase + "/")
+			u, err := base.Parse(next)
+			if err != nil || u.Scheme != base.Scheme || u.Host != base.Host {
+				return nil, mfaFailure("MFA 后续地址不属于当前授权服务")
+			}
+		}
+		factor := factorID(result)
+		if factor == "" {
+			return nil, mfaFailure("未能读取本次 MFA 验证因子，请重新授权")
+		}
+		session.FactorID = factor
+		if session.TOTPCode != nil {
+			code, err := session.TOTPCode(session.ID)
+			if err != nil {
+				return nil, mfaFailure("无法使用已保存的 2FA 密钥，请检查账号密钥及绑定关系后重新授权")
+			}
+			if code != "" {
+				return s.verify2FA(ctx, session, code)
+			}
 		}
 		s.setStage(session, "waiting_2fa")
-		return map[string]string{"session_id": session.ID, "stage": "waiting_2fa", "message": "上游要求 2FA，请输入一次性验证码"}, nil
+		return map[string]string{"session_id": session.ID, "stage": "waiting_2fa", "message": "上游要求验证已有 2FA；未保存密钥，请补填密钥后重新授权，或手动输入验证码"}, nil
 	}
+	text := strings.ToLower(jsonText(result))
 	page := pageType(result)
 	if page == "password" || page == "password_challenge" || page == "password_verification" || page == "login_password" || strings.Contains(text, "password_verify") || strings.Contains(text, "password-verification") || strings.Contains(text, "login-password") || strings.Contains(text, "password_challenge") {
 		if session.Password == "" {
@@ -1005,12 +1075,28 @@ func pageType(value map[string]any) string {
 	return strings.ToLower(stringValueAny(value["page_type"]))
 }
 func nextURL(value map[string]any) string {
-	for _, key := range []string{"continue_url", "redirect_url", "url", "next", "location"} {
-		if v := stringValueAny(value[key]); v != "" {
-			return v
+	page, _ := value["page"].(map[string]any)
+	for _, object := range []map[string]any{value, page} {
+		for _, key := range []string{"continue_url", "external_url", "redirect_url", "url", "next", "location"} {
+			if v := stringValueAny(object[key]); v != "" {
+				return v
+			}
 		}
 	}
 	return ""
+}
+
+func codexMFARequired(value map[string]any) bool {
+	switch pageType(value) {
+	case "mfa", "mfa_challenge", "mfa-challenge", "totp":
+		return true
+	}
+	u, err := url.Parse(nextURL(value))
+	if err != nil {
+		return false
+	}
+	path := strings.TrimRight(u.Path, "/")
+	return path == "/mfa-challenge" || strings.HasPrefix(path, "/mfa-challenge/")
 }
 func stringValueAny(value any) string {
 	if value, ok := value.(string); ok {
@@ -1019,34 +1105,26 @@ func stringValueAny(value any) string {
 	return ""
 }
 func factorID(value map[string]any) string {
-	var found string
-	var walk func(any)
-	walk = func(item any) {
-		if found != "" {
-			return
-		}
-		switch value := item.(type) {
-		case map[string]any:
-			if v := stringValueAny(value["factor_id"]); v != "" {
-				found = v
-				return
-			}
-			for _, child := range value {
-				walk(child)
-			}
-		case []any:
-			for _, child := range value {
-				walk(child)
-			}
-		case string:
-			if strings.Contains(value, "/mfa-challenge/") {
-				trimmed := strings.TrimSuffix(value, "/")
-				found = trimmed[strings.LastIndex(trimmed, "/")+1:]
+	valid := func(id string) bool {
+		return id != "" && len(id) <= 256 && !strings.ContainsAny(id, "/\\?#") && strings.IndexFunc(id, unicode.IsControl) < 0
+	}
+	page, _ := value["page"].(map[string]any)
+	payload, _ := page["payload"].(map[string]any)
+	for _, object := range []map[string]any{value, payload} {
+		for _, key := range []string{"factor_id", "id"} {
+			if id := stringValueAny(object[key]); valid(id) {
+				return id
 			}
 		}
 	}
-	walk(value)
-	return found
+	u, err := url.Parse(nextURL(value))
+	if err == nil && strings.HasPrefix(u.Path, "/mfa-challenge/") {
+		id := strings.TrimPrefix(strings.TrimRight(u.Path, "/"), "/mfa-challenge/")
+		if valid(id) {
+			return id
+		}
+	}
+	return ""
 }
 
 func findWorkspaceID(value map[string]any) string {

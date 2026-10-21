@@ -47,6 +47,9 @@ func (s *Server) autoReloginEligible(account map[string]any) bool {
 func (s *Server) startAccountRelogin(account map[string]any, automatic bool) (accountReloginProgress, error) {
 	s.authStartMu.Lock()
 	defer s.authStartMu.Unlock()
+	if s.cpaSyncActive(accountPublicRef(account), stringValue(account["email"])) {
+		return accountReloginProgress{}, errors.New("该账号正在同步 CPA，请完成后再登录")
+	}
 	if s.twoFAActive(accountPublicRef(account)) {
 		return accountReloginProgress{}, errors.New("该账号正在开启 2FA")
 	}

@@ -38,6 +38,7 @@ import (
 
 type Server struct {
 	authStartMu        sync.Mutex
+	cpaSyncing         sync.Map
 	twofaMu            sync.Mutex
 	twofaTasks         map[string]*accountTwoFATask
 	cfg                config.Config
@@ -2130,7 +2131,7 @@ func accountForAPI(account map[string]any) map[string]any {
 
 func publicCodexCredential(credential map[string]any) map[string]any {
 	result := map[string]any{}
-	for _, key := range []string{"email", "account_id", "status", "expires_at", "updated_at", "cpa_sync_status", "cpa_pool_id", "cpa_file_name", "cpa_synced_at", "cpa_last_error", "cpa_last_error_at"} {
+	for _, key := range []string{"email", "account_id", "status", "expires_at", "updated_at", "cpa_sync_status", "cpa_pool_id", "cpa_file_name", "cpa_synced_at", "cpa_last_error", "cpa_last_error_at", "cpa_source_pool_id", "cpa_source_file_name", "imported_at"} {
 		if value, ok := credential[key]; ok && value != nil {
 			result[key] = value
 		}
