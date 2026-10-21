@@ -63,7 +63,7 @@ func (r *WebRegistrar) BeginTwoFA(ctx context.Context, email string) (time.Time,
 	}
 	target := stringValue(reply.data["url"])
 	u, err := url.Parse(target)
-	if err != nil || !sameOrigin(target, r.auth) || u.Path != "/api/accounts/authorize" || u.Query().Get("state") == "" {
+	if err != nil || !sameOrigin(target, r.auth) || (u.Path != "/api/accounts/authorize" && u.Path != "/oauth/authorize") || u.Query().Get("state") == "" {
 		return time.Time{}, fail("reauth", "invalid_authorize_url")
 	}
 	r.state = u.Query().Get("state")
