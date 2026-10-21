@@ -1043,7 +1043,7 @@
                 <div v-else-if="importMode === 'session_json'" class="space-y-3">
                   <ImportModePanel
                     title="导入 Session JSON"
-                    description="从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。"
+                    description="从 chatgpt.com 的 session 接口复制完整 JSON，导入邮箱和账号标识并校验额度。校验失败仍保留账号，完成后自动定位。"
                   />
                   <textarea v-model.trim="sessionJsonText" rows="12" class="ui-textarea-sm font-mono" placeholder="粘贴完整 session JSON"></textarea>
                   <div class="flex justify-end">

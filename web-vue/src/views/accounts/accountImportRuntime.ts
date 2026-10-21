@@ -1,4 +1,5 @@
 import { onUnmounted, ref } from 'vue'
+import { parseSessionJsonAccount } from '@/lib/sessionImport'
 
 import { accountsApi } from '@/api/accounts'
 import { accountImportsApi } from '@/api/accountImports'
@@ -15,6 +16,7 @@ type AccountImportRuntimeOptions = {
   normalizeErrorMessage: (error: unknown) => string
   setError: (prefix: string, error: unknown, notify?: boolean) => void
   loadData: (options?: { silentErrorToast?: boolean }) => Promise<void>
+  revealImportedAccount: (ref: string) => Promise<void>
 }
 
 function uniqueTokens(tokens: string[]) {
@@ -36,24 +38,6 @@ function accountPayloadToken(value: unknown): string {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return ''
   const source = value as AccountImportPayload
   return String(source.access_token || source.accessToken || '').trim()
-}
-
-function parseSessionJsonAccount(rawText: string): AccountImportPayload {
-  const text = rawText.trim()
-  if (!text) throw new Error('请先粘贴 Session JSON')
-  const parsed = JSON.parse(text)
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Session JSON 格式不正确')
-  }
-  const source = parsed as AccountImportPayload
-  const token = accountPayloadToken(source)
-  if (!token) throw new Error('Session JSON 中没有找到 accessToken')
-  return {
-    ...source,
-    access_token: token,
-    type: source.type || source.plan_type || 'free',
-    source_type: source.source_type || source.sourceType || 'session_json',
-  }
 }
 
 function tokenFromCPAAccount(value: unknown): string {
@@ -283,7 +267,36 @@ export function useAccountImportRuntime(options: AccountImportRuntimeOptions) {
   }
 
   async function importSessionJson() {
-    await importAccountPayloadBatch([parseSessionJsonAccount(sessionJsonText.value)], 'session_json', '导入 Session JSON')
+    if (importBusy.value) return
+    let started = false
+    try {
+      const session = parseSessionJsonAccount(sessionJsonText.value)
+      const confirmed = await confirmDialog.ask({
+        title: '导入 Session JSON',
+        message: '将保存账号并校验账号信息和额度。同一 Token 已存在时补全缺失资料；校验失败仍保留账号。',
+        confirmText: '确认导入',
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+      importBusy.value = true
+      options.bulkProgress.start('导入 Session JSON', 1, 'mutation')
+      started = true
+      const result = await accountsApi.importSession(session)
+      await options.revealImportedAccount(result.account_ref)
+      sessionJsonText.value = ''
+      showImportModal.value = false
+      options.bulkProgress.finish({ total: 1, processed: 1, total_quota: 0 })
+      options.bulkProgress.close()
+      const action = result.added ? '已新增账号' : '已更新已有账号'
+      if (result.refresh_error) toast.warning(`${action}，账号已保留；信息校验未完成：${result.refresh_error}`)
+      else toast.success(`${action}，账号信息和额度已校验`)
+    } catch (error) {
+      if (started) options.bulkProgress.fail(1, 0, options.normalizeErrorMessage(error))
+      options.setError('导入 Session JSON 失败', error)
+    } finally {
+      if (importBusy.value) options.bulkProgress.end()
+      importBusy.value = false
+    }
   }
 
   async function startOAuthLogin() {

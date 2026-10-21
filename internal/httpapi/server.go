@@ -343,6 +343,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/accounts/codex/sync", s.codexSync)
 	mux.HandleFunc("/api/accounts/export", s.accountExport)
 	mux.HandleFunc("/api/accounts/import-api", s.importAccountsAPI)
+	mux.HandleFunc("/api/accounts/import-session", s.accountSessionImport)
 	mux.HandleFunc("/api/accounts/agent-identities", s.agentIdentities)
 	mux.HandleFunc("/api/accounts/import-cleanup", s.cleanupImportedAbnormalAccounts)
 	mux.HandleFunc("/api/accounts/update", s.updateAccount)
@@ -2210,6 +2211,9 @@ func accountStatusMatches(account map[string]any, filter string) bool {
 }
 
 func accountContains(account map[string]any, keyword string) bool {
+	if strings.Contains(strings.ToLower(accountPublicRef(account)), keyword) {
+		return true
+	}
 	for _, key := range []string{"access_token", "email", "user_id", "type", "source_type", "status", "proxy", "group_id"} {
 		if strings.Contains(strings.ToLower(stringValue(account[key])), keyword) {
 			return true

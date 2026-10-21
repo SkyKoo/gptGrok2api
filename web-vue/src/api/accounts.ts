@@ -814,6 +814,11 @@ async function deleteAccountsByIds(accountIdsOrTokens: string[]) {
 }
 
 export const accountsApi = {
+  importSession: (session: Record<string, unknown>) =>
+    apiClient.post<{ session: Record<string, unknown> }, {
+      added: number; updated: number; refreshed: number
+      account_ref: string; email: string; refresh_error: string
+    }>('/api/accounts/import-session', { session }),
   list: async (params?: AccountListParams) => {
     const response = await apiClient.get<never, BackendAccountsResponse>('/api/accounts', {
       params: params || undefined,

@@ -1,5 +1,5 @@
 import { useAccountTwoFARuntime } from './accountTwoFARuntime'
-import { computed, ref, toRef } from 'vue'
+import { computed, nextTick, ref, toRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { accountsApi } from '@/api/accounts'
 import type {
@@ -242,6 +242,15 @@ export function useAccountsPage() {
     normalizeErrorMessage,
     setError,
     loadData,
+    revealImportedAccount: async (ref) => {
+      statusFilter.value = 'all'
+      groupFilter.value = 'all'
+      keyword.value = ref
+      currentPage.value = 1
+      clearSelection()
+      await nextTick()
+      await loadData()
+    },
   })
   const importBusy = accountImport.importBusy
   const showImportModal = accountImport.showImportModal
