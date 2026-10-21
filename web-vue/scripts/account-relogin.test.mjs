@@ -115,3 +115,11 @@ test('pending validation explains reuse of the saved session without another log
   assert.match(reloginErrorText(pending), /无需再次邮箱登录/)
   assert.match(reloginErrorText(pending), /异常.*暂停调度/)
 })
+
+
+test('MFA failures explain how to import an existing seed and never suggest enrollment', () => {
+  assert.match(reloginErrorText({...task('a','failed'),error:'mfa: secret_required'}), /补填原 2FA Secret/)
+  assert.match(reloginErrorText({...task('a','failed'),error:'mfa: invalid_secret'}), /格式不正确/)
+  assert.match(reloginErrorText({...task('a','failed'),error:'mfa: upstream_rejected'}), /原账号凭据保持不变/)
+  assert.equal(reloginStep(task('a','mfa')),4)
+})

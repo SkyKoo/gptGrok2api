@@ -49,6 +49,9 @@ type WebRegistrar struct {
 	profile              BrowserProfile
 	device, state        string
 	authSessionID        string
+	loginTOTPSecret      string
+	loginMFACompleted    bool
+	loginProgress        Progress
 	proxy                string
 	timezone             *time.Location
 	resolveTimezone      func(context.Context, string, string) *time.Location
@@ -319,6 +322,13 @@ func (r *WebRegistrar) continueAfterOTP(ctx context.Context, reply webReply, ema
 	if next == "" {
 		next = reply.headers.Get("Location")
 	}
+	if loginMFARequired(reply.data, next) {
+		verified, err := r.completeLoginMFA(ctx, reply.data, next)
+		if err != nil {
+			return err
+		}
+		return r.continueAfterOTP(ctx, verified, email, existingOnly)
+	}
 	if profilePage(reply.data) {
 		if existingOnly {
 			return fail("session", "profile_completion_required")
@@ -340,6 +350,13 @@ func (r *WebRegistrar) followContinuation(ctx context.Context, next, email strin
 		u, err := base.Parse(next)
 		if err != nil || !r.trusted(u.String()) {
 			return fail("session", "untrusted_continuation")
+		}
+		if loginMFARequired(nil, u.String()) {
+			verified, err := r.completeLoginMFA(ctx, nil, u.String())
+			if err != nil {
+				return err
+			}
+			return r.continueAfterOTP(ctx, verified, email, existingOnly)
 		}
 		path := strings.TrimRight(u.Path, "/")
 		if sameOrigin(u.String(), r.auth) && (path == "/about-you" || path == "/api/accounts/user/profile") {
@@ -370,6 +387,13 @@ func (r *WebRegistrar) followContinuation(ctx context.Context, next, email strin
 		}
 		if res.status != 200 {
 			return fail("session", "unexpected_status")
+		}
+		if loginMFARequired(res.data, continuationURL(res.data)) {
+			verified, err := r.completeLoginMFA(ctx, res.data, continuationURL(res.data))
+			if err != nil {
+				return err
+			}
+			return r.continueAfterOTP(ctx, verified, email, existingOnly)
 		}
 		if profilePage(res.data) {
 			if existingOnly {
@@ -438,6 +462,9 @@ func (r *WebRegistrar) register(ctx context.Context, box Mailbox, cfg FreeConfig
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	r.loginMFACompleted = false
+	r.loginProgress = progress
+	defer func() { r.loginProgress = nil; r.loginTOTPSecret = "" }()
 	// Resolve once per login attempt, before any auth request. The selected
 	// proxy is fixed by the constructor; saved browser/device identity is retained.
 	if r.resolveTimezone != nil {

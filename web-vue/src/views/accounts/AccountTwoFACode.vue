@@ -1,7 +1,7 @@
 <template>
   <div class="min-w-[10rem] space-y-2 text-xs" :aria-label="`${item.email || '账号'} 2FA`">
     <div class="flex flex-wrap items-center gap-2">
-      <StatusPill :label="item.has_two_factor_secret ? '已配置' : item.twofa_pending_activation ? '待激活 / 待核对' : '未配置'" :tone-class="item.has_two_factor_secret ? 'border-teal-500/30 bg-teal-500/10 text-teal-600' : 'border-border text-muted-foreground'" />
+      <StatusPill :label="item.has_two_factor_secret ? '已配置' : item.twofa_pending_activation ? '待激活 / 待核对' : '未保存密钥'" :tone-class="item.has_two_factor_secret ? 'border-teal-500/30 bg-teal-500/10 text-teal-600' : 'border-border text-muted-foreground'" />
       <Button v-if="item.has_two_factor_secret" size="xs" variant="outline" :disabled="copying || item.is_demo" @click="copySecret">复制密钥</Button>
     </div>
     <template v-if="item.has_two_factor_secret">

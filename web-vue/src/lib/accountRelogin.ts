@@ -24,11 +24,11 @@ export const reloginSteps = ['准备邮箱', '初始化登录', '等待验证码
 
 export function reloginStep(task: AccountReloginTask): number {
   const stage = task.failed_stage || task.stage
-  return ({ mail: 0, mailbox: 0, authorize: 1, send_code: 2, wait_code: 2, validate_code: 3, session: 4, save_session: 4, refresh_account: 4, completed: 5 } as Record<string, number>)[stage] ?? -1
+  return ({ mail: 0, mailbox: 0, authorize: 1, send_code: 2, wait_code: 2, validate_code: 3, mfa: 4, session: 4, save_session: 4, refresh_account: 4, completed: 5 } as Record<string, number>)[stage] ?? -1
 }
 
 export function reloginStageLabel(stage: string): string {
-  return ({ queued: '等待启动', config: '准备登录环境', mailbox: '准备邮箱', mail: '准备邮箱', authorize: '初始化登录', send_code: '重新发送验证码', wait_code: '等待邮箱验证码', validate_code: '验证验证码', session: '获取会话', save_session: '校验账号并保存会话', refresh_account: '刷新用户信息和额度', completed: '会话已更新', failed: '重新登录失败', unavailable: '进度记录已不可用' } as Record<string, string>)[stage] || '处理登录请求'
+  return ({ queued: '等待启动', config: '准备登录环境', mailbox: '准备邮箱', mail: '准备邮箱', authorize: '初始化登录', send_code: '重新发送验证码', wait_code: '等待邮箱验证码', validate_code: '验证验证码', mfa: '验证已有 2FA', session: '获取会话', save_session: '校验账号并保存会话', refresh_account: '刷新用户信息和额度', completed: '会话已更新', failed: '重新登录失败', unavailable: '进度记录已不可用' } as Record<string, string>)[stage] || '处理登录请求'
 }
 
 export function reloginErrorText(task: AccountReloginTask): string {
@@ -36,6 +36,9 @@ export function reloginErrorText(task: AccountReloginTask): string {
   if (task.session_updated && task.next_validation_at) return '新登录凭据已保存，账号保持异常并暂停调度。系统将使用已保存的凭据重试用户信息和额度校验，无需再次邮箱登录。'
   if (task.session_updated) return '新登录凭据已保存，但用户信息或额度刷新未完成。账号已标记异常并暂停调度，请刷新账号信息和额度完成校验。'
   const error = task.error || ''
+  if (error.includes('mfa: secret_required')) return '上游要求验证已有 2FA。请在编辑账号中补填原 2FA Secret 后重试，无需再次开启 2FA。'
+  if (error.includes('mfa: invalid_secret')) return '已保存的 2FA Secret 格式不正确，请核对原验证器密钥后重试。'
+  if (error.startsWith('mfa:')) return '已有 2FA 验证未完成，原账号凭据保持不变并暂停调度。请核对原始密钥、验证器时间及错误详情后重试。'
   if (error.includes('timeout')) return '等待超时，请确认邮箱服务可用后重试。'
   if (error.includes('cancelled')) return '登录任务已中止，可以重新尝试。'
   if (error.includes('saved_browser_profile_unsupported')) return '已保存的登录环境不受支持，请检查账号配置。'

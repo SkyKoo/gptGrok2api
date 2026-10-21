@@ -305,6 +305,7 @@ func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConf
 		mail.Close()
 		return cfg, nil, nil, err
 	}
+	flow.SetLoginTOTPSecret(firstNonEmpty(stringValue(account["two_factor_secret"]), stringValue(account["totp_secret"])))
 	return cfg, mail, flow, nil
 }
 

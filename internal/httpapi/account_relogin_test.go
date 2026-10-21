@@ -18,7 +18,7 @@ import (
 )
 
 func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
-	for _, scenario := range []string{"account", "journal", "legacy_fp", "fresh", "login_failure", "identity_mismatch"} {
+	for _, scenario := range []string{"account", "journal", "legacy_fp", "fresh", "login_failure", "identity_mismatch", "mfa", "mfa_legacy", "mfa_missing_secret", "mfa_wrong"} {
 		t.Run(scenario, func(t *testing.T) {
 			profile := registerruntime.NewBrowserProfile()
 			const email = "alias@example.test"
@@ -30,6 +30,7 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 			var loggingIDs []string
 			var devices []string
 			csrfCount, anonymousCount, otpCount := 0, 0, 0
+			mfaCount := 0
 			var base string
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
@@ -107,6 +108,26 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 					if body["code"] != "987654" {
 						t.Error("missing fresh OTP")
 					}
+					if strings.HasPrefix(scenario, "mfa") {
+						write(map[string]any{"continue_url": base + "/mfa-challenge/fixture-factor", "page": map[string]any{"type": "mfa_challenge"}})
+						return
+					}
+					write(map[string]string{"continue_url": base + fmt.Sprintf("/api/auth/callback/openai?state=state-%d&code=new-code", csrfCount)})
+				case "/api/accounts/mfa/issue_challenge":
+					write(map[string]any{})
+				case "/api/accounts/mfa/verify":
+					mfaCount++
+					var body map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&body)
+					want, _ := registerruntime.TOTPCode("JBSWY3DPEHPK3PXP", time.Now())
+					prev, _ := registerruntime.TOTPCode("JBSWY3DPEHPK3PXP", time.Now().Add(-30*time.Second))
+					if body["id"] != "fixture-factor" || body["type"] != "totp" || (body["code"] != want && body["code"] != prev) {
+						t.Error("wrong authenticator challenge submission")
+					}
+					if scenario == "mfa_wrong" {
+						http.Error(w, "rejected", 400)
+						return
+					}
 					write(map[string]string{"continue_url": base + fmt.Sprintf("/api/auth/callback/openai?state=state-%d&code=new-code", csrfCount)})
 				case "/api/auth/callback/openai":
 					if r.URL.Query().Get("state") != fmt.Sprintf("state-%d", csrfCount) {
@@ -130,6 +151,17 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 			cfg.RegisterPath = filepath.Join(root, "register.json")
 			cfg.OpenAIBaseURL, cfg.OpenAIAuthBaseURL = base+"/backend-api", base
 			original := map[string]any{"access_token": "old-token", "email": email, "user_id": "user-1", "enabled": false, "created_at": "2026-01-01T00:00:00Z", "source_type": "chatgpt_web", "registration_job_id": "job-1"}
+			if strings.HasPrefix(scenario, "mfa") {
+				original["refresh_token"] = "saved-oauth-refresh"
+				original["two_factor_secret"] = "JBSWY3DPEHPK3PXP"
+				if scenario == "mfa_missing_secret" {
+					delete(original, "two_factor_secret")
+				}
+				if scenario == "mfa_legacy" {
+					delete(original, "two_factor_secret")
+					original["totp_secret"] = "JBSWY3DPEHPK3PXP"
+				}
+			}
 			if scenario != "fresh" {
 				original["fp"] = map[string]any{"profile": profile.Name, "user-agent": profile.UserAgent, "impersonate": profile.TLSProfile, "oai-device-id": expectedDevice, "legacy-extra": "keep"}
 			}
@@ -157,7 +189,7 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 			}
 			before, _ := os.ReadFile(cfg.AccountsPath)
 			attempts := 2
-			failing := scenario == "login_failure" || scenario == "identity_mismatch"
+			failing := scenario == "login_failure" || scenario == "identity_mismatch" || scenario == "mfa_missing_secret" || scenario == "mfa_wrong"
 			if failing {
 				attempts = 1
 			}
@@ -194,16 +226,25 @@ func TestReloginReusesEnvironmentAndPersistsItAcrossRestart(t *testing.T) {
 					}
 					after, _ := os.ReadFile(cfg.AccountsPath)
 					assertReloginFailurePreservesAccount(t, before, after)
+					if scenario == "mfa_missing_secret" && (mfaCount != 0 || !strings.Contains(stringValue(progress["error"]), "secret_required")) {
+						t.Fatal("missing seed did not stop before challenge submission")
+					}
+					if scenario == "mfa_wrong" && (mfaCount != 1 || progress["failed_stage"] != "mfa") {
+						t.Fatal("MFA rejection retried or wrong stage")
+					}
 					continue
 				}
 				if progress["stage"] != "completed" {
 					t.Fatalf("login failed: %v", progress["error"])
 				}
-				if strings.Contains(rec.Body.String(), "browser_profile") || strings.Contains(rec.Body.String(), "new-token-") {
+				if strings.Contains(rec.Body.String(), "JBSWY3DPEHPK3PXP") || strings.Contains(rec.Body.String(), "saved-oauth-refresh") || strings.Contains(rec.Body.String(), "browser_profile") || strings.Contains(rec.Body.String(), "new-token-") {
 					t.Fatal("private state leaked into progress")
 				}
 				items, _ = server.store.AccountList()
 				saved := items[0]
+				if strings.HasPrefix(scenario, "mfa") && (mfaCount != attempt || firstNonEmpty(stringValue(saved["two_factor_secret"]), stringValue(saved["totp_secret"])) != "JBSWY3DPEHPK3PXP" || saved["refresh_token"] != "saved-oauth-refresh") {
+					t.Fatal("relogin lost existing 2FA/OAuth credentials or skipped verification")
+				}
 				rawCookies, _ := json.Marshal(saved["web_cookies"])
 				if !strings.Contains(string(rawCookies), "fresh-session") {
 					t.Fatal("new login cookies were not persisted")

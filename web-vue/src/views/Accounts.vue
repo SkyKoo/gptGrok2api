@@ -581,14 +581,14 @@
                       <Button type="button" size="sm" variant="outline" @click="copyCredential(form.two_factor_pending_secret, '2FA 待激活密钥')">复制待激活密钥</Button>
                     </div>
                     <label class="text-xs">
-                      <span class="ui-field-label">2FA Secret</span>
+                      <span class="ui-field-label">2FA Secret（已有账号可补填原始密钥）</span>
                       <div class="flex gap-2">
                         <Input
                           v-model="form.two_factor_secret"
                           :type="showTwoFactorSecret ? 'text' : 'password'"
                           block
                           autocomplete="off"
-                          placeholder="没有则留空"
+                          placeholder="粘贴原验证器密钥，不是六位验证码"
                         />
                         <Button
                           type="button"
@@ -615,6 +615,7 @@
                           复制
                         </Button>
                       </div>
+                      <p class="mt-1 text-muted-foreground">已有 2FA：保存原始密钥后即可查看验证码，重新登录也会自动验证；无需再次开启。Session JSON 不包含此密钥。</p>
                     </label>
                   </div>
                   <label class="mt-2.5 block text-xs">

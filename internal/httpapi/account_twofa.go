@@ -185,7 +185,7 @@ func (s *Server) accountTwoFAAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	profile, err := s.accountReloginProfile(account)
 	if err != nil || profile == nil || stringValue(mapValue(account["fp"])["oai-device-id"]) == "" {
-		writeError(w, http.StatusBadRequest, "缺少账号保存的浏览器环境或设备标识，请先完成重新登录", "invalid_request_error")
+		writeError(w, http.StatusBadRequest, "缺少浏览器环境或设备标识。已开启 2FA 的账号请在编辑账号中补填原 2FA Secret，无需重复开启；尚未开启的账号请先完成重新登录", "invalid_request_error")
 		return
 	}
 	proxy := s.proxyManager.Resolve(account, false)
