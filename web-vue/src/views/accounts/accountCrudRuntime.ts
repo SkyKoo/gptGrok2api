@@ -66,6 +66,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
   const refreshingAccountId = ref('')
   const resettingAccountId = ref('')
   const form = reactive(createDefaultForm())
+  let originalAccessToken = ''
+  let credentialsReady = false
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
   let syncProxyControlsFromValue: (value: unknown) => void = () => {}
@@ -77,6 +79,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
 
   function resetForm() {
     editingId.value = null
+    originalAccessToken = ''
+    credentialsReady = false
     Object.assign(form, createDefaultForm())
     syncProxyControlsFromValue(form.proxy)
   }
@@ -89,6 +93,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
 
   async function openEditModal(item: Account) {
     editingId.value = item.id
+    credentialsReady = false
+    originalAccessToken = ''
     form.id = item.id
     form.access_token = item.access_token || ''
     form.email = item.email || ''
@@ -108,6 +114,8 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     try {
       const secrets = await accountsApi.getAccountSecrets(item.id)
       if (editingId.value !== item.id) return
+      originalAccessToken = secrets.access_token
+      credentialsReady = true
       form.access_token = secrets.access_token
       form.email = secrets.email || form.email
       form.user_id = secrets.user_id || form.user_id
@@ -125,6 +133,14 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
   }
 
   async function saveAccount() {
+    if (editingId.value && !credentialsReady) {
+      toast.warning('账号凭据尚未读取完成，请稍后再保存；读取失败时请重新打开编辑')
+      return
+    }
+    if (editingId.value && form.access_token.trim() !== originalAccessToken) {
+      toast.warning('编辑资料不支持替换 Access Token，请使用导入或重新登录更新会话')
+      return
+    }
     if (!form.access_token.trim()) {
       toast.warning('Access token 不能为空')
       return

@@ -842,8 +842,9 @@ export const accountsApi = {
 
   upsert: async (payload: Partial<Account>) => {
     const account = accountFromPayload(payload)
-    const existingToken = payload.id ? accountTokenById.get(payload.id) : ''
-    if (existingToken && existingToken === account.access_token) {
+    // 编辑身份来自列表的公开引用，不能与凭据接口返回的真实 Token 比较。
+    const existingToken = payload.id ? resolveToken(payload.id) : ''
+    if (existingToken) {
       const response = await apiClient.post<
         {
           access_token: string
@@ -872,19 +873,23 @@ export const accountsApi = {
         login_password: account.login_password,
         two_factor_secret: account.two_factor_secret,
       })
+      if (!response.item) throw new Error('账号更新未返回保存结果，请刷新后确认')
       return {
         status: 'ok',
-        account: response.item ? mapBackendAccount(response.item, 0, new Set()) : undefined,
+        account: mapBackendAccount(response.item, 0, new Set()),
       }
     }
 
     const response = await apiClient.post<
       { tokens: string[]; accounts: Array<Record<string, unknown>> },
-      { items?: BackendAccount[] }
+      { added?: number; skipped?: number; items?: BackendAccount[] }
     >('/api/accounts', {
       tokens: [],
       accounts: [account],
     })
+    if (response.added !== 1) {
+      throw new Error(response.skipped ? '该账号已存在，请在账号列表中编辑，修改尚未保存' : '账号未添加，请刷新后确认')
+    }
     const mapped = mapAccountsResponse({ items: response.items || [] })
     return { status: 'ok', account: mapped.accounts.find((item) => item.access_token === account.access_token) || mapped.accounts[0] }
   },

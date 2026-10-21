@@ -14,7 +14,8 @@
     "test:registration-schedule": "node --experimental-strip-types --test scripts/registration-schedule.test.mjs",
     "test:account-quotas": "node --experimental-strip-types --test scripts/account-quotas.test.mjs",
     "test:session-import": "node --experimental-strip-types --test scripts/session-import.test.mjs",
-    "test:account-relogin": "node --experimental-strip-types --test scripts/account-relogin.test.mjs"
+    "test:account-relogin": "node --experimental-strip-types --test scripts/account-relogin.test.mjs",
+    "test:account-edit": "node --experimental-strip-types --test scripts/account-edit.test.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",
