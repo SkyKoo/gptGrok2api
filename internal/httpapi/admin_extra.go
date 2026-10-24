@@ -528,6 +528,7 @@ func (s *Server) accountCleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	accounts, _ := s.store.AccountList()
 	candidates := []string{}
+	candidateAccounts := make([]map[string]any, 0)
 	invalidCandidates := 0
 	limitedCandidates := 0
 	for _, account := range accounts {
@@ -540,6 +541,7 @@ func (s *Server) accountCleanup(w http.ResponseWriter, r *http.Request) {
 		limited := removeLimited && category == "limited"
 		if invalid || limited {
 			candidates = append(candidates, accountToken(account))
+			candidateAccounts = append(candidateAccounts, account)
 			if invalid {
 				invalidCandidates++
 			}
@@ -550,8 +552,9 @@ func (s *Server) accountCleanup(w http.ResponseWriter, r *http.Request) {
 	}
 	dryRun := strings.HasSuffix(r.URL.Path, "/preview")
 	removed := 0
+	hmeCleanup := hmeCleanupSummary{}
 	if !dryRun {
-		removed, _, _ = s.store.DeleteAccounts(candidates)
+		removed, _, hmeCleanup, _ = s.deleteAccountsAndCleanup(r.Context(), candidates, candidateAccounts)
 	}
 	total := len(candidates)
 	if !dryRun {
@@ -567,6 +570,7 @@ func (s *Server) accountCleanup(w http.ResponseWriter, r *http.Request) {
 		"rate_limited":        limitedCandidates,
 		"remove_invalid":      removeInvalid,
 		"remove_rate_limited": removeLimited,
+		"hme_cleanup":         hmeCleanup,
 	})
 }
 

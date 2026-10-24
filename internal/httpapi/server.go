@@ -1608,6 +1608,7 @@ func (s *Server) cleanupImportedAbnormalAccounts(w http.ResponseWriter, r *http.
 		targets[token] = struct{}{}
 	}
 	abnormalTokens := make([]string, 0, len(tokens))
+	abnormalAccounts := make([]map[string]any, 0, len(tokens))
 	seen := make(map[string]struct{}, len(tokens))
 	for _, item := range items {
 		token := accountToken(item)
@@ -1619,20 +1620,23 @@ func (s *Server) cleanupImportedAbnormalAccounts(w http.ResponseWriter, r *http.
 		}
 		seen[token] = struct{}{}
 		abnormalTokens = append(abnormalTokens, token)
+		abnormalAccounts = append(abnormalAccounts, item)
 	}
 	removed := 0
+	hmeCleanup := hmeCleanupSummary{}
 	if body.Remove && len(abnormalTokens) > 0 {
-		removed, _, err = s.store.DeleteAccounts(abnormalTokens)
+		removed, _, hmeCleanup, err = s.deleteAccountsAndCleanup(r.Context(), abnormalTokens, abnormalAccounts)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"checked":  len(refs),
-		"abnormal": len(abnormalTokens),
-		"removed":  removed,
-		"errors":   missing,
+		"checked":     len(refs),
+		"abnormal":    len(abnormalTokens),
+		"removed":     removed,
+		"errors":      missing,
+		"hme_cleanup": hmeCleanup,
 	})
 }
 
@@ -1653,24 +1657,36 @@ func (s *Server) deleteAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens, missing := resolveAccountRefTokens(items, body.Tokens)
+	accountsToDelete := make([]map[string]any, 0, len(tokens))
+	for _, token := range tokens {
+		for _, item := range items {
+			if accountToken(item) == token {
+				accountsToDelete = append(accountsToDelete, item)
+				break
+			}
+		}
+	}
 	s.authStartMu.Lock()
-	defer s.authStartMu.Unlock()
 	for _, token := range tokens {
 		if s.twoFAActive(accountRefForToken(items, token)) {
+			s.authStartMu.Unlock()
 			writeError(w, http.StatusConflict, "该账号正在开启 2FA，请等待或先取消任务", "invalid_request_error")
 			return
 		}
 	}
 
 	removed, items, err := s.store.DeleteAccounts(tokens)
+	s.authStartMu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
+	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accountsToDelete)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"removed": removed,
-		"errors":  missing,
-		"items":   accountsForAPI(items),
+		"removed":     removed,
+		"errors":      missing,
+		"items":       accountsForAPI(items),
+		"hme_cleanup": hmeCleanup,
 	})
 }
 

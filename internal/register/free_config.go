@@ -56,6 +56,7 @@ type FreeConfig struct {
 	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
+	DeleteMailboxOnAccountDelete       bool
 	AutoTwoFA                          bool
 	// BrowserProfile is selected by the registration flow factory. It is not
 	// user configuration; compensation retries may set it to the saved task
@@ -130,6 +131,7 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 		}
 		password, _ := p["admin_password"].(string)
 		c.HME = HMEConfig{BaseURL: strings.TrimRight(stringValue(p["api_base"]), "/"), Password: password, AccountID: stringValue(p["account_id"])}
+		c.DeleteMailboxOnAccountDelete = boolValue(p["delete_hme_mailbox_on_account_delete"], false)
 	}
 	if count != 1 {
 		return c, fail("config", "enable_exactly_one_icloud_hme_provider")

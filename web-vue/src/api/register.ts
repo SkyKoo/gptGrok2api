@@ -39,6 +39,7 @@ export type RegisterProvider = {
   admin_password?: string
   admin_password_set?: boolean
   account_id?: string
+  delete_hme_mailbox_on_account_delete?: boolean
   ddg_token?: string
   cf_inbox_jwt?: string
   cf_api_base?: string

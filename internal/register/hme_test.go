@@ -3,6 +3,7 @@ package register
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -152,6 +153,61 @@ func TestHMEAuthenticatesCreatesAliasAndReadsFreshJunkCode(t *testing.T) {
 	}
 	if created != 1 || detail != 1 {
 		t.Fatalf("created=%d detail=%d", created, detail)
+	}
+}
+
+func TestHMEDeleteMailboxMatchesAccountAndEmail(t *testing.T) {
+	loginCalls, listCalls, deleteCalls := 0, 0, 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+		switch r.URL.Path {
+		case "/api/auth/login":
+			loginCalls++
+			http.SetCookie(w, &http.Cookie{Name: "hme_session", Value: "session", Path: "/"})
+			respond(map[string]string{"csrf_token": "csrf"})
+		case "/api/mailboxes":
+			listCalls++
+			respond(map[string]any{"mailboxes": []map[string]string{
+				{"id": "other", "account_id": "acc-other", "email": "alias@example.test"},
+				{"id": "target", "account_id": "acc-test", "email": "Alias@Example.Test"},
+			}})
+		case "/api/mailboxes/target":
+			deleteCalls++
+			respond(map[string]any{"success": true})
+		default:
+			t.Fatalf("unexpected HME path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	h, err := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if err := h.DeleteMailbox(context.Background(), Mailbox{Email: "alias@example.test", AccountID: "acc-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if loginCalls != 1 || listCalls != 1 || deleteCalls != 1 {
+		t.Fatalf("unexpected calls login=%d list=%d delete=%d", loginCalls, listCalls, deleteCalls)
+	}
+}
+
+func TestHMEDeleteMailboxReportsMissingWithoutDelete(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+		if r.URL.Path == "/api/auth/login" {
+			respond(map[string]string{"csrf_token": "csrf"})
+			return
+		}
+		respond(map[string]any{"mailboxes": []map[string]string{}})
+	}))
+	defer server.Close()
+	h, _ := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Second)
+	defer h.Close()
+	err := h.DeleteMailbox(context.Background(), Mailbox{Email: "alias@example.test", AccountID: "acc-test"})
+	var failure *Failure
+	if !errors.As(err, &failure) || failure.Code != "mailbox_not_found" {
+		t.Fatalf("expected mailbox_not_found, got %v", err)
 	}
 }
 

@@ -31,6 +31,7 @@ func (c HMEConfig) Validate() error {
 }
 
 type Mailbox struct {
+	ID        string `json:"id,omitempty"`
 	Email     string `json:"email"`
 	AccountID string `json:"account_id"`
 }
@@ -214,6 +215,39 @@ func (h *HME) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
 		return Mailbox{}, fail("mail", "invalid_alias_response")
 	}
 	return box, nil
+}
+
+// DeleteMailbox removes the HME mailbox that belongs to the supplied CFM
+// registration mailbox. The HME API requires its internal mailbox ID, so the
+// address and HME account ID are matched before issuing DELETE. A missing
+// mailbox is reported with a stable error code so callers can keep the CFM
+// deletion successful while showing an actionable cleanup result.
+func (h *HME) DeleteMailbox(ctx context.Context, box Mailbox) error {
+	if box.AccountID == "" || box.AccountID != h.cfg.AccountID {
+		return fail("mail", "mailbox_account_mismatch")
+	}
+	address, err := mail.ParseAddress(box.Email)
+	if err != nil || address.Address != box.Email {
+		return fail("mail", "invalid_saved_mailbox")
+	}
+	if h.csrf == "" {
+		if err := h.login(ctx); err != nil {
+			return err
+		}
+	}
+	var response struct {
+		Mailboxes []Mailbox `json:"mailboxes"`
+	}
+	if err := h.request(ctx, http.MethodGet, "/api/mailboxes", nil, &response); err != nil {
+		return err
+	}
+	for _, candidate := range response.Mailboxes {
+		if candidate.ID == "" || candidate.AccountID != box.AccountID || !strings.EqualFold(candidate.Email, box.Email) {
+			continue
+		}
+		return h.request(ctx, http.MethodDelete, "/api/mailboxes/"+url.PathEscape(candidate.ID), nil, nil)
+	}
+	return fail("mail", "mailbox_not_found")
 }
 
 type hmeMessage struct{ ID, Folder, From, To, Subject, Date, Preview, Body string }

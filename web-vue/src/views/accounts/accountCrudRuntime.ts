@@ -1,6 +1,6 @@
 import { reactive, ref } from 'vue'
 
-import { accountsApi, normalizeAccountBackendStatus, type Account, type AccountBackendStatus } from '@/api/accounts'
+import { accountsApi, normalizeAccountBackendStatus, type Account, type AccountBackendStatus, type HMECleanupSummary } from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 
@@ -57,6 +57,21 @@ function normalizeQuota(value: unknown): number | undefined {
   if (!raw) return undefined
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : undefined
+}
+
+function hmeCleanupNotice(summary?: HMECleanupSummary) {
+  if (!summary?.enabled) return ''
+  const deleted = Number(summary.deleted || 0)
+  const notFound = Number(summary.not_found || 0)
+  const failed = Number(summary.failed || 0)
+  const skipped = Number(summary.skipped || 0)
+  if (deleted === 0 && notFound === 0 && failed === 0 && skipped > 0) return '该账号不是 HME 来源，未执行上游删除'
+  const parts = [`HME 邮箱同步删除成功 ${deleted} 个`]
+  if (notFound) parts.push(`未找到 ${notFound} 个`)
+  if (failed) parts.push(`失败 ${failed} 个`)
+  const failedResult = summary.results?.find(item => item.status === 'failed' && item.message)
+  if (failedResult?.message) parts.push(failedResult.message)
+  return parts.join('，')
 }
 
 export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
@@ -255,8 +270,13 @@ export function useAccountCrudRuntime(options: AccountCrudRuntimeOptions) {
     if (!confirmed) return
 
     try {
-      await accountsApi.delete(accountId)
-      toast.success(`账号 ${accountId} 已删除`)
+      const result = await accountsApi.delete(accountId)
+      const hmeNotice = hmeCleanupNotice(result.hme_cleanup)
+      if (result.hme_cleanup?.enabled && Number(result.hme_cleanup.failed || 0) > 0) {
+        toast.warning(`账号 ${accountId} 已删除，但${hmeNotice}`)
+      } else {
+        toast.success(`账号 ${accountId} 已删除${hmeNotice ? `；${hmeNotice}` : ''}`)
+      }
       await options.loadData({ silentErrorToast: true })
     } catch (error) {
       options.setError('删除失败', error)

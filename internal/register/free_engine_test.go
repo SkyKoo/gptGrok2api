@@ -362,8 +362,13 @@ func TestFreeEngineCorruptJournalAndInvalidConfigFailBeforeNetwork(t *testing.T)
 	accepted := freeTestConfig()
 	accepted["threads"] = 2
 	accepted["total"] = 2
-	if _, err := ParseFreeConfig(accepted); err != nil {
+	object(object(accepted["mail"])["providers"].([]any)[0])["delete_hme_mailbox_on_account_delete"] = true
+	parsed, err := ParseFreeConfig(accepted)
+	if err != nil {
 		t.Fatalf("configurable total/thread count rejected: %v", err)
+	}
+	if !parsed.DeleteMailboxOnAccountDelete {
+		t.Fatal("HME cleanup switch was not parsed")
 	}
 }
 

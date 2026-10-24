@@ -298,6 +298,23 @@ type BackendAccountMutationResponse = {
   errors?: Array<{ token?: string; error?: string } | string>
   group_id?: string
   groups?: AccountGroup[]
+  hme_cleanup?: HMECleanupSummary
+}
+
+export type HMECleanupResult = {
+  account_ref?: string
+  email?: string
+  status?: 'deleted' | 'not_found' | 'not_hme_source' | 'failed' | string
+  message?: string
+}
+
+export type HMECleanupSummary = {
+  enabled?: boolean
+  deleted?: number
+  skipped?: number
+  not_found?: number
+  failed?: number
+  results?: HMECleanupResult[]
 }
 
 type AccountImportPayload = Record<string, unknown>
@@ -816,6 +833,7 @@ async function deleteAccountsByIds(accountIdsOrTokens: string[]) {
     errors: Array.isArray(response.errors)
       ? response.errors.map((item) => (typeof item === 'string' ? item : String(item.error || item.token || ''))).filter(Boolean)
       : [],
+    hme_cleanup: response.hme_cleanup,
   }
 }
 
@@ -980,9 +998,9 @@ export const accountsApi = {
   },
 
   delete: async (accountId: string) => {
-    await deleteAccountsByIds([accountId])
+    const result = await deleteAccountsByIds([accountId])
     accountTokenById.delete(accountId)
-    return { status: 'ok', deleted: accountId }
+    return { status: 'ok', deleted: accountId, hme_cleanup: result.hme_cleanup }
   },
 
   refreshToken: async (accountId: string) => {

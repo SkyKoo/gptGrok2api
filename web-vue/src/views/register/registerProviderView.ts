@@ -133,7 +133,7 @@ export const providerTypeKeys: Record<string, string[]> = {
   duckmail: ['api_key', 'default_domain'],
   gptmail: ['key_mode', 'api_key', 'default_domain', 'local_compose'],
   icloud_api: ['api_base', 'api_key', 'project', 'purpose', 'keyword', 'wait_ms', 'use_proxy'],
-  icloud_hme: ['api_base', 'admin_password', 'admin_password_set', 'account_id'],
+  icloud_hme: ['api_base', 'admin_password', 'admin_password_set', 'account_id', 'delete_hme_mailbox_on_account_delete'],
   icloud_local: ['project', 'purpose', 'keyword', 'wait_ms'],
   donemail: ['api_base', 'admin_key', 'domain', 'email_prefix', 'message_limit'],
   yyds_mail: ['api_base', 'api_key', 'domain', 'subdomain', 'wildcard'],
@@ -366,7 +366,7 @@ export function defaultProvider(type = 'icloud_hme'): RegisterProvider {
     case 'gptmail':
       return { ...base, key_mode: 'public', api_key: '', default_domain: '', local_compose: false }
     case 'icloud_hme':
-      return { ...base, api_base: '', admin_password: '', account_id: '' }
+      return { ...base, api_base: '', admin_password: '', account_id: '', delete_hme_mailbox_on_account_delete: false }
     case 'icloud_api':
       return {
         ...base,

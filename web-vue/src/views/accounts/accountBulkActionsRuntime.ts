@@ -1,6 +1,6 @@
 import type { Ref } from 'vue'
 
-import { accountsApi, type Account, type AccountGroup } from '@/api/accounts'
+import { accountsApi, type Account, type AccountGroup, type HMECleanupSummary } from '@/api/accounts'
 import type { ProxyGroup } from '@/api/proxy'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
@@ -19,6 +19,7 @@ type AccountBulkMutationResponse = {
   updated?: number
   removed?: number
   errors?: unknown[]
+  hme_cleanup?: HMECleanupSummary
 }
 
 type AccountBulkMutationSummary = {
@@ -27,6 +28,7 @@ type AccountBulkMutationSummary = {
   stopped: boolean
   processed: number
   processed_ids: string[]
+  hme_cleanup?: HMECleanupSummary
 }
 
 type AccountBulkActionsRuntimeOptions = {
@@ -64,6 +66,30 @@ function normalizeErrorList(errors: unknown) {
   return errors
     .map(refreshErrorText)
     .filter(Boolean)
+}
+
+function mergeHMECleanup(target: HMECleanupSummary, source?: HMECleanupSummary) {
+  if (!source) return
+  target.enabled = target.enabled || source.enabled === true
+  for (const key of ['deleted', 'skipped', 'not_found', 'failed'] as const) {
+    target[key] = Number(target[key] || 0) + Number(source[key] || 0)
+  }
+  if (Array.isArray(source.results)) target.results = [...(target.results || []), ...source.results]
+}
+
+function hmeCleanupNotice(summary?: HMECleanupSummary) {
+  if (!summary?.enabled) return ''
+  const deleted = Number(summary.deleted || 0)
+  const notFound = Number(summary.not_found || 0)
+  const failed = Number(summary.failed || 0)
+  const skipped = Number(summary.skipped || 0)
+  if (deleted === 0 && notFound === 0 && failed === 0 && skipped > 0) return '没有 HME 来源账号，未执行上游删除'
+  const parts = [`HME 邮箱同步删除成功 ${deleted} 个`]
+  if (notFound) parts.push(`未找到 ${notFound} 个`)
+  if (failed) parts.push(`失败 ${failed} 个`)
+  const failedResult = summary.results?.find(item => item.status === 'failed' && item.message)
+  if (failedResult?.message) parts.push(`首个失败：${failedResult.message}`)
+  return parts.join('，')
 }
 
 function bulkActionMeta(action: AccountBulkAction) {
@@ -226,6 +252,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
     let successCount = 0
     const errors: string[] = []
     const processedIds: string[] = []
+    const hmeCleanup: HMECleanupSummary = { enabled: false, deleted: 0, skipped: 0, not_found: 0, failed: 0, results: [] }
 
     try {
       for (let index = 0; index < targetIds.length; index += options.refreshBatchSize) {
@@ -234,6 +261,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
         try {
           const result = await mutateAccounts(batch)
           const batchErrors = normalizeErrorList(result?.errors)
+          mergeHMECleanup(hmeCleanup, result?.hme_cleanup)
           const batchSuccess = Number(
             result?.success_count ?? result?.updated ?? result?.removed ?? (batch.length - batchErrors.length),
           )
@@ -260,7 +288,7 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
         processed,
         total_quota: 0,
       })
-      return { success_count: successCount, errors, stopped, processed, processed_ids: processedIds }
+      return { success_count: successCount, errors, stopped, processed, processed_ids: processedIds, hme_cleanup: hmeCleanup }
     } finally {
       options.bulkProgress.end()
     }
@@ -302,12 +330,13 @@ export function useAccountBulkActionsRuntime(options: AccountBulkActionsRuntimeO
       }
 
       const errors = Array.isArray(result.errors) ? result.errors.filter(Boolean) : []
+      const hmeNotice = hmeCleanupNotice(result.hme_cleanup)
       if (result.stopped) {
         toast.warning(`${actionMeta.title}已停止，已处理 ${result.processed || 0}/${targetIds.length} 个账号`)
       } else if (errors.length > 0) {
-        toast.warning(`${actionMeta.successText}，成功 ${result.success_count} 个，失败 ${errors.length} 个`)
+        toast.warning(`${actionMeta.successText}，成功 ${result.success_count} 个，失败 ${errors.length} 个${hmeNotice ? `；${hmeNotice}` : ''}`)
       } else {
-        toast.success(`${actionMeta.successText}，共 ${result.success_count} 个`)
+        toast.success(`${actionMeta.successText}，共 ${result.success_count} 个${hmeNotice ? `；${hmeNotice}` : ''}`)
       }
       if (action === 'delete') {
         const deletedIds = result.stopped ? result.processed_ids : targetIds

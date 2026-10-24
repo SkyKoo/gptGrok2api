@@ -123,6 +123,15 @@
             @update:model-value="value => emit('update-field', index, 'account_id', String(value || '').trim())" />
         </label>
 
+        <label v-if="currentType === 'icloud_hme'" class="register-checkbox-field">
+          <Checkbox
+            :model-value="provider.delete_hme_mailbox_on_account_delete === true"
+            :disabled="disabled"
+            @update:model-value="value => emit('update-field', index, 'delete_hme_mailbox_on_account_delete', Boolean(value))"
+          >删除时同步删除 HME 邮箱</Checkbox>
+          <span class="register-help">删除 CFM 账号后，按邮箱和 HME 账号 ID 删除对应上游邮箱；失败时会在删除结果中提示。</span>
+        </label>
+
         <label v-if="providerUsesApiKey(provider) && !providerUsesPublicGptMailKey(provider)" class="register-field">
           <span class="register-label">API Key</span>
           <Input
@@ -1013,9 +1022,18 @@ function numberModelValue(value: unknown) {
 
 .register-checkbox-field {
   display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   min-height: 62px;
   align-items: end;
   padding-bottom: 8px;
+}
+
+.register-help {
+  flex-basis: 100%;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .register-checkbox-field--compact {
