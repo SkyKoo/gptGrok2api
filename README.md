@@ -1,6 +1,6 @@
 # GPTGrok2API Go
 
-这是一个自托管的 OpenAI 兼容网关。本仓库由 Go 版上游项目 fork 后持续维护，当前版本为 `1.3.0-go`，代码以 `main` 分支为准。
+这是一个自托管的 OpenAI 兼容网关。本仓库基于 [lichao199208/gptGrok2api](https://github.com/lichao199208/gptGrok2api) 持续开发，当前版本为 `1.3.0-go`，代码以 `main` 分支为准。
 
 项目通过网页协议和授权协议接入 ChatGPT、Codex 与 Grok，不是 OpenAI、ChatGPT 或 xAI 官方服务。上游接口、模型、账号策略和可用性会变化，请只使用你有权使用的账号，并自行承担账号、网络和内容风险。
 
@@ -25,7 +25,8 @@
 - [多模态聊天](./docs/multimodal-chat.md)：ChatGPT Web 图片输入、Responses 和流式边界。
 - [图片 mask](./docs/image-mask.md)：图片编辑 mask 语义和限制。
 - [ChatGPT Free 注册](./docs/registration/go-free.md)：iCloud 邮箱、浏览器环境、验证码和注册恢复。
-- 上游参考：[yukkcat/chatgpt2api](https://github.com/yukkcat/chatgpt2api)。
+- 基础项目：[lichao199208/gptGrok2api](https://github.com/lichao199208/gptGrok2api)，本仓库在其基础上持续开发。
+- 协议和实现参考：[yukkcat/chatgpt2api](https://github.com/yukkcat/chatgpt2api)。
 - 注册协议参考：[turb-gpt-free-register](https://github.com/myfanhua/turb-gpt-free-register) 的 protocol 流程、浏览器画像和 Sentinel 调用顺序。
 - 图片参数参考：[OpenAI 图片编辑接口](https://developers.openai.com/api/reference/go/resources/images/methods/edit)。
 
