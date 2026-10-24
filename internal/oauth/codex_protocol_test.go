@@ -9,9 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 )
 
 func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
@@ -75,12 +78,27 @@ func TestCodexProtocolManualPhoneSMSAnd2FA(t *testing.T) {
 	protocol.sentinelOrigin = server.URL
 	protocol.sentinelVersion = "test-version"
 	ctx := context.Background()
-	started, err := protocol.Start(ctx, "person@example.test", "")
+	savedProfile := browserprofile.Candidates()[2]
+	started, err := protocol.StartWithEnvironment(ctx, "person@example.test", "", nil, ProtocolEnvironment{
+		Profile:       savedProfile,
+		DeviceID:      "saved-device-id",
+		AuthSessionID: "saved-auth-session",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if started["stage"] != "waiting_phone" {
 		t.Fatalf("stage after start = %q", started["stage"])
+	}
+	if session := protocol.sessions[started["session_id"]]; session == nil {
+		t.Fatal("protocol session was not retained")
+	} else {
+		if !reflect.DeepEqual(session.Profile, savedProfile) {
+			t.Fatalf("saved browser profile was not reused: got=%#v want=%#v", session.Profile, savedProfile)
+		}
+		if session.DeviceID != "saved-device-id" || session.AuthSessionID != "saved-auth-session" {
+			t.Fatalf("saved device identity was not reused: %#v", session)
+		}
 	}
 	id := started["session_id"]
 	phone, err := protocol.SubmitPhone(ctx, id, "+8613800138000")
@@ -137,6 +155,12 @@ func TestPhoneStepRequiresStructuredPhonePage(t *testing.T) {
 		"message": "We've detected suspicious behavior from phone numbers similar to yours.",
 	}}) {
 		t.Fatal("fraud_guard phone rejection must be detected")
+	}
+	if !phoneRejectionText("too many phone submissions") || !phoneRejectionText("rate limit") {
+		t.Fatal("phone rate-limit text must be detected")
+	}
+	if !isExplicitPhoneRejection(protocolBodyError(http.StatusTooManyRequests, nil, []byte("temporary limit"))) {
+		t.Fatal("HTTP 429 phone rejection must be detected")
 	}
 	if isExplicitPhoneRejectionResult(map[string]any{"page": map[string]any{"type": "add_phone"}, "message": "enter your phone number"}) {
 		t.Fatal("ordinary add_phone prompt must not be treated as a phone rejection")

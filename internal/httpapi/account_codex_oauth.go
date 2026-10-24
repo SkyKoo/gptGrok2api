@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -39,6 +40,21 @@ type codexOAuthProgress struct {
 	StartedAt         string
 	UpdatedAt         string
 	FinishedAt        string
+}
+
+func codexProtocolEnvironment(account map[string]any, proxyURL string) (oauth.ProtocolEnvironment, error) {
+	profile, err := provider.BrowserProfileForAccount(account)
+	if err != nil {
+		return oauth.ProtocolEnvironment{}, err
+	}
+	fingerprint, _ := account["fp"].(map[string]any)
+	deviceID := firstNonEmpty(
+		stringValue(account["oai-device-id"]), stringValue(account["oai_device_id"]),
+		stringValue(fingerprint["oai-device-id"]), stringValue(fingerprint["oai_device_id"]),
+	)
+	// auth_session_logging_id is an authorization-attempt identifier, so it
+	// remains fresh per OAuth run even when the browser environment is reused.
+	return oauth.ProtocolEnvironment{Profile: profile, ProxyURL: proxyURL, DeviceID: deviceID}, nil
 }
 
 func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +128,16 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	startedAt := time.Now().UTC()
-	result, err := s.codexProtocolLogin.StartWithTOTP(r.Context(), body.EmailHint, body.Password, s.codexTOTPProvider(account))
+	proxyURL := ""
+	if s.proxyManager != nil {
+		proxyURL = s.proxyManager.Resolve(account, false)
+	}
+	environment, environmentErr := codexProtocolEnvironment(account, proxyURL)
+	if environmentErr != nil {
+		writeError(w, http.StatusBadRequest, environmentErr.Error(), "invalid_request_error")
+		return
+	}
+	result, err := s.codexProtocolLogin.StartWithEnvironment(r.Context(), body.EmailHint, body.Password, s.codexTOTPProvider(account), environment)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, safeOAuthError(err), "upstream_error")
 		return

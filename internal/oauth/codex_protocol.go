@@ -27,6 +27,7 @@ import (
 
 	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"github.com/auucoder/gptgrok2api-go/internal/register"
 	fhttp "github.com/bogdanfinn/fhttp"
 	tlsclient "github.com/bogdanfinn/tls-client"
@@ -51,6 +52,16 @@ type CodexProtocolLogin struct {
 	sessions        map[string]*codexProtocolSession
 }
 
+// ProtocolEnvironment is the account-bound environment used by one Codex
+// authorization. The profile and egress must match the environment used when
+// the account was registered and subsequently reauthenticated.
+type ProtocolEnvironment struct {
+	Profile       browserprofile.Profile
+	ProxyURL      string
+	DeviceID      string
+	AuthSessionID string
+}
+
 type codexProtocolSession struct {
 	operationMu          sync.Mutex
 	TOTPCode             func(string) (string, error)
@@ -62,6 +73,7 @@ type codexProtocolSession struct {
 	Verifier             string
 	AuthBase             string
 	Client               tlsclient.HttpClient
+	ProxyURL             string
 	Profile              browserprofile.Profile
 	DeviceID             string
 	AuthSessionID        string
@@ -97,6 +109,14 @@ func (s *CodexProtocolLogin) Start(ctx context.Context, emailHint, password stri
 // StartWithTOTP resolves an existing authenticator code only when Auth requires MFA.
 // The callback retains an account reference, never the seed or a generated code.
 func (s *CodexProtocolLogin) StartWithTOTP(ctx context.Context, emailHint, password string, code func(string) (string, error)) (map[string]string, error) {
+	return s.StartWithEnvironment(ctx, emailHint, password, code, ProtocolEnvironment{})
+}
+
+// StartWithEnvironment starts Codex authorization using the saved account
+// browser profile, device identity and proxy. A zero environment keeps the
+// standalone protocol tests and unbound login flow compatible by creating a
+// fresh session environment.
+func (s *CodexProtocolLogin) StartWithEnvironment(ctx context.Context, emailHint, password string, code func(string) (string, error), env ProtocolEnvironment) (map[string]string, error) {
 	if s == nil || s.standard == nil {
 		return nil, fmt.Errorf("%w: protocol login is not configured", ErrCodexOAuth)
 	}
@@ -119,17 +139,31 @@ func (s *CodexProtocolLogin) StartWithTOTP(ctx context.Context, emailHint, passw
 	if err != nil || authURL.Scheme == "" || authURL.Host == "" {
 		return nil, fmt.Errorf("%w: invalid authorize URL", ErrCodexOAuth)
 	}
-	profile := browserprofile.New()
-	if location := provider.ResolveOpenAITimezone(ctx, "https://chat.openai.com", "direct"); location != nil {
+	profile := env.Profile
+	if !profile.Valid() {
+		profile = browserprofile.New()
+	}
+	proxyURL := strings.TrimSpace(env.ProxyURL)
+	zoneProxy := proxyURL
+	if zoneProxy == "" {
+		zoneProxy = "direct"
+	}
+	if location := provider.ResolveOpenAITimezone(ctx, "https://chat.openai.com", zoneProxy); location != nil {
 		profile.SetTimezone(location, time.Now())
 	}
-	deviceID, err := randomHex(16)
-	if err != nil {
-		return nil, fmt.Errorf("%w: generate device id: %v", ErrCodexOAuth, err)
+	deviceID := strings.TrimSpace(env.DeviceID)
+	if deviceID == "" {
+		deviceID, err = randomHex(16)
+		if err != nil {
+			return nil, fmt.Errorf("%w: generate device id: %v", ErrCodexOAuth, err)
+		}
 	}
-	authSessionID, err := randomHex(16)
-	if err != nil {
-		return nil, fmt.Errorf("%w: generate auth session id: %v", ErrCodexOAuth, err)
+	authSessionID := strings.TrimSpace(env.AuthSessionID)
+	if authSessionID == "" {
+		authSessionID, err = randomHex(16)
+		if err != nil {
+			return nil, fmt.Errorf("%w: generate auth session id: %v", ErrCodexOAuth, err)
+		}
 	}
 	sentinelSID, err := randomHex(16)
 	if err != nil {
@@ -140,12 +174,12 @@ func (s *CodexProtocolLogin) StartWithTOTP(ctx context.Context, emailHint, passw
 	query.Set("auth_session_logging_id", authSessionID)
 	query.Set("screen_hint", "login_or_signup")
 	authURL.RawQuery = query.Encode()
-	client, err := newProtocolClient(profile)
+	client, err := newProtocolClient(profile, proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: create auth client: %v", ErrCodexOAuth, err)
 	}
 	client.SetCookies(authURL, []*fhttp.Cookie{{Name: "oai-did", Value: deviceID, Path: "/", Secure: authURL.Scheme == "https"}})
-	session := &codexProtocolSession{TOTPCode: code, ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, SentinelSID: sentinelSID, Stage: "starting", CreatedAt: time.Now().UTC()}
+	session := &codexProtocolSession{TOTPCode: code, ID: sessionID, Email: strings.TrimSpace(emailHint), Password: strings.TrimSpace(password), State: state, Verifier: verifier, AuthBase: authURL.Scheme + "://" + authURL.Host, Client: client, ProxyURL: proxyURL, Profile: profile, DeviceID: deviceID, AuthSessionID: authSessionID, SentinelSID: sentinelSID, Stage: "starting", CreatedAt: time.Now().UTC()}
 	s.mu.Lock()
 	s.purgeLocked(time.Now().UTC())
 	s.sessions[sessionID] = session
@@ -171,13 +205,27 @@ func randomHex(size int) (string, error) {
 	return fmt.Sprintf("%x", buf), nil
 }
 
-func newProtocolClient(profile browserprofile.Profile) (tlsclient.HttpClient, error) {
-	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
+func newProtocolClient(profile browserprofile.Profile, proxyURLs ...string) (tlsclient.HttpClient, error) {
+	options := []tlsclient.HttpClientOption{
 		tlsclient.WithClientProfile(profile.TLSClientProfile()),
 		tlsclient.WithTimeoutSeconds(60),
 		tlsclient.WithNotFollowRedirects(),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
-	)
+	}
+	if len(proxyURLs) > 0 {
+		proxyURL := strings.TrimSpace(proxyURLs[0])
+		if proxyURL != "" && !strings.EqualFold(proxyURL, "direct") {
+			options = append(options, tlsclient.WithProxyUrl(proxyURL))
+		}
+	}
+	return tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), options...)
+}
+
+func (s *CodexProtocolLogin) exchange(ctx context.Context, session *codexProtocolSession, code string) (map[string]string, error) {
+	if session != nil && session.ProxyURL != "" && !strings.EqualFold(session.ProxyURL, "direct") {
+		ctx = proxyruntime.WithURL(ctx, session.ProxyURL)
+	}
+	return s.standard.exchange(ctx, code, session.Verifier)
 }
 
 func (s *CodexProtocolLogin) bootstrap(ctx context.Context, session *codexProtocolSession, authorizeURL string) (map[string]string, error) {
@@ -394,7 +442,7 @@ func (s *CodexProtocolLogin) FinishCallback(ctx context.Context, id, callback st
 	if state != "" && state != session.State {
 		return nil, fmt.Errorf("%w: state mismatch", ErrCodexOAuth)
 	}
-	tokens, err := s.standard.exchange(ctx, code, session.Verifier)
+	tokens, err := s.exchange(ctx, session, code)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +467,7 @@ func (s *CodexProtocolLogin) advanceResult(ctx context.Context, session *codexPr
 		if state != "" && state != session.State {
 			return nil, fmt.Errorf("%w: state mismatch", ErrCodexOAuth)
 		}
-		tokens, err := s.standard.exchange(ctx, code, session.Verifier)
+		tokens, err := s.exchange(ctx, session, code)
 		if err != nil {
 			return nil, err
 		}
@@ -950,7 +998,7 @@ func isExplicitPhoneRejection(err error) bool {
 	if !errors.As(err, &protocolErr) {
 		return false
 	}
-	return phoneRejectionText(protocolErr.code) || phoneRejectionText(protocolErr.detail)
+	return protocolErr.status == http.StatusTooManyRequests || phoneRejectionText(protocolErr.code) || phoneRejectionText(protocolErr.detail)
 }
 
 func isExplicitPhoneRejectionResult(result map[string]any) bool {
@@ -994,6 +1042,12 @@ func phoneRejectionText(value string) bool {
 		"phone rejected",
 		"phone verification failed",
 		"phone already used",
+		"too many",
+		"rate limit",
+		"throttle",
+		"limited",
+		"频繁",
+		"限流",
 	} {
 		if strings.Contains(text, marker) {
 			return true

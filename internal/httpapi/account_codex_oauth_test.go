@@ -8,12 +8,27 @@ import (
 	"mime"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
+
+func TestCodexProtocolEnvironmentUsesAccountProfileAndIdentity(t *testing.T) {
+	profile := browserprofile.Candidates()[1]
+	environment, err := codexProtocolEnvironment(map[string]any{
+		"browser_profile": profile,
+		"fp": map[string]any{
+			"oai-device-id": "saved-device",
+		},
+	}, "socks5://proxy.example.test:1080")
+	if err != nil || !reflect.DeepEqual(environment.Profile, profile) || environment.ProxyURL != "socks5://proxy.example.test:1080" || environment.DeviceID != "saved-device" || environment.AuthSessionID != "" {
+		t.Fatalf("account environment was not preserved: %#v", environment)
+	}
+}
 
 func TestCodexHMEMailboxOnlyUsesRegisteredHMEAccounts(t *testing.T) {
 	box, ok := codexHMEMailbox(map[string]any{

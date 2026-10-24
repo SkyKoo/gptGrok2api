@@ -29,6 +29,13 @@ func accountBrowserProfile(account map[string]any) (browserprofile.Profile, erro
 	return browserprofile.Default(), nil
 }
 
+// BrowserProfileForAccount exposes the same saved profile lookup to other
+// account-bound flows, including Codex OAuth. Keeping one lookup path avoids
+// silently creating a different browser environment for a later operation.
+func BrowserProfileForAccount(account map[string]any) (browserprofile.Profile, error) {
+	return accountBrowserProfile(account)
+}
+
 func stableBrowserID(kind, token string) string {
 	sum := sha256.Sum256([]byte(kind + "\x00" + token))
 	sum[6] = (sum[6] & 0x0f) | 0x40
