@@ -8,7 +8,7 @@
       <p class="px-5 pt-4 text-xs text-muted-foreground">各账号独立执行；离开或刷新页面后可继续查看。结束后可手动收起记录。</p>
       <p v-if="pollError" role="status" class="mx-5 mt-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600">暂时无法获取最新进度，正在重新连接。下方保留上次状态，不代表登录失败。</p>
       <p v-if="starting.length" role="status" class="px-5 pt-3 text-sm text-muted-foreground">正在提交 {{ starting.length }} 个登录任务…</p>
-      <div class="max-h-[32rem] overflow-y-auto divide-y divide-border px-5">
+      <div class="max-h-[28rem] overflow-y-auto divide-y divide-border px-5">
         <article v-for="task in tasks" :key="task.progress_id" class="space-y-3 py-4" :aria-label="task.email || task.account_ref">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div class="min-w-0 space-y-1">

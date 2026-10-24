@@ -4,7 +4,7 @@
       <span class="text-sm font-medium">2FA 开启进度 <span class="ml-2 text-xs text-muted-foreground">{{ tasks.filter(t => t.status === 'running').length }} 个进行中</span></span>
       <span class="text-xs text-muted-foreground">{{ expanded ? '收起' : '展开' }}</span>
     </button>
-    <div v-if="expanded" id="account-twofa-tasks" class="border-t border-border px-5">
+    <div v-if="expanded" id="account-twofa-tasks" class="max-h-[28rem] overflow-y-auto border-t border-border px-5">
       <p class="py-3 text-xs text-muted-foreground">HME 邮箱尝试自动取码，也可手动输入邮箱验证码。完成后密钥保存在账号中，可通过“编辑”查看。</p>
       <p v-if="pollError" role="status" class="py-2 text-xs text-amber-600">暂时无法读取进度，正在重连；保留的状态不代表任务失败。</p>
       <p v-if="starting.length" role="status" class="py-2 text-xs text-muted-foreground">正在提交开启任务…</p>

@@ -16,6 +16,7 @@
     "test:session-import": "node --experimental-strip-types --test scripts/session-import.test.mjs",
     "test:account-relogin": "node --experimental-strip-types --test scripts/account-relogin.test.mjs",
     "test:account-edit": "node --experimental-strip-types --test scripts/account-edit.test.mjs",
+    "test:account-progress-layout": "node --experimental-strip-types --test scripts/account-progress-layout.test.mjs",
     "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs"
   },
   "devDependencies": {

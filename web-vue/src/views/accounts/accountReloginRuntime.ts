@@ -16,7 +16,8 @@ export function useAccountReloginRuntime(options: {
     const value: unknown = JSON.parse(window.localStorage.getItem(DISMISSED_KEY) || '[]')
     if (Array.isArray(value)) dismissed.value = value.filter((id): id is string => typeof id === 'string').slice(-300)
   } catch { /* Storage can be disabled; the progress panel still works. */ }
-  const expanded = ref(true)
+  // Do not move the user away from the account list when a task is submitted.
+  const expanded = ref(false)
   const now = ref(Date.now())
   let disposed = false
   let confirming = false
@@ -40,7 +41,7 @@ export function useAccountReloginRuntime(options: {
     window.requestAnimationFrame(() => document.getElementById('account-relogin-progress')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }))
   }
   async function start(accountId: string) {
-    if (tracker.busy(accountId)) { showProgress(); return }
+    if (tracker.busy(accountId)) return
     if (confirming) return
     confirming = true
     let allowed = false
@@ -51,9 +52,7 @@ export function useAccountReloginRuntime(options: {
     if (!allowed || disposed) return
     try {
       const submitted = tracker.start(accountId)
-      showProgress()
       await submitted
-      showProgress()
       await tracker.sync()
     } catch {
       // Submission may have succeeded despite a lost response. Reconcile first;

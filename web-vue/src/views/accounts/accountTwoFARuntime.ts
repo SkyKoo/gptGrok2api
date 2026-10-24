@@ -14,7 +14,9 @@ export function useAccountTwoFARuntime(options: {
 }) {
   const tasks = ref<AccountTwoFATask[]>([])
   const starting = ref<string[]>([])
-  const expanded = ref(true)
+  // Keep the account list as the primary workspace. Users can expand the
+  // progress panel when they need to enter a code or inspect a task.
+  const expanded = ref(false)
   const pollError = ref(false)
   const dismissed = ref<string[]>([])
   const submitting = ref<string[]>([])
@@ -39,15 +41,13 @@ export function useAccountTwoFARuntime(options: {
     } catch { if (!disposed) pollError.value = true }
   }
   async function start(accountId: string) {
-    if (busyIds.value.has(accountId)) { showProgress(); return }
+    if (busyIds.value.has(accountId)) return
     starting.value = [...starting.value, accountId]
-    showProgress()
     try {
       const result = await accountsApi.startTwoFA(accountId)
       if (disposed) return
       tasks.value = [result.progress, ...tasks.value.filter(t => t.account_ref !== accountId)]
       dismissed.value = dismissed.value.filter(id => id !== result.progress.progress_id)
-      showProgress()
     } catch (error) {
       // A lost response can hide an accepted task; reconcile without resubmitting.
       await sync()
