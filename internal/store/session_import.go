@@ -60,5 +60,10 @@ func (s *Store) ImportSessionAccount(payload map[string]any) (map[string]any, bo
 	next = normalizeAccountListJSON(next)
 	s.replaceAccountsLocked(next)
 	s.accountsDirty = false
+	if added {
+		if err := s.appendAccountHistoryLocked("added", []map[string]any{next[index]}); err != nil {
+			return nil, false, err
+		}
+	}
 	return cloneMap(next[index]), added, nil
 }

@@ -25,26 +25,28 @@ type Identity struct {
 }
 
 type Store struct {
-	accountsPath     string
-	authKeysPath     string
-	configPath       string
-	mu               sync.RWMutex
-	accountsWriteMu  sync.Mutex
-	accountsCache    []map[string]any
-	accountsIndex    map[string]int
-	accountsLoaded   bool
-	accountsRevision uint64
-	accountsDirty    bool
-	accountsTimer    *time.Timer
+	accountsPath       string
+	accountHistoryPath string
+	authKeysPath       string
+	configPath         string
+	mu                 sync.RWMutex
+	accountsWriteMu    sync.Mutex
+	accountsCache      []map[string]any
+	accountsIndex      map[string]int
+	accountsLoaded     bool
+	accountsRevision   uint64
+	accountsDirty      bool
+	accountsTimer      *time.Timer
 }
 
 const accountRuntimeFlushDelay = time.Second
 
 func New(accountsPath, authKeysPath, configPath string) *Store {
 	return &Store{
-		accountsPath: accountsPath,
-		authKeysPath: authKeysPath,
-		configPath:   configPath,
+		accountsPath:       accountsPath,
+		accountHistoryPath: filepath.Join(filepath.Dir(accountsPath), "account_history.json"),
+		authKeysPath:       authKeysPath,
+		configPath:         configPath,
 	}
 }
 
@@ -332,6 +334,12 @@ func (s *Store) AccountList() ([]map[string]any, error) {
 }
 
 func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, int, []map[string]any, error) {
+	return s.AddAccountsWithAction("added", tokens, payloads)
+}
+
+// AddAccountsWithAction persists new accounts and records a safe audit entry.
+// The history intentionally omits access and refresh tokens and other secrets.
+func (s *Store) AddAccountsWithAction(action string, tokens []string, payloads []map[string]any) (int, int, []map[string]any, error) {
 	s.accountsWriteMu.Lock()
 	defer s.accountsWriteMu.Unlock()
 	s.mu.Lock()
@@ -347,6 +355,7 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 		}
 	}
 	added, skipped := 0, 0
+	addedAccounts := make([]map[string]any, 0, len(payloads)+len(tokens))
 	for _, payload := range payloads {
 		token := accountToken(payload)
 		if token == "" {
@@ -359,6 +368,7 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 		item := cloneMap(payload)
 		normalizeAccount(item)
 		accounts = append(accounts, item)
+		addedAccounts = append(addedAccounts, cloneMap(item))
 		byToken[token] = len(accounts) - 1
 		added++
 	}
@@ -379,6 +389,7 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 			"created_at":   time.Now().UTC().Format(time.RFC3339),
 		}
 		accounts = append(accounts, item)
+		addedAccounts = append(addedAccounts, cloneMap(item))
 		byToken[token] = len(accounts) - 1
 		added++
 	}
@@ -389,11 +400,20 @@ func (s *Store) AddAccounts(tokens []string, payloads []map[string]any) (int, in
 		accounts = normalizeAccountListJSON(accounts)
 		s.replaceAccountsLocked(accounts)
 		s.accountsDirty = false
+		if err := s.appendAccountHistoryLocked(action, addedAccounts); err != nil {
+			return 0, 0, nil, err
+		}
 	}
 	return added, skipped, cloneAccountList(accounts), nil
 }
 
 func (s *Store) DeleteAccounts(tokens []string) (int, []map[string]any, error) {
+	return s.DeleteAccountsWithAction("deleted", tokens)
+}
+
+// DeleteAccountsWithAction removes accounts and records the removed identities
+// without persisting any credential material.
+func (s *Store) DeleteAccountsWithAction(action string, tokens []string) (int, []map[string]any, error) {
 	s.accountsWriteMu.Lock()
 	defer s.accountsWriteMu.Unlock()
 	s.mu.Lock()
@@ -410,9 +430,11 @@ func (s *Store) DeleteAccounts(tokens []string) (int, []map[string]any, error) {
 	}
 	filtered := make([]map[string]any, 0, len(accounts))
 	removed := 0
+	removedAccounts := make([]map[string]any, 0, len(targets))
 	for _, item := range accounts {
 		if _, ok := targets[accountToken(item)]; ok {
 			removed++
+			removedAccounts = append(removedAccounts, cloneMap(item))
 			continue
 		}
 		filtered = append(filtered, item)
@@ -423,6 +445,9 @@ func (s *Store) DeleteAccounts(tokens []string) (int, []map[string]any, error) {
 		}
 		s.replaceAccountsLocked(filtered)
 		s.accountsDirty = false
+		if err := s.appendAccountHistoryLocked(action, removedAccounts); err != nil {
+			return 0, nil, err
+		}
 	}
 	return removed, cloneAccountList(filtered), nil
 }
@@ -670,6 +695,121 @@ func normalizeAccountListJSON(items []map[string]any) []map[string]any {
 		normalized[i] = normalizeAccountMapJSON(item)
 	}
 	return normalized
+}
+
+// ListAccountHistory returns safe account lifecycle events. It never reads or
+// returns account credentials; the history file is intended for administration
+// and recovery diagnostics only.
+func (s *Store) ListAccountHistory(action, keyword string, page, pageSize int) ([]map[string]any, int, error) {
+	s.accountsWriteMu.Lock()
+	defer s.accountsWriteMu.Unlock()
+	items, err := loadList(s.accountHistoryPath)
+	if err != nil {
+		return nil, 0, err
+	}
+	action = strings.ToLower(strings.TrimSpace(action))
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if action != "" && !strings.EqualFold(stringValue(item["action"]), action) {
+			continue
+		}
+		if keyword != "" {
+			matched := false
+			for _, key := range []string{"account_ref", "email", "user_id", "source_type", "action", "status", "type"} {
+				if strings.Contains(strings.ToLower(stringValue(item[key])), keyword) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		filtered = append(filtered, cloneMap(item))
+	}
+	// Newest events are most useful when investigating a recent deletion.
+	for left, right := 0, len(filtered)-1; left < right; left, right = left+1, right-1 {
+		filtered[left], filtered[right] = filtered[right], filtered[left]
+	}
+	total := len(filtered)
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	if pageSize > 500 {
+		pageSize = 500
+	}
+	start := (page - 1) * pageSize
+	if start > len(filtered) {
+		start = len(filtered)
+	}
+	end := start + pageSize
+	if end > len(filtered) {
+		end = len(filtered)
+	}
+	return filtered[start:end], total, nil
+}
+
+func (s *Store) appendAccountHistoryLocked(action string, accounts []map[string]any) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	history, err := loadList(s.accountHistoryPath)
+	if err != nil {
+		return err
+	}
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "changed"
+	}
+	eventAt := time.Now().UTC().Format(time.RFC3339)
+	for _, account := range accounts {
+		event := map[string]any{
+			"id":                  randomID(),
+			"action":              action,
+			"event_at":            eventAt,
+			"account_ref":         accountHistoryRef(account),
+			"email":               stringValue(account["email"]),
+			"user_id":             firstNonEmptyStore(stringValue(account["user_id"]), stringValue(account["account_id"])),
+			"source_type":         stringValue(account["source_type"]),
+			"type":                stringValue(account["type"]),
+			"status":              stringValue(account["status"]),
+			"created_at":          stringValue(account["created_at"]),
+			"registration_job_id": stringValue(account["registration_job_id"]),
+		}
+		for key, value := range event {
+			if value == "" {
+				delete(event, key)
+			}
+		}
+		history = append(history, event)
+	}
+	return writeJSON(s.accountHistoryPath, history)
+}
+
+func firstNonEmptyStore(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func accountHistoryRef(account map[string]any) string {
+	for _, key := range []string{"id", "account_ref", "account_id", "chatgpt_account_id", "user_id", "email"} {
+		if value := strings.TrimSpace(stringValue(account[key])); value != "" {
+			return value
+		}
+	}
+	if token := accountToken(account); token != "" {
+		sum := sha256.Sum256([]byte(token))
+		return "acct_" + hex.EncodeToString(sum[:])[:16]
+	}
+	return "unknown"
 }
 
 func loadList(path string) ([]map[string]any, error) {

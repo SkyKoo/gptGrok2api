@@ -62,6 +62,14 @@
               >
                 账号组管理
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                :root-class="accountToolbarButtonClass"
+                @click="showAccountHistoryModal = true"
+              >
+                历史记录
+              </Button>
               <FloatingActionMenu
                 label="导入 / 添加"
                 :items="accountEntryItems"
@@ -495,6 +503,11 @@
       :open="activeAccountPlatform === 'grok' && showGrokOAuthAccess"
       @close="showGrokOAuthAccess = false"
       @changed="handleGrokOAuthChanged"
+    />
+
+    <AccountHistoryModal
+      :open="activeAccountPlatform === 'gpt' && showAccountHistoryModal"
+      @close="showAccountHistoryModal = false"
     />
 
     <ModalShell :open="activeAccountPlatform === 'gpt' && showModal" max-width="44rem" :z-index="120">
@@ -1161,6 +1174,7 @@ import AccountGridCard from './accounts/AccountGridCard.vue'
 import AccountTableRow from './accounts/AccountTableRow.vue'
 import AccountTwoFAPanel from './accounts/AccountTwoFAPanel.vue'
 import AccountReloginPanel from './accounts/AccountReloginPanel.vue'
+import AccountHistoryModal from './accounts/AccountHistoryModal.vue'
 import GrokAccountConversationTestModal from './accounts/GrokAccountConversationTestModal.vue'
 import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
 import GrokAccountTableRow from './accounts/GrokAccountTableRow.vue'
@@ -1188,6 +1202,7 @@ const confirmDialog = useConfirmDialog()
 const toast = useToast()
 const showLoginPassword = ref(false)
 const showTwoFactorSecret = ref(false)
+const showAccountHistoryModal = ref(false)
 
 async function writeClipboardText(text: string) {
   if (navigator.clipboard?.writeText) {

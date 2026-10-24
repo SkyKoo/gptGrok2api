@@ -56,7 +56,7 @@ func (s *Server) importRegisteredAccount(ctx context.Context, id string, account
 			return errors.New("account already belongs to another source")
 		}
 	}
-	_, _, _, err = s.store.AddAccounts(nil, []map[string]any{account})
+	_, _, _, err = s.store.AddAccountsWithAction("registered", nil, []map[string]any{account})
 	return err
 }
 func (s *Server) verifyRegisteredAccount(ctx context.Context, id string, account map[string]any) error {

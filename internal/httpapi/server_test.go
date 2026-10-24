@@ -181,6 +181,45 @@ func TestAccountListDoesNotExposeCredentialTokens(t *testing.T) {
 	}
 }
 
+func TestAccountHistoryAPIListsLifecycleEventsWithoutCredentials(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig()
+	cfg.RootDir = root
+	cfg.DataDir = root
+	cfg.AccountsPath = filepath.Join(root, "accounts.json")
+	cfg.AuthKeysPath = filepath.Join(root, "auth_keys.json")
+	cfg.ConfigPath = filepath.Join(root, "config.json")
+	server := New(cfg)
+	if _, _, _, err := server.store.AddAccountsWithAction("registered", nil, []map[string]any{{
+		"id": "account-1", "access_token": "access-secret", "refresh_token": "refresh-secret", "email": "account@example.test",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/accounts", strings.NewReader(`{"tokens":["account-1"]}`))
+	deleteRequest.Header.Set("Authorization", "Bearer admin-secret")
+	deleteResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("account delete returned %d: %s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+	historyRequest := httptest.NewRequest(http.MethodGet, "/api/accounts/history?page=1&page_size=20", nil)
+	historyRequest.Header.Set("Authorization", "Bearer admin-secret")
+	historyResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(historyResponse, historyRequest)
+	if historyResponse.Code != http.StatusOK {
+		t.Fatalf("account history returned %d: %s", historyResponse.Code, historyResponse.Body.String())
+	}
+	body := historyResponse.Body.String()
+	for _, secret := range []string{"access-secret", "refresh-secret"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("account history leaked credential %q: %s", secret, body)
+		}
+	}
+	if !strings.Contains(body, `"action":"deleted"`) || !strings.Contains(body, `"action":"registered"`) {
+		t.Fatalf("account history omitted lifecycle events: %s", body)
+	}
+}
+
 func TestAccountStatusCategoryIgnoresClearedMarkers(t *testing.T) {
 	account := map[string]any{
 		"status":             "正常",

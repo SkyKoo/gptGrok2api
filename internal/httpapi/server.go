@@ -323,6 +323,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/users", s.userKeys)
 	mux.HandleFunc("/api/auth/users/", s.userKeyByID)
 	mux.HandleFunc("/api/accounts", s.accounts)
+	mux.HandleFunc("/api/accounts/history", s.accountHistory)
 	mux.HandleFunc("/api/accounts/token", s.accountToken)
 	mux.HandleFunc("/api/accounts/quotas/refresh", s.refreshQuotasAPI)
 	mux.HandleFunc("/api/accounts/refresh", s.accountRefreshStart)
@@ -1449,6 +1450,33 @@ func (s *Server) accounts(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
+}
+
+func (s *Server) accountHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	query := r.URL.Query()
+	page := positiveInt(query.Get("page"), 1)
+	pageSize := positiveInt(query.Get("page_size"), 50)
+	if pageSize > 500 {
+		pageSize = 500
+	}
+	items, total, err := s.store.ListAccountHistory(query.Get("action"), query.Get("keyword"), page, pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":     items,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 func (s *Server) accountToken(w http.ResponseWriter, r *http.Request) {

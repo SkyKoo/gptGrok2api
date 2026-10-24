@@ -317,6 +317,27 @@ export type HMECleanupSummary = {
   results?: HMECleanupResult[]
 }
 
+export type AccountHistoryItem = {
+  id: string
+  action: 'registered' | 'added' | 'deleted' | string
+  event_at: string
+  account_ref: string
+  email?: string
+  user_id?: string
+  source_type?: string
+  type?: string
+  status?: string
+  created_at?: string
+  registration_job_id?: string
+}
+
+export type AccountHistoryResponse = {
+  items: AccountHistoryItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
 type AccountImportPayload = Record<string, unknown>
 type AccountImportOptions = {
   refresh?: boolean
@@ -849,6 +870,9 @@ export const accountsApi = {
     })
     return mapAccountsResponse(response)
   },
+
+  listHistory: (params?: { page?: number; page_size?: number; action?: string; keyword?: string }) =>
+    apiClient.get<never, AccountHistoryResponse>('/api/accounts/history', { params }),
 
   listGroups: () =>
     apiClient.get<never, { groups: AccountGroup[]; proxy_groups?: ProxyGroup[] }>('/api/account-groups'),

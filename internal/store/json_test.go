@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,35 @@ func TestAccountStoragePreservesJSONCompatibleFields(t *testing.T) {
 	}
 	if decoded[0]["refresh_token"] != "refresh-secret" {
 		t.Fatalf("account secret was not preserved in storage")
+	}
+}
+
+func TestAccountHistoryTracksRegistrationAndDeletionWithoutSecrets(t *testing.T) {
+	root := t.TempDir()
+	repository := New(filepath.Join(root, "accounts.json"), filepath.Join(root, "auth_keys.json"), filepath.Join(root, "config.json"))
+	_, _, _, err := repository.AddAccountsWithAction("registered", nil, []map[string]any{{
+		"id": "account-1", "access_token": "access-secret", "refresh_token": "refresh-secret",
+		"email": "person@example.test", "user_id": "user-1", "source_type": "chatgpt_web",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repository.DeleteAccounts([]string{"access-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	items, total, err := repository.ListAccountHistory("", "person@example.test", 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 2 || len(items) != 2 || items[0]["action"] != "deleted" || items[1]["action"] != "registered" {
+		t.Fatalf("unexpected history: total=%d items=%#v", total, items)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "account_history.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "access-secret") || strings.Contains(string(raw), "refresh-secret") {
+		t.Fatalf("account history leaked credentials: %s", raw)
 	}
 }
 
