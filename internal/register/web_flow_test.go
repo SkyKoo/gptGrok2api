@@ -18,9 +18,13 @@ import (
 // used after a wait timeout. The profile branch also covers the protocol-only
 // about-you submission used for new accounts.
 func TestWebRegistrationTurbProtocol(t *testing.T) {
-	for _, scenario := range []string{"success", "existing_success", "resend", "profile_required", "existing_profile_required", "wrong_state"} {
+	for _, scenario := range []string{"success", "oauth_authorize", "existing_success", "resend", "profile_required", "existing_profile_required", "wrong_state"} {
 		t.Run(scenario, func(t *testing.T) {
 			var base string
+			authorizePath := "/api/accounts/authorize"
+			if scenario == "oauth_authorize" {
+				authorizePath = "/oauth/authorize"
+			}
 			var timezoneCalls atomic.Int32
 			savedProfile := browserProfilePool[4]
 			phoenix, err := time.LoadLocation("America/Phoenix")
@@ -59,8 +63,8 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 					if err := r.ParseForm(); err != nil || r.Form.Get("csrfToken") != "csrf" || r.Form.Get("callbackUrl") != "/" {
 						t.Error("Turb signin form is incomplete")
 					}
-					write(map[string]string{"url": base + "/api/accounts/authorize?device_id=did&state=expected-state"})
-				case "/api/accounts/authorize":
+					write(map[string]string{"url": base + authorizePath + "?device_id=did&state=expected-state"})
+				case "/api/accounts/authorize", "/oauth/authorize":
 					authorize++
 					if c, err := r.Cookie("oai-did"); err != nil || c.Value != "did" {
 						t.Error("device cookie missing")
@@ -172,7 +176,7 @@ func TestWebRegistrationTurbProtocol(t *testing.T) {
 			if providers != 1 || anonymousSession != 1 || csrf != 1 || signin != 1 || authorize != 1 {
 				t.Errorf("initialization counts providers=%d session=%d csrf=%d signin=%d authorize=%d", providers, anonymousSession, csrf, signin, authorize)
 			}
-			if scenario == "success" || scenario == "existing_success" || scenario == "resend" || scenario == "profile_required" {
+			if scenario == "success" || scenario == "oauth_authorize" || scenario == "existing_success" || scenario == "resend" || scenario == "profile_required" {
 				if err != nil || account["access_token"] != "secret-account-token" {
 					t.Fatalf("unexpected result account=%#v err=%v", account, err)
 				}

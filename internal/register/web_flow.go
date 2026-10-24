@@ -280,7 +280,7 @@ func (r *WebRegistrar) begin(ctx context.Context, email string) (time.Time, erro
 	}
 	authorize := stringValue(signin.data["url"])
 	u, err := url.Parse(authorize)
-	if err != nil || !sameOrigin(authorize, r.auth) || u.Path != "/api/accounts/authorize" {
+	if err != nil || !sameOrigin(authorize, r.auth) || (u.Path != "/api/accounts/authorize" && u.Path != "/oauth/authorize") || u.Query().Get("state") == "" {
 		return time.Time{}, fail("authorize", "invalid_authorize_url")
 	}
 	if returnedDevice := u.Query().Get("device_id"); returnedDevice != "" {
