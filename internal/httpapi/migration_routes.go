@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	projectRepositoryURL = "https://github.com/lichao199208/gptGrok2api"
-	projectVersionURL    = "https://raw.githubusercontent.com/lichao199208/gptGrok2api/main/VERSION"
-	projectChangelogURL  = "https://raw.githubusercontent.com/lichao199208/gptGrok2api/main/CHANGELOG.md"
+	projectRepositoryURL = "https://github.com/SkyKoo/gptGrok2api"
+	projectVersionURL    = "https://raw.githubusercontent.com/SkyKoo/gptGrok2api/main/VERSION"
+	projectChangelogURL  = "https://raw.githubusercontent.com/SkyKoo/gptGrok2api/main/CHANGELOG.md"
 )
 
 func (s *Server) metaUpdate(w http.ResponseWriter, r *http.Request) {
