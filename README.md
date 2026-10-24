@@ -1,10 +1,40 @@
-# GPTGrok2API Go
+# GPTGrok2API Go（fork 维护版）
 
-GPTGrok2API Go 是一个自托管的 OpenAI 兼容网关。它使用 Go 运行时接入 ChatGPT/OpenAI JWT 账号池、Grok SSO/OAuth 账号池和代理出口，并提供账号调度、图片任务、文件存储、实时监控和 Web 管理控制台。
+GPTGrok2API Go 是一个自托管的 OpenAI 兼容网关。本仓库从 Go 版上游项目 fork 后持续维护，当前 `main` 在 `v1.2.4-go` 运行时基线之上增加了账号管理、Codex OAuth、CPA、ChatGPT Web 图片链路、免费注册和运维能力。版本号仍由 [VERSION](./VERSION) 和 [CHANGELOG.md](./CHANGELOG.md) 提供；fork 的连续改动不等同于上游 GitHub Release，也不要把上游 release tag 当成当前 `main` 的完整功能清单。
 
-当前发布版本：<code>v1.2.4-go</code>  ·  [GitHub Releases](https://github.com/lichao199208/gptGrok2api/releases)
+代码仓库：[SkyKoo/gptGrok2api](https://github.com/SkyKoo/gptGrok2api)。上游参考：[yukkcat/chatgpt2api](https://github.com/yukkcat/chatgpt2api)。
 
-> 本项目通过逆向研究接入 ChatGPT 和 Grok 网页能力，不是 OpenAI 或 xAI 官方服务。上游协议、账号策略和可用模型随时可能变化。请使用你有权使用的账号，遵守相关服务条款和当地法律，并自行承担账号、网络和内容风险。
+> 本项目通过逆向研究接入 ChatGPT、Codex 和 Grok 网页/授权能力，不是 OpenAI、ChatGPT 或 xAI 官方服务。上游协议、账号策略、模型名称和可用性随时可能变化。请只使用你有权使用的账号，遵守相关服务条款和当地法律，并自行承担账号、网络和内容风险。
+
+本文中的 CFM 是 ChatGPT Free 账号管理与注册链路的简称，包含账号池、注册、HME、Codex OAuth 和管理控制台相关功能。
+
+## Fork 后的功能范围
+
+下面是当前代码已经实现并持续维护的功能。接口细节以代码、测试和 [CHANGELOG.md](./CHANGELOG.md) 为准。
+
+| 领域 | 当前实现 |
+| --- | --- |
+| OpenAI 兼容网关 | `/v1/chat/completions`、Responses、Anthropic Messages、搜索、文件、图片、视频和可编辑文件任务；支持流式响应、工具调用与多模态输入。 |
+| ChatGPT Web | 动态模型目录、账号能力额度、模型路由、浏览器指纹/设备环境、Cookie 隔离、出口时区、图片生成与编辑。 |
+| 图片链路 | `gpt-image-2` 同步/异步生成、编辑、原生 mask、多参考图、`background`/`output_format`、结果筛选、透明度校验、失败诊断和有限重试。 |
+| 账号池 | JWT、OAuth refresh token、Grok SSO/OAuth、分组、额度预占、失败换号、限流冷却、并发控制、账号异常隔离和自动恢复。 |
+| 账号导入与维护 | Session JSON 导入、账号编辑、批量操作、重新登录进度、401 后自动恢复、2FA 开启/续跑/TOTP 查看、账号和媒体清理。 |
+| Codex 与 CPA | Codex OAuth 多阶段授权、邮箱/2FA/手机号/SMS 验证、已有 2FA 复用、CPA 凭据预览绑定、同步、冲突保护和文件名兼容。 |
+| 注册中心 | ChatGPT Free 原生注册、iCloud HME 邮箱、Sentinel/Turnstile、已取得邮箱的自动补偿、批次定时启动、注册后自动开启 2FA。 |
+| HME 生命周期 | 删除 CFM 账号时可按 `account_id` 和邮箱查询 HME aliases，并使用 `anonymousId` 调用删除协议；失败逐条报告，不伪装成成功。 |
+| Grok 与代理 | Grok Web/Console/Thinking/Imagine、视频、代理池/代理组/订阅、节点健康和图片并发容量、可选 FlareSolverr/Cloudflare clearance。 |
+| 管理与运维 | Vue 管理控制台、实时请求、调用日志、输入图预览、图片图库、提示词、备份、配置、健康检查和 Redis/JSON 队列。 |
+
+## 参考资料和文档入口
+
+- [多模态聊天说明](docs/multimodal-chat.md)：ChatGPT Web 的图片输入、Responses 和流式边界。
+- [原生图片 mask](docs/image-mask.md)：`/v1/images/edits` 的 mask 语义和限制。
+- [Go Free 注册说明](docs/registration/go-free.md)：HME、浏览器环境、验证码和注册恢复。
+- [DEVELOPMENT.md](./DEVELOPMENT.md)：本地开发、构建和调试约定。
+- [CHANGELOG.md](./CHANGELOG.md)：按提交整理的功能和修复记录。
+- [OpenAI 图片编辑接口](https://developers.openai.com/api/reference/go/resources/images/methods/edit)：外部图片参数命名参考；Web 上游字段仍以实际验证结果为准。
+
+ChatGPT Web、Codex 和 Grok 的登录及业务请求使用上游私有协议。HME aliases 协议使用仓库内的 iCloud Privacy Mail 服务实现并由回归测试锁定请求形状；私有协议发生变化时，不能只根据公开 API 文档判断兼容性。
 
 ## 能力概览
 
@@ -151,6 +181,9 @@ flowchart LR
   Console --> Core
   Core --> ChatGPT[ChatGPT Web API]
   Core --> Grok[Grok Web / Console API]
+  Core --> Codex[Codex OAuth / Agent Identity]
+  Core --> HME[iCloud HME aliases / 邮件]
+  Core --> CPA[CPA / Sub2API 外部连接]
   Core --> Proxy[代理出口与健康检测]
   Core --> Files[data/files 图片和视频]
   Core --> Queue[JSON 或 Redis 队列]
@@ -158,17 +191,27 @@ flowchart LR
   Gateway --> API
 ~~~
 
-## Docker 快速开始
+## 运行模式和 Docker 快速开始
 
-要求 Docker Engine 24+、Docker Compose v2，以及能够访问 ChatGPT/Grok 的网络出口。
+要求 Docker Engine 24+、Docker Compose v2，以及能够访问 ChatGPT/Grok 的网络出口。仓库里有多套 Compose 文件，先选择一种模式，不要把不同模式的持久化目录混用：
+
+| 文件 | 用途 | 端口/依赖 |
+| --- | --- | --- |
+| `docker-compose.yml` | 默认完整 Go 服务，包含 Redis；`local-icloud` profile 可额外启动仓库内 HME sidecar。 | 主服务默认 `3000`；Redis 只在 Compose 网络内暴露。 |
+| `docker-compose.go.yml` | Go 镜像、Redis、独立图片队列网关，适合需要图片排队和独立 worker 的部署。 | 主服务默认 `3000`，图片网关只监听 `127.0.0.1:3001`；需要外部网络 `gptgrok2api_default`。 |
+| `docker-compose.local.yml` | 本地兼容模式，使用 SQLite 适配路径和 `8000` 端口。 | 适合迁移/对照，不作为生产默认。 |
+| `docker-compose.warp.yml` | WARP、Privoxy、FlareSolverr、HME 等复杂出口编排。 | 只有明确需要时启用，并单独检查代理和内存。 |
+| `deploy/docker-compose.server.yml` | 把主服务绑定到 `127.0.0.1:8000` 的 Compose 覆盖文件。 | 由 Nginx/Caddy 等 HTTPS 反向代理对外提供服务。 |
+
+### 默认完整 Go 服务
 
 ~~~bash
-git clone https://github.com/lichao199208/gptGrok2api.git
+git clone https://github.com/SkyKoo/gptGrok2api.git
 cd gptGrok2api
 cp .env.example .env
 mkdir -p data logs
 test -f data/auth_keys.json || printf '{"items":[]}\n' > data/auth_keys.json
-docker network inspect gptgrok2api_default >/dev/null 2>&1 || docker network create gptgrok2api_default
+test -f config.json || printf '{}\n' > config.json
 ~~~
 
 编辑 <code>.env</code>，至少设置两个不同的随机密钥：
@@ -176,30 +219,51 @@ docker network inspect gptgrok2api_default >/dev/null 2>&1 || docker network cre
 ~~~dotenv
 CHATGPT2API_AUTH_KEY=replace-with-a-long-random-api-key
 CHATGPT2API_ADMIN_KEY=replace-with-a-different-admin-key
-CHATGPT2API_GO_PORT=3000
-GO_PUBLIC_BASE_URL=http://your-server:3000
+CHATGPT2API_PORT=3000
+GO_PUBLIC_BASE_URL=https://your-domain.example
 ~~~
 
-启动 Go 服务、Redis 和图片队列网关：
+启动主服务和 Redis：
 
 ~~~bash
+docker compose up -d --build
+docker compose ps
+curl -fsS http://127.0.0.1:3000/health
+~~~
+
+管理控制台地址为 <code>http://服务器地址:3000/</code>。没有配置外部 HME 时不要打开注册中心的 HME 注册；使用仓库内 HME sidecar 时执行：
+
+~~~bash
+docker compose --profile local-icloud up -d --build
+docker compose ps
+~~~
+
+HME sidecar 的 Apple 会话和邮件数据保存在 `data/icloud-privacy-mail/`，`ICLOUD_PRIVACY_MAIL_API_KEY` 必须使用随机值。它默认只在 Compose 网络内监听，不要把管理接口直接暴露到公网。
+
+### Go 镜像和图片队列网关
+
+需要独立图片队列时，先创建 Compose 声明的外部网络，再启动 Go 编排：
+
+~~~bash
+docker network inspect gptgrok2api_default >/dev/null 2>&1 || docker network create gptgrok2api_default
 docker compose -f docker-compose.go.yml up -d --build
 docker compose -f docker-compose.go.yml ps
 curl -fsS http://127.0.0.1:3000/health
 ~~~
 
-管理控制台地址为 <code>http://服务器地址:3000/</code>。图片队列网关默认只监听 <code>127.0.0.1:3001</code>，不应直接暴露到公网；普通客户端直接访问主服务的 <code>/v1</code> 接口即可。
+图片队列网关默认只监听 <code>127.0.0.1:3001</code>，不应直接暴露到公网；普通客户端直接访问主服务的 <code>/v1</code> 接口即可。网关与主服务共享 `data/auth_keys.json`，修改管理员密钥后需要确认挂载文件和容器环境同时更新。
 
 ### 服务器 8000 端口
 
-服务器部署使用 Compose 覆盖文件。覆盖文件会把主服务绑定到本机 <code>127.0.0.1:8000</code>，适合由 Nginx 或其他 HTTPS 反向代理对外提供服务：
+服务器部署可以使用 Compose 覆盖文件。覆盖文件会把主服务绑定到本机 <code>127.0.0.1:8000</code>，适合由 Nginx 或其他 HTTPS 反向代理对外提供服务；它还要求预先存在 `deploy_sub2api-network` 外部网络：
 
 ~~~bash
 cp .env.example .env
 mkdir -p data logs
 test -f data/auth_keys.json || printf '{"items":[]}\n' > data/auth_keys.json
-docker network inspect gptgrok2api_default >/dev/null 2>&1 || docker network create gptgrok2api_default
-docker compose -f docker-compose.go.yml -f deploy/docker-compose.server.yml up -d --build
+test -f config.json || printf '{}\n' > config.json
+docker network inspect deploy_sub2api-network >/dev/null 2>&1 || docker network create deploy_sub2api-network
+docker compose -f docker-compose.yml -f deploy/docker-compose.server.yml up -d --build
 curl -fsS http://127.0.0.1:8000/health
 ~~~
 
@@ -213,7 +277,7 @@ GO_PUBLIC_BASE_URL=https://gpt.example.com
 GO_VERSION=1.2.4-go
 ~~~
 
-<code>CHATGPT2API_PORT</code> 是服务器覆盖文件使用的宿主机端口；本地单 Compose 部署使用 <code>CHATGPT2API_GO_PORT</code>。首次接入域名时，请确认反向代理把 <code>/</code>、<code>/v1</code>、<code>/api</code> 和 <code>/images</code> 一并转发到 <code>127.0.0.1:8000</code>。
+<code>CHATGPT2API_PORT</code> 是主 Compose 使用的宿主机端口。首次接入域名时，请确认反向代理把 <code>/</code>、<code>/v1</code>、<code>/api</code>、<code>/images</code>、<code>/files</code> 和 <code>/v1/files</code> 一并转发到 <code>127.0.0.1:8000</code>，并正确支持 SSE、较长的请求超时和大 multipart 请求。
 
 ## 认证和控制台
 
@@ -244,6 +308,23 @@ Authorization: Bearer <api-key>
 | <code>GET</code> | <code>/files/{path}</code> | 下载可编辑文件产物 |
 
 可用模型以 <code>/v1/models</code> 返回值和账号实际权限为准。当前目录按能力分为 OpenAI GPT 文本、Grok 文本、<code>gpt-image-2</code>/Grok Imagine 图片、Grok Imagine 视频和 Grok Console/Thinking 模型，不建议在客户端硬编码完整模型清单。
+
+### 管理接口和控制台入口
+
+除 <code>/health</code>、静态页面和公开资源外，管理接口默认要求管理员密钥。管理控制台使用同一组接口；下面列出 fork 后最常用的入口，完整路由以 `internal/httpapi/server.go` 为准：
+
+| 路径 | 用途 |
+| --- | --- |
+| <code>/api/accounts</code>、<code>/api/accounts/import-session</code> | 账号列表、导入 Session JSON、编辑、分组、批量删除和异常导入清理。 |
+| <code>/api/accounts/relogin</code>、<code>/api/accounts/twofa</code> | 重新登录、自动恢复、开启/续跑 2FA、查看任务与 TOTP。 |
+| <code>/api/accounts/quotas/refresh</code>、<code>/api/accounts/models/refresh</code> | 主动刷新账号能力额度和 ChatGPT Web 动态模型目录。 |
+| <code>/api/accounts/codex/oauth/*</code>、<code>/api/accounts/codex/sync</code> | Codex OAuth 授权、分阶段验证码、已有 2FA 和 CPA 同步。 |
+| <code>/api/register</code>、<code>/api/register/schedule</code> | 注册配置、运行状态、补偿任务、定时批次和注册历史。 |
+| <code>/api/image-tasks/*</code>、<code>/api/images</code>、<code>/api/logs</code> | 异步图片任务、图库、调用日志和输入图预览。 |
+| <code>/api/proxy/*</code>、<code>/api/settings</code>、<code>/api/backups</code> | 代理组/健康、基础配置、保留期清理和备份。 |
+| <code>/api/cpa/pools/*</code>、<code>/api/sub2api/servers/*</code> | 外部 CPA/Sub2API 连接、预览、绑定和同步。 |
+
+管理 API 的响应会隐藏 Token、Cookie、HME 管理密码、邮箱验证码和图片 data URL。不要把管理员密钥放进浏览器自动化脚本、公共日志或前端源码。
 
 ### 文本聊天
 
@@ -477,39 +558,51 @@ http://your-server:3000/v1/files/image?id=<image-id>
 | --- | --- | --- |
 | <code>CHATGPT2API_AUTH_KEY</code> | 空 | 普通 API 密钥 |
 | <code>CHATGPT2API_ADMIN_KEY</code> | 空 | 管理密钥 |
-| <code>CHATGPT2API_GO_PORT</code> | <code>3000</code> | <code>docker-compose.go.yml</code> 宿主机端口 |
-| <code>CHATGPT2API_PORT</code> | <code>8000</code> | 服务器覆盖 Compose 的宿主机端口 |
-| <code>GO_PUBLIC_BASE_URL</code> | 空 | 图片和文件公开 URL 前缀 |
-| <code>GO_CONFIG_PATH</code> | <code>config.json</code> | JSON 配置文件路径 |
+| <code>CHATGPT2API_WEBUI_KEY</code> | 空 | 可选 Web UI 密钥；未设置时使用管理员认证 |
+| <code>CHATGPT2API_PORT</code> | <code>3000</code> | 默认 Compose 的宿主机端口；server 覆盖示例使用 <code>8000</code> |
+| <code>GO_PUBLIC_BASE_URL</code> | 空 | 图片和文件公开 URL 前缀；公网部署应使用 HTTPS |
+| <code>GO_TRUST_REQUEST_PUBLIC_BASE</code> | <code>false</code> | 是否信任请求 Host/Forwarded 生成公开 URL，前置代理未清洗时保持关闭 |
+| <code>GO_ALLOW_PRIVATE_IMAGE_URLS</code> | <code>false</code> | 是否允许读取内网、localhost 或云元数据图片地址 |
+| <code>GO_CONFIG_PATH</code> | <code>/app/data/config.json</code> | JSON 运行时配置路径 |
 | <code>GO_ACCOUNTS_PATH</code> | <code>data/accounts.json</code> | OpenAI 账号文件 |
 | <code>GO_AUTH_KEYS_PATH</code> | <code>data/auth_keys.json</code> | 用户密钥文件 |
-| <code>GO_QUEUE_BACKEND</code> | <code>json</code> | <code>json</code> 或 <code>redis</code> |
+| <code>GO_QUEUE_BACKEND</code> | <code>json</code> | <code>json</code> 或 <code>redis</code>；默认 Compose 显式使用 <code>redis</code> |
 | <code>GO_REDIS_ADDR</code> | <code>127.0.0.1:6379</code> | Redis 地址 |
-| <code>GO_REQUEST_TIMEOUT_SECONDS</code> | <code>180</code> | 上游请求超时，范围 10-300 秒 |
-| <code>GO_CHAT_MAX_RETRIES</code> | <code>2</code> | 聊天/图片最大重试次数 |
+| <code>GO_REDIS_PASSWORD</code> / <code>GO_REDIS_DB</code> | 空 / <code>0</code> | Redis 认证和数据库编号 |
+| <code>GO_REQUEST_TIMEOUT_SECONDS</code> | Go fallback <code>180</code>；Compose 示例 <code>600</code> | 上游单请求超时，运行时范围 10–300 秒；Compose 传入的更大值会被截断 |
+| <code>GO_CHAT_MAX_RETRIES</code> | <code>2</code> | 聊天/图片常规重试预算，范围 0–3 |
+| <code>GO_CHAT_RETRY_CODES</code> | Go fallback 含 <code>504</code>；Compose 示例不含 | 可触发账号切换的 HTTP 状态码，按实际部署环境确认 |
+| <code>GO_ACCOUNT_REFRESH_CONCURRENCY</code> | <code>3</code> | 额度和用户信息后台刷新并发 |
 | <code>GO_IMAGE_ACCOUNT_CONCURRENCY</code> | <code>1</code> | 单账号图片并发，范围 1-4 |
 | <code>GO_IMAGE_MAX_CONCURRENCY</code> | <code>128</code> | 单进程图片总并发，范围 1-1024 |
 | <code>GO_IMAGE_RETENTION_DAYS</code> | <code>1</code> | 本地图片保留天数 |
 | <code>GO_IMAGE_CLEANUP_INTERVAL_SECONDS</code> | <code>3600</code> | 图片清理间隔，最少 60 秒 |
 | <code>GO_PROXY_URL</code> | 空 | 默认代理 |
 | <code>GO_PROXY_POOL</code> | 空 | 逗号分隔的代理池 |
+| <code>GO_RESOURCE_PROXY_URL</code> / <code>GO_RESOURCE_PROXY_POOL</code> | 空 | 图片下载等资源请求使用的独立代理 |
+| <code>GO_FLARESOLVERR_URL</code> / <code>GO_CLEARANCE_ENABLED</code> | 空 / <code>false</code> | 可选 Cloudflare clearance 服务 |
+| <code>ICLOUD_PRIVACY_MAIL_BASE_URL</code> | `http://icloud-privacy-mail:8787` | 外部 HME 服务或 local-icloud sidecar 地址 |
+| <code>ICLOUD_PRIVACY_MAIL_API_KEY</code> | 空 | HME 管理 API 密钥，只在后端使用 |
+| <code>TZ</code> | <code>Asia/Shanghai</code> | 容器本地时区；业务出口时区仍由代理定位结果决定 |
 | <code>GO_VERSION</code> | <code>1.2.4-go</code> | 版本标识 |
 
-完整配置项和上游地址见 [<code>.env.example</code>](./.env.example) 与 [<code>config.example.yaml</code>](./config.example.yaml)。运行时配置通过控制台保存到 <code>config.json</code>，不要把真实配置提交到 Git。
+完整配置项和上游地址见 [<code>.env.example</code>](./.env.example)、[<code>config.example.yaml</code>](./config.example.yaml) 和对应 Compose 文件。`config.example.yaml` 是历史配置项参考，不应直接当作 Go 运行时的 JSON 文件；运行时配置通过控制台保存到 <code>config.json</code>，不要把真实配置提交到 Git。图片网关的 `IMAGE_GATEWAY_*` 参数只在 `docker-compose.go.yml` 或 `go-image-gateway/docker-compose.go-image.yml` 中使用。
 
 ## 升级与备份
 
-升级前先备份 <code>data/</code>、<code>.env</code> 和自定义反向代理配置。然后在仓库目录执行：
+升级前先备份 <code>data/</code>、<code>.env</code>、<code>config.json</code> 和自定义反向代理配置。当前 fork 的日常升级以 `main` 提交为准，先确认工作区干净，再执行：
 
 ~~~bash
-git fetch --tags user-origin
-git checkout v1.2.4-go
-docker compose -f docker-compose.go.yml -f deploy/docker-compose.server.yml pull
-docker compose -f docker-compose.go.yml -f deploy/docker-compose.server.yml up -d --build
+git switch main
+git pull --ff-only origin main
+docker compose up -d --build
+docker compose ps
 curl -fsS http://127.0.0.1:8000/health
 ~~~
 
-如果使用本地构建而非服务器覆盖文件，去掉第二个 Compose 文件并把端口检查改为 <code>CHATGPT2API_GO_PORT</code> 对应的端口。不要删除 <code>data/</code>，其中包含账号、密钥、队列和图片。
+如果使用 `docker-compose.go.yml`，替换上面的 Compose 命令并检查 `3000` 端口；如果使用 server 覆盖文件，保留 `deploy_sub2api-network` 外部网络。生产发布应固定提交或镜像 digest，先确认注册、重新登录、2FA、图片和定时任务为空闲，完成备份后再切换容器；健康检查通过后保留旧镜像作为回滚点。不要删除 <code>data/</code>，其中包含账号、Cookie、OAuth 凭据、队列、注册恢复状态、模型目录、日志和图片。
+
+回滚只切换到已验证的旧镜像和配置指针，不要用旧数据快照覆盖已经产生的新账号、任务或图片。若发布过程中创建了 `data/cfm-maintenance`，确认服务和后台任务恢复后再删除该标记。
 
 ## 本地开发与测试
 
@@ -517,17 +610,27 @@ Go 版运行不需要 Python 或 Uvicorn：
 
 ~~~bash
 go run ./cmd/gptgrok2api
-go test ./internal/... ./cmd/...
+go test ./...
 CGO_ENABLED=0 go build -trimpath -o gptgrok2api ./cmd/gptgrok2api
 ~~~
 
 前端源码在 <code>web-vue/</code>，需要 Node.js 22+：
 
 ~~~bash
-cd web-vue
-npm ci
-npm run build
+npm --prefix web-vue ci
+npm --prefix web-vue run build
+npm --prefix web-vue run test:session-import
+npm --prefix web-vue run test:account-relogin
+npm --prefix web-vue run test:cpa-binding
+npm --prefix web-vue run test:registration-compensation
+npm --prefix web-vue run test:registration-schedule
+npm --prefix web-vue run test:log-images
+npm --prefix web-vue run test:account-quotas
+npm --prefix web-vue run test:account-edit
+npm --prefix web-vue run test:account-progress-layout
 ~~~
+
+Docker 构建会同时编译 Go 后端和 Vue 前端：`docker build -f Dockerfile.golang .` 是 Go-only 镜像，`docker build -f Dockerfile .` 是默认完整镜像。两者都使用 `CGO_ENABLED=0` 构建，ARM64 不需要额外 C 编译库；`third_party/nativewebp` 许可证随镜像分发。
 
 ## 数据安全
 
@@ -542,6 +645,32 @@ web_dist/
 ~~~
 
 <code>data/</code> 可能包含 OpenAI/Grok Token、Cookie、OAuth 凭据、管理密钥、调用日志和生成图片。生产环境请使用随机密钥、限制管理接口来源、启用 HTTPS，并定期备份数据目录。
+
+### 运行时数据布局
+
+| 路径 | 内容 | 注意 |
+| --- | --- | --- |
+| `data/accounts.json` | ChatGPT/OpenAI 账号、浏览器环境摘要、额度和状态 | 包含 Token、Cookie 关联信息和邮箱，必须按凭据保护。 |
+| `data/auth_keys.json` | 控制台创建的用户密钥哈希 | 图片网关会只读挂载此文件，改密钥后需同步重启网关。 |
+| `data/config.json` | 控制台保存的 Go 运行时配置 | 首次启动可由旧的根目录 `config.json` 迁移；不要把 YAML 示例直接复制成此文件。 |
+| `data/oauth_accounts.json.enc` | Grok/xAI CLI OAuth 加密账号 | 加密密钥来自管理员密钥，迁移时不能只复制单个明文字段。 |
+| `data/register.json`、`data/openai_registration_schedule.json` | 注册配置、任务、补偿和定时状态 | 定时默认关闭；维护标记存在时不会启动新批次。 |
+| `data/chatgpt_models.json` | ChatGPT Web 动态模型目录缓存 | 缓存过期或上游改名时应刷新，不要手工硬编码模型清单。 |
+| `data/image_tasks/` | 异步图片任务和去重状态 | 单个主服务进程使用；重启时进行中的任务会标记失败，不会自动重复生图。 |
+| `data/files/images/`、`data/files/videos/` | 生成结果和媒体元数据 | 按保留期清理；公开 URL 依赖 `GO_PUBLIC_BASE_URL`。 |
+| `data/log_input_images/` | 调用日志中的参考图预览 | 只允许管理员读取，仍属于敏感数据。 |
+| `data/cfm-maintenance` | 发布/维护暂停标记 | 只在排空、备份或切换期间使用；验证完成后必须清除。 |
+
+### 使用时必须注意
+
+- 不要把账号 Token、Cookie、HME 管理密码、CPA 凭据、Redis 密码或管理员密钥提交到 Git，也不要在 issue、截图和公开日志中粘贴完整值。
+- `GO_ALLOW_ANONYMOUS`、`GO_ALLOW_PRIVATE_IMAGE_URLS` 和信任请求 Host 的选项默认关闭；只有在明确知道边界并由前置代理限制来源时才打开。
+- ChatGPT Web、Codex 和 Grok 都是动态上游。`401`、`403`、`429`、模型拒绝、额度未知、网络超时和上游服务错误的含义不同，先看管理日志中的阶段、模型、账号、出口和脱敏原因，再决定是否重试。
+- CFM 账号删除与 HME 清理是两个步骤：CFM 账号删除成功后，HME aliases 删除失败不会恢复 CFM 账号。开启同步删除前先确认 HME `account_id`、邮箱和 aliases 权限可用。
+- 账号重新登录、Codex OAuth、已有账号 2FA 和注册自动 2FA 会复用浏览器环境、代理和邮件配置；缺少可用环境或密钥时会停在需要人工处理的状态，不会偷偷新建账号或重新绑定验证器。
+- 图片上传、代理和上游请求会消耗真实额度。异步任务适合长请求和反向代理超时场景，但不能把异步提交理解为上游任务可恢复；服务重启后未完成任务不会自动补发。
+- 代理定位得到的业务出口时区用于 ChatGPT Web 请求；系统 `TZ` 只影响容器本地显示。稳定出口比频繁轮换出口更适合账号登录、HME 和图片链路。
+- 生产升级应先排空注册、重新登录、2FA、图片和定时任务，做一致备份，再切换镜像。健康检查只证明网关和依赖存活，不代表上游账号、模型或邮箱协议可用。
 
 ## 上游与许可证
 
