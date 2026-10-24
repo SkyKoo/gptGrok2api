@@ -165,13 +165,23 @@ func TestHMEDeleteMailboxMatchesAccountAndEmail(t *testing.T) {
 			loginCalls++
 			http.SetCookie(w, &http.Cookie{Name: "hme_session", Value: "session", Path: "/"})
 			respond(map[string]string{"csrf_token": "csrf"})
-		case "/api/mailboxes":
+		case "/api/aliases":
+			if r.URL.Query().Get("account_id") != "acc-test" {
+				t.Errorf("missing account_id query: %s", r.URL.RawQuery)
+			}
 			listCalls++
-			respond(map[string]any{"mailboxes": []map[string]string{
-				{"id": "other", "account_id": "acc-other", "email": "alias@example.test"},
-				{"id": "target", "account_id": "acc-test", "email": "Alias@Example.Test"},
+			respond(map[string]any{"aliases": []map[string]string{
+				{"anonymousId": "other", "email": "other@example.test"},
+				{"anonymousId": "target", "email": "Alias@Example.Test"},
 			}})
-		case "/api/mailboxes/target":
+		case "/api/aliases/target":
+			if r.Method != http.MethodDelete || r.Header.Get("X-CSRF-Token") != "csrf" {
+				t.Errorf("delete request missing method or csrf: method=%s csrf=%q", r.Method, r.Header.Get("X-CSRF-Token"))
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["account_id"] != "acc-test" {
+				t.Errorf("delete request missing account_id: %#v err=%v", body, err)
+			}
 			deleteCalls++
 			respond(map[string]any{"success": true})
 		default:
@@ -199,7 +209,7 @@ func TestHMEDeleteMailboxReportsMissingWithoutDelete(t *testing.T) {
 			respond(map[string]string{"csrf_token": "csrf"})
 			return
 		}
-		respond(map[string]any{"mailboxes": []map[string]string{}})
+		respond(map[string]any{"aliases": []map[string]string{}})
 	}))
 	defer server.Close()
 	h, _ := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Second)

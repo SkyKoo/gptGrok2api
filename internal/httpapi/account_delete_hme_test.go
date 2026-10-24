@@ -17,12 +17,22 @@ func TestDeleteAccountSynchronizesHMEMailbox(t *testing.T) {
 			loginCalls++
 			http.SetCookie(w, &http.Cookie{Name: "hme_session", Value: "session", Path: "/"})
 			respond(map[string]string{"csrf_token": "csrf"})
-		case "/api/mailboxes":
+		case "/api/aliases":
+			if r.URL.Query().Get("account_id") != "hme-account" {
+				t.Errorf("missing account_id query: %s", r.URL.RawQuery)
+			}
 			listCalls++
-			respond(map[string]any{"mailboxes": []map[string]string{{
-				"id": "hme-mailbox-1", "account_id": "hme-account", "email": "alias@example.test",
+			respond(map[string]any{"aliases": []map[string]string{{
+				"anonymousId": "hme-alias-1", "email": "alias@example.test",
 			}}})
-		case "/api/mailboxes/hme-mailbox-1":
+		case "/api/aliases/hme-alias-1":
+			if r.Method != http.MethodDelete || r.Header.Get("X-CSRF-Token") != "csrf" {
+				t.Errorf("delete request missing method or csrf: method=%s csrf=%q", r.Method, r.Header.Get("X-CSRF-Token"))
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["account_id"] != "hme-account" {
+				t.Errorf("delete request missing account_id: %#v err=%v", body, err)
+			}
 			deleteCalls++
 			respond(map[string]any{"success": true})
 		default:

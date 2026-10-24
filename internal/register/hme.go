@@ -35,6 +35,15 @@ type Mailbox struct {
 	Email     string `json:"email"`
 	AccountID string `json:"account_id"`
 }
+
+// hmeAlias is the alias shape returned by the deployed icloud-hme service.
+// Its stable deletion identifier is anonymousId; older HME variants may use
+// id, so the client accepts that field only as a compatibility fallback.
+type hmeAlias struct {
+	AnonymousID string `json:"anonymousId"`
+	ID          string `json:"id"`
+	Email       string `json:"email"`
+}
 type MailSource interface {
 	Acquire(context.Context, string) (Mailbox, error)
 	WaitCode(context.Context, Mailbox, time.Time) (string, error)
@@ -217,11 +226,11 @@ func (h *HME) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
 	return box, nil
 }
 
-// DeleteMailbox removes the HME mailbox that belongs to the supplied CFM
-// registration mailbox. The HME API requires its internal mailbox ID, so the
-// address and HME account ID are matched before issuing DELETE. A missing
-// mailbox is reported with a stable error code so callers can keep the CFM
-// deletion successful while showing an actionable cleanup result.
+// DeleteMailbox removes the HME alias that belongs to the supplied CFM
+// registration mailbox. The HME API scopes alias listing by account ID and
+// requires the alias anonymousId plus account_id on DELETE. A missing alias is
+// reported with a stable error code so callers can keep the CFM deletion
+// successful while showing an actionable cleanup result.
 func (h *HME) DeleteMailbox(ctx context.Context, box Mailbox) error {
 	if box.AccountID == "" || box.AccountID != h.cfg.AccountID {
 		return fail("mail", "mailbox_account_mismatch")
@@ -236,16 +245,21 @@ func (h *HME) DeleteMailbox(ctx context.Context, box Mailbox) error {
 		}
 	}
 	var response struct {
-		Mailboxes []Mailbox `json:"mailboxes"`
+		Aliases []hmeAlias `json:"aliases"`
 	}
-	if err := h.request(ctx, http.MethodGet, "/api/mailboxes", nil, &response); err != nil {
+	query := url.Values{"account_id": {box.AccountID}}
+	if err := h.request(ctx, http.MethodGet, "/api/aliases?"+query.Encode(), nil, &response); err != nil {
 		return err
 	}
-	for _, candidate := range response.Mailboxes {
-		if candidate.ID == "" || candidate.AccountID != box.AccountID || !strings.EqualFold(candidate.Email, box.Email) {
+	for _, candidate := range response.Aliases {
+		aliasID := strings.TrimSpace(candidate.AnonymousID)
+		if aliasID == "" {
+			aliasID = strings.TrimSpace(candidate.ID)
+		}
+		if aliasID == "" || !strings.EqualFold(candidate.Email, box.Email) {
 			continue
 		}
-		return h.request(ctx, http.MethodDelete, "/api/mailboxes/"+url.PathEscape(candidate.ID), nil, nil)
+		return h.request(ctx, http.MethodDelete, "/api/aliases/"+url.PathEscape(aliasID), map[string]string{"account_id": box.AccountID}, nil)
 	}
 	return fail("mail", "mailbox_not_found")
 }
