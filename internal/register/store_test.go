@@ -12,7 +12,7 @@ func TestStoreRegistrationControlAndAccountLifecycle(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "register.json")
 	accountsPath := filepath.Join(root, "grok_accounts.json")
-	if err := os.WriteFile(accountsPath, []byte(`[{"id":"grok-one","email":"alice@example.com","password":"secret","sso":"sso-token","status":"active","source_type":"protocol","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]`), 0o600); err != nil {
+	if err := os.WriteFile(accountsPath, []byte(`[{"id":"grok-one","email":"alice@example.com","password":"secret","sso":"sso-token","sso_rw":"sso-rw-token","cookie_header":"sso=sso-token","status":"active","source_type":"protocol","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	store := New(configPath, accountsPath)
@@ -25,7 +25,7 @@ func TestStoreRegistrationControlAndAccountLifecycle(t *testing.T) {
 	if err != nil || total != 1 || len(items) != 1 || summary["active"] != 1 {
 		t.Fatalf("unexpected list: %#v %d %#v %v", items, total, summary, err)
 	}
-	if _, leaked := items[0]["sso"]; leaked || items[0]["has_sso"] != true || items[0]["email"] != "al***e@example.com" {
+	if _, leaked := items[0]["sso"]; leaked || items[0]["sso_rw"] != nil || items[0]["cookie_header"] != nil || items[0]["has_sso"] != true || items[0]["email"] != "al***e@example.com" {
 		t.Fatalf("public account leaked or was not masked: %#v", items[0])
 	}
 
