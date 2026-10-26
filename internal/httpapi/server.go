@@ -26,6 +26,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/agentidentity"
 	"github.com/auucoder/gptgrok2api-go/internal/auth"
 	"github.com/auucoder/gptgrok2api-go/internal/config"
+	mailboxstore "github.com/auucoder/gptgrok2api-go/internal/mailbox"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
@@ -44,6 +45,8 @@ type Server struct {
 	cfg                config.Config
 	auth               *auth.Validator
 	store              *store.Store
+	mailboxStore       *mailboxstore.Store
+	mailboxInitErr     error
 	catalog            []model.Spec
 	discovery          *model.Registry
 	modelRefreshMu     sync.Mutex
@@ -110,6 +113,16 @@ type Server struct {
 
 func New(cfg config.Config) *Server {
 	repository := store.New(cfg.AccountsPath, cfg.AuthKeysPath, cfg.ConfigPath)
+	var mailboxStore *mailboxstore.Store
+	var mailboxInitErr error
+	if strings.TrimSpace(cfg.MailboxDatabaseURL) != "" {
+		mailboxCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		mailboxStore, mailboxInitErr = mailboxstore.Open(mailboxCtx, cfg.MailboxDatabaseURL)
+		cancel()
+		if mailboxInitErr != nil {
+			log.Printf("mailbox database unavailable: %v", mailboxInitErr)
+		}
+	}
 	grokRuntimePath := strings.TrimSpace(cfg.GrokRuntimeAccountsPath)
 	if grokRuntimePath == "" {
 		grokRuntimePath = filepath.Join(cfg.DataDir, "grok_runtime_accounts.json")
@@ -135,6 +148,8 @@ func New(cfg config.Config) *Server {
 		cfg:                cfg,
 		auth:               auth.New(cfg.APIKey, cfg.AdminKey, cfg.AuthKeysPath, cfg.AllowAnonymous, repository),
 		store:              repository,
+		mailboxStore:       mailboxStore,
+		mailboxInitErr:     mailboxInitErr,
 		catalog:            model.Catalog(),
 		discovery:          model.NewRegistry(filepath.Join(cfg.DataDir, "chatgpt_models.json")),
 		modelRefreshing:    map[string]bool{},
@@ -408,6 +423,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/image-storage/test", s.imageStorageTest)
 	mux.HandleFunc("/api/image-storage/sync", s.imageStorageSync)
 	mux.HandleFunc("/api/icloud/claim-status/sync", s.iCloudClaimStatusSync)
+	mux.HandleFunc("/api/icloud/bridge-status", s.iCloudBridgeStatus)
+	mux.HandleFunc("/api/icloud/status", s.iCloudMailboxStatus)
+	mux.HandleFunc("/api/icloud/mailboxes", s.iCloudMailboxes)
+	mux.HandleFunc("/api/icloud/events", s.iCloudMailboxEvents)
+	mux.HandleFunc("/api/icloud/reconcile", s.iCloudMailboxReconcile)
 	mux.HandleFunc("/api/images", s.adminImages)
 	mux.HandleFunc("/api/images/", s.adminImages)
 	mux.HandleFunc("/images/", s.publicImage)

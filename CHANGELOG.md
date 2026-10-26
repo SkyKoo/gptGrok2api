@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.1-go - 2026-10-27
+
++ [新增] GPT 和 Grok 共用的邮箱资产协调层，支持 PostgreSQL 邮箱、平台占用、注册任务和清理事件登记。
++ [新增] 注册成功提交邮箱占用，补偿任务复用原邮箱；删除账号按平台释放占用，仅在没有其他占用时删除 iCloud 邮箱上游别名。
++ [新增] 邮箱资产、事件查询和历史账号/上游别名核对接口：`/api/icloud/status`、`/api/icloud/mailboxes`、`/api/icloud/events` 和 `/api/icloud/reconcile`。
++ [新增] 默认 Go Compose 编排 PostgreSQL 服务，并保留 iCloud 邮箱上游为独立服务。
++ [测试] 增加邮箱资产生命周期、注册占用和删除清理的编译与回归覆盖。
+
 ## 1.3.0-go - 2026-10-24
 
 + [新增] 账号 Session JSON 导入、浏览器环境复用、Cookie 隔离、账号能力额度、动态 ChatGPT Web 模型目录和模型路由。

@@ -345,7 +345,14 @@ func (e *FreeEngine) runCompensation(ctx context.Context, job RegistrationJob, c
 		runErr = fail("mail", "resume_not_supported")
 		return
 	}
-	if runErr = preparer.Prepare(ctx, job.Mailbox); runErr != nil {
+	if withJob, ok := mail.(interface {
+		PrepareFor(context.Context, string, Mailbox) error
+	}); ok {
+		runErr = withJob.PrepareFor(ctx, job.ID, job.Mailbox)
+	} else {
+		runErr = preparer.Prepare(ctx, job.Mailbox)
+	}
+	if runErr != nil {
 		return
 	}
 	runErr = e.runWithMailbox(ctx, job.ID, cfg, mail, flow, job.Mailbox)

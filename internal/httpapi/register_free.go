@@ -17,9 +17,20 @@ func (s *Server) initFreeRegistration() {
 		if proxy == "" {
 			proxy = s.proxyManager.Resolve(nil, false)
 		}
-		mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+		mailClient, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
 		if err != nil {
 			return nil, nil, err
+		}
+		var mail registerruntime.MailSource = mailClient
+		if strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "" && s.mailboxStore == nil {
+			mailClient.Close()
+			if s.mailboxInitErr != nil {
+				return nil, nil, s.mailboxInitErr
+			}
+			return nil, nil, errors.New("mailbox database is not configured")
+		}
+		if coordinator := s.mailboxCoordinator(); coordinator != nil {
+			mail = registerruntime.NewCoordinatedMailSource("openai", mailClient, coordinator)
 		}
 		var profile []registerruntime.BrowserProfile
 		if cfg.BrowserProfile != nil {
@@ -218,7 +229,13 @@ func (s *Server) ShutdownRegistration(ctx context.Context) error {
 	if err := s.freeRegister.Shutdown(ctx); err != nil {
 		return err
 	}
-	return s.grokRegister.Shutdown(ctx)
+	if err := s.grokRegister.Shutdown(ctx); err != nil {
+		return err
+	}
+	if s.mailboxStore != nil {
+		return s.mailboxStore.Close()
+	}
+	return nil
 }
 
 func writeRegistrationJSON(w http.ResponseWriter, status int, value any) {

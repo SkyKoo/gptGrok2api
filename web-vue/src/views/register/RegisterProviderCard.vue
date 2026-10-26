@@ -118,7 +118,7 @@
         </label>
 
         <label v-if="currentType === 'icloud_hme'" class="register-field">
-          <span class="register-label">HME 账号 ID</span>
+          <span class="register-label">iCloud 邮箱上游账号 ID</span>
           <Input :model-value="provider.account_id" block :disabled="disabled" placeholder="acc_…"
             @update:model-value="value => emit('update-field', index, 'account_id', String(value || '').trim())" />
         </label>
@@ -128,8 +128,8 @@
             :model-value="provider.delete_hme_mailbox_on_account_delete === true"
             :disabled="disabled"
             @update:model-value="value => emit('update-field', index, 'delete_hme_mailbox_on_account_delete', Boolean(value))"
-          >删除时同步删除 HME 邮箱</Checkbox>
-          <span class="register-help">删除 CFM 账号后，按邮箱和 HME 账号 ID 删除对应上游邮箱；失败时会在删除结果中提示。</span>
+          >删除时同步删除 iCloud 邮箱上游邮箱</Checkbox>
+          <span class="register-help">删除账号后，按邮箱和上游账号 ID 删除对应邮箱；失败时会在删除结果中提示。</span>
         </label>
 
         <label v-if="providerUsesApiKey(provider) && !providerUsesPublicGptMailKey(provider)" class="register-field">

@@ -41,6 +41,22 @@ services:
       retries: 10
       start_period: 10s
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: chatgpt2api-local-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CFM_POSTGRES_DB:-cfm}
+      POSTGRES_USER: ${CFM_POSTGRES_USER:-cfm}
+      POSTGRES_PASSWORD: ${CFM_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CFM_POSTGRES_USER:-cfm} -d ${CFM_POSTGRES_DB:-cfm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
@@ -57,9 +73,13 @@ services:
       STORAGE_BACKEND: sqlite
       CFM_GROK_BROWSER_URL: ${CFM_GROK_BROWSER_URL:-http://grok-browser:8899}
       DATABASE_URL: sqlite:////app/data/accounts.db
+      GO_DATABASE_URL: ${GO_DATABASE_URL:-postgresql://cfm:${CFM_POSTGRES_PASSWORD:-change-me}@postgres:5432/cfm?sslmode=disable}
       ICLOUD_PRIVACY_MAIL_BASE_URL: ${ICLOUD_PRIVACY_MAIL_BASE_URL:-http://icloud-privacy-mail:8787}
     depends_on:
-      - grok-browser
+      grok-browser:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
     # 存储后端配置 (可选值: json, sqlite, postgres, git)
     # environment:

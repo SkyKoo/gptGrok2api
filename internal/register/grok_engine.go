@@ -244,7 +244,14 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 		return
 	}
 	account["registration_job_id"] = id
-	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": box.AccountID, "email": box.Email}
+	account["registration_mailbox"] = map[string]any{
+		"provider":          "icloud_hme",
+		"source_type":       firstNonEmpty(box.SourceType, "hme"),
+		"source_mailbox_id": firstNonEmpty(box.SourceMailboxID, box.ID),
+		"id":                box.ID,
+		"account_id":        box.AccountID,
+		"email":             box.Email,
+	}
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(j *RegistrationJob) {
@@ -255,6 +262,14 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 	}); err != nil {
 		e.failJob(id, err)
 		return
+	}
+	if committer, ok := mail.(interface {
+		Commit(context.Context, string, Mailbox) error
+	}); ok {
+		if err := committer.Commit(ctx, id, box); err != nil {
+			e.failJob(id, err)
+			return
+		}
 	}
 	if err := e.importAndVerify(ctx, id); err != nil {
 		e.failJob(id, err)
@@ -605,7 +620,14 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 		return
 	}
 	account["registration_job_id"] = id
-	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": job.Mailbox.AccountID, "email": job.Mailbox.Email}
+	account["registration_mailbox"] = map[string]any{
+		"provider":          "icloud_hme",
+		"source_type":       firstNonEmpty(job.Mailbox.SourceType, "hme"),
+		"source_mailbox_id": firstNonEmpty(job.Mailbox.SourceMailboxID, job.Mailbox.ID),
+		"id":                job.Mailbox.ID,
+		"account_id":        job.Mailbox.AccountID,
+		"email":             job.Mailbox.Email,
+	}
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(current *RegistrationJob) {
@@ -615,6 +637,14 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 	}); err != nil {
 		e.failJob(id, err)
 		return
+	}
+	if committer, ok := mail.(interface {
+		Commit(context.Context, string, Mailbox) error
+	}); ok {
+		if err := committer.Commit(ctx, id, job.Mailbox); err != nil {
+			e.failJob(id, err)
+			return
+		}
 	}
 	if err := e.importAndVerify(ctx, id); err != nil {
 		e.failJob(id, err)

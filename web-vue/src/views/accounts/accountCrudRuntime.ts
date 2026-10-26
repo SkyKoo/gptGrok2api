@@ -65,8 +65,8 @@ function hmeCleanupNotice(summary?: HMECleanupSummary) {
   const notFound = Number(summary.not_found || 0)
   const failed = Number(summary.failed || 0)
   const skipped = Number(summary.skipped || 0)
-  if (deleted === 0 && notFound === 0 && failed === 0 && skipped > 0) return '该账号不是 HME 来源，未执行上游删除'
-  const parts = [`HME 邮箱同步删除成功 ${deleted} 个`]
+  if (deleted === 0 && notFound === 0 && failed === 0 && skipped > 0) return '该账号未使用 iCloud 邮箱上游，未执行上游删除'
+  const parts = [`iCloud 邮箱上游同步删除成功 ${deleted} 个`]
   if (notFound) parts.push(`未找到 ${notFound} 个`)
   if (failed) parts.push(`失败 ${failed} 个`)
   const failedResult = summary.results?.find(item => item.status === 'failed' && item.message)

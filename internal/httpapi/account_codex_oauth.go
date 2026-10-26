@@ -149,7 +149,7 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		progress.MailboxEmail = mailbox.Email
 		progress.MailboxAccountID = mailbox.AccountID
 		if progress.Stage == "waiting_email_code" {
-			progress.Message = "上游要求邮箱验证码，正在从 HME 自动获取；也可手动输入"
+			progress.Message = "上游要求邮箱验证码，正在从 iCloud 邮箱上游自动获取；也可手动输入"
 		}
 	} else {
 		progress.EmailCodeSource = "manual"
@@ -312,7 +312,7 @@ func (s *Server) maybeStartCodexEmailAuto(sessionID string) {
 		}
 	}
 	progress.EmailAutoStarted = true
-	progress.Message = "HME 正在获取邮箱验证码，也可手动输入"
+	progress.Message = "iCloud 邮箱上游正在获取邮箱验证码，也可手动输入"
 	progress.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	copyProgress := *progress
 	s.codexMu.Unlock()
@@ -322,17 +322,17 @@ func (s *Server) maybeStartCodexEmailAuto(sessionID string) {
 
 func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 	if s.registerStore == nil {
-		s.keepCodexEmailManual(progress.SessionID, "HME 未配置，请手动输入邮箱验证码")
+		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游未配置，请手动输入邮箱验证码")
 		return
 	}
 	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
 	if err != nil {
-		s.keepCodexEmailManual(progress.SessionID, "HME 配置不可用，请手动输入邮箱验证码")
+		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游配置不可用，请手动输入邮箱验证码")
 		return
 	}
 	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
 	if err != nil {
-		s.keepCodexEmailManual(progress.SessionID, "HME 连接不可用，请手动输入邮箱验证码")
+		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游连接不可用，请手动输入邮箱验证码")
 		return
 	}
 	defer mail.Close()
@@ -341,13 +341,13 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID}
 	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
 		if err := preparer.Prepare(ctx, box); err != nil {
-			s.keepCodexEmailManual(progress.SessionID, "HME 邮箱会话不可用，请手动输入邮箱验证码")
+			s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游会话不可用，请手动输入邮箱验证码")
 			return
 		}
 	}
 	code, err := mail.WaitCode(ctx, box, progress.EmailWaitAfter)
 	if err != nil {
-		s.keepCodexEmailManual(progress.SessionID, "HME 未获取到邮箱验证码，请手动输入")
+		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游未获取到邮箱验证码，请手动输入")
 		return
 	}
 	result, err := s.submitCodexEmailCode(context.Background(), progress.SessionID, code, true)
@@ -358,7 +358,7 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 		// Keep the session alive. A valid HME message can still be rejected by
 		// the upstream challenge, in which case the operator may submit a code
 		// manually after inspecting the progress details.
-		s.keepCodexEmailManual(progress.SessionID, "HME 验证码提交失败，请手动输入邮箱验证码")
+		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游验证码提交失败，请手动输入邮箱验证码")
 		return
 	}
 	if result == nil {

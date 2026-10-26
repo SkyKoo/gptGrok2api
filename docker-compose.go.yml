@@ -27,6 +27,22 @@ services:
     volumes:
       - ./data/redis:/data
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: gptgrok2api-go-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CFM_POSTGRES_DB:-cfm}
+      POSTGRES_USER: ${CFM_POSTGRES_USER:-cfm}
+      POSTGRES_PASSWORD: ${CFM_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CFM_POSTGRES_USER:-cfm} -d ${CFM_POSTGRES_DB:-cfm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
@@ -49,10 +65,15 @@ services:
       GO_PUBLIC_BASE_URL: ${GO_PUBLIC_BASE_URL:-}
       GO_QUEUE_BACKEND: ${GO_QUEUE_BACKEND:-redis}
       GO_REDIS_ADDR: ${GO_REDIS_ADDR:-redis:6379}
+      GO_DATABASE_URL: ${GO_DATABASE_URL:-postgresql://cfm:${CFM_POSTGRES_PASSWORD:-change-me}@postgres:5432/cfm?sslmode=disable}
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
-      - redis
-      - grok-browser
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      grok-browser:
+        condition: service_started
     networks:
       default:
       upstream:

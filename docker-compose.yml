@@ -27,6 +27,22 @@ services:
     volumes:
       - ./data/redis:/data
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: gptgrok2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CFM_POSTGRES_DB:-cfm}
+      POSTGRES_USER: ${CFM_POSTGRES_USER:-cfm}
+      POSTGRES_PASSWORD: ${CFM_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CFM_POSTGRES_USER:-cfm} -d ${CFM_POSTGRES_DB:-cfm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   icloud-privacy-mail:
     profiles: ["local-icloud"]
     build:
@@ -81,6 +97,7 @@ services:
       GO_ACCOUNT_REFRESH_CONCURRENCY: ${GO_ACCOUNT_REFRESH_CONCURRENCY:-3}
       GO_ALLOW_ANONYMOUS: ${GO_ALLOW_ANONYMOUS:-false}
       GO_QUEUE_BACKEND: ${GO_QUEUE_BACKEND:-redis}
+      GO_DATABASE_URL: ${GO_DATABASE_URL:-postgresql://cfm:${CFM_POSTGRES_PASSWORD:-change-me}@postgres:5432/cfm?sslmode=disable}
       GO_REDIS_ADDR: ${GO_REDIS_ADDR:-redis:6379}
       GO_REDIS_PASSWORD: ${GO_REDIS_PASSWORD:-}
       GO_REDIS_DB: ${GO_REDIS_DB:-0}
@@ -96,5 +113,9 @@ services:
       ICLOUD_PRIVACY_MAIL_API_KEY: ${ICLOUD_PRIVACY_MAIL_API_KEY:-}
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
-      - redis
-      - grok-browser
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      grok-browser:
+        condition: service_started

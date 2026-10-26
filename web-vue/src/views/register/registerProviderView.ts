@@ -41,7 +41,7 @@ export type RegisterRuntimeLogLine = {
 }
 
 export const providerTypeOptions = [
-  { value: 'icloud_hme', label: 'iCloud HME（独立服务）' },
+  { value: 'icloud_hme', label: 'iCloud 邮箱上游（独立服务）' },
   { value: 'cloudmail_gen', label: 'CloudMail Gen' },
   { value: 'cloudflare_temp_email', label: 'Cloudflare Temp Email' },
   { value: 'tempmail_lol', label: 'TempMail.lol' },
@@ -825,9 +825,9 @@ export function providerRequirementMessages(provider: RegisterProvider) {
 
   switch (type) {
     case 'icloud_hme':
-      requireValue(provider.api_base, 'HME 服务地址')
-      requireValue(provider.account_id, 'HME 账号 ID')
-      if (!provider.admin_password_set) requireValue(provider.admin_password, 'HME 管理员密码')
+      requireValue(provider.api_base, 'iCloud 邮箱上游服务地址')
+      requireValue(provider.account_id, 'iCloud 邮箱上游账号 ID')
+      if (!provider.admin_password_set) requireValue(provider.admin_password, 'iCloud 邮箱上游管理员密码')
       break
     case 'cloudmail_gen':
       requireValue(provider.api_base, 'CloudMail URL')

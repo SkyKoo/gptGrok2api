@@ -6,6 +6,8 @@ const requestConfig = {}
 export type ICloudBridgeStatus = {
   enabled: boolean
   reachable: boolean
+  database_configured?: boolean
+  hme_configured?: boolean
   base_url?: string
   status_code?: number
   error?: string
@@ -95,6 +97,21 @@ export type ICloudMailboxList = {
   mailboxes?: ICloudMailbox[]
   groups?: Array<{ key?: string; title?: string; count?: number; account_id?: string }>
   pagination?: { page?: number; page_size?: number; total?: number; total_all?: number; total_pages?: number }
+}
+
+export type ICloudMailboxEvent = {
+  id?: string
+  mailbox_id?: string
+  claim_id?: string
+  event_type?: string
+  source_type?: string
+  platform?: string
+  account_id?: string
+  registration_job_id?: string
+  result?: string
+  error?: string
+  created_at?: string
+  [key: string]: unknown
 }
 
 export type ICloudMailboxSyncResult = {
@@ -194,6 +211,9 @@ export const icloudApi = {
   listAccounts: () => apiClient.get<never, { accounts?: ICloudAccount[] }>(path('accounts'), requestConfig),
   listMailboxes: (params: { page?: number; page_size?: number; search?: string; account_id?: string } = {}) =>
     apiClient.get<never, ICloudMailboxList>(path('mailboxes'), { ...requestConfig, params }),
+  reconcile: () => apiClient.post<never, { success?: boolean; aliases?: number; openai_claims?: number; grok_claims?: number; missing?: string[]; errors?: string[] }>(path('reconcile'), {}, requestConfig),
+  listEvents: (params: { page?: number; page_size?: number; mailbox_id?: string; platform?: string } = {}) =>
+    apiClient.get<never, { events?: ICloudMailboxEvent[]; total?: number; page?: number; page_size?: number }>(path('events'), { ...requestConfig, params }),
   syncMailbox: (id: string, after?: string) =>
     apiClient.post(path(`mailboxes/${encodeURIComponent(id)}/sync`), {}, { ...requestConfig, params: after ? { after } : undefined }),
   listMessages: (id: string) =>

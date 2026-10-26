@@ -55,6 +55,7 @@ type Config struct {
 	ClearanceEnabled        bool
 	ClearanceTimeout        time.Duration
 	QueueBackend            string
+	MailboxDatabaseURL      string
 	RedisAddr               string
 	RedisPassword           string
 	RedisDB                 int
@@ -198,6 +199,7 @@ func Load(root string) (Config, error) {
 		ClearanceEnabled:        envBool("GO_CLEARANCE_ENABLED", false),
 		ClearanceTimeout:        time.Duration(envInt("GO_CLEARANCE_TIMEOUT_SECONDS", 60)) * time.Second,
 		QueueBackend:            strings.ToLower(env("GO_QUEUE_BACKEND", "json")),
+		MailboxDatabaseURL:      mailboxDatabaseURL(),
 		RedisAddr:               env("GO_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword:           strings.TrimSpace(os.Getenv("GO_REDIS_PASSWORD")),
 		RedisDB:                 envIntAllowZero("GO_REDIS_DB", 0),
@@ -379,6 +381,20 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func mailboxDatabaseURL() string {
+	if value := strings.TrimSpace(os.Getenv("GO_DATABASE_URL")); value != "" {
+		return value
+	}
+	// DATABASE_URL is used by older deployments for SQLite account storage.
+	// Reuse it only when it is unambiguously a PostgreSQL URL so enabling the
+	// mailbox coordinator cannot reinterpret an existing SQLite configuration.
+	legacy := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if strings.HasPrefix(strings.ToLower(legacy), "postgres://") || strings.HasPrefix(strings.ToLower(legacy), "postgresql://") {
+		return legacy
+	}
+	return ""
 }
 
 func envBool(name string, fallback bool) bool {

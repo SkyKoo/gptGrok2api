@@ -114,6 +114,22 @@ services:
       retries: 10
       start_period: 10s
 
+  postgres:
+    image: postgres:17-alpine
+    container_name: chatgpt2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CFM_POSTGRES_DB:-cfm}
+      POSTGRES_USER: ${CFM_POSTGRES_USER:-cfm}
+      POSTGRES_PASSWORD: ${CFM_POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CFM_POSTGRES_USER:-cfm} -d ${CFM_POSTGRES_DB:-cfm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
@@ -128,6 +144,8 @@ services:
         condition: service_started
       flaresolverr:
         condition: service_started
+      postgres:
+        condition: service_healthy
     ports:
       - "${CHATGPT2API_PORT:-3000}:80"
     volumes:
@@ -137,6 +155,7 @@ services:
     environment:
       STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
       DATABASE_URL: ${DATABASE_URL:-}
+      GO_DATABASE_URL: ${GO_DATABASE_URL:-postgresql://cfm:${CFM_POSTGRES_PASSWORD:-change-me}@postgres:5432/cfm?sslmode=disable}
       GIT_REPO_URL: ${GIT_REPO_URL:-}
       GIT_TOKEN: ${GIT_TOKEN:-}
       GIT_BRANCH: ${GIT_BRANCH:-main}

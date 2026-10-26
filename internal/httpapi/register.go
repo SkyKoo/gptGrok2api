@@ -686,12 +686,18 @@ func (s *Server) deleteRegisteredGrokAccounts(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	accounts, err := s.registerStore.ExportAccounts(ids)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
 	removed, err := s.registerStore.Delete(ids)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"removed": removed, "count": removed, "upstream_deleted": 0})
+	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accounts)
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"removed": removed, "count": removed, "upstream_deleted": 0, "hme_cleanup": hmeCleanup})
 }
 
 func (s *Server) exportRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request, ids []string) {

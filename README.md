@@ -18,6 +18,8 @@
 
 删除账号时可以开启 iCloud 邮箱同步清理。系统先删除项目账号，再按保存的邮箱账号 ID 和邮箱地址查询上游别名并删除；清理失败会逐条报告，不会恢复已经删除的项目账号。
 
+GPT 和 Grok 共用一层邮箱资产协调器。邮箱资产、平台占用、注册任务和清理结果保存在 PostgreSQL；同一个邮箱可以同时有 GPT 和 Grok 占用，只有最后一个占用释放后才允许删除上游别名。协调器保留邮箱来源 ID，注册失败补偿会复用原邮箱，账号删除会写入邮箱事件日志。`POST /api/icloud/reconcile` 可把已有 iCloud 邮箱和历史账号重新纳入登记，`GET /api/icloud/mailboxes` 与 `GET /api/icloud/events` 用于查看资产和操作历史。
+
 ## 参考资料
 
 - [CHANGELOG.md](./CHANGELOG.md)：版本和功能变更。
@@ -54,7 +56,9 @@ flowchart LR
   core --> chatgpt["ChatGPT Web"]
   core --> grok["Grok Web 和 xAI"]
   core --> codex["Codex OAuth"]
-  core --> email["iCloud 邮箱上游"]
+  core --> mailbox["邮箱资产协调器"]
+  mailbox --> email["iCloud 邮箱上游"]
+  mailbox --> postgres["PostgreSQL"]
   core --> external["CPA 或 Sub2API"]
   core --> proxy["代理出口和健康检测"]
   core --> storage["本地账号、任务和媒体"]
@@ -81,9 +85,10 @@ CHATGPT2API_AUTH_KEY=replace-with-a-long-random-api-key
 CHATGPT2API_ADMIN_KEY=replace-with-a-different-admin-key
 CHATGPT2API_PORT=3000
 GO_PUBLIC_BASE_URL=https://your-domain.example
+CFM_POSTGRES_PASSWORD=replace-with-a-long-random-password
 ```
 
-启动默认 Go 服务和 Redis：
+启动默认 Go 服务、Redis 和 PostgreSQL：
 
 ```bash
 docker compose up -d --build
@@ -187,6 +192,8 @@ Grok Imagine 视频使用 `POST /v1/videos`，当前网页协议公开的时长�
 | `GO_CONFIG_PATH` | 运行时 JSON 配置，容器默认 `/app/data/config.json`。 |
 | `GO_GROK_RUNTIME_ACCOUNTS_PATH` | Grok 运行时账号池文件，默认 `data/grok_runtime_accounts.json`；与 GPT `accounts.json` 分离。 |
 | `GO_QUEUE_BACKEND` / `GO_REDIS_ADDR` | 队列类型和 Redis 地址；可选 `json` 或 `redis`。 |
+| `GO_DATABASE_URL` | 邮箱资产协调器的 PostgreSQL 连接串；为空时保留 JSON 兼容模式。 |
+| `CFM_POSTGRES_DB` / `CFM_POSTGRES_USER` / `CFM_POSTGRES_PASSWORD` | Compose 内置 PostgreSQL 的数据库、用户和密码；生产环境请替换默认值。 |
 | `GO_REQUEST_TIMEOUT_SECONDS` | 上游单请求超时，运行时限制 10–300 秒。 |
 | `GO_CHAT_MAX_RETRIES` / `GO_CHAT_RETRY_CODES` | 聊天和图片常规换号重试配置。 |
 | `GO_IMAGE_ACCOUNT_CONCURRENCY` / `GO_IMAGE_MAX_CONCURRENCY` | 图片单账号和单进程并发。 |

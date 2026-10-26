@@ -419,7 +419,14 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 		account["browser_profile"] = provider.BrowserProfile()
 	}
 	account["registration_job_id"] = id
-	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "account_id": box.AccountID, "email": box.Email}
+	account["registration_mailbox"] = map[string]any{
+		"provider":          "icloud_hme",
+		"source_type":       firstNonEmpty(box.SourceType, "hme"),
+		"source_mailbox_id": firstNonEmpty(box.SourceMailboxID, box.ID),
+		"id":                box.ID,
+		"account_id":        box.AccountID,
+		"email":             box.Email,
+	}
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err = e.change(id, func(j *RegistrationJob) {
@@ -429,6 +436,13 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 		finishRegistrationCompensation(j, "saved_result")
 	}); err != nil {
 		return err
+	}
+	if committer, ok := mail.(interface {
+		Commit(context.Context, string, Mailbox) error
+	}); ok {
+		if err := committer.Commit(ctx, id, box); err != nil {
+			return err
+		}
 	}
 	if cfg.AutoTwoFA {
 		if err = e.enableRegistrationTwoFA(ctx, id, cfg, mail, flow, box); err != nil {

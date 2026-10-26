@@ -31,9 +31,20 @@ func (c HMEConfig) Validate() error {
 }
 
 type Mailbox struct {
-	ID        string `json:"id,omitempty"`
-	Email     string `json:"email"`
-	AccountID string `json:"account_id"`
+	ID              string `json:"id,omitempty"`
+	Email           string `json:"email"`
+	AccountID       string `json:"account_id"`
+	SourceType      string `json:"source_type,omitempty"`
+	SourceMailboxID string `json:"source_mailbox_id,omitempty"`
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // hmeAlias is the alias shape returned by the deployed icloud-hme service.
@@ -44,6 +55,38 @@ type hmeAlias struct {
 	ID          string `json:"id"`
 	Email       string `json:"email"`
 }
+
+// ListMailboxes returns the aliases currently known by the deployed HME
+// account. It is used by the mailbox reconciliation job and never exposes the
+// HME session or administrator credentials to callers.
+func (h *HME) ListMailboxes(ctx context.Context) ([]Mailbox, error) {
+	if h.csrf == "" {
+		if err := h.login(ctx); err != nil {
+			return nil, err
+		}
+	}
+	var response struct {
+		Aliases []hmeAlias `json:"aliases"`
+	}
+	query := url.Values{"account_id": {h.cfg.AccountID}}
+	if err := h.request(ctx, http.MethodGet, "/api/aliases?"+query.Encode(), nil, &response); err != nil {
+		return nil, err
+	}
+	result := make([]Mailbox, 0, len(response.Aliases))
+	for _, alias := range response.Aliases {
+		email := strings.TrimSpace(alias.Email)
+		if email == "" {
+			continue
+		}
+		id := strings.TrimSpace(alias.AnonymousID)
+		if id == "" {
+			id = strings.TrimSpace(alias.ID)
+		}
+		result = append(result, Mailbox{ID: id, Email: email, AccountID: h.cfg.AccountID, SourceType: "hme", SourceMailboxID: id})
+	}
+	return result, nil
+}
+
 type MailSource interface {
 	Acquire(context.Context, string) (Mailbox, error)
 	WaitCode(context.Context, Mailbox, time.Time) (string, error)
@@ -56,6 +99,98 @@ type MailSource interface {
 type MailSessionPreparer interface {
 	Prepare(context.Context, Mailbox) error
 }
+
+// MailboxClaimCoordinator is the boundary between registration engines and
+// the provider-neutral mailbox asset store. Implementations may reuse an
+// existing mailbox, create a new provider mailbox, and persist the claim
+// lifecycle without exposing provider details to GPT or Grok flows.
+type MailboxClaimCoordinator interface {
+	Reserve(context.Context, string, string, func(context.Context) (Mailbox, error), func(context.Context, Mailbox) error) (Mailbox, error)
+	EnsureClaim(context.Context, string, string, Mailbox) error
+	Commit(context.Context, string, string, string, Mailbox) error
+	Release(context.Context, string, string, Mailbox, string) error
+}
+
+// CoordinatedMailSource keeps the existing HME client as the provider while
+// routing mailbox allocation and claims through the central coordinator.
+// Each registration worker receives its own wrapper, so the job ID is local
+// and does not cross concurrent GPT/Grok registrations.
+type CoordinatedMailSource struct {
+	source      MailSource
+	coordinator MailboxClaimCoordinator
+	platform    string
+	jobID       string
+}
+
+func NewCoordinatedMailSource(platform string, source MailSource, coordinator MailboxClaimCoordinator) *CoordinatedMailSource {
+	return &CoordinatedMailSource{source: source, coordinator: coordinator, platform: strings.ToLower(strings.TrimSpace(platform))}
+}
+
+func (c *CoordinatedMailSource) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
+	c.jobID = strings.TrimSpace(jobID)
+	if c.coordinator == nil {
+		return c.source.Acquire(ctx, jobID)
+	}
+	prepare := func(ctx context.Context, box Mailbox) error {
+		preparer, ok := c.source.(MailSessionPreparer)
+		if !ok {
+			return nil
+		}
+		return preparer.Prepare(ctx, box)
+	}
+	return c.coordinator.Reserve(ctx, c.platform, c.jobID, func(ctx context.Context) (Mailbox, error) {
+		return c.source.Acquire(ctx, c.jobID)
+	}, prepare)
+}
+
+func (c *CoordinatedMailSource) Prepare(ctx context.Context, box Mailbox) error {
+	return c.PrepareFor(ctx, c.jobID, box)
+}
+
+func (c *CoordinatedMailSource) PrepareFor(ctx context.Context, jobID string, box Mailbox) error {
+	if strings.TrimSpace(jobID) != "" {
+		c.jobID = strings.TrimSpace(jobID)
+	}
+	if c.coordinator != nil {
+		if err := c.coordinator.EnsureClaim(ctx, c.platform, c.jobID, box); err != nil {
+			return err
+		}
+	}
+	preparer, ok := c.source.(MailSessionPreparer)
+	if !ok {
+		return fail("mail", "resume_not_supported")
+	}
+	return preparer.Prepare(ctx, box)
+}
+
+func (c *CoordinatedMailSource) Commit(ctx context.Context, accountID string, box Mailbox) error {
+	if c.coordinator == nil {
+		return nil
+	}
+	return c.coordinator.Commit(ctx, c.platform, c.jobID, accountID, box)
+}
+
+func (c *CoordinatedMailSource) Release(ctx context.Context, box Mailbox, reason string) error {
+	if c.coordinator == nil {
+		return nil
+	}
+	return c.coordinator.Release(ctx, c.platform, c.jobID, box, reason)
+}
+
+func (c *CoordinatedMailSource) WaitCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
+	return c.source.WaitCode(ctx, box, after)
+}
+
+func (c *CoordinatedMailSource) WaitCodeFor(ctx context.Context, box Mailbox, after time.Time, matcher func(string) bool) (string, error) {
+	if targetAware, ok := c.source.(interface {
+		WaitCodeFor(context.Context, Mailbox, time.Time, func(string) bool) (string, error)
+	}); ok {
+		return targetAware.WaitCodeFor(ctx, box, after, matcher)
+	}
+	return c.source.WaitCode(ctx, box, after)
+}
+
+func (c *CoordinatedMailSource) Close() { c.source.Close() }
 
 // HME talks to the deployed icloud-hme API, not the legacy Privacy Mail API.
 // It creates a labelled alias once and leaves it in place on failure so that a

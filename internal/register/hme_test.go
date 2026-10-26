@@ -202,6 +202,39 @@ func TestHMEDeleteMailboxMatchesAccountAndEmail(t *testing.T) {
 	}
 }
 
+func TestHMEListMailboxesReturnsStableSourceIdentifiers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }
+		switch r.URL.Path {
+		case "/api/auth/login":
+			respond(map[string]string{"csrf_token": "csrf"})
+		case "/api/aliases":
+			if r.URL.Query().Get("account_id") != "acc-test" {
+				t.Errorf("missing account id")
+			}
+			respond(map[string]any{"aliases": []map[string]string{
+				{"anonymousId": "alias-1", "email": "first@example.test"},
+				{"id": "alias-2", "email": "second@example.test"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	h, err := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	items, err := h.ListMailboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].SourceMailboxID != "alias-1" || items[1].SourceMailboxID != "alias-2" {
+		t.Fatalf("unexpected aliases: %#v", items)
+	}
+}
+
 func TestHMEDeleteMailboxReportsMissingWithoutDelete(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		respond := func(data any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data}) }

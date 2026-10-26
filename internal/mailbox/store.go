@@ -1,0 +1,755 @@
+package mailbox
+
+import (
+	"context"
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+// Mailbox is the provider-neutral representation used by the account and
+// registration layers. Source-specific identifiers remain opaque to callers.
+type Mailbox struct {
+	ID              string
+	Email           string
+	SourceType      string
+	SourceAccountID string
+	SourceMailboxID string
+	Status          string
+	LastError       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type Claim struct {
+	ID              string
+	MailboxID       string
+	Platform        string
+	AccountID       string
+	RegistrationJob string
+	Status          string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	ReleasedAt      *time.Time
+}
+
+type MailboxView struct {
+	Mailbox
+	OpenAIClaimed bool       `json:"openai_claimed"`
+	GrokClaimed   bool       `json:"grok_claimed"`
+	Claims        []Claim    `json:"claims,omitempty"`
+	Capabilities  any        `json:"capabilities,omitempty"`
+	Metadata      any        `json:"metadata,omitempty"`
+	LastSyncAt    *time.Time `json:"last_sync_at,omitempty"`
+}
+
+type Event struct {
+	ID              string    `json:"id"`
+	MailboxID       string    `json:"mailbox_id"`
+	ClaimID         string    `json:"claim_id"`
+	EventType       string    `json:"event_type"`
+	SourceType      string    `json:"source_type"`
+	Platform        string    `json:"platform"`
+	AccountID       string    `json:"account_id"`
+	RegistrationJob string    `json:"registration_job_id"`
+	Actor           string    `json:"actor,omitempty"`
+	RequestID       string    `json:"request_id,omitempty"`
+	Result          string    `json:"result"`
+	Error           string    `json:"error,omitempty"`
+	Metadata        any       `json:"metadata,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type Store struct {
+	db *sql.DB
+}
+
+// Open connects to PostgreSQL and applies the mailbox schema. An empty URL
+// deliberately disables the module so existing JSON-only installations keep
+// starting until the database is configured.
+func Open(ctx context.Context, databaseURL string) (*Store, error) {
+	databaseURL = strings.TrimSpace(databaseURL)
+	if databaseURL == "" {
+		return nil, nil
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open mailbox database: %w", err)
+	}
+	db.SetMaxOpenConns(8)
+	db.SetMaxIdleConns(4)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	store := &Store{db: db}
+	if err := store.migrate(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping mailbox database: %w", err)
+	}
+	return store, nil
+}
+
+func (s *Store) Enabled() bool { return s != nil && s.db != nil }
+
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+
+func (s *Store) Ping(ctx context.Context) error {
+	if !s.Enabled() {
+		return errors.New("mailbox database is not configured")
+	}
+	return s.db.PingContext(ctx)
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	if !s.Enabled() {
+		return errors.New("mailbox database is not configured")
+	}
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS mailbox_schema_migrations (
+			version integer PRIMARY KEY,
+			applied_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS mailboxes (
+			id text PRIMARY KEY,
+			source_type text NOT NULL,
+			source_account_id text NOT NULL DEFAULT '',
+			source_mailbox_id text NOT NULL DEFAULT '',
+			email text NOT NULL,
+			status text NOT NULL DEFAULT 'available',
+			capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
+			metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+			last_sync_at timestamptz,
+			last_error text NOT NULL DEFAULT '',
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			UNIQUE (source_type, source_account_id, source_mailbox_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_email_ci_idx ON mailboxes (lower(email))`,
+		`CREATE INDEX IF NOT EXISTS mailboxes_status_idx ON mailboxes (status, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mailbox_claims (
+			id text PRIMARY KEY,
+			mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+			platform text NOT NULL,
+			account_id text NOT NULL DEFAULT '',
+			registration_job_id text NOT NULL DEFAULT '',
+			status text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			released_at timestamptz
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS mailbox_claims_active_platform_idx
+			ON mailbox_claims (mailbox_id, platform)
+			WHERE status IN ('reserved', 'active')`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS mailbox_claims_job_idx
+			ON mailbox_claims (platform, registration_job_id)
+			WHERE registration_job_id <> '' AND status IN ('reserved', 'active')`,
+		`CREATE INDEX IF NOT EXISTS mailbox_claims_account_idx ON mailbox_claims (platform, account_id, status)`,
+		`CREATE TABLE IF NOT EXISTS mailbox_events (
+			id text PRIMARY KEY,
+			mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+			claim_id text NOT NULL DEFAULT '',
+			event_type text NOT NULL,
+			source_type text NOT NULL DEFAULT '',
+			platform text NOT NULL DEFAULT '',
+			account_id text NOT NULL DEFAULT '',
+			registration_job_id text NOT NULL DEFAULT '',
+			actor text NOT NULL DEFAULT '',
+			request_id text NOT NULL DEFAULT '',
+			result text NOT NULL DEFAULT '',
+			error text NOT NULL DEFAULT '',
+			metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS mailbox_events_mailbox_idx ON mailbox_events (mailbox_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS mailbox_events_created_idx ON mailbox_events (created_at DESC)`,
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mailbox migration: %w", err)
+	}
+	defer tx.Rollback()
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply mailbox schema: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_schema_migrations(version) VALUES (1) ON CONFLICT (version) DO NOTHING`); err != nil {
+		return fmt.Errorf("record mailbox schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit mailbox migration: %w", err)
+	}
+	return nil
+}
+
+func newID(prefix string) string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "_" + hex.EncodeToString(raw[:])
+}
+
+func normalizeSource(sourceType, sourceAccountID, sourceMailboxID, email string) (string, string, string, string, error) {
+	sourceType = strings.TrimSpace(strings.ToLower(sourceType))
+	if sourceType == "" {
+		sourceType = "hme"
+	}
+	sourceAccountID = strings.TrimSpace(sourceAccountID)
+	sourceMailboxID = strings.TrimSpace(sourceMailboxID)
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" {
+		return "", "", "", "", errors.New("mailbox email is required")
+	}
+	if sourceMailboxID == "" {
+		sourceMailboxID = email
+	}
+	return sourceType, sourceAccountID, sourceMailboxID, email, nil
+}
+
+func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox, error) {
+	sourceType, sourceAccountID, sourceMailboxID, email, err := normalizeSource(item.SourceType, item.SourceAccountID, item.SourceMailboxID, item.Email)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	// Email is the provider-independent identity of a mailbox asset. Provider
+	// aliases may expose an anonymousId that must remain in source_mailbox_id;
+	// it must never replace the canonical database id or make reconciliation
+	// collide with the case-insensitive email index.
+	var id string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, email).Scan(&id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Mailbox{}, fmt.Errorf("find mailbox by email: %w", err)
+	}
+	if id == "" {
+		id = newID("mbx")
+	}
+	status := strings.TrimSpace(item.Status)
+	if status == "" {
+		status = "available"
+	}
+	var out Mailbox
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO mailboxes(id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
+		ON CONFLICT (id) DO UPDATE SET
+			source_type=EXCLUDED.source_type,
+			source_account_id=EXCLUDED.source_account_id,
+			source_mailbox_id=EXCLUDED.source_mailbox_id,
+			email=EXCLUDED.email,
+			status=CASE WHEN mailboxes.status IN ('reserved','active','cleanup_pending') THEN mailboxes.status ELSE EXCLUDED.status END,
+			last_error=CASE WHEN EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailboxes.last_error END,
+			updated_at=now()
+		RETURNING id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at`,
+		id, sourceType, sourceAccountID, sourceMailboxID, email, status, strings.TrimSpace(item.LastError)).Scan(
+		&out.ID, &out.SourceType, &out.SourceAccountID, &out.SourceMailboxID, &out.Email, &out.Status, &out.LastError, &out.CreatedAt, &out.UpdatedAt)
+	if err != nil {
+		return Mailbox{}, fmt.Errorf("upsert mailbox: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) writeEventTx(ctx context.Context, tx *sql.Tx, event Event) error {
+	metadata, err := json.Marshal(event.Metadata)
+	if err != nil {
+		metadata = []byte(`{}`)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO mailbox_events
+		(id, mailbox_id, claim_id, event_type, source_type, platform, account_id, registration_job_id, actor, request_id, result, error, metadata)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		firstNonEmpty(event.ID, newID("evt")), strings.TrimSpace(event.MailboxID), strings.TrimSpace(event.ClaimID), strings.TrimSpace(event.EventType), strings.TrimSpace(event.SourceType), strings.TrimSpace(event.Platform), strings.TrimSpace(event.AccountID), strings.TrimSpace(event.RegistrationJob), strings.TrimSpace(event.Actor), strings.TrimSpace(event.RequestID), strings.TrimSpace(event.Result), strings.TrimSpace(event.Error), metadata)
+	return err
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// Upsert imports a provider mailbox into the canonical asset registry. It is
+// intentionally non-destructive: reconciliation never releases claims or
+// deletes an upstream alias.
+func (s *Store) Upsert(ctx context.Context, item Mailbox, eventType string) (Mailbox, error) {
+	if !s.Enabled() {
+		return Mailbox{}, errors.New("mailbox database is not configured")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	item, err = s.upsertTx(ctx, tx, item)
+	if err != nil {
+		tx.Rollback()
+		return Mailbox{}, err
+	}
+	if eventType == "" {
+		eventType = "mailbox_synced"
+	}
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, EventType: eventType, SourceType: item.SourceType, Result: "ok"}); err != nil {
+		tx.Rollback()
+		return Mailbox{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Mailbox{}, err
+	}
+	return item, nil
+}
+
+// Reserve reserves an existing mailbox that is free for the requested
+// platform, or creates one through acquire when no suitable mailbox exists.
+// The prepare callback re-authenticates an existing provider mailbox.
+func (s *Store) Reserve(ctx context.Context, platform, jobID string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+	if !s.Enabled() {
+		return acquire(ctx)
+	}
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	jobID = strings.TrimSpace(jobID)
+	if platform == "" || jobID == "" {
+		return Mailbox{}, errors.New("mailbox platform and job are required")
+	}
+	if existing, ok, err := s.claimForJob(ctx, platform, jobID); err != nil {
+		return Mailbox{}, err
+	} else if ok {
+		if prepare != nil {
+			if err := prepare(ctx, existing); err != nil {
+				return Mailbox{}, err
+			}
+		}
+		return existing, nil
+	}
+
+	// Claim an existing alias first. The partial unique index serializes races
+	// between GPT and Grok while keeping their claims independent.
+	var candidate Mailbox
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	row := tx.QueryRowContext(ctx, `SELECT m.id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at
+		FROM mailboxes m
+		WHERE m.status IN ('available','active')
+		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$1 AND c.status IN ('reserved','active'))
+		ORDER BY m.updated_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`, platform)
+	if scanErr := row.Scan(&candidate.ID, &candidate.SourceType, &candidate.SourceAccountID, &candidate.SourceMailboxID, &candidate.Email, &candidate.Status, &candidate.LastError, &candidate.CreatedAt, &candidate.UpdatedAt); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		tx.Rollback()
+		return Mailbox{}, scanErr
+	}
+	if candidate.ID != "" {
+		claimID := newID("clm")
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, candidate.ID, platform, jobID); err != nil {
+			tx.Rollback()
+			return Mailbox{}, fmt.Errorf("reserve mailbox: %w", err)
+		}
+		if err := s.writeEventTx(ctx, tx, Event{MailboxID: candidate.ID, ClaimID: claimID, EventType: "claim_reserved", SourceType: candidate.SourceType, Platform: platform, RegistrationJob: jobID, Result: "existing"}); err != nil {
+			tx.Rollback()
+			return Mailbox{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET status='active', updated_at=now() WHERE id=$1`, candidate.ID); err != nil {
+			tx.Rollback()
+			return Mailbox{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Mailbox{}, err
+		}
+		if prepare != nil {
+			if err := prepare(ctx, candidate); err != nil {
+				_ = s.Release(ctx, platform, jobID, candidate, "provider_prepare_failed")
+				return Mailbox{}, err
+			}
+		}
+		return candidate, nil
+	}
+	tx.Rollback()
+
+	created, err := acquire(ctx)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	created.SourceType = firstNonEmpty(created.SourceType, "hme")
+	created.SourceMailboxID = firstNonEmpty(created.SourceMailboxID, created.ID, created.Email)
+	tx, err = s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	item, err := s.upsertTx(ctx, tx, created)
+	if err != nil {
+		tx.Rollback()
+		return Mailbox{}, err
+	}
+	claimID := newID("clm")
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, item.ID, platform, jobID); err != nil {
+		tx.Rollback()
+		return Mailbox{}, fmt.Errorf("claim created mailbox: %w", err)
+	}
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "mailbox_created", SourceType: item.SourceType, Platform: platform, RegistrationJob: jobID, Result: "created"}); err != nil {
+		tx.Rollback()
+		return Mailbox{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Mailbox{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) claimForJob(ctx context.Context, platform, jobID string) (Mailbox, bool, error) {
+	var item Mailbox
+	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.email,m.source_type,m.source_account_id,m.source_mailbox_id,m.status,m.last_error,m.created_at,m.updated_at
+		FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id
+		WHERE c.platform=$1 AND c.registration_job_id=$2 AND c.status IN ('reserved','active')
+		ORDER BY c.updated_at DESC LIMIT 1`, platform, jobID).Scan(&item.ID, &item.Email, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Mailbox{}, false, nil
+	}
+	if err != nil {
+		return Mailbox{}, false, err
+	}
+	return item, true, nil
+}
+
+// EnsureClaim adopts a mailbox already present in a registration journal or
+// account record. It is idempotent and never creates an upstream alias.
+func (s *Store) EnsureClaim(ctx context.Context, platform, jobID string, item Mailbox) error {
+	if !s.Enabled() {
+		return nil
+	}
+	platform, jobID = strings.ToLower(strings.TrimSpace(platform)), strings.TrimSpace(jobID)
+	if platform == "" || jobID == "" {
+		return errors.New("mailbox platform and job are required")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	item, err = s.upsertTx(ctx, tx, item)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	var claimID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM mailbox_claims WHERE mailbox_id=$1 AND platform=$2 AND status IN ('reserved','active') LIMIT 1`, item.ID, platform).Scan(&claimID)
+	if errors.Is(err, sql.ErrNoRows) {
+		claimID = newID("clm")
+		if _, err = tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, item.ID, platform, jobID); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err = s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_adopted", SourceType: item.SourceType, Platform: platform, RegistrationJob: jobID, Result: "adopted"}); err != nil {
+			tx.Rollback()
+			return err
+		}
+	} else if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Commit(ctx context.Context, platform, jobID, accountID string, item Mailbox) error {
+	if !s.Enabled() {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	var canonicalID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, item.Email).Scan(&canonicalID); err == nil {
+		item.ID = canonicalID
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		return err
+	} else if strings.TrimSpace(item.ID) == "" {
+		tx.Rollback()
+		return s.EnsureClaim(ctx, platform, jobID, item)
+	}
+	var claimID, sourceType string
+	err = tx.QueryRowContext(ctx, `SELECT c.id,m.source_type FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.mailbox_id=$1 AND c.platform=$2 AND (c.registration_job_id=$3 OR c.status IN ('reserved','active')) ORDER BY c.updated_at DESC LIMIT 1`, item.ID, strings.ToLower(strings.TrimSpace(platform)), strings.TrimSpace(jobID)).Scan(&claimID, &sourceType)
+	if err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return s.EnsureClaim(ctx, platform, jobID, item)
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mailbox_claims SET status='active', account_id=$1, updated_at=now() WHERE id=$2`, strings.TrimSpace(accountID), claimID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET status='active', updated_at=now(), last_error='' WHERE id=$1`, item.ID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_committed", SourceType: sourceType, Platform: platform, AccountID: accountID, RegistrationJob: jobID, Result: "active"}); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbox, reason string) error {
+	if !s.Enabled() {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	var canonicalID string
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, item.Email).Scan(&canonicalID); err == nil {
+		item.ID = canonicalID
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		return err
+	} else if strings.TrimSpace(item.ID) == "" {
+		tx.Rollback()
+		return nil
+	}
+	var claimID, sourceType string
+	err = tx.QueryRowContext(ctx, `SELECT c.id,m.source_type FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.mailbox_id=$1 AND c.platform=$2 AND (c.registration_job_id=$3 OR c.status IN ('reserved','active')) ORDER BY c.updated_at DESC LIMIT 1`, item.ID, strings.ToLower(strings.TrimSpace(platform)), strings.TrimSpace(jobID)).Scan(&claimID, &sourceType)
+	if errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		return nil
+	}
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mailbox_claims SET status='released', released_at=now(), updated_at=now() WHERE id=$1`, claimID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	status := "available"
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')`, item.ID).Scan(&count); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if count > 0 {
+		status = "active"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET status=$1, updated_at=now() WHERE id=$2`, status, item.ID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_released", SourceType: sourceType, Platform: platform, RegistrationJob: jobID, Result: status, Error: reason}); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ReleaseForAccount(ctx context.Context, platform, accountID, email string) ([]Mailbox, error) {
+	if !s.Enabled() {
+		return nil, nil
+	}
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	accountID, email = strings.TrimSpace(accountID), strings.ToLower(strings.TrimSpace(email))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT c.id,c.mailbox_id,m.source_type,m.email FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.platform=$1 AND c.status IN ('reserved','active') AND (($2 <> '' AND c.account_id=$2) OR ($3 <> '' AND lower(m.email)=lower($3))) FOR UPDATE`, platform, accountID, email)
+	if err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	defer rows.Close()
+	type released struct{ claimID, mailboxID, sourceType, email string }
+	var claims []released
+	for rows.Next() {
+		var item released
+		if err := rows.Scan(&item.claimID, &item.mailboxID, &item.sourceType, &item.email); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		claims = append(claims, item)
+	}
+	if err := rows.Err(); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	for _, claim := range claims {
+		if _, err := tx.ExecContext(ctx, `UPDATE mailbox_claims SET status='released', released_at=now(), updated_at=now() WHERE id=$1`, claim.claimID); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		if err := s.writeEventTx(ctx, tx, Event{MailboxID: claim.mailboxID, ClaimID: claim.claimID, EventType: "account_claim_released", SourceType: claim.sourceType, Platform: platform, AccountID: accountID, Result: "released"}); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+	}
+	var result []Mailbox
+	for _, claim := range claims {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')`, claim.mailboxID).Scan(&active); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		if active > 0 {
+			_, _ = tx.ExecContext(ctx, `UPDATE mailboxes SET status='active', updated_at=now() WHERE id=$1`, claim.mailboxID)
+			continue
+		}
+		var item Mailbox
+		if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status='cleanup_pending', updated_at=now() WHERE id=$1 RETURNING id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, claim.mailboxID).Scan(&item.ID, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Email, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Store) MarkCleanup(ctx context.Context, item Mailbox, success bool, message string) error {
+	if !s.Enabled() {
+		return nil
+	}
+	status := "cleanup_pending"
+	eventType := "provider_cleanup_failed"
+	result := "failed"
+	if success {
+		status = "deleted"
+		eventType = "provider_cleanup_succeeded"
+		result = "deleted"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	var sourceType string
+	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=$1,last_error=$2,updated_at=now() WHERE id=$3 RETURNING source_type`, status, strings.TrimSpace(message), item.ID).Scan(&sourceType); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, EventType: eventType, SourceType: sourceType, Result: result, Error: strings.TrimSpace(message)}); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) List(ctx context.Context, page, pageSize int, search string) ([]MailboxView, int, error) {
+	if !s.Enabled() {
+		return nil, 0, errors.New("mailbox database is not configured")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 200 {
+		pageSize = 20
+	}
+	search = strings.TrimSpace(search)
+	args := []any{}
+	where := ""
+	if search != "" {
+		args = append(args, "%"+strings.ToLower(search)+"%")
+		where = "WHERE lower(m.email) LIKE $1 OR lower(m.source_type) LIKE $1 OR lower(m.source_account_id) LIKE $1"
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mailboxes m "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at,m.last_sync_at,
+		COALESCE(bool_or(c.platform='openai' AND c.status IN ('reserved','active')),false), COALESCE(bool_or(c.platform='grok' AND c.status IN ('reserved','active')),false)
+		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	views := []MailboxView{}
+	for rows.Next() {
+		var view MailboxView
+		if err := rows.Scan(&view.ID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
+			return nil, 0, err
+		}
+		views = append(views, view)
+	}
+	return views, total, rows.Err()
+}
+
+func (s *Store) Events(ctx context.Context, page, pageSize int, mailboxID, platform string) ([]Event, int, error) {
+	if !s.Enabled() {
+		return nil, 0, errors.New("mailbox database is not configured")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 500 {
+		pageSize = 50
+	}
+	where := []string{"1=1"}
+	args := []any{}
+	if mailboxID = strings.TrimSpace(mailboxID); mailboxID != "" {
+		args = append(args, mailboxID)
+		where = append(where, fmt.Sprintf("mailbox_id=$%d", len(args)))
+	}
+	if platform = strings.TrimSpace(strings.ToLower(platform)); platform != "" {
+		args = append(args, platform)
+		where = append(where, fmt.Sprintf("platform=$%d", len(args)))
+	}
+	whereSQL := strings.Join(where, " AND ")
+	var total int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mailbox_events WHERE "+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,mailbox_id,claim_id,event_type,source_type,platform,account_id,registration_job_id,actor,request_id,result,error,metadata,created_at FROM mailbox_events WHERE `+whereSQL+` ORDER BY created_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	events := []Event{}
+	for rows.Next() {
+		var event Event
+		var metadata []byte
+		if err := rows.Scan(&event.ID, &event.MailboxID, &event.ClaimID, &event.EventType, &event.SourceType, &event.Platform, &event.AccountID, &event.RegistrationJob, &event.Actor, &event.RequestID, &event.Result, &event.Error, &metadata, &event.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if len(metadata) > 0 {
+			_ = json.Unmarshal(metadata, &event.Metadata)
+		}
+		events = append(events, event)
+	}
+	return events, total, rows.Err()
+}
+
+func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
+	if !s.Enabled() {
+		return nil, errors.New("mailbox database is not configured")
+	}
+	result := map[string]any{}
+	for key, query := range map[string]string{
+		"mailboxes":       "SELECT count(*) FROM mailboxes",
+		"available":       "SELECT count(*) FROM mailboxes WHERE status='available'",
+		"active":          "SELECT count(*) FROM mailboxes WHERE status='active'",
+		"cleanup_pending": "SELECT count(*) FROM mailboxes WHERE status='cleanup_pending'",
+		"events":          "SELECT count(*) FROM mailbox_events",
+	} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			return nil, err
+		}
+		result[key] = count
+	}
+	return result, nil
+}
