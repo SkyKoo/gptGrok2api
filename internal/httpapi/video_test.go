@@ -18,7 +18,8 @@ import (
 func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	videoBytes := []byte("fake-mp4")
 	var sawVideoPayload map[string]any
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/post":
 			if r.Header.Get("Cookie") == "" {
@@ -121,11 +122,22 @@ func TestVideosCreateRejectsMalformedMultipartBeforeStartingJob(t *testing.T) {
 
 func TestVideosAPICompletesAndServesContent(t *testing.T) {
 	videoBytes := []byte("api-video")
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var videoPayload map[string]any
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/upload":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode reference upload: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"fileUri": upstream.URL + "/source.png"})
 		case "/post":
 			_ = json.NewEncoder(w).Encode(map[string]any{"post": map[string]any{"id": "parent-api"}})
 		case "/chat":
+			if err := json.NewDecoder(r.Body).Decode(&videoPayload); err != nil {
+				t.Errorf("decode API video payload: %v", err)
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprintln(w, `data: {"result":{"response":{"streamingVideoGenerationResponse":{"progress":100,"videoPostId":"video-api"}}}}`)
 			fmt.Fprintln(w, `data: [DONE]`)
@@ -168,6 +180,13 @@ func TestVideosAPICompletesAndServesContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := writer.WriteField("prompt", "a paper plane"); err != nil {
+		t.Fatal(err)
+	}
+	part, err := writer.CreateFormFile("input_reference[]", "reference.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(tinyPNG); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -214,5 +233,13 @@ func TestVideosAPICompletesAndServesContent(t *testing.T) {
 	got, _ := io.ReadAll(content.Body)
 	if content.Code != http.StatusOK || string(got) != string(videoBytes) {
 		t.Fatalf("video content mismatch: status=%d bytes=%q", content.Code, got)
+	}
+	metadata := mapValue(videoPayload["responseMetadata"])
+	modelOverride := mapValue(metadata["modelConfigOverride"])
+	modelMap := mapValue(modelOverride["modelMap"])
+	videoConfig := mapValue(modelMap["videoGenModelConfig"])
+	refs, ok := videoConfig["imageReferences"].([]any)
+	if !ok || len(refs) != 1 || !strings.Contains(stringValue(refs[0]), "/source.png") {
+		t.Fatalf("image-to-video reference missing from payload: %#v", videoPayload)
 	}
 }
