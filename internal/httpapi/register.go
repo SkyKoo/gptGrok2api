@@ -504,7 +504,12 @@ func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 	if end > len(items) {
 		end = len(items)
 	}
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": false, "runtime_error": "Go registration runtime archive is local-only", "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
+	runtimeAvailable := s.grokQuota != nil && strings.TrimSpace(s.grokQuota.URL) != ""
+	runtimeError := ""
+	if !runtimeAvailable {
+		runtimeError = "Grok runtime quota endpoint is not configured"
+	}
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": runtimeAvailable, "runtime_error": runtimeError, "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
 }
 
 func (s *Server) registeredGrokCredentials(w http.ResponseWriter, id string) {

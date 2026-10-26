@@ -57,6 +57,42 @@ func TestStoreRegistrationControlAndAccountLifecycle(t *testing.T) {
 	}
 }
 
+func TestStorePublicAccountFlattensRuntimeAndProbeState(t *testing.T) {
+	root := t.TempDir()
+	accountsPath := filepath.Join(root, "grok_accounts.json")
+	archive := `[{
+		"id":"grok-runtime",
+		"email":"runtime@example.com",
+		"password":"secret",
+		"sso":"private-sso",
+		"status":"active",
+		"runtime":{"present":true,"status":"active","synced_at":"2026-10-26T11:57:45Z","quota":{"fast":{"remaining":30,"total":30}}},
+		"probe":{"status":"valid","checked_at":"2026-10-26T11:36:34Z","quota":{"remaining":30,"total":30}}
+	}]`
+	if err := os.WriteFile(accountsPath, []byte(archive), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	items, _, _, err := New(filepath.Join(root, "register.json"), accountsPath).ListAccounts("", "")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("unexpected account list: %#v %v", items, err)
+	}
+	item := items[0]
+	if item["runtime_status"] != "active" || item["sync_state"] != "synced" || item["refresh_status"] != "success" {
+		t.Fatalf("runtime state was not flattened: %#v", item)
+	}
+	quota, ok := item["quota"].(map[string]any)
+	if !ok || quota["fast"] == nil {
+		t.Fatalf("runtime quota was not exposed: %#v", item["quota"])
+	}
+	if item["probe_status"] != "valid" || item["probe_at"] != "2026-10-26T11:36:34Z" {
+		t.Fatalf("probe state was not flattened: %#v", item)
+	}
+	if _, leaked := item["sso"]; leaked {
+		t.Fatalf("SSO leaked into public account: %#v", item)
+	}
+}
+
 func TestRuntimeRequiresAllExternalProviders(t *testing.T) {
 	runtime := NewRuntime()
 	if runtime.Ready("grok") {

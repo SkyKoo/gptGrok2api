@@ -677,6 +677,50 @@ func publicAccount(item map[string]any) map[string]any {
 	delete(result, "refresh_token")
 	result["has_password"] = stringValue(item["password"]) != ""
 	result["has_sso"] = stringValue(item["sso"]) != ""
+	// The private archive keeps runtime and probe observations in nested
+	// objects. The admin UI consumes the flattened account contract, so expose
+	// only their non-secret fields here. This also keeps the runtime state
+	// available after a process restart instead of making the row look like it
+	// has never been synced.
+	if runtime, ok := item["runtime"].(map[string]any); ok {
+		if status := stringValue(runtime["status"]); status != "" {
+			result["runtime_status"] = status
+		}
+		if quota, ok := runtime["quota"].(map[string]any); ok {
+			result["quota"] = cloneMap(quota)
+		}
+		if syncedAt := stringValue(runtime["synced_at"]); syncedAt != "" {
+			result["refresh_at"] = syncedAt
+			if stringValue(result["refresh_status"]) == "" {
+				result["refresh_status"] = "success"
+			}
+		}
+		if boolValue(runtime["present"], false) {
+			result["sync_state"] = "synced"
+		}
+	}
+	if probe, ok := item["probe"].(map[string]any); ok {
+		if status := stringValue(probe["status"]); status != "" {
+			result["probe_status"] = status
+		}
+		checkedAt := stringValue(probe["checked_at"])
+		if checkedAt == "" {
+			checkedAt = stringValue(probe["at"])
+		}
+		if checkedAt != "" {
+			result["probe_at"] = checkedAt
+		}
+		if quota, ok := probe["quota"].(map[string]any); ok {
+			result["probe_quota"] = cloneMap(quota)
+		}
+		if errorText := stringValue(probe["error"]); errorText != "" {
+			result["probe_error"] = errorText
+		}
+	}
+	if errorText := stringValue(item["last_runtime_error"]); errorText != "" {
+		result["refresh_status"] = "failed"
+		result["refresh_error"] = errorText
+	}
 	if email := stringValue(item["email"]); email != "" {
 		result["email"] = maskEmail(email)
 	}
