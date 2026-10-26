@@ -3,6 +3,7 @@ package model
 import "strings"
 
 type ChatRoute struct {
+	Provider       string
 	Mode           string
 	PoolCandidates []string
 	Console        bool

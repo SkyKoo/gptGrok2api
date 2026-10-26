@@ -51,6 +51,9 @@ type Server struct {
 	client             *http.Client
 	requestClient      *http.Client
 	accountPool        *accounts.Pool
+	grokRuntimeStore   *store.Store
+	grokAccountPool    *accounts.Pool
+	grokRuntimePath    string
 	chatProvider       *provider.GrokChat
 	consoleProvider    *provider.ConsoleChat
 	mediaProvider      *provider.Media
@@ -107,6 +110,11 @@ type Server struct {
 
 func New(cfg config.Config) *Server {
 	repository := store.New(cfg.AccountsPath, cfg.AuthKeysPath, cfg.ConfigPath)
+	grokRuntimePath := strings.TrimSpace(cfg.GrokRuntimeAccountsPath)
+	if grokRuntimePath == "" {
+		grokRuntimePath = filepath.Join(cfg.DataDir, "grok_runtime_accounts.json")
+	}
+	grokRuntimeStore := store.New(grokRuntimePath, cfg.AuthKeysPath, cfg.ConfigPath)
 	proxyManager := proxyruntime.NewManager(cfg.ProxyURL, cfg.ProxyPool)
 	groups := runtimeProxyGroups(cfg.ProxyGroups)
 	proxyManager.ConfigureImageGroups(cfg.FallbackProxy, groups)
@@ -133,6 +141,9 @@ func New(cfg config.Config) *Server {
 		client:             &http.Client{Timeout: 0},
 		requestClient:      requestClient,
 		accountPool:        accounts.New(repository),
+		grokRuntimeStore:   grokRuntimeStore,
+		grokAccountPool:    accounts.New(grokRuntimeStore),
+		grokRuntimePath:    grokRuntimePath,
 		chatProvider:       provider.NewGrokChat(cfg.GrokChatURL, requestClient, cfg.RequestTimeout),
 		consoleProvider:    provider.NewConsoleChat(cfg.ConsoleURL, requestClient),
 		mediaProvider:      provider.NewMedia(requestClient, cfg.MediaChatURL, cfg.MediaPostURL, cfg.AssetUploadURL, cfg.AssetsBaseURL, cfg.RequestTimeout),
@@ -996,11 +1007,12 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 		message = protocol.InjectToolPrompt(message, protocol.BuildToolSystemPrompt(request.Tools, request.ToolChoice))
 	}
 	responseID := newChatID()
+	pool := s.chatAccountPool(route)
 	excluded := map[string]bool{}
 	var text, thinking string
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), route.PoolCandidates, excluded)
+		lease, err := pool.Reserve(r.Context(), route.PoolCandidates, excluded)
 		if err != nil {
 			lastErr = err
 			break
@@ -1009,8 +1021,8 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 		payload := protocol.BuildGrokPayload(message, route.Mode, request.Temperature, request.TopP, request.MaxTokens)
 		response, err := s.chatProvider.Do(r.Context(), lease.Account, payload)
 		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
+			pool.Release(lease)
+			pool.Feedback(lease.Account, http.StatusBadGateway, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
 			if attempt < s.cfg.ChatMaxRetries {
@@ -1020,8 +1032,8 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			upstreamErr := provider.ReadError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
+			pool.Release(lease)
+			pool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
 			excluded[lease.Account.Token] = true
 			lastErr = upstreamErr
 			if s.shouldRetry(upstreamErr.Status, attempt) {
@@ -1038,9 +1050,9 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 			return nil
 		})
 		response.Body.Close()
-		s.accountPool.Release(lease)
+		pool.Release(lease)
 		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
+			pool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
 			excluded[lease.Account.Token] = true
 			lastErr = scanErr
 			if attempt < s.cfg.ChatMaxRetries {
@@ -1049,7 +1061,7 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 			}
 			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+		pool.Feedback(lease.Account, http.StatusOK, nil)
 		lastErr = nil
 		break
 	}
@@ -1138,11 +1150,12 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 	responseID := newChatID()
+	pool := s.chatAccountPool(route)
 	excluded := map[string]bool{}
 	emitted := false
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), route.PoolCandidates, excluded)
+		lease, err := pool.Reserve(r.Context(), route.PoolCandidates, excluded)
 		if err != nil {
 			lastErr = err
 			break
@@ -1151,8 +1164,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 		payload := protocol.BuildGrokPayload(message, route.Mode, request.Temperature, request.TopP, request.MaxTokens)
 		response, err := s.chatProvider.Do(r.Context(), lease.Account, payload)
 		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
+			pool.Release(lease)
+			pool.Feedback(lease.Account, http.StatusBadGateway, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
 			if !emitted && attempt < s.cfg.ChatMaxRetries {
@@ -1162,8 +1175,8 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			upstreamErr := provider.ReadError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
+			pool.Release(lease)
+			pool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
 			excluded[lease.Account.Token] = true
 			lastErr = upstreamErr
 			if !emitted && s.shouldRetry(upstreamErr.Status, attempt) {
@@ -1202,9 +1215,9 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 			return nil
 		})
 		response.Body.Close()
-		s.accountPool.Release(lease)
+		pool.Release(lease)
 		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
+			pool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
 			excluded[lease.Account.Token] = true
 			lastErr = scanErr
 			if !emitted && attempt < s.cfg.ChatMaxRetries {
@@ -1212,7 +1225,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 			}
 			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+		pool.Feedback(lease.Account, http.StatusOK, nil)
 		lastErr = nil
 		break
 	}

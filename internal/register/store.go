@@ -675,6 +675,10 @@ func publicAccount(item map[string]any) map[string]any {
 	delete(result, "sso")
 	delete(result, "access_token")
 	delete(result, "refresh_token")
+	delete(result, "sso_rw")
+	delete(result, "cookie_header")
+	delete(result, "browser_profile")
+	delete(result, "registration_mailbox")
 	result["has_password"] = stringValue(item["password"]) != ""
 	result["has_sso"] = stringValue(item["sso"]) != ""
 	// The private archive keeps runtime and probe observations in nested

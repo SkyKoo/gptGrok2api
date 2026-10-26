@@ -23,8 +23,8 @@ func (s *Server) grokRuntimeAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "verify" && r.Method == http.MethodGet:
 		writeJSON(w, 200, map[string]any{"status": "success"})
 	case path == "status" && r.Method == http.MethodGet:
-		accounts, _ := s.store.AccountList()
-		writeJSON(w, 200, map[string]any{"status": "ok", "size": len(accounts), "revision": fileRevision(s.cfg.AccountsPath), "selection_strategy": "least_busy"})
+		accounts, _ := s.grokRuntimeStore.AccountList()
+		writeJSON(w, 200, map[string]any{"status": "ok", "size": len(accounts), "revision": fileRevision(s.grokRuntimePath), "selection_strategy": "least_busy"})
 	case path == "storage" && r.Method == http.MethodGet:
 		writeJSON(w, 200, map[string]any{"type": "json"})
 	case path == "config" && r.Method == http.MethodGet:
@@ -111,11 +111,15 @@ func (s *Server) refreshGrokRuntimeTokens(parent context.Context, tokens []strin
 }
 
 func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.QuotaWindow, status, errorText string) {
-	fields := map[string]any{"access_token": token}
+	fields := map[string]any{"access_token": token, "source_type": "grok_protocol", "platform": "grok", "pool": "basic", "enabled": true}
+	if status != "" {
+		fields["status"] = status
+	}
 	for mode, window := range quotas {
 		fields[mode+"_quota"] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
 	}
-	_, _, _ = s.store.UpdateAccount(token, fields)
+	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{fields})
+	_, _, _ = s.grokRuntimeStore.UpdateAccount(token, fields)
 	items, err := s.registerStore.ExportAccounts(nil)
 	if err != nil {
 		return
@@ -148,7 +152,7 @@ func fileRevision(path string) int64 {
 
 func (s *Server) grokRuntimeTokens(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
-	accounts, _ := s.store.AccountList()
+	accounts, _ := s.grokRuntimeStore.AccountList()
 	tokens := make([]map[string]any, 0, len(accounts))
 	for _, account := range accounts {
 		token := firstNonEmpty(stringValue(account["sso"]), stringValue(account["access_token"]), stringValue(account["token"]))
@@ -175,7 +179,7 @@ func (s *Server) grokRuntimeDeleteTokens(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &tokens) {
 		return
 	}
-	accounts, _ := s.store.AccountList()
+	accounts, _ := s.grokRuntimeStore.AccountList()
 	remove := map[string]bool{}
 	for _, token := range tokens {
 		remove[strings.TrimSpace(token)] = true
@@ -190,7 +194,7 @@ func (s *Server) grokRuntimeDeleteTokens(w http.ResponseWriter, r *http.Request)
 		}
 		filtered = append(filtered, account)
 	}
-	if err := s.store.SaveAccounts(filtered); err != nil {
+	if err := s.grokRuntimeStore.SaveAccounts(filtered); err != nil {
 		writeError(w, 500, err.Error(), "server_error")
 		return
 	}
@@ -206,7 +210,7 @@ func (s *Server) grokRuntimeDisabled(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	accounts, _ := s.store.AccountList()
+	accounts, _ := s.grokRuntimeStore.AccountList()
 	found := false
 	for _, account := range accounts {
 		token := firstNonEmpty(stringValue(account["sso"]), stringValue(account["access_token"]), stringValue(account["token"]))
@@ -225,7 +229,7 @@ func (s *Server) grokRuntimeDisabled(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "token not found", "not_found")
 		return
 	}
-	if err := s.store.SaveAccounts(accounts); err != nil {
+	if err := s.grokRuntimeStore.SaveAccounts(accounts); err != nil {
 		writeError(w, 500, err.Error(), "server_error")
 		return
 	}

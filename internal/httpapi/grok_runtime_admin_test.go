@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,7 +28,7 @@ func TestGrokRuntimeAdminMasksTokensAndSupportsOpaqueSelectors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(cfg.AccountsPath, raw, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "grok_runtime_accounts.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	handler := New(cfg).Handler()

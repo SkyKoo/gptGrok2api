@@ -65,7 +65,7 @@ func TestRegisterRuntimeSnapshotImportsOnlyEnabledSSOAccounts(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"added":1`) || !strings.Contains(response.Body.String(), `"disabled":1`) || !strings.Contains(response.Body.String(), `"missing_sso":1`) {
 		t.Fatalf("unexpected snapshot summary: %s", response.Body.String())
 	}
-	accounts, err := New(cfg).store.AccountList()
+	accounts, err := New(cfg).grokRuntimeStore.AccountList()
 	if err != nil || len(accounts) != 1 || stringValue(accounts[0]["access_token"]) != secret {
 		t.Fatalf("snapshot did not import expected runtime account: %#v %v", accounts, err)
 	}
@@ -104,7 +104,7 @@ func TestRegisterRuntimeSnapshotRefreshesRealGrokQuota(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `"quota_refreshed":1`) || !strings.Contains(response.Body.String(), `"available":true`) {
 		t.Fatalf("quota refresh was not reported: %s", response.Body.String())
 	}
-	runtimeRaw, err := os.ReadFile(filepath.Join(cfg.DataDir, "accounts.json"))
+	runtimeRaw, err := os.ReadFile(filepath.Join(cfg.DataDir, "grok_runtime_accounts.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

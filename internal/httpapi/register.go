@@ -379,7 +379,7 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 			continue
 		}
 		result["eligible"] = intValue(result["eligible"]) + 1
-		added, skipped, _, addErr := s.store.AddAccounts([]string{token}, nil)
+		added, skipped, addErr := s.syncRegisteredGrokRuntimeAccount(item, token)
 		if addErr != nil {
 			errors, _ := result["errors"].([]any)
 			errors = append(errors, map[string]any{"id": stringValue(item["id"]), "error": addErr.Error()})
@@ -568,7 +568,7 @@ func (s *Server) syncRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 		if token == "" {
 			continue
 		}
-		count, _, _, addErr := s.store.AddAccounts([]string{token}, nil)
+		count, _, addErr := s.syncRegisteredGrokRuntimeAccount(item, token)
 		if addErr != nil {
 			continue
 		}
@@ -579,6 +579,54 @@ func (s *Server) syncRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"ok": true, "sync_state": "synced", "added": added, "skipped": skipped, "verification_pending": len(items) - added - skipped})
+}
+
+// syncRegisteredGrokRuntimeAccount keeps the shared request pool aware that
+// this token is a Grok SSO account. Without the source marker, JWT-shaped SSO
+// values can be mistaken for OpenAI sessions and be invalidated by GPT-only
+// account checks. Grok media routes then cannot find the account either.
+func (s *Server) syncRegisteredGrokRuntimeAccount(item map[string]any, token string) (int, int, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return 0, 0, errors.New("registered Grok account missing SSO")
+	}
+	fields := map[string]any{
+		"access_token": token,
+		"source_type":  "grok_protocol",
+		"platform":     "grok",
+		"pool":         "basic",
+		"status":       "正常",
+		"enabled":      true,
+	}
+	for _, key := range []string{"email", "cookie_header", "sso_rw"} {
+		if value := stringValue(item[key]); value != "" {
+			fields[key] = value
+		}
+	}
+	if id := stringValue(item["id"]); id != "" {
+		fields["grok_account_id"] = id
+	}
+	added, skipped, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{fields})
+	if err != nil {
+		return 0, 0, err
+	}
+	updates := cloneMap(fields)
+	// Clear GPT-side validation markers left by earlier imports of the same
+	// SSO token. A successful Grok quota refresh is the authoritative check.
+	for _, key := range []string{
+		"last_account_validation_error", "last_error_kind", "last_error_status", "last_error_message", "last_error_at",
+		"last_refresh_error", "last_refresh_error_at", "last_refresh_warning", "last_refresh_warning_at",
+		"status_reason_code", "relogin_blocked", "survival_check_error", "survival_status", "survival_last_probe_status",
+	} {
+		updates[key] = nil
+	}
+	if _, _, err := s.grokRuntimeStore.UpdateAccount(token, updates); err != nil {
+		return 0, 0, err
+	}
+	// Remove legacy copies created before Grok had its own runtime store. GPT
+	// account management must never see or validate a Grok SSO token.
+	_, _, _ = s.store.DeleteAccounts([]string{token})
+	return added, skipped, nil
 }
 
 func (s *Server) authorizeRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {

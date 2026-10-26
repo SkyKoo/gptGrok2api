@@ -110,12 +110,12 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		if mimeType == "" {
 			mimeType = "image/jpeg"
 		}
-		lease, reserveErr := s.accountPool.Reserve(r.Context(), []string{"super", "heavy"}, nil)
+		lease, reserveErr := s.grokAccountPool.Reserve(r.Context(), []string{"basic", "super", "heavy"}, nil)
 		if reserveErr != nil {
 			continue
 		}
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, header.Filename, mimeType, base64.StdEncoding.EncodeToString(raw))
-		s.accountPool.Release(lease)
+		s.grokAccountPool.Release(lease)
 		if uploadErr == nil {
 			if ref := protocol.ResolveAssetReference(fileID, fileURI, ""); ref != "" {
 				references = append(references, ref)
@@ -128,15 +128,15 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, refs []string) {
 	s.setVideoStatus(job, "in_progress", 1, nil)
-	lease, err := s.accountPool.Reserve(context.Background(), []string{"super", "heavy"}, nil)
+	lease, err := s.grokAccountPool.Reserve(context.Background(), []string{"basic", "super", "heavy"}, nil)
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
 		return
 	}
-	defer s.accountPool.Release(lease)
+	defer s.grokAccountPool.Release(lease)
 	post, err := s.mediaProvider.CreatePost(context.Background(), lease.Account, protocol.VideoPostMediaType, "", prompt)
 	if err != nil {
-		s.accountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		s.grokAccountPool.Feedback(lease.Account, upstreamStatus(err), err)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "create_post_failed", "message": err.Error()})
 		return
 	}
@@ -158,7 +158,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		}
 		response, requestErr := s.mediaProvider.StreamChat(context.Background(), lease.Account, payload)
 		if requestErr != nil {
-			s.accountPool.Feedback(lease.Account, upstreamStatus(requestErr), requestErr)
+			s.grokAccountPool.Feedback(lease.Account, upstreamStatus(requestErr), requestErr)
 			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_failed", "message": requestErr.Error()})
 			return
 		}
@@ -241,7 +241,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	job.VideoURL = videoURL
 	s.videoMu.Unlock()
 	s.setVideoStatus(job, "completed", 100, nil)
-	s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+	s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
 }
 
 func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {

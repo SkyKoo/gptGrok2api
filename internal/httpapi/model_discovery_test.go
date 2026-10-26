@@ -10,7 +10,35 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/auucoder/gptgrok2api-go/internal/model"
 )
+
+func TestChatRoutesUseProviderSpecificAccountPools(t *testing.T) {
+	s := New(testConfig())
+	openAIRoute, ok := s.resolveChatModel("gpt-5-3")
+	if !ok || !openAIRoute.OpenAI || openAIRoute.Provider != "openai" {
+		t.Fatalf("unexpected OpenAI route: %#v", openAIRoute)
+	}
+	grokRoute, ok := s.resolveChatModel("grok-4.20-fast")
+	if !ok || grokRoute.OpenAI || grokRoute.Provider != "grok" {
+		t.Fatalf("unexpected Grok route: %#v", grokRoute)
+	}
+	if s.chatAccountPool(openAIRoute) != s.accountPool {
+		t.Fatal("OpenAI route selected the Grok account pool")
+	}
+	if s.chatAccountPool(grokRoute) != s.grokAccountPool {
+		t.Fatal("Grok route selected the OpenAI account pool")
+	}
+	// Routes constructed by older compatibility code have no Provider marker;
+	// OpenAI remains explicit through OpenAI=true and the legacy default stays Grok.
+	if s.chatAccountPool(model.ChatRoute{OpenAI: true}) != s.accountPool {
+		t.Fatal("legacy OpenAI route lost its account pool")
+	}
+	if s.chatAccountPool(model.ChatRoute{}) != s.grokAccountPool {
+		t.Fatal("legacy Grok route lost its account pool")
+	}
+}
 
 func TestDynamicModelRoutesBothAPIsAndKeepsRequestedModel(t *testing.T) {
 	s, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {

@@ -41,7 +41,7 @@ func (s *Server) completeConsoleChat(w http.ResponseWriter, r *http.Request, req
 	var usage map[string]any
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), []string{"basic"}, excluded)
+		lease, err := s.grokAccountPool.Reserve(r.Context(), []string{"basic"}, excluded)
 		if err != nil {
 			lastErr = err
 			break
@@ -51,14 +51,14 @@ func (s *Server) completeConsoleChat(w http.ResponseWriter, r *http.Request, req
 			request.Temperature, request.TopP, request.MaxTokens, true,
 		)
 		if err != nil {
-			s.accountPool.Release(lease)
+			s.grokAccountPool.Release(lease)
 			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
 		response, err := s.consoleProvider.Do(r.Context(), lease.Account, payload)
 		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
+			s.grokAccountPool.Release(lease)
+			s.grokAccountPool.Feedback(lease.Account, http.StatusBadGateway, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
 			if attempt < s.cfg.ChatMaxRetries {
@@ -68,8 +68,8 @@ func (s *Server) completeConsoleChat(w http.ResponseWriter, r *http.Request, req
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			upstreamErr := provider.ReadConsoleError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
+			s.grokAccountPool.Release(lease)
+			s.grokAccountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
 			excluded[lease.Account.Token] = true
 			lastErr = upstreamErr
 			if s.shouldRetry(upstreamErr.Status, attempt) {
@@ -90,9 +90,9 @@ func (s *Server) completeConsoleChat(w http.ResponseWriter, r *http.Request, req
 			return nil
 		})
 		response.Body.Close()
-		s.accountPool.Release(lease)
+		s.grokAccountPool.Release(lease)
 		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
+			s.grokAccountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
 			excluded[lease.Account.Token] = true
 			lastErr = scanErr
 			text, usage = "", nil
@@ -101,7 +101,7 @@ func (s *Server) completeConsoleChat(w http.ResponseWriter, r *http.Request, req
 			}
 			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+		s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
 		lastErr = nil
 		break
 	}
@@ -141,7 +141,7 @@ func (s *Server) streamConsoleChat(w http.ResponseWriter, r *http.Request, reque
 	emitted := false
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := s.accountPool.Reserve(r.Context(), []string{"basic"}, excluded)
+		lease, err := s.grokAccountPool.Reserve(r.Context(), []string{"basic"}, excluded)
 		if err != nil {
 			lastErr = err
 			break
@@ -151,14 +151,14 @@ func (s *Server) streamConsoleChat(w http.ResponseWriter, r *http.Request, reque
 			request.Temperature, request.TopP, request.MaxTokens, true,
 		)
 		if err != nil {
-			s.accountPool.Release(lease)
+			s.grokAccountPool.Release(lease)
 			writeSSE(w, map[string]any{"error": map[string]any{"message": err.Error(), "type": "invalid_request_error"}})
 			return
 		}
 		response, err := s.consoleProvider.Do(r.Context(), lease.Account, payload)
 		if err != nil {
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, err)
+			s.grokAccountPool.Release(lease)
+			s.grokAccountPool.Feedback(lease.Account, http.StatusBadGateway, err)
 			excluded[lease.Account.Token] = true
 			lastErr = err
 			if !emitted && attempt < s.cfg.ChatMaxRetries {
@@ -168,8 +168,8 @@ func (s *Server) streamConsoleChat(w http.ResponseWriter, r *http.Request, reque
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			upstreamErr := provider.ReadConsoleError(response)
-			s.accountPool.Release(lease)
-			s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
+			s.grokAccountPool.Release(lease)
+			s.grokAccountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
 			excluded[lease.Account.Token] = true
 			lastErr = upstreamErr
 			if !emitted && s.shouldRetry(upstreamErr.Status, attempt) {
@@ -203,9 +203,9 @@ func (s *Server) streamConsoleChat(w http.ResponseWriter, r *http.Request, reque
 			return nil
 		})
 		response.Body.Close()
-		s.accountPool.Release(lease)
+		s.grokAccountPool.Release(lease)
 		if scanErr != nil {
-			s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
+			s.grokAccountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
 			excluded[lease.Account.Token] = true
 			lastErr = scanErr
 			if !emitted && attempt < s.cfg.ChatMaxRetries {
@@ -213,7 +213,7 @@ func (s *Server) streamConsoleChat(w http.ResponseWriter, r *http.Request, reque
 			}
 			break
 		}
-		s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+		s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
 		lastErr = nil
 		break
 	}
@@ -434,7 +434,7 @@ func (s *Server) streamConsoleResponses(w http.ResponseWriter, r *http.Request, 
 		flusher.Flush()
 	}
 
-	lease, err := s.accountPool.Reserve(r.Context(), []string{"basic"}, nil)
+	lease, err := s.grokAccountPool.Reserve(r.Context(), []string{"basic"}, nil)
 	if err != nil {
 		writeEventSSE(w, "error", map[string]any{"type": "error", "message": err.Error()})
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
@@ -442,22 +442,22 @@ func (s *Server) streamConsoleResponses(w http.ResponseWriter, r *http.Request, 
 	}
 	payload, err := protocol.BuildConsolePayload(request.Messages, request.Model, request.ReasoningEffort, request.Temperature, request.TopP, request.MaxTokens, true)
 	if err != nil {
-		s.accountPool.Release(lease)
+		s.grokAccountPool.Release(lease)
 		writeEventSSE(w, "error", map[string]any{"type": "error", "message": err.Error()})
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return
 	}
 	response, err := s.consoleProvider.Do(r.Context(), lease.Account, payload)
 	if err != nil {
-		s.accountPool.Release(lease)
+		s.grokAccountPool.Release(lease)
 		writeEventSSE(w, "error", map[string]any{"type": "error", "message": err.Error()})
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		upstreamErr := provider.ReadConsoleError(response)
-		s.accountPool.Release(lease)
-		s.accountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
+		s.grokAccountPool.Release(lease)
+		s.grokAccountPool.Feedback(lease.Account, upstreamErr.Status, upstreamErr)
 		writeEventSSE(w, "error", map[string]any{"type": "error", "message": upstreamErr.Error()})
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return
@@ -483,14 +483,14 @@ func (s *Server) streamConsoleResponses(w http.ResponseWriter, r *http.Request, 
 		return nil
 	})
 	response.Body.Close()
-	s.accountPool.Release(lease)
+	s.grokAccountPool.Release(lease)
 	if scanErr != nil {
-		s.accountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
+		s.grokAccountPool.Feedback(lease.Account, http.StatusBadGateway, scanErr)
 		writeEventSSE(w, "error", map[string]any{"type": "error", "message": scanErr.Error()})
 		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		return
 	}
-	s.accountPool.Feedback(lease.Account, http.StatusOK, nil)
+	s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
 	content := full.String()
 	writeEventSSE(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": messageID, "output_index": 0, "content_index": 0, "text": content})
 	writeEventSSE(w, "response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": messageID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": content, "annotations": []any{}}})

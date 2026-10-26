@@ -109,6 +109,10 @@ func (s *Server) verifyRegisteredGrokAccount(ctx context.Context, id string, acc
 		"registration_verified": true,
 		"fast_quota":            map[string]any{"remaining": quota.Remaining, "total": quota.Total, "window_seconds": quota.WindowSeconds, "reset_at": quota.ResetAt},
 	})
+	if err != nil {
+		return err
+	}
+	_, _, err = s.syncRegisteredGrokRuntimeAccount(stored, token)
 	return err
 }
 

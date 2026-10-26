@@ -36,14 +36,44 @@ func (s *Server) modelSpecs() []model.Spec {
 func (s *Server) resolveChatModel(id string) (model.ChatRoute, bool) {
 	id = strings.TrimSpace(id)
 	if m, ok := model.Find(s.modelSpecs(), id); ok && m.Enabled && m.OwnedBy == "openai" && m.Capability&model.Chat != 0 {
-		return model.ChatRoute{OpenAI: true, PoolCandidates: []string{"basic", "super", "heavy"}}, true
+		return model.ChatRoute{Provider: "openai", OpenAI: true, PoolCandidates: []string{"basic", "super", "heavy"}}, true
 	}
-	return model.ResolveChat(id)
+	route, ok := model.ResolveChat(id)
+	if ok {
+		if route.OpenAI {
+			route.Provider = "openai"
+		} else {
+			route.Provider = "grok"
+		}
+	}
+	return route, ok
+}
+
+func (s *Server) chatAccountPool(route model.ChatRoute) *accounts.Pool {
+	switch strings.ToLower(strings.TrimSpace(route.Provider)) {
+	case "openai", "gpt":
+		return s.accountPool
+	case "grok", "xai":
+		return s.grokAccountPool
+	}
+	if route.OpenAI {
+		return s.accountPool
+	}
+	return s.grokAccountPool
 }
 func (s *Server) supportsChatModel(id string) func(accounts.Account) bool {
 	return func(a accounts.Account) bool {
 		return isOpenAIAccount(a) && s.discovery.Supports(accounts.Identity(a), id)
 	}
+}
+
+func isGrokAccount(account accounts.Account) bool {
+	source := strings.ToLower(strings.TrimSpace(stringValue(account.Fields["source_type"])))
+	switch source {
+	case "grok", "grok_protocol", "xai":
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(stringValue(account.Fields["platform"])), "grok")
 }
 func (s *Server) refreshAccountModels(ctx context.Context, a accounts.Account) error {
 	id := accounts.Identity(a)

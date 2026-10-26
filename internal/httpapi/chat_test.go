@@ -39,7 +39,7 @@ func TestChatCompletionJSONAndSSE(t *testing.T) {
 	root := t.TempDir()
 	cfg := chatTestConfig(root, upstream.URL)
 	server := New(cfg)
-	if _, _, _, err := server.store.AddAccounts([]string{"chat-token"}, nil); err != nil {
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"chat-token"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -77,7 +77,7 @@ func TestChatRetriesAnotherAccount(t *testing.T) {
 
 	root := t.TempDir()
 	server := New(chatTestConfig(root, upstream.URL))
-	if _, _, _, err := server.store.AddAccounts([]string{"first", "second"}, nil); err != nil {
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"first", "second"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"grok-4.20-fast","messages":[{"role":"user","content":"retry"}]}`))
@@ -115,7 +115,7 @@ func TestConsoleChatAndResponses(t *testing.T) {
 	cfg := chatTestConfig(root, upstream.URL)
 	cfg.ConsoleURL = upstream.URL
 	server := New(cfg)
-	if _, _, _, err := server.store.AddAccounts([]string{"console-token"}, nil); err != nil {
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"console-token"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,7 +153,7 @@ func TestChatToolCallsJSONAndStream(t *testing.T) {
 	defer upstream.Close()
 	root := t.TempDir()
 	server := New(chatTestConfig(root, upstream.URL))
-	if _, _, _, err := server.store.AddAccounts([]string{"tool-token"}, nil); err != nil {
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"tool-token"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	body := `{"model":"grok-4.20-fast","messages":[{"role":"user","content":"find"}],"tools":[{"type":"function","function":{"name":"search","parameters":{"type":"object"}}}]}`
