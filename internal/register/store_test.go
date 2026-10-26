@@ -57,6 +57,20 @@ func TestStoreRegistrationControlAndAccountLifecycle(t *testing.T) {
 	}
 }
 
+func TestPublicAccountNormalizesConsoleQuota(t *testing.T) {
+	account := publicAccount(map[string]any{
+		"email": "alice@example.com",
+		"runtime": map[string]any{"present": true, "quota": map[string]any{
+			"auto":     map[string]any{"remaining": 7},
+			"grok_4_3": map[string]any{"remaining": 3},
+		}},
+	})
+	quota, ok := account["quota"].(map[string]any)
+	if !ok || quota["console"] == nil || quota["grok_4_3"] != nil {
+		t.Fatalf("console quota was not normalized: %#v", account["quota"])
+	}
+}
+
 func TestStorePublicAccountFlattensRuntimeAndProbeState(t *testing.T) {
 	root := t.TempDir()
 	accountsPath := filepath.Join(root, "grok_accounts.json")

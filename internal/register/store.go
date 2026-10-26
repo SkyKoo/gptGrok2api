@@ -691,7 +691,7 @@ func publicAccount(item map[string]any) map[string]any {
 			result["runtime_status"] = status
 		}
 		if quota, ok := runtime["quota"].(map[string]any); ok {
-			result["quota"] = cloneMap(quota)
+			result["quota"] = normalizeGrokQuota(quota)
 		}
 		if syncedAt := stringValue(runtime["synced_at"]); syncedAt != "" {
 			result["refresh_at"] = syncedAt
@@ -715,7 +715,7 @@ func publicAccount(item map[string]any) map[string]any {
 			result["probe_at"] = checkedAt
 		}
 		if quota, ok := probe["quota"].(map[string]any); ok {
-			result["probe_quota"] = cloneMap(quota)
+			result["probe_quota"] = normalizeGrokQuota(quota)
 		}
 		if errorText := stringValue(probe["error"]); errorText != "" {
 			result["probe_error"] = errorText
@@ -728,6 +728,17 @@ func publicAccount(item map[string]any) map[string]any {
 	if email := stringValue(item["email"]); email != "" {
 		result["email"] = maskEmail(email)
 	}
+	return result
+}
+
+func normalizeGrokQuota(quota map[string]any) map[string]any {
+	result := cloneMap(quota)
+	if _, hasConsole := result["console"]; !hasConsole {
+		if value, ok := result["grok_4_3"]; ok {
+			result["console"] = value
+		}
+	}
+	delete(result, "grok_4_3")
 	return result
 }
 

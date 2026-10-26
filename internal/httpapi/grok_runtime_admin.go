@@ -116,6 +116,9 @@ func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.Qu
 		fields["status"] = status
 	}
 	for mode, window := range quotas {
+		if mode == "grok_4_3" {
+			mode = "console"
+		}
 		fields[mode+"_quota"] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
 	}
 	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{fields})
@@ -137,6 +140,9 @@ func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.Qu
 func quotaMap(quotas map[string]provider.QuotaWindow) map[string]any {
 	result := map[string]any{}
 	for mode, window := range quotas {
+		if mode == "grok_4_3" {
+			mode = "console"
+		}
 		result[mode] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
 	}
 	return result
@@ -165,7 +171,11 @@ func (s *Server) grokRuntimeTokens(w http.ResponseWriter) {
 		}
 		quota := map[string]any{}
 		for _, mode := range []string{"auto", "fast", "expert", "heavy", "console"} {
-			if value, ok := account[mode+"_quota"].(map[string]any); ok {
+			value, ok := account[mode+"_quota"].(map[string]any)
+			if mode == "console" && !ok {
+				value, ok = account["grok_4_3_quota"].(map[string]any)
+			}
+			if ok {
 				quota[mode] = map[string]any{"remaining": intValue(value["remaining"]), "total": intValue(value["total"])}
 			}
 		}
