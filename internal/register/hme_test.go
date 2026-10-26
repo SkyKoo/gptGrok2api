@@ -302,13 +302,33 @@ func TestHMEAcceptsOpenAIForwarderAddress(t *testing.T) {
 		"noreply_at_tm_openai_com_88czx49dw80135_51446d5b@icloud.com",
 		"noreply_at_chatgpt_com_opaque@icloud.com",
 	} {
-		if !suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after) {
+		if !suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after, isOpenAISender) {
 			t.Errorf("accepted sender was rejected: %s", sender)
 		}
 	}
 	for _, sender := range []string{"random@icloud.com", "noreply_at_example_com@icloud.com"} {
-		if suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after) {
+		if suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after, isOpenAISender) {
 			t.Errorf("unrelated sender was accepted: %s", sender)
+		}
+	}
+}
+
+func TestHMEAcceptsGrokForwarderAddress(t *testing.T) {
+	after := time.Now().UTC().Add(-time.Minute)
+	box := Mailbox{Email: "alias@example.test", AccountID: "acc-test"}
+	for _, sender := range []string{
+		"noreply@x.ai",
+		"noreply@grok.com",
+		"noreply_at_x_ai_opaque@icloud.com",
+		"noreply_at_grok_com_opaque@icloud.com",
+	} {
+		if !suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after, isGrokSender) {
+			t.Errorf("accepted Grok sender was rejected: %s", sender)
+		}
+	}
+	for _, sender := range []string{"noreply@openai.com", "random@icloud.com"} {
+		if suitableMessage(hmeMessage{From: sender, To: box.Email, Date: time.Now().UTC().Format(time.RFC3339)}, box, after, isGrokSender) {
+			t.Errorf("non-Grok sender was accepted: %s", sender)
 		}
 	}
 }

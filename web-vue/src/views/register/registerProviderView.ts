@@ -74,18 +74,14 @@ export const registerTargetOptions = [
 ] as const
 
 export const turnstileProviderOptions = [
-  { value: 'yescaptcha', label: 'YesCaptcha' },
-  { value: '2captcha', label: '2Captcha' },
-  { value: 'local', label: '本地 Captcha Solver' },
-  { value: 'custom', label: '自定义' },
+  { value: 'browser', label: 'CFM Grok Browser Worker' },
 ] as const
 
 export const turnstileProviderGroups = [{ options: turnstileProviderOptions }]
 
 export const grokSignupFlowGroups = [{
   options: [
-    { value: 'xconsole', label: '参考链路（推荐）' },
-    { value: 'legacy', label: '原注册链路' },
+    { value: 'xconsole', label: '纯协议链路' },
   ],
 }]
 
@@ -149,10 +145,10 @@ export const providerLocalOnlyKeys: Record<string, string[]> = {
 
 export const defaultGrokRegisterConfig: GrokRegisterConfig = {
   signup_flow: 'xconsole',
-  browser_flow_enabled: true,
-  provider: 'yescaptcha',
+  browser_flow_enabled: false,
+  provider: 'browser',
   api_key: '',
-  api_base: '',
+  api_base: 'http://grok-browser:8899',
   request_timeout: 30,
   captcha_timeout: 180,
   captcha_poll_interval: 3,
@@ -258,11 +254,8 @@ export function normalizeRegisterTarget(value: unknown): RegisterTarget {
   return String(value || '').trim().toLowerCase() === 'grok' ? 'grok' : 'openai'
 }
 
-export function normalizeTurnstileProvider(value: unknown): GrokTurnstileProvider {
-  const provider = String(value || '').trim().toLowerCase()
-  return ['yescaptcha', '2captcha', 'local', 'custom'].includes(provider)
-    ? provider as GrokTurnstileProvider
-    : 'yescaptcha'
+export function normalizeTurnstileProvider(_value: unknown): GrokTurnstileProvider {
+  return 'browser'
 }
 
 export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig {
@@ -277,14 +270,15 @@ export function normalizeGrokRegisterConfig(value: unknown): GrokRegisterConfig 
   const deliveryCPAInput = deliveryInput.cpa && typeof deliveryInput.cpa === 'object'
     ? deliveryInput.cpa
     : defaultGrokRegisterConfig.oauth_delivery.cpa
+  const normalizedProvider = normalizeTurnstileProvider(input.provider)
   return {
     ...defaultGrokRegisterConfig,
     ...input,
-    signup_flow: input.signup_flow === 'legacy' ? 'legacy' : 'xconsole',
-    browser_flow_enabled: true,
-    provider: normalizeTurnstileProvider(input.provider),
+    signup_flow: 'xconsole',
+    browser_flow_enabled: false,
+    provider: normalizedProvider,
     api_key: String(input.api_key || '').trim(),
-    api_base: String(input.api_base || '').trim(),
+    api_base: String(input.api_base || defaultGrokRegisterConfig.api_base).trim(),
     request_timeout: Math.max(1, Number(input.request_timeout) || defaultGrokRegisterConfig.request_timeout),
     captcha_timeout: Math.max(1, Number(input.captcha_timeout) || defaultGrokRegisterConfig.captcha_timeout),
     captcha_poll_interval: Math.max(1, Math.min(60, Math.round(Number(input.captcha_poll_interval) || defaultGrokRegisterConfig.captcha_poll_interval))),
@@ -334,11 +328,8 @@ export function providerForRegisterTarget(provider: RegisterProvider, target: Re
   }
 }
 
-export function turnstileApiBasePlaceholder(provider: unknown) {
-  if (normalizeTurnstileProvider(provider) === 'yescaptcha') return 'https://api.yescaptcha.com'
-  if (normalizeTurnstileProvider(provider) === '2captcha') return 'https://api.2captcha.com'
-  if (normalizeTurnstileProvider(provider) === 'local') return 'http://127.0.0.1:8877'
-  return 'https://solver.example.com'
+export function turnstileApiBasePlaceholder(_provider: unknown) {
+  return 'http://grok-browser:8899'
 }
 
 export function createProviderId(type = 'provider') {
@@ -778,8 +769,7 @@ export function grokRequirementMessages(config: LegacyRegisterConfig | null | un
   if (!config || normalizeRegisterTarget(config.target) !== 'grok') return []
   const grok = normalizeGrokRegisterConfig(config.grok)
   const missing: string[] = []
-  if (grok.provider !== 'local' && !isFilled(grok.api_key)) missing.push('Turnstile API Key')
-  if (grok.provider === 'custom' && !isFilled(grok.api_base)) missing.push('Turnstile API Base')
+  if (!isFilled(grok.api_base)) missing.push('Grok Browser Worker 地址')
   const sub2api = grok.oauth_delivery.sub2api
   if (sub2api.enabled) {
     if (!isFilled(sub2api.server_id)) missing.push('OAuth 投递 Sub2API 连接')

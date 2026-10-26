@@ -114,6 +114,14 @@ func (s *Server) registrationSnapshot() map[string]any {
 		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
 			value[key] = state[key]
 		}
+	} else if strings.EqualFold(stringValue(value["target"]), "grok") {
+		state := s.grokRegister.Snapshot()
+		value["enabled"], value["stats"], value["logs"], value["jobs"] = state["running"], state["stats"], state["logs"], state["jobs"]
+		value["runtime_error"] = state["error"]
+		value["compensation_error"] = state["compensation_error"]
+		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
+			value[key] = state[key]
+		}
 	}
 	return value
 }
@@ -207,7 +215,10 @@ func (s *Server) ShutdownRegistration(ctx context.Context) error {
 		close(s.registrationStop)
 	}
 	s.registrationMu.Unlock()
-	return s.freeRegister.Shutdown(ctx)
+	if err := s.freeRegister.Shutdown(ctx); err != nil {
+		return err
+	}
+	return s.grokRegister.Shutdown(ctx)
 }
 
 func writeRegistrationJSON(w http.ResponseWriter, status int, value any) {

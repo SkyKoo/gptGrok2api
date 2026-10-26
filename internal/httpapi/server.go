@@ -70,6 +70,7 @@ type Server struct {
 	registerStore      *registerruntime.Store
 	registerRuntime    *registerruntime.Runtime
 	freeRegister       *registerruntime.FreeEngine
+	grokRegister       *registerruntime.GrokEngine
 	registrationMu     sync.Mutex
 	monitor            *runtimeMonitor
 	logMu              sync.Mutex
@@ -164,6 +165,7 @@ func New(cfg config.Config) *Server {
 	}
 	server.codexProtocolLogin = oauth.NewCodexProtocolLogin(server.codexLogin)
 	server.initFreeRegistration()
+	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)

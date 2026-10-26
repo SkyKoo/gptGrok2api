@@ -1,4 +1,24 @@
 services:
+  grok-browser:
+    build:
+      context: .
+      dockerfile: grok-browser/Dockerfile
+    image: ${GROK_BROWSER_IMAGE:-gptgrok2api-grok-browser:local}
+    container_name: ${GROK_BROWSER_CONTAINER_NAME:-gptgrok2api-grok-browser}
+    restart: unless-stopped
+    environment:
+      TURNSTILE_HEADLESS: ${GROK_BROWSER_HEADLESS:-0}
+      GROK_BROWSER_CONCURRENCY: ${GROK_BROWSER_CONCURRENCY:-1}
+      GROK_BROWSER_TOKEN: ${GROK_BROWSER_TOKEN:-}
+    expose:
+      - "8899"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   icloud-privacy-mail:
     profiles: ["local-icloud"]
     build:
@@ -35,8 +55,12 @@ services:
       - ./config.json:/app/config.json
     environment:
       STORAGE_BACKEND: sqlite
+      CFM_GROK_BROWSER_URL: ${CFM_GROK_BROWSER_URL:-http://grok-browser:8899}
       DATABASE_URL: sqlite:////app/data/accounts.db
       ICLOUD_PRIVACY_MAIL_BASE_URL: ${ICLOUD_PRIVACY_MAIL_BASE_URL:-http://icloud-privacy-mail:8787}
+    depends_on:
+      - grok-browser
+
     # 存储后端配置 (可选值: json, sqlite, postgres, git)
     # environment:
     #   STORAGE_BACKEND: json

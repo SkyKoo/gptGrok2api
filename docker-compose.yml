@@ -1,4 +1,24 @@
 services:
+  grok-browser:
+    build:
+      context: .
+      dockerfile: grok-browser/Dockerfile
+    image: ${GROK_BROWSER_IMAGE:-gptgrok2api-grok-browser:local}
+    container_name: ${GROK_BROWSER_CONTAINER_NAME:-gptgrok2api-grok-browser}
+    restart: unless-stopped
+    environment:
+      TURNSTILE_HEADLESS: ${GROK_BROWSER_HEADLESS:-0}
+      GROK_BROWSER_CONCURRENCY: ${GROK_BROWSER_CONCURRENCY:-1}
+      GROK_BROWSER_TOKEN: ${GROK_BROWSER_TOKEN:-}
+    expose:
+      - "8899"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   redis:
     image: redis:7-alpine
     container_name: gptgrok2api-redis
@@ -50,6 +70,7 @@ services:
       CHATGPT2API_ADMIN_KEY: ${CHATGPT2API_ADMIN_KEY:-}
       CHATGPT2API_WEBUI_KEY: ${CHATGPT2API_WEBUI_KEY:-}
       GO_CONFIG_PATH: ${GO_CONFIG_PATH:-/app/data/config.json}
+      CFM_GROK_BROWSER_URL: ${CFM_GROK_BROWSER_URL:-http://grok-browser:8899}
       GO_PUBLIC_BASE_URL: ${GO_PUBLIC_BASE_URL:-}
       GO_TRUST_REQUEST_PUBLIC_BASE: ${GO_TRUST_REQUEST_PUBLIC_BASE:-false}
       GO_REQUEST_TIMEOUT_SECONDS: ${GO_REQUEST_TIMEOUT_SECONDS:-600}
@@ -76,3 +97,4 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     depends_on:
       - redis
+      - grok-browser

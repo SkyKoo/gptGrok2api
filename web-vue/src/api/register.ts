@@ -103,7 +103,7 @@ export type RegisterProvider = {
 
 export type RegisterTarget = 'openai' | 'grok'
 
-export type GrokTurnstileProvider = 'yescaptcha' | '2captcha' | 'local' | 'custom'
+export type GrokTurnstileProvider = 'browser'
 
 export type GrokOAuthDeliveryConfig = {
   sub2api: OpenAISub2APISyncConfig
@@ -314,11 +314,20 @@ export const registerApi = {
   getFreeJobs(page: number) {
     return apiClient.get<any, RegistrationHistoryPage>('/api/register/openai/jobs', { params: { page } })
   },
+  getGrokJobs(page: number) {
+    return apiClient.get<any, RegistrationHistoryPage>('/api/register/grok/jobs', { params: { page } })
+  },
   retryFreeResult(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-result', { id })
   },
   retryFreeRegistration(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/openai/retry-registration', { id })
+  },
+  retryGrokResult(id: string) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/grok/retry-result', { id })
+  },
+  retryGrokRegistration(id: string) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/grok/retry-registration', { id })
   },
   startCodexOAuth(registrationJobId: string) {
     return apiClient.post<any, { session_id?: string; authorize_url?: string; redirect_uri_prefix?: string; stage?: string; message?: string }>('/api/register/openai/codex/start', { registration_job_id: registrationJobId })

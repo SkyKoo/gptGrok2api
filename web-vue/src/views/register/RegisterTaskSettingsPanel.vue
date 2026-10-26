@@ -475,19 +475,12 @@
 
     <FormSection v-if="config.target === 'grok'" title="Grok 注册协议" density="roomy">
       <div class="register-form-grid register-form-grid--grok">
-        <label class="register-field">
-          <span class="register-label">注册链路</span>
-          <GroupedSelectMenu
-            v-model="config.grok.signup_flow"
-            :groups="grokSignupFlowGroups"
-            selected-indicator="none"
-            :disabled="config.enabled"
-            block
-          />
-        </label>
+        <p class="register-proxy-hint register-field--full">
+          注册链路：CFM 后端执行 Grok 纯协议请求，Turnstile 由独立的 Grok Browser Worker 在隔离 Chromium 中完成。
+        </p>
 
         <label class="register-field">
-          <span class="register-label">Turnstile 服务</span>
+          <span class="register-label">Grok Browser Worker</span>
           <GroupedSelectMenu
             v-model="config.grok.provider"
             :groups="turnstileProviderGroups"
@@ -497,8 +490,8 @@
           />
         </label>
 
-        <label v-if="config.grok.provider !== 'local'" class="register-field">
-          <span class="register-label">API Key</span>
+        <label class="register-field">
+          <span class="register-label">Worker Token（可选）</span>
           <Input
             v-model.trim="config.grok.api_key"
             type="password"
@@ -531,19 +524,6 @@
           />
         </label>
 
-        <label v-if="config.grok.provider === 'local'" class="register-field">
-          <span class="register-label">注册解题并发</span>
-          <Input
-            v-model.number="config.grok.local_concurrency"
-            type="number"
-            min="0"
-            max="64"
-            step="1"
-            block
-            :disabled="config.enabled"
-          />
-        </label>
-
         <label class="register-field">
           <span class="register-label">解题超时（秒）</span>
           <Input
@@ -554,43 +534,6 @@
             :disabled="config.enabled"
           />
         </label>
-
-        <label class="register-field">
-          <span class="register-label">轮询间隔（秒）</span>
-          <Input
-            v-model.number="config.grok.captcha_poll_interval"
-            type="number"
-            min="1"
-            max="60"
-            step="1"
-            block
-            :disabled="config.enabled"
-          />
-        </label>
-
-        <template v-if="config.grok.provider === 'custom'">
-          <label class="register-field">
-            <span class="register-label">创建任务路径</span>
-            <Input
-              v-model.trim="config.grok.create_path"
-              block
-              root-class="font-mono"
-              placeholder="/createTask"
-              :disabled="config.enabled"
-            />
-          </label>
-
-          <label class="register-field">
-            <span class="register-label">查询结果路径</span>
-            <Input
-              v-model.trim="config.grok.result_path"
-              block
-              root-class="font-mono"
-              placeholder="/getTaskResult"
-              :disabled="config.enabled"
-            />
-          </label>
-        </template>
 
         <label class="register-field">
           <span class="register-label">邮箱重试次数</span>
@@ -902,7 +845,6 @@ import type { CPAPool, Sub2APIRemoteGroup, Sub2APIServer } from '@/api/accountIm
 import { proxyApi, type ProxySampleTestResult } from '@/api/proxy'
 import type { LegacyRegisterConfig } from '@/api/register'
 import {
-  grokSignupFlowGroups,
   registerModeGroups,
   registerProxyModeGroups,
   registerTargetOptions,

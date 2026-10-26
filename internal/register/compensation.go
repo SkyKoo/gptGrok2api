@@ -53,6 +53,12 @@ func transientRegistrationFailure(message string) bool {
 		status, _ := strconv.Atoi(match[1])
 		return status == 408 || status == 429 || status >= 500 && status <= 599
 	}
+	if strings.HasPrefix(code[0], "turnstile:") {
+		switch code[1] {
+		case "browser_worker_unreachable", "browser_worker_read_failed", "browser_worker_rejected", "browser_worker_invalid_response":
+			return true
+		}
+	}
 	return code[1] == "network_error" || code[1] == "read_error"
 }
 

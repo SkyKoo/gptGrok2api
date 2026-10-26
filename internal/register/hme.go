@@ -279,7 +279,7 @@ func mailCode(text string) string {
 	}
 	return code
 }
-func suitableMessage(m hmeMessage, box Mailbox, after time.Time) bool {
+func suitableMessage(m hmeMessage, box Mailbox, after time.Time, senderMatcher func(string) bool) bool {
 	at, err := time.Parse(time.RFC3339, m.Date)
 	if err != nil || at.Before(after) || at.After(time.Now().Add(time.Minute)) {
 		return false
@@ -301,7 +301,7 @@ func suitableMessage(m hmeMessage, box Mailbox, after time.Time) bool {
 	if err != nil {
 		return false
 	}
-	return isOpenAISender(sender.Address)
+	return senderMatcher(sender.Address)
 }
 
 // HME rewrites some forwarded senders into an iCloud address such as
@@ -320,7 +320,28 @@ func isOpenAISender(raw string) bool {
 	return domain == "icloud.com" && strings.HasPrefix(local, "noreply_at_") &&
 		(strings.Contains(local, "_openai_com") || strings.Contains(local, "_chatgpt_com"))
 }
-func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
+
+// isGrokSender is kept separate from the OpenAI allow-list because the two
+// registration targets use different verification mail senders.
+func isGrokSender(raw string) bool {
+	parts := strings.SplitN(strings.ToLower(raw), "@", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	local, domain := parts[0], parts[1]
+	if domain == "x.ai" || strings.HasSuffix(domain, ".x.ai") || domain == "grok.com" || strings.HasSuffix(domain, ".grok.com") {
+		return true
+	}
+	return domain == "icloud.com" && strings.HasPrefix(local, "noreply_at_") &&
+		(strings.Contains(local, "_x_ai") || strings.Contains(local, "_grok_com"))
+}
+
+// WaitCodeFor is the target-aware variant used by parallel registration
+// engines. WaitCode below preserves the original OpenAI-only behavior.
+func (h *HME) WaitCodeFor(ctx context.Context, box Mailbox, after time.Time, senderMatcher func(string) bool) (string, error) {
+	if senderMatcher == nil {
+		senderMatcher = isOpenAISender
+	}
 	query := url.Values{"account_id": {box.AccountID}, "alias": {box.Email}, "folder": {"all"}, "limit": {"30"}, "days": {"1"}}
 	for {
 		var inbox struct {
@@ -350,7 +371,7 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 				h.consumed[key] = true
 				return code
 			}
-			if !suitableMessage(m, box, after) {
+			if !suitableMessage(m, box, after, senderMatcher) {
 				continue
 			}
 			if code := mailCode(m.Subject); code != "" {
@@ -367,7 +388,7 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 			if err := h.request(ctx, http.MethodGet, "/api/inbox/"+url.PathEscape(m.ID)+"?"+q.Encode(), nil, &full); err != nil {
 				return "", err
 			}
-			if suitableMessage(full, box, after) {
+			if suitableMessage(full, box, after, senderMatcher) {
 				if code := mailCode(full.Body); code != "" {
 					return consume(code), nil
 				}
@@ -377,6 +398,10 @@ func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (strin
 			return "", err
 		}
 	}
+}
+
+func (h *HME) WaitCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
+	return h.WaitCodeFor(ctx, box, after, isOpenAISender)
 }
 
 func hmeOperation(path string) string {

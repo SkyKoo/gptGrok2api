@@ -39,10 +39,16 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.registerRuntimeStatus(w)
 	case path == "/openai/jobs" && r.Method == http.MethodGet:
 		writeRegistrationJSON(w, http.StatusOK, s.freeRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
+	case path == "/grok/jobs" && r.Method == http.MethodGet:
+		writeRegistrationJSON(w, http.StatusOK, s.grokRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
 	case path == "/openai/retry-result" && r.Method == http.MethodPost:
 		s.retryFreeRegistration(w, r)
 	case path == "/openai/retry-registration" && r.Method == http.MethodPost:
 		s.retryFreeRegistrationTask(w, r)
+	case path == "/grok/retry-result" && r.Method == http.MethodPost:
+		s.retryGrokRegistration(w, r)
+	case path == "/grok/retry-registration" && r.Method == http.MethodPost:
+		s.retryGrokRegistrationTask(w, r)
 	case path == "/openai/codex/start" && r.Method == http.MethodPost:
 		s.codexOAuthStart(w, r)
 	case path == "/openai/codex/finish" && r.Method == http.MethodPost:
@@ -111,7 +117,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &updates) {
 		return
 	}
-	if s.freeRegister.Snapshot()["running"] == true {
+	if s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true {
 		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
 		return
 	}
@@ -134,7 +140,11 @@ func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
 		writeError(w, 503, "服务正在停止，请稍后重试", "server_error")
 		return
 	}
-	if stringValue(s.registerStore.Get()["target"]) == "openai" || s.freeRegister.Snapshot()["running"] == true {
+	target := strings.ToLower(strings.TrimSpace(stringValue(s.registerStore.Get()["target"])))
+	if target == "" {
+		target = "openai"
+	}
+	if target == "openai" {
 		if enabled {
 			if _, err := s.freeRegister.Start(s.registerStore.Get()); err != nil {
 				registrationError(w, err)
@@ -148,20 +158,18 @@ func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
 	}
 	if enabled {
 		config := s.registerStore.Get()
-		target := stringValue(config["target"])
-		if target == "" {
-			target = "grok"
+		if target != "grok" {
+			writeError(w, http.StatusBadRequest, "不支持的注册目标", "invalid_request_error")
+			return
 		}
-		if err := s.registerRuntime.Start(target); err != nil {
-			writeRegistrationJSON(w, http.StatusServiceUnavailable, map[string]any{
-				"ok":       false,
-				"runtime":  s.registerRuntime.Status(target),
-				"register": config,
-			})
+		if _, err := s.grokRegister.Start(config); err != nil {
+			registrationError(w, err)
 			return
 		}
 	} else {
-		s.registerRuntime.Stop()
+		if target == "grok" {
+			s.grokRegister.Stop()
+		}
 	}
 	value, err := s.registerStore.SetEnabled(enabled)
 	if err != nil {
@@ -176,6 +184,15 @@ func (s *Server) resetRegister(w http.ResponseWriter) {
 	defer s.registrationMu.Unlock()
 	if stringValue(s.registerStore.Get()["target"]) == "openai" {
 		removed, err := s.freeRegister.ClearFinished()
+		if err != nil {
+			registrationError(w, err)
+			return
+		}
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot(), "removed": removed})
+		return
+	}
+	if strings.EqualFold(stringValue(s.registerStore.Get()["target"]), "grok") {
+		removed, err := s.grokRegister.ClearFinished()
 		if err != nil {
 			registrationError(w, err)
 			return
@@ -420,13 +437,24 @@ func (s *Server) registerRuntimeStatus(w http.ResponseWriter) {
 	config := s.registerStore.Get()
 	target := stringValue(config["target"])
 	if target == "" {
-		target = "grok"
+		target = "openai"
 	}
 	if target == "openai" {
 		state := s.freeRegister.Snapshot()
 		_, err := registerruntime.ParseFreeConfig(config)
 		state["ready"] = err == nil && state["error"] == nil
 		state["target"], state["driver"] = "openai", "go_chatgpt_web"
+		if err != nil {
+			state["configuration_error"] = err.Error()
+		}
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"runtime": state})
+		return
+	}
+	if target == "grok" {
+		state := s.grokRegister.Snapshot()
+		_, err := registerruntime.ParseGrokConfig(config)
+		state["ready"] = err == nil && state["error"] == nil
+		state["target"], state["driver"] = "grok", "go_grok_protocol"
 		if err != nil {
 			state["configuration_error"] = err.Error()
 		}

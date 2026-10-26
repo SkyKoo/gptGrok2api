@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
@@ -30,7 +31,14 @@ func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if *body.Enabled {
-			if _, err := registerruntime.ParseFreeConfig(s.registerStore.Get()); err != nil {
+			config := s.registerStore.Get()
+			var err error
+			if strings.EqualFold(stringValue(config["target"]), "grok") {
+				_, err = registerruntime.ParseGrokConfig(config)
+			} else {
+				_, err = registerruntime.ParseFreeConfig(config)
+			}
+			if err != nil {
 				registrationError(w, err)
 				return
 			}
@@ -70,7 +78,13 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
 			return &registerruntime.Failure{Stage: "task", Code: "maintenance"}
 		}
-		_, err := s.freeRegister.Start(s.registerStore.Get())
+		config := s.registerStore.Get()
+		var err error
+		if strings.EqualFold(stringValue(config["target"]), "grok") {
+			_, err = s.grokRegister.Start(config)
+		} else {
+			_, err = s.freeRegister.Start(config)
+		}
 		return err
 	}) // Storage/launch failures are exposed by the persisted schedule snapshot.
 	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
@@ -78,5 +92,10 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 	}
 	// A scheduled/manual batch owns the same engine slot and takes precedence.
 	// Compensation runs even when the new-account batch timer is disabled.
-	_, _ = s.freeRegister.RunCompensation(s.registerStore.Get(), now)
+	config := s.registerStore.Get()
+	if strings.EqualFold(stringValue(config["target"]), "grok") {
+		_, _ = s.grokRegister.RunCompensation(config, now)
+	} else {
+		_, _ = s.freeRegister.RunCompensation(config, now)
+	}
 }

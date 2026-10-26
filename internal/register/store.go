@@ -318,6 +318,68 @@ func (s *Store) Credentials(id string) (map[string]string, bool, error) {
 	return nil, false, nil
 }
 
+// AddAccount appends one Grok registration result to the dedicated archive.
+// Duplicate SSO or registration-job rows are treated as an idempotent write.
+func (s *Store) AddAccount(account map[string]any) (map[string]any, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.loadAccountsLocked()
+	if err != nil {
+		return nil, false, err
+	}
+	for _, existing := range items {
+		if jobID := stringValue(account["registration_job_id"]); jobID != "" && jobID == stringValue(existing["registration_job_id"]) {
+			return cloneMap(existing), false, nil
+		}
+		if token := stringValue(account["sso"]); token != "" && token == stringValue(existing["sso"]) {
+			return cloneMap(existing), false, nil
+		}
+	}
+	value := cloneMap(account)
+	if stringValue(value["id"]) == "" {
+		value["id"] = NewID()
+	}
+	if stringValue(value["platform"]) == "" {
+		value["platform"] = "grok"
+	}
+	if stringValue(value["status"]) == "" {
+		value["status"] = "pending"
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if stringValue(value["created_at"]) == "" {
+		value["created_at"] = now
+	}
+	value["updated_at"] = now
+	items = append(items, value)
+	if err := writeJSON0600(s.accountsPath, items); err != nil {
+		return nil, false, err
+	}
+	return cloneMap(value), true, nil
+}
+
+// UpdateAccountFields updates private fields in the Grok registration archive
+// while preserving credentials unless the caller explicitly replaces them.
+func (s *Store) UpdateAccountFields(id string, fields map[string]any) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.loadAccountsLocked()
+	if err != nil {
+		return false, err
+	}
+	for index, item := range items {
+		if stringValue(item["id"]) != strings.TrimSpace(id) {
+			continue
+		}
+		for key, value := range fields {
+			item[key] = value
+		}
+		item["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+		items[index] = item
+		return true, writeJSON0600(s.accountsPath, items)
+	}
+	return false, nil
+}
+
 func (s *Store) SetDisabled(ids []string, disabled bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -521,6 +583,7 @@ func defaultConfig() map[string]any {
 		"threads":                  1,
 		"mode":                     "total",
 		"openai_free":              map[string]any{"timeout_seconds": 600, "auto_twofa": false},
+		"grok":                     map[string]any{"signup_flow": "xconsole", "browser_flow_enabled": false, "provider": "browser", "api_key": "", "api_base": "http://grok-browser:8899", "request_timeout": 45, "captcha_timeout": 180, "captcha_poll_interval": 3, "create_path": "/createTask", "result_path": "/getTaskResult"},
 		"checkout":                 map[string]any{"enabled": false},
 		"agent_identity_archive":   map[string]any{"enabled": false},
 		"target_quota":             0,
