@@ -2230,6 +2230,10 @@ func accountStatusCategory(account map[string]any) string {
 	case "quota_exhausted", "media_pending", "media_generation_unavailable", "media_degraded", "lane_degraded", "text_pending":
 		return "limited"
 	}
+	lastError := strings.ToLower(strings.TrimSpace(stringValue(account["last_error_message"])))
+	if strings.Contains(lastError, "image rate limit") || strings.Contains(lastError, "image quota") {
+		return "limited"
+	}
 	return "normal"
 }
 

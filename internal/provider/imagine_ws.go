@@ -112,7 +112,7 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 		}
 	}
 	for _, id := range order {
-		if result, ok := byID[id]; ok && isFinalImagineResult(result, id) {
+		if result, ok := byID[id]; ok && isFinalImagineResult(result) {
 			results = append(results, result)
 		}
 		if len(results) >= count {
@@ -214,8 +214,7 @@ func finalImageIDs(images map[string]ImageResult) []string {
 	return result
 }
 
-func isFinalImagineResult(image ImageResult, id string) bool {
-	_ = id
+func isFinalImagineResult(image ImageResult) bool {
 	raw, _, ok := decodeImagineBlob(image.Base64, image.URL)
 	return ok && imagineImageFinal(image.URL, len(raw))
 }

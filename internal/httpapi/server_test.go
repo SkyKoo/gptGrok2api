@@ -284,6 +284,17 @@ func TestAccountStatusCategoryDoesNotTreatTransientMarkersAsAbnormal(t *testing.
 	}
 }
 
+func TestAccountStatusCategoryMarksGrokImageRateLimitAsLimited(t *testing.T) {
+	account := map[string]any{
+		"status": "active", "enabled": true,
+		"last_error_kind": "upstream_error", "last_error_status": 502,
+		"last_error_message": "imagine websocket error: Image rate limit exceeded",
+	}
+	if category := accountStatusCategory(account); category != "limited" {
+		t.Fatalf("expected Grok image rate limit to be limited, got %q", category)
+	}
+}
+
 func TestAccountStatusNeverRecoversFromCachedQuota(t *testing.T) {
 	for _, status := range []string{"异常", "abnormal", "invalid", "error", "incomplete", "expired", "unauthorized"} {
 		item := map[string]any{"status": status, "enabled": true, "quota": 25, "survival_alive": true, "status_reason_code": "image_quota_exhausted"}
