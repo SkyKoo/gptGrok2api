@@ -99,6 +99,36 @@ func TestImagineSocketRateLimitIsTypedAs429(t *testing.T) {
 	}
 }
 
+func TestImagineSocketProFlagReachesImagineProtocol(t *testing.T) {
+	finalBytes := bytesOfSize(imagineFinalMinBytes+1, 'p')
+	var request map[string]any
+	server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+		for i := 0; i < 2; i++ {
+			message, err := readClientText(reader)
+			if err != nil {
+				t.Errorf("read client message: %v", err)
+				return
+			}
+			if i == 1 && json.Unmarshal([]byte(message), &request) != nil {
+				t.Errorf("decode imagine request")
+			}
+		}
+		writeServerText(t, conn, fmt.Sprintf(`{"type":"image","url":"/images/pro.png","blob":%q}`, base64.StdEncoding.EncodeToString(finalBytes)))
+	})
+	defer server.Close()
+	socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, 3*time.Second)
+	if _, err := socket.Generate(context.Background(), accounts.Account{Token: "pro-sso"}, "a cinematic cat", "1:1", 1, true, true); err != nil {
+		t.Fatal(err)
+	}
+	item := request["item"].(map[string]any)
+	content := item["content"].([]any)
+	input := content[0].(map[string]any)
+	properties := input["properties"].(map[string]any)
+	if properties["enable_pro"] != true {
+		t.Fatalf("pro flag was not sent: %#v", properties)
+	}
+}
+
 func TestDecodeImagineBlobAcceptsDataURL(t *testing.T) {
 	raw := []byte("image-bytes")
 	encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw)
