@@ -147,6 +147,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	s.enrichMonitorAccount(r, lease.Account)
 	s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 	generationStarted := time.Now()
+	s.grokAccountPool.MarkSent(lease, "image_gen")
 	var images []provider.ImageResult
 	if request.Model == "grok-imagine-image-lite" {
 		images, err = s.mediaProvider.GenerateLite(r.Context(), lease.Account, request.Prompt, "fast", request.N)
@@ -844,7 +845,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordInputImages(r, inputs)
-	lease, err := s.grokAccountPool.Reserve(r.Context(), []string{"basic", "super", "heavy"}, nil)
+	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: modelName, Uploads: len(inputs)})
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
 		return
@@ -852,9 +853,10 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	defer s.grokAccountPool.Release(lease)
 	refs := make([]string, 0, len(inputs))
 	for _, input := range inputs {
+		s.grokAccountPool.MarkSent(lease, "file_upload")
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
 		if uploadErr != nil {
-			s.grokAccountPool.Feedback(lease.Account, upstreamStatus(uploadErr), uploadErr)
+			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(uploadErr), uploadErr)
 			writeError(w, upstreamStatus(uploadErr), uploadErr.Error(), "upstream_error")
 			return
 		}
@@ -867,7 +869,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	post, err := s.mediaProvider.CreatePost(r.Context(), lease.Account, protocol.ImagePostMediaType, "", prompt)
 	if err != nil {
-		s.grokAccountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 		return
 	}
@@ -877,9 +879,10 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "image edit create-post returned no post id", "upstream_error")
 		return
 	}
+	s.grokAccountPool.MarkSent(lease, "image_gen")
 	response, err := s.mediaProvider.StreamChat(r.Context(), lease.Account, protocol.BuildImageEditPayload(prompt, refs, parentID))
 	if err != nil {
-		s.grokAccountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 		return
 	}
@@ -900,7 +903,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		s.recordGeneratedMedia(r.Context(), value)
 		data = append(data, value)
 	}
-	s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
+	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 

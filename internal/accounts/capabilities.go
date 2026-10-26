@@ -13,15 +13,23 @@ import (
 // Intent describes the quota groups needed by one upstream attempt, not API billing.
 // These are conservative reservations; only upstream observations are authoritative.
 type Intent struct {
-	Kind    string
-	Model   string
-	Uploads int
+	Kind          string
+	Model         string
+	Uploads       int
+	VideoSegments int
 }
 
 func (i Intent) Costs() map[string]int {
 	c := map[string]int{"reason": 1}
 	if i.Kind == "image" {
 		c["image_gen"] = 1
+	}
+	if i.Kind == "video" {
+		segments := i.VideoSegments
+		if segments < 1 {
+			segments = 1
+		}
+		c["video_gen"] = segments
 	}
 	if i.Uploads > 0 {
 		c["file_upload"] = i.Uploads
@@ -68,7 +76,7 @@ func pendingQuotas(v any) map[string]int {
 // Quotas normalizes known features, retaining unknown quantities as nil, never zero.
 func Quotas(raw any, observed time.Time) map[string]FeatureQuota {
 	out := map[string]FeatureQuota{}
-	for _, k := range []string{"reason", "image_gen", "file_upload", "paste_text_to_file", "deep_research"} {
+	for _, k := range []string{"reason", "image_gen", "video_gen", "file_upload", "paste_text_to_file", "deep_research"} {
 		out[k] = FeatureQuota{}
 	}
 	var rows []map[string]any
@@ -302,7 +310,7 @@ func (p *Pool) FeedbackIntent(l *Lease, status int, err error) {
 	if err != nil {
 		text = strings.ToLower(err.Error())
 	}
-	for _, f := range []string{"image_gen", "file_upload", "reason", "deep_research"} {
+	for _, f := range []string{"image_gen", "video_gen", "file_upload", "reason", "deep_research"} {
 		if strings.Contains(text, f) {
 			feature = f
 			break
@@ -310,6 +318,9 @@ func (p *Pool) FeedbackIntent(l *Lease, status int, err error) {
 	}
 	if strings.HasPrefix(feature, "model:") && strings.Contains(text, "image") && (strings.Contains(text, "limit") || strings.Contains(text, "quota")) {
 		feature = "image_gen"
+	}
+	if strings.HasPrefix(feature, "model:") && strings.Contains(text, "video") && (strings.Contains(text, "limit") || strings.Contains(text, "quota")) {
+		feature = "video_gen"
 	}
 	duration := retryAfterDuration(err)
 	if duration <= 0 {

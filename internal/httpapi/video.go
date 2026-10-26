@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 )
@@ -96,7 +97,11 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	s.videoMu.Unlock()
 	s.monitor.start(job.ID, "/v1/videos", modelName, prompt)
 	var references []string
-	for _, header := range multipartFiles(r, "input_reference[]", "input_reference")[:7] {
+	inputReferences := multipartFiles(r, "input_reference[]", "input_reference")
+	if len(inputReferences) > 7 {
+		inputReferences = inputReferences[:7]
+	}
+	for _, header := range inputReferences {
 		file, err := header.Open()
 		if err != nil {
 			continue
@@ -110,14 +115,20 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		if mimeType == "" {
 			mimeType = "image/jpeg"
 		}
-		lease, reserveErr := s.grokAccountPool.Reserve(r.Context(), []string{"basic", "super", "heavy"}, nil)
+		lease, reserveErr := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: modelName, Uploads: 1})
 		if reserveErr != nil {
 			continue
 		}
+		s.grokAccountPool.MarkSent(lease, "file_upload")
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, header.Filename, mimeType, base64.StdEncoding.EncodeToString(raw))
+		if uploadErr == nil {
+			s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
+		} else {
+			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(uploadErr), uploadErr)
+		}
 		s.grokAccountPool.Release(lease)
 		if uploadErr == nil {
-			if ref := protocol.ResolveAssetReference(fileID, fileURI, ""); ref != "" {
+			if ref := protocol.ResolveAssetReference(fileID, fileURI, cookieUserID(lease.Account)); ref != "" {
 				references = append(references, ref)
 			}
 		}
@@ -128,7 +139,8 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, refs []string) {
 	s.setVideoStatus(job, "in_progress", 1, nil)
-	lease, err := s.grokAccountPool.Reserve(context.Background(), []string{"basic", "super", "heavy"}, nil)
+	segments, _ := protocol.VideoSegmentLengths(seconds)
+	lease, err := s.grokAccountPool.ReserveIntent(context.Background(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments)})
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
 		return
@@ -136,7 +148,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	defer s.grokAccountPool.Release(lease)
 	post, err := s.mediaProvider.CreatePost(context.Background(), lease.Account, protocol.VideoPostMediaType, "", prompt)
 	if err != nil {
-		s.grokAccountPool.Feedback(lease.Account, upstreamStatus(err), err)
+		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "create_post_failed", "message": err.Error()})
 		return
 	}
@@ -150,15 +162,15 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	assetID := ""
 	extendPostID := parentID
 	elapsedSeconds := 0
-	segments, _ := protocol.VideoSegmentLengths(seconds)
 	for index, segmentLength := range segments {
 		payload := protocol.BuildVideoPayload(prompt, parentID, aspect, resolution, segmentLength, preset, refs)
 		if index > 0 {
 			payload = protocol.BuildVideoExtendPayload(prompt, parentID, extendPostID, aspect, resolution, segmentLength, preset, float64(elapsedSeconds)+1.0/24.0)
 		}
+		s.grokAccountPool.MarkSent(lease, "video_gen")
 		response, requestErr := s.mediaProvider.StreamChat(context.Background(), lease.Account, payload)
 		if requestErr != nil {
-			s.grokAccountPool.Feedback(lease.Account, upstreamStatus(requestErr), requestErr)
+			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(requestErr), requestErr)
 			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_failed", "message": requestErr.Error()})
 			return
 		}
@@ -187,7 +199,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 					if event.PostID != "" {
 						segmentPostID = event.PostID
 					}
-					if event.ImageID != "" {
+					if segmentPostID == "" && event.ImageID != "" {
 						segmentPostID = event.ImageID
 					}
 				}
@@ -211,6 +223,9 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	}
 	if videoURL == "" && assetID != "" {
 		videoURL = protocol.ResolveAssetReference(assetID, "", "")
+	}
+	if videoURL == "" {
+		videoURL = protocol.ResolveGeneratedVideoReference(cookieUserID(lease.Account), extendPostID)
 	}
 	if videoURL == "" {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_video", "message": "video generation returned no final video URL"})
@@ -241,7 +256,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	job.VideoURL = videoURL
 	s.videoMu.Unlock()
 	s.setVideoStatus(job, "completed", 100, nil)
-	s.grokAccountPool.Feedback(lease.Account, http.StatusOK, nil)
+	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
 }
 
 func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {

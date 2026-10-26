@@ -40,6 +40,13 @@ func TestQuotaImageExhaustionDoesNotDisableText(t *testing.T) {
 		}
 	}
 }
+
+func TestVideoIntentReservesOneQuotaPerSegment(t *testing.T) {
+	costs := (Intent{Kind: "video", VideoSegments: 2, Uploads: 1}).Costs()
+	if costs["video_gen"] != 2 || costs["file_upload"] != 1 {
+		t.Fatalf("unexpected video intent costs: %#v", costs)
+	}
+}
 func TestQuotaAtomicReservationAndRestart(t *testing.T) {
 	p, s := quotaPool(t, 1, 1, "正常")
 	var mu sync.Mutex

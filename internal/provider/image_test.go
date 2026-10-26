@@ -3,10 +3,14 @@ package provider
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 )
@@ -34,5 +38,23 @@ func TestResolveImageUsesInlineImagineBytesBeforeAssetURL(t *testing.T) {
 	stored, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
 	if err != nil || string(stored) != string(raw) {
 		t.Fatalf("stored image bytes changed: %v %q", err, stored)
+	}
+}
+
+func TestGenerateLiteSkipsPreviewFrames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"/preview.png","progress":25}}}}`)
+		fmt.Fprintln(w, `data: {"result":{"response":{"streamingImageGenerationResponse":{"imageUrl":"/final.png","progress":100}}}}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer server.Close()
+	media := NewMedia(server.Client(), server.URL, "", "", "", 3*time.Second)
+	results, err := media.GenerateLite(context.Background(), accounts.Account{Token: "sso"}, "a cat", "fast", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || !strings.HasSuffix(results[0].URL, "/final.png") {
+		t.Fatalf("preview frame leaked into lite result: %#v", results)
 	}
 }

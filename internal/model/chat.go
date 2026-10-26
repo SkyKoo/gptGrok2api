@@ -25,6 +25,13 @@ func ResolveChat(id string) (ChatRoute, bool) {
 		return ChatRoute{Mode: "console", PoolCandidates: []string{"basic"}, Console: true}, true
 	}
 	switch id {
+	case "grok-4.3-low", "grok-4.3-medium", "grok-4.3-high",
+		"grok-4.20-multi-agent-low", "grok-4.20-multi-agent-medium",
+		"grok-4.20-multi-agent-high", "grok-4.20-multi-agent-xhigh":
+		// These console variants are exposed by the catalog without a
+		// "-console" suffix. Keep them on the same native console path as
+		// the suffixed variants instead of silently rejecting them.
+		return ChatRoute{Mode: "console", PoolCandidates: []string{"basic"}, Console: true}, true
 	case "grok-4.20-0309-non-reasoning", "grok-4.20-fast", "grok-4.3-fast":
 		return ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}}, true
 	case "grok-4.20-0309-non-reasoning-super":

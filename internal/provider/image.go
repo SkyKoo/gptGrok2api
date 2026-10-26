@@ -45,7 +45,9 @@ func (m *Media) GenerateLite(ctx context.Context, account accounts.Account, prom
 			break
 		}
 		for _, event := range events {
-			if event.Kind != "image" || event.URL == "" || seen[event.URL] {
+			// Grok may emit a preview URL before the finished image. Keep
+			// progress-less legacy finals, but never expose a known partial frame.
+			if event.Kind != "image" || event.URL == "" || (event.Progress > 0 && event.Progress < 100) || seen[event.URL] {
 				continue
 			}
 			seen[event.URL] = true

@@ -45,3 +45,14 @@ func TestVideoSegmentLengths(t *testing.T) {
 		t.Fatal("unsupported video length accepted")
 	}
 }
+
+func TestResolveGeneratedVideoReference(t *testing.T) {
+	got := ResolveGeneratedVideoReference("user/one", "post id")
+	want := "https://assets.grok.com/users/user%2Fone/generated/post%20id/generated_video.mp4"
+	if got != want {
+		t.Fatalf("unexpected generated video URL: %q", got)
+	}
+	if ResolveGeneratedVideoReference("", "post") != "" || ResolveGeneratedVideoReference("user", "") != "" {
+		t.Fatal("incomplete generated video references must be empty")
+	}
+}

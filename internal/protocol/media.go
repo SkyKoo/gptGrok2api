@@ -327,6 +327,17 @@ func ResolveAssetReference(fileID, fileURI, userID string) string {
 	return ""
 }
 
+// ResolveGeneratedVideoReference builds the authenticated Grok Imagine asset
+// path used when the streaming response exposes only videoPostId/videoId.
+func ResolveGeneratedVideoReference(userID, postID string) string {
+	userID = strings.TrimSpace(userID)
+	postID = strings.TrimSpace(postID)
+	if userID == "" || postID == "" {
+		return ""
+	}
+	return "https://assets.grok.com/users/" + url.PathEscape(userID) + "/generated/" + url.PathEscape(postID) + "/generated_video.mp4"
+}
+
 func ValidMediaFileID(value string) bool { return mediaFileIDPattern.MatchString(value) }
 
 func stringField(object map[string]any, keys ...string) string {

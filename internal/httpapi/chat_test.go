@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/auucoder/gptgrok2api-go/internal/config"
+	"github.com/auucoder/gptgrok2api-go/internal/model"
 )
 
 func chatTestConfig(root, upstream string) config.Config {
@@ -141,6 +142,84 @@ func TestConsoleChatAndResponses(t *testing.T) {
 	server.Handler().ServeHTTP(responsesResponse, responsesRequest)
 	if responsesResponse.Code != http.StatusOK || !strings.Contains(responsesResponse.Body.String(), `"object":"response"`) || !strings.Contains(responsesResponse.Body.String(), "console reply") {
 		t.Fatalf("unexpected responses result: %d %s", responsesResponse.Code, responsesResponse.Body.String())
+	}
+}
+
+func TestConsoleThinkingAliasesUseConsoleEndpoint(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer anonymous" {
+			t.Errorf("unexpected console authorization: %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `event: response.output_text.delta`)
+		fmt.Fprintln(w, `data: {"type":"response.output_text.delta","delta":"ok"}`)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, `event: response.completed`)
+		fmt.Fprintln(w, `data: {"type":"response.completed","response":{}}`)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer upstream.Close()
+	root := t.TempDir()
+	cfg := chatTestConfig(root, upstream.URL)
+	cfg.ConsoleURL = upstream.URL
+	server := New(cfg)
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"console-alias-token"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, modelName := range []string{
+		"grok-4.3-low", "grok-4.3-medium", "grok-4.3-high",
+		"grok-4.20-multi-agent-low", "grok-4.20-multi-agent-medium",
+		"grok-4.20-multi-agent-high", "grok-4.20-multi-agent-xhigh",
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+modelName+`","messages":[{"role":"user","content":"hi"}]}`))
+		request.Header.Set("Authorization", "Bearer api-secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"ok"`) {
+			t.Fatalf("console alias %s failed: %d %s", modelName, response.Code, response.Body.String())
+		}
+	}
+	if calls != 7 {
+		t.Fatalf("expected 7 console calls, got %d", calls)
+	}
+}
+
+func TestAllCatalogGrokChatModelsReachWebChatEndpoint(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(w, `data: {"result":{"response":{"token":"ok","messageTag":"final"}}}`)
+		fmt.Fprintln(w, `data: [DONE]`)
+	}))
+	defer upstream.Close()
+	root := t.TempDir()
+	server := New(chatTestConfig(root, upstream.URL))
+	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{
+		{"access_token": "chat-model-matrix-super-token", "pool": "super"},
+		{"access_token": "chat-model-matrix-heavy-token", "pool": "heavy"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := 0
+	for _, item := range model.Catalog() {
+		if item.Capability&model.Chat == 0 {
+			continue
+		}
+		want++
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"`+item.ID+`","messages":[{"role":"user","content":"matrix"}]}`))
+		request.Header.Set("Authorization", "Bearer api-secret")
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"content":"ok"`) {
+			t.Fatalf("catalog model %s failed: %d %s", item.ID, response.Code, response.Body.String())
+		}
+	}
+	if calls != want {
+		t.Fatalf("expected %d web chat calls, got %d", want, calls)
 	}
 }
 
