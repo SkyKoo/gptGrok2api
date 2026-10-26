@@ -75,19 +75,26 @@ func (m *Media) ResolveImage(ctx context.Context, account accounts.Account, imag
 	if format != "url" && format != "b64_json" {
 		return nil, fmt.Errorf("response_format must be url or b64_json")
 	}
-	if format == "b64_json" {
-		if image.Base64 != "" {
-			return map[string]string{"b64_json": image.Base64}, nil
+	var raw []byte
+	mime := strings.TrimSpace(image.MIME)
+	if image.Base64 != "" {
+		decoded, err := base64.StdEncoding.DecodeString(image.Base64)
+		if err == nil && len(decoded) > 0 {
+			raw = decoded
+			if mime == "" {
+				mime = "image/jpeg"
+			}
 		}
-		raw, mime, err := m.Fetch(ctx, account, image.URL)
+	}
+	if raw == nil {
+		var err error
+		raw, mime, err = m.Fetch(ctx, account, image.URL)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"b64_json": base64.StdEncoding.EncodeToString(raw), "mime": mime}, nil
 	}
-	raw, mime, err := m.Fetch(ctx, account, image.URL)
-	if err != nil {
-		return nil, err
+	if format == "b64_json" {
+		return map[string]string{"b64_json": base64.StdEncoding.EncodeToString(raw), "mime": mime}, nil
 	}
 	fileID := mediaID(image.URL)
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
