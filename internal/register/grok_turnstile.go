@@ -13,23 +13,26 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
 )
 
-// GrokTurnstileSolver is intentionally independent from OpenAI Sentinel. A
-// solver receives the live Grok site key and page URL and returns a provider
-// issued Turnstile token for the same proxy used by the protocol session.
+// GrokTurnstileSolver is intentionally independent from OpenAI Sentinel. It
+// remains the compatibility seam for the raw protocol fallback; the built-in
+// worker also implements GrokBrowserSignupFlow for the native page path.
 type GrokTurnstileSolver interface {
 	Solve(context.Context, string, string, string) (string, error)
 }
 
 // GrokBrowserContext is the short-lived browser context exported by the
-// internal grok-browser worker. The token is single-use and the cookies and
-// user agent are returned with it because Cloudflare may bind the token to the
-// browser session that produced it.
+// internal grok-browser worker. Cookies, user agent and SSO stay attached to
+// the same Chromium session because xAI and Cloudflare bind challenge state to
+// that context.
 type GrokBrowserContext struct {
-	SessionID string
-	Token     string
-	Cookies   []browserprofile.Cookie
-	UserAgent string
-	ExpiresAt time.Time
+	SessionID   string
+	Token       string
+	SSO         string
+	SSORW       string
+	RedirectURL string
+	Cookies     []browserprofile.Cookie
+	UserAgent   string
+	ExpiresAt   time.Time
 }
 
 // GrokBrowserContextSolver returns the worker session context together with
@@ -45,10 +48,20 @@ type GrokBrowserProfileSetter interface {
 	SetBrowserProfile(BrowserProfile)
 }
 
-// GrokBrowserSessionCloser releases the Chromium page that issued a
-// single-use Turnstile token once the protocol flow has ended.
+// GrokBrowserSessionCloser releases the persistent Chromium page once the
+// native registration flow has ended.
 type GrokBrowserSessionCloser interface {
 	CloseSession(context.Context, string) error
+}
+
+// GrokBrowserSignupFlow is the native xAI registration flow.  All four
+// operations use one persistent browser page so the email form, Castle state,
+// Turnstile result and final SSO cookies remain in the same context.
+type GrokBrowserSignupFlow interface {
+	StartSignup(context.Context, string, string) (GrokBrowserContext, error)
+	SendEmailCode(context.Context, string, string) error
+	VerifyEmailCode(context.Context, string, string, string) (GrokBrowserContext, error)
+	CompleteSignup(context.Context, string, string, string, string, string, string, string) (GrokBrowserContext, error)
 }
 
 // GrokSSOMaterializer lets the same worker turn a signup wrapper cookie into
@@ -74,6 +87,117 @@ func (s *HTTPGrokBrowserSolver) SetBrowserProfile(profile BrowserProfile) {
 	}
 	copy := profile
 	s.Profile = &copy
+}
+
+func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, payload any, stage string) ([]byte, error) {
+	if s == nil || strings.TrimSpace(s.BaseURL) == "" {
+		return nil, fail(stage, "browser_worker_not_configured")
+	}
+	client := s.Client
+	if client == nil {
+		client = &http.Client{Timeout: 240 * time.Second}
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fail(stage, "browser_worker_request_failed")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.BaseURL, "/")+path, bytes.NewReader(raw))
+	if err != nil {
+		return nil, fail(stage, "browser_worker_request_failed")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if strings.TrimSpace(s.APIKey) != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(s.APIKey))
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fail(stage, "browser_worker_unreachable")
+	}
+	defer resp.Body.Close()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if readErr != nil {
+		return nil, fail(stage, "browser_worker_read_failed")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &Failure{Stage: stage, Code: "browser_worker_rejected", HTTPStatus: resp.StatusCode}
+	}
+	return body, nil
+}
+
+func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy string) (GrokBrowserContext, error) {
+	payload := map[string]any{"url": pageURL, "proxy": proxy}
+	if s.Profile != nil {
+		payload["timezone"] = strings.TrimSpace(s.Profile.TimezoneIANA)
+		payload["locale"] = strings.TrimSpace(s.Profile.NavigatorLanguage)
+	}
+	body, err := s.workerPost(ctx, "/v1/session/start", payload, "bootstrap")
+	if err != nil {
+		return GrokBrowserContext{}, err
+	}
+	var result struct {
+		OK        bool                    `json:"ok"`
+		SessionID string                  `json:"session_id"`
+		Cookies   []browserprofile.Cookie `json:"cookies"`
+		UserAgent string                  `json:"user_agent"`
+		URL       string                  `json:"url"`
+	}
+	if json.Unmarshal(body, &result) != nil || !result.OK || strings.TrimSpace(result.SessionID) == "" {
+		return GrokBrowserContext{}, fail("bootstrap", "browser_worker_invalid_response")
+	}
+	return GrokBrowserContext{SessionID: strings.TrimSpace(result.SessionID), Cookies: result.Cookies, UserAgent: strings.TrimSpace(result.UserAgent), RedirectURL: strings.TrimSpace(result.URL)}, nil
+}
+
+func (s *HTTPGrokBrowserSolver) SendEmailCode(ctx context.Context, sessionID, email string) error {
+	_, err := s.workerPost(ctx, "/v1/session/send-email", map[string]string{"session_id": sessionID, "email": email}, "send_code")
+	return err
+}
+
+func (s *HTTPGrokBrowserSolver) VerifyEmailCode(ctx context.Context, sessionID, email, code string) (GrokBrowserContext, error) {
+	body, err := s.workerPost(ctx, "/v1/session/verify-email", map[string]string{"session_id": sessionID, "email": email, "code": code}, "validate_code")
+	if err != nil {
+		return GrokBrowserContext{}, err
+	}
+	return parseNativeBrowserContext(body, "validate_code")
+}
+
+func (s *HTTPGrokBrowserSolver) CompleteSignup(ctx context.Context, sessionID, email, password, code, givenName, familyName, turnstileToken string) (GrokBrowserContext, error) {
+	payload := map[string]string{"session_id": sessionID, "email": email, "password": password, "code": code, "given_name": givenName, "family_name": familyName, "turnstile_token": turnstileToken}
+	body, err := s.workerPost(ctx, "/v1/session/signup", payload, "signup")
+	if err != nil {
+		return GrokBrowserContext{}, err
+	}
+	result, err := parseNativeBrowserContext(body, "signup")
+	if err != nil {
+		return GrokBrowserContext{}, err
+	}
+	if strings.TrimSpace(result.SSO) == "" && strings.TrimSpace(result.Token) == "" {
+		return GrokBrowserContext{}, fail("sso", "missing_sso")
+	}
+	if result.Token == "" {
+		result.Token = result.SSO
+	}
+	return result, nil
+}
+
+func parseNativeBrowserContext(body []byte, stage string) (GrokBrowserContext, error) {
+	var result struct {
+		OK          bool                    `json:"ok"`
+		SessionID   string                  `json:"session_id"`
+		Token       string                  `json:"token"`
+		SSO         string                  `json:"sso"`
+		SSORW       string                  `json:"sso_rw"`
+		RedirectURL string                  `json:"redirect_url"`
+		Cookies     []browserprofile.Cookie `json:"cookies"`
+		UserAgent   string                  `json:"user_agent"`
+	}
+	if json.Unmarshal(body, &result) != nil || !result.OK {
+		return GrokBrowserContext{}, fail(stage, "browser_worker_invalid_response")
+	}
+	return GrokBrowserContext{SessionID: strings.TrimSpace(result.SessionID), Token: strings.TrimSpace(result.Token), SSO: strings.TrimSpace(result.SSO), SSORW: strings.TrimSpace(result.SSORW), RedirectURL: strings.TrimSpace(result.RedirectURL), Cookies: result.Cookies, UserAgent: strings.TrimSpace(result.UserAgent)}, nil
 }
 
 func (s *HTTPGrokBrowserSolver) Solve(ctx context.Context, siteKey, pageURL, proxy string) (string, error) {

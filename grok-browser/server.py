@@ -1,9 +1,8 @@
 """CFM-owned Grok browser worker.
 
-The worker is deliberately small: CFM owns registration state and protocol
-requests, while this process owns a short-lived Chromium context used to run
-the official Turnstile widget. It returns the token together with the browser
-cookies and User-Agent that were present when the token was issued.
+CFM owns registration state, mailbox polling and account storage, while this
+process owns the persistent Chromium page required by xAI's native signup
+flow. Castle, Turnstile, page state and final SSO are kept in that context.
 """
 from __future__ import annotations
 
@@ -23,6 +22,14 @@ import cloakbrowser
 
 from common.browser import browser_kwargs
 from turnstile.solve import solve_turnstile_realpage_session
+from xai_flow import (
+    XaiBrowserFlowError,
+    close_session as close_xai_session,
+    send_email as xai_send_email,
+    signup as xai_signup,
+    start_session as xai_start_session,
+    verify_email as xai_verify_email,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("grok-browser")
@@ -46,6 +53,30 @@ class SessionRequest(BaseModel):
 
 class SessionCloseRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
+
+
+class NativeStartRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    proxy: str = Field(default="", max_length=2048)
+    timezone: str = Field(default="", max_length=128)
+    locale: str = Field(default="", max_length=64)
+    timeout_s: int = Field(default=180, ge=30, le=900)
+
+
+class NativeEmailRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=128)
+    email: str = Field(min_length=3, max_length=320)
+
+
+class NativeVerifyRequest(NativeEmailRequest):
+    code: str = Field(min_length=4, max_length=32)
+
+
+class NativeSignupRequest(NativeVerifyRequest):
+    password: str = Field(min_length=8, max_length=256)
+    given_name: str = Field(min_length=1, max_length=128)
+    family_name: str = Field(min_length=1, max_length=128)
+    turnstile_token: str = Field(default="", max_length=8192)
 
 
 class MaterializeRequest(BaseModel):
@@ -163,8 +194,84 @@ async def _close_session(session_id: str) -> None:
 async def session_close(req: SessionCloseRequest, authorization: str | None = Header(default=None)) -> dict:
     if not _authorized(authorization):
         raise HTTPException(status_code=401, detail="invalid worker token")
+    await close_xai_session(req.session_id)
     await _close_session(req.session_id)
     return {"ok": True}
+
+
+def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
+    status = 504 if exc.retryable else 422
+    # Do not return page HTML, cookies, or challenge values to the caller.
+    return HTTPException(status_code=status, detail={"stage": exc.stage, "error": str(exc)[:300]})
+
+
+@app.post("/v1/session/start")
+async def native_session_start(req: NativeStartRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        async with _slots:
+            return await xai_start_session(
+                signup_url=_validate_url(req.url),
+                proxy=_normalize_proxy(req.proxy),
+                timezone=req.timezone.strip(),
+                locale=req.locale.strip(),
+                timeout_s=req.timeout_s,
+            )
+    except XaiBrowserFlowError as exc:
+        raise _native_error(exc)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail={"stage": "browser_start", "error": "browser start timeout"})
+    except Exception:
+        log.exception("native signup session start failed")
+        raise HTTPException(status_code=502, detail={"stage": "browser_start", "error": "browser start failed"})
+
+
+@app.post("/v1/session/send-email")
+async def native_session_send_email(req: NativeEmailRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        return await xai_send_email(req.session_id, req.email)
+    except XaiBrowserFlowError as exc:
+        raise _native_error(exc)
+    except Exception:
+        log.exception("native signup email stage failed session=%s", req.session_id)
+        raise HTTPException(status_code=502, detail={"stage": "send_code", "error": "browser email stage failed"})
+
+
+@app.post("/v1/session/verify-email")
+async def native_session_verify_email(req: NativeVerifyRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        return await xai_verify_email(req.session_id, req.email, req.code)
+    except XaiBrowserFlowError as exc:
+        raise _native_error(exc)
+    except Exception:
+        log.exception("native signup verify stage failed session=%s", req.session_id)
+        raise HTTPException(status_code=502, detail={"stage": "validate_code", "error": "browser verify stage failed"})
+
+
+@app.post("/v1/session/signup")
+async def native_session_signup(req: NativeSignupRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        return await xai_signup(
+            req.session_id,
+            email=req.email,
+            password=req.password,
+            code=req.code,
+            given_name=req.given_name,
+            family_name=req.family_name,
+            turnstile_token=req.turnstile_token,
+        )
+    except XaiBrowserFlowError as exc:
+        raise _native_error(exc)
+    except Exception:
+        log.exception("native signup final stage failed session=%s", req.session_id)
+        raise HTTPException(status_code=502, detail={"stage": "signup", "error": "browser signup stage failed"})
 
 
 async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict]) -> tuple[str, list[dict], str]:

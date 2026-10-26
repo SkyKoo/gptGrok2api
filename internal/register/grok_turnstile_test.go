@@ -93,3 +93,57 @@ func TestHTTPGrokBrowserSolverClosesSession(t *testing.T) {
 		t.Fatalf("CloseSession() error = %v", err)
 	}
 }
+
+func TestHTTPGrokBrowserSolverNativeSignupFlow(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("unexpected native method: %s", req.Method)
+		}
+		body, _ := io.ReadAll(req.Body)
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("invalid native payload: %v", err)
+		}
+		var response string
+		switch req.URL.Path {
+		case "/v1/session/start":
+			if payload["url"] != "https://accounts.x.ai/sign-up?redirect=grok-com" {
+				t.Fatalf("unexpected start payload: %s", body)
+			}
+			response = `{"ok":true,"session_id":"native-1","url":"https://accounts.x.ai/sign-up?redirect=grok-com","user_agent":"Chrome"}`
+		case "/v1/session/send-email":
+			if payload["session_id"] != "native-1" || payload["email"] != "person@example.com" {
+				t.Fatalf("unexpected send payload: %s", body)
+			}
+			response = `{"ok":true}`
+		case "/v1/session/verify-email":
+			if payload["code"] != "123456" {
+				t.Fatalf("unexpected verify payload: %s", body)
+			}
+			response = `{"ok":true,"session_id":"native-1","cookies":[],"user_agent":"Chrome"}`
+		case "/v1/session/signup":
+			if payload["password"] != "secret-pass" || payload["given_name"] != "Grok" {
+				t.Fatalf("unexpected signup payload: %s", body)
+			}
+			response = `{"ok":true,"session_id":"native-1","sso":"session-token","sso_rw":"session-token-rw","redirect_url":"https://grok.com/","user_agent":"Chrome"}`
+		default:
+			t.Fatalf("unexpected native path: %s", req.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header)}, nil
+	}), Timeout: time.Second}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	started, err := solver.StartSignup(context.Background(), "https://accounts.x.ai/sign-up?redirect=grok-com", "direct")
+	if err != nil || started.SessionID != "native-1" {
+		t.Fatalf("StartSignup() = %+v, %v", started, err)
+	}
+	if err := solver.SendEmailCode(context.Background(), started.SessionID, "person@example.com"); err != nil {
+		t.Fatalf("SendEmailCode() error = %v", err)
+	}
+	if _, err := solver.VerifyEmailCode(context.Background(), started.SessionID, "person@example.com", "123456"); err != nil {
+		t.Fatalf("VerifyEmailCode() error = %v", err)
+	}
+	completed, err := solver.CompleteSignup(context.Background(), started.SessionID, "person@example.com", "secret-pass", "123456", "Grok", "User", "")
+	if err != nil || completed.SSO != "session-token" || completed.SSORW != "session-token-rw" {
+		t.Fatalf("CompleteSignup() = %+v, %v", completed, err)
+	}
+}

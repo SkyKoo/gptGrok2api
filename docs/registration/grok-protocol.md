@@ -1,4 +1,4 @@
-# Grok 纯协议注册
+# Grok 注册协议流程
 
 Grok 注册在 Go 注册中心中与 ChatGPT Free 保持两条平行链路。选择 `Grok（协议）` 后，任务、日志、定时启动、邮箱来源和恢复记录仍由注册中心统一管理；注册协议客户端和 Grok 账号归档使用独立实现。
 
@@ -6,14 +6,14 @@ Grok 注册在 Go 注册中心中与 ChatGPT Free 保持两条平行链路。选
 
 每个任务按以下顺序执行：
 
-1. 请求 `accounts.x.ai` 注册页，提取当前 site key、Next.js Server Action 和 router state tree。
-2. CFM 调用内网 `grok-browser` worker。worker 在隔离的 Chromium/Xvfb 中运行官方 Turnstile widget，返回短期 token、Cookie 快照和会话编号；CFM 不自行生成 token。
-3. CFM 使用同一代理、同一浏览器 profile 和已恢复的 Cookie/UA，调用 `auth_mgmt.AuthManagement/CreateEmailValidationCode` gRPC 发码。注册页的 `/api/auth/send-verification-code` 依赖页面绑定的 Castle step token，不作为协议注册的发码通道。
-4. 复用现有 iCloud HME 邮箱来源等待验证码，再调用原生 `VerifyEmailValidationCode`。
-5. 提交 Next.js Server Action。创建响应中的 SSO wrapper 会继续经过受信任的 cookie hop，并提取最终 `sso` 会话。
+1. CFM 为每次注册创建新的浏览器 profile、HTTP 客户端和 Grok browser session，并通过同一代理打开 `accounts.x.ai/sign-up?redirect=grok-com`。
+2. `grok-browser` 在持久 Chromium 页面中点击原生“Sign up with email”，填写邮箱并提交。Castle 请求上下文、页面 Cookie 和原生注册状态因此属于同一会话。
+3. 复用现有 iCloud HME 邮箱来源等待验证码，再由同一浏览器页面填写并提交验证码。
+4. 浏览器页面填写姓名和密码，运行页面自己的 Turnstile widget，提交“Create account”，并在同一会话中等待最终 `sso`/`sso-rw` Cookie。
+5. Go 注册引擎继续负责任务状态、阶段日志、邮箱收码、重试和账号归档；worker 只负责隔离的浏览器页面生命周期。
 6. 先写入 Grok 任务恢复记录，再写入独立 Grok 账号归档并调用现有 Grok Fast quota 校验。
 
-注册协议客户端和账号创建步骤仍由 Go 发送 HTTP 请求；浏览器 worker 只负责 Turnstile 和会话上下文，不会接收账号密码或提交创建账号请求。OpenAI 的 Sentinel 解码器不进入 Grok 流程。
+Grok 的账号创建请求由 worker 在原生页面中提交，因为 Castle/Turnstile 与页面 React 状态绑定；密码只在一次请求期间传给内网 worker，不写入 worker 日志或持久状态。OpenAI 的 Sentinel 解码器不进入 Grok 流程。
 
 ## Docker 配置
 

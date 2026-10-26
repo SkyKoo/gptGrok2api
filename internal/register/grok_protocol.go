@@ -55,9 +55,9 @@ type grokResponse struct {
 	Body    []byte
 }
 
-// GrokProtocolClient implements the xAI signup transport without opening the
-// signup page in a persistent browser. The only browser-like component is the
-// configured Turnstile provider owned by GrokProtocolFlow.
+// GrokProtocolClient implements the raw xAI signup transport used by the
+// fallback path. The built-in Grok flow uses a persistent browser worker for
+// the native signup page because Castle and Turnstile are page-bound.
 type GrokProtocolClient struct {
 	http                  tlsclient.HttpClient
 	cookies               *browserprofile.CookieJar
@@ -929,6 +929,12 @@ func (f *GrokProtocolFlow) Register(ctx context.Context, box Mailbox, cfg GrokCo
 	if f.Solver == nil {
 		return nil, fail("turnstile", "solver_not_configured")
 	}
+	// The built-in worker implements the historical native xAI page flow.  It
+	// must be selected before FetchConfig: xAI may return 403 to a raw landing
+	// request even while the same proxy can load the signup page in Chromium.
+	if native, ok := f.Solver.(GrokBrowserSignupFlow); ok {
+		return f.registerNative(ctx, box, cfg, wait, progress, native)
+	}
 	if err := progress("bootstrap"); err != nil {
 		return nil, err
 	}
@@ -1033,6 +1039,94 @@ func (f *GrokProtocolFlow) Register(ctx context.Context, box Mailbox, cfg GrokCo
 		"enabled":         false,
 		"created_at":      time.Now().UTC().Format(time.RFC3339),
 		"cookie_header":   "sso=" + sso + "; sso-rw=" + sso,
+		"browser_profile": browserprofile.Profile(f.Profile).FingerprintMetadata(),
+	}, nil
+}
+
+func (f *GrokProtocolFlow) registerNative(ctx context.Context, box Mailbox, cfg GrokConfig, wait func(context.Context, time.Time) (string, error), progress Progress, native GrokBrowserSignupFlow) (map[string]any, error) {
+	if err := progress("bootstrap"); err != nil {
+		return nil, err
+	}
+	started, err := native.StartSignup(ctx, grokSignupURL, cfg.Proxy)
+	if err != nil {
+		return nil, err
+	}
+	f.browserSessionID = strings.TrimSpace(started.SessionID)
+	f.Client.RestoreBrowserContext(started)
+
+	sendCode := func() error {
+		if err := progress("send_code"); err != nil {
+			return err
+		}
+		return native.SendEmailCode(ctx, f.browserSessionID, box.Email)
+	}
+	if err := sendCode(); err != nil {
+		return nil, err
+	}
+	if err := progress("wait_code"); err != nil {
+		return nil, err
+	}
+	var code string
+	var waitErr error
+	after := time.Now().UTC().Add(-10 * time.Second)
+	for attempt := 0; attempt < 3; attempt++ {
+		mailCtx, cancel := context.WithTimeout(ctx, cfg.MailTimeout)
+		code, waitErr = wait(mailCtx, after)
+		cancel()
+		if waitErr == nil {
+			break
+		}
+		if ctx.Err() != nil || attempt == 2 {
+			return nil, waitErr
+		}
+		if err := sendCode(); err != nil {
+			return nil, err
+		}
+		if err := progress("wait_code"); err != nil {
+			return nil, err
+		}
+		after = time.Now().UTC().Add(-10 * time.Second)
+	}
+	code = strings.ReplaceAll(strings.TrimSpace(code), "-", "")
+	if len(code) != 6 {
+		return nil, fail("wait_code", "invalid_code")
+	}
+	if err := progress("validate_code"); err != nil {
+		return nil, err
+	}
+	verified, err := native.VerifyEmailCode(ctx, f.browserSessionID, box.Email, code)
+	if err != nil {
+		return nil, err
+	}
+	f.Client.RestoreBrowserContext(verified)
+	if err := progress("signup"); err != nil {
+		return nil, err
+	}
+	password := generateGrokPassword()
+	given, family := grokProfileName(box.Email)
+	completed, err := native.CompleteSignup(ctx, f.browserSessionID, box.Email, password, code, given, family, "")
+	if err != nil {
+		return nil, err
+	}
+	f.Client.RestoreBrowserContext(completed)
+	sso := strings.TrimSpace(completed.SSO)
+	if sso == "" {
+		sso = strings.TrimSpace(completed.Token)
+	}
+	if sso == "" {
+		return nil, fail("sso", "missing_sso")
+	}
+	return map[string]any{
+		"email":           box.Email,
+		"password":        password,
+		"sso":             sso,
+		"sso_rw":          strings.TrimSpace(completed.SSORW),
+		"source_type":     "grok_protocol",
+		"platform":        "grok",
+		"status":          "待验证",
+		"enabled":         false,
+		"created_at":      time.Now().UTC().Format(time.RFC3339),
+		"cookie_header":   "sso=" + sso + "; sso-rw=" + strings.TrimSpace(completed.SSORW),
 		"browser_profile": browserprofile.Profile(f.Profile).FingerprintMetadata(),
 	}, nil
 }

@@ -1,12 +1,12 @@
 # CFM Grok Browser Worker
 
-这是 CFM 的内部浏览器 worker，负责在隔离的 Chromium/Xvfb 进程中运行官方 Turnstile widget。CFM 主进程继续负责邮箱收码、任务、日志、协议请求和账号保存。
+这是 CFM 的内部浏览器 worker，负责在隔离的 Chromium/Xvfb 进程中运行 xAI 原生邮箱注册页面。CFM 主进程继续负责邮箱收码、任务、日志、重试和账号保存。
 
-`POST /v1/turnstile/session` 返回短期 token、浏览器 Cookie 快照和会话编号；协议注册使用 Go 的 `CreateEmailValidationCode` gRPC 发码；`POST /v1/session/close` 用于释放仍保留的浏览器会话。`POST /v1/sso/materialize` 只用于把协议响应中的 wrapper SSO 转成会话 SSO。
+`POST /v1/session/start` 启动持久页面；`/send-email` 点击原生邮箱注册并发起验证码；`/verify-email` 填写验证码；`/signup` 在同一页面完成 Turnstile、Castle 和账号创建并返回 SSO；`/v1/session/close` 释放会话。
 
-Turnstile 只使用目标注册页上的真实 widget；worker 不提供 synthetic route fixture、独立 Castle token 或浏览器内账号创建接口。协议发码、验证码验证和最终 Server Action 保持在 Go 的同一协议客户端中，浏览器会话只用于 Turnstile、Cookie/UA 绑定和必要的 SSO materialize。
+Turnstile 和 Castle 只使用目标注册页的真实状态；worker 不提供 synthetic route fixture 或独立 token。旧的 `/v1/turnstile/session` 仅用于兼容诊断，注册主链路使用持久原生页面。
 
-worker 只应通过 Docker 内网访问，注册任务、邮箱验证码和密码仍由 CFM 管理；密码不会发送给 worker，也不会写入 worker 状态。
+worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 CFM 管理；密码只在最终页面操作时短暂传给 worker，不写入 worker 日志或持久状态。
 
 本服务只应通过 Docker 内网访问，可用 `GROK_BROWSER_TOKEN` 增加 Bearer 认证。`TURNSTILE_HEADLESS=0` 时通过 Xvfb 运行 headed Chromium，用户不会看到窗口。
 
