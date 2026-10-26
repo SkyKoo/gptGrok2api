@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,9 +55,10 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 		return nil, err
 	}
 	results := make([]ImageResult, 0, count)
-	seen := map[string]bool{}
+	byID := map[string]ImageResult{}
+	order := make([]string, 0, count)
 	deadline := time.Now().Add(i.Timeout)
-	for len(results) < count && time.Now().Before(deadline) {
+	for len(finalImageIDs(byID)) < count && time.Now().Before(deadline) {
 		frame, err := conn.readText(ctx, deadline)
 		if err != nil {
 			return nil, err
@@ -70,34 +72,152 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 		}
 		switch fmt.Sprint(object["type"]) {
 		case "error":
-			return nil, fmt.Errorf("imagine websocket error: %s", fmt.Sprint(object["err_msg"]))
+			message := imagineFirstString(object["err_msg"], imagineFirstString(object["error"], "imagine websocket error"))
+			status := 502
+			if isImagineRateLimit(object["err_code"], message) {
+				status = 429
+			}
+			return nil, &protocol.UpstreamError{
+				Status:   status,
+				Message:  "imagine websocket error: " + message,
+				Body:     frame,
+				Endpoint: "/ws/imagine/listen",
+			}
 		case "image":
 			urlValue, _ := object["url"].(string)
 			blob, _ := object["blob"].(string)
 			if blob == "" {
 				continue
 			}
-			id := imageIDFromURL(urlValue)
-			if seen[id] {
+			raw, mime, ok := decodeImagineBlob(blob, urlValue)
+			if !ok {
 				continue
 			}
-			seen[id] = true
-			result := ImageResult{URL: absoluteAssetURL(urlValue)}
-			if raw, decodeErr := base64.StdEncoding.DecodeString(blob); decodeErr == nil {
-				result.Base64 = base64.StdEncoding.EncodeToString(raw)
-				result.MIME = "image/jpeg"
+			id := imageIDFromURL(urlValue)
+			result := ImageResult{
+				URL:    absoluteAssetURL(urlValue),
+				Base64: base64.StdEncoding.EncodeToString(raw),
+				MIME:   mime,
 			}
-			results = append(results, result)
+			if previous, exists := byID[id]; !exists {
+				order = append(order, id)
+				byID[id] = result
+			} else if betterImagineImage(previous, result, urlValue, len(raw)) {
+				byID[id] = result
+			}
 		case "json":
 			if fmt.Sprint(object["current_status"]) == "completed" && boolValue(object["moderated"]) {
 				continue
 			}
 		}
 	}
-	if len(results) == 0 {
+	for _, id := range order {
+		if result, ok := byID[id]; ok && isFinalImagineResult(result, id) {
+			results = append(results, result)
+		}
+		if len(results) >= count {
+			break
+		}
+	}
+	if len(results) < count {
 		return nil, fmt.Errorf("imagine websocket returned no images")
 	}
 	return results, nil
+}
+
+const (
+	imagineMediumMinBytes = 30 << 10
+	imagineFinalMinBytes  = 100 << 10
+)
+
+func decodeImagineBlob(blob, urlValue string) ([]byte, string, bool) {
+	mime := ""
+	encoded := strings.TrimSpace(blob)
+	if header, value, ok := strings.Cut(encoded, ","); ok && strings.Contains(strings.ToLower(header), "base64") {
+		encoded = strings.TrimSpace(value)
+		if parsed, _, ok := strings.Cut(strings.TrimPrefix(strings.ToLower(header), "data:"), ";"); ok {
+			mime = parsed
+		}
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) == 0 {
+		return nil, "", false
+	}
+	if mime == "" {
+		mime = mimeFromImagineURL(urlValue)
+	}
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	return raw, mime, true
+}
+
+func mimeFromImagineURL(value string) string {
+	ext := strings.ToLower(filepath.Ext(value))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	default:
+		return ""
+	}
+}
+
+func imagineImageFinal(urlValue string, rawSize int) bool {
+	if rawSize >= imagineFinalMinBytes {
+		return true
+	}
+	// Older Imagine responses used JPEG for the final frame and PNG for
+	// previews. Keep this compatibility rule only for a clearly identified
+	// JPEG; size remains the primary discriminator for current responses.
+	ext := strings.ToLower(filepath.Ext(urlValue))
+	return (ext == ".jpg" || ext == ".jpeg") && rawSize >= imagineMediumMinBytes
+}
+
+func isImagineRateLimit(code any, message string) bool {
+	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(code)))
+	if value == "rate_limit_exceeded" || value == "rate_limited" || value == "429" {
+		return true
+	}
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "rate limit") || strings.Contains(lower, "too many") || strings.Contains(lower, "quota exceeded")
+}
+
+func imagineFirstString(value, fallback any) string {
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return strings.TrimSpace(fmt.Sprint(fallback))
+	}
+	return text
+}
+
+func betterImagineImage(previous, candidate ImageResult, urlValue string, rawSize int) bool {
+	previousRaw, _, previousOK := decodeImagineBlob(previous.Base64, previous.URL)
+	previousSize := 0
+	if previousOK {
+		previousSize = len(previousRaw)
+	}
+	return imagineImageFinal(urlValue, rawSize) && !imagineImageFinal(previous.URL, previousSize) || rawSize > previousSize
+}
+
+func finalImageIDs(images map[string]ImageResult) []string {
+	result := make([]string, 0, len(images))
+	for id, image := range images {
+		raw, _, ok := decodeImagineBlob(image.Base64, image.URL)
+		if ok && imagineImageFinal(image.URL, len(raw)) {
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func isFinalImagineResult(image ImageResult, id string) bool {
+	_ = id
+	raw, _, ok := decodeImagineBlob(image.Base64, image.URL)
+	return ok && imagineImageFinal(image.URL, len(raw))
 }
 
 func (i *ImagineSocket) dial(ctx context.Context, account accounts.Account) (*wsConn, error) {
