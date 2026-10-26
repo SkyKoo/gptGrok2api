@@ -71,7 +71,6 @@ func headers(account accounts.Account) map[string]string {
 	}
 	return map[string]string{
 		"Accept":          "*/*",
-		"Accept-Encoding": "gzip, deflate, br",
 		"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 		"Content-Type":    "application/json",
 		"Origin":          "https://grok.com",
