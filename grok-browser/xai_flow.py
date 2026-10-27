@@ -257,15 +257,14 @@ async def _fill_code(page: Any, code: str) -> bool:
 
 async def _wait_for_profile(page: Any, timeout_s: int = 45) -> None:
     deadline = time.monotonic() + timeout_s
-    last = ""
     while time.monotonic() < deadline:
         if await _first_visible(page, ('input[name="givenName"]', 'input[autocomplete="given-name"]')):
             return
         last = await _body_text(page)
         if re.search(r"验证码.*(无效|错误|过期)|invalid.*code|expired.*code", last, re.I):
-            raise XaiBrowserFlowError(re.sub(r"\s+", " ", last)[:240], stage="validate_code")
+            raise XaiBrowserFlowError("verification_code_invalid", stage="validate_code")
         await _pause(page, 300)
-    raise XaiBrowserFlowError("profile form did not appear after email verification", stage="validate_code", retryable=True)
+    raise XaiBrowserFlowError("profile_form_missing", stage="validate_code", retryable=True)
 
 
 async def verify_email(session_id: str, email: str, code: str) -> dict:
@@ -292,12 +291,11 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 45) -> str:
         if clicks < 3 and await _click_turnstile_checkbox(page):
             clicks += 1
         await _pause(page, 500)
-    raise XaiBrowserFlowError("native Turnstile did not complete", stage="turnstile", retryable=True)
+    raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=True)
 
 
 async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
     deadline = time.monotonic() + timeout_s
-    last = ""
     while time.monotonic() < deadline:
         parsed = urlparse(str(page.url or ""))
         last = await _body_text(page)
@@ -305,10 +303,11 @@ async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
             return
         if re.search(r"管理您的账户|欢迎|Manage your account|Welcome", last, re.I) and not re.search(r"完成注册|Complete your sign up", last, re.I):
             return
-        if re.search(r"邮箱.*已被使用|账户.*已存在|already exists|already in use", last, re.I):
-            raise XaiBrowserFlowError(re.sub(r"\s+", " ", last)[:240], stage="signup")
+        reason = _classify_email_stage_error(last)
+        if reason:
+            raise XaiBrowserFlowError(reason, stage="signup")
         await _pause(page, 500)
-    raise XaiBrowserFlowError("account page did not appear after signup", stage="signup", retryable=True)
+    raise XaiBrowserFlowError("account_page_missing", stage="signup", retryable=True)
 
 
 async def signup(session_id: str, *, email: str, password: str, code: str, given_name: str, family_name: str, turnstile_token: str = "") -> dict:
@@ -323,14 +322,14 @@ async def signup(session_id: str, *, email: str, password: str, code: str, given
         ]
         for selectors, value in fields:
             if not await _fill_first(page, selectors, value):
-                raise XaiBrowserFlowError("signup profile field not found", stage="signup", retryable=True)
+                raise XaiBrowserFlowError("signup_profile_field_missing", stage="signup", retryable=True)
         await _set_native_input_value(page, "input[name=password]", password)
         await _pause(page, 900)
         token = await _native_turnstile_token(page)
         if not token and turnstile_token:
             token = turnstile_token
         if not await _click_submit(page, ("Complete sign up", "Create account", "Continue", "完成注册", "创建账户", "继续", "Submit")):
-            raise XaiBrowserFlowError("signup submit button not found", stage="signup", retryable=True)
+            raise XaiBrowserFlowError("signup_submit_button_missing", stage="signup", retryable=True)
         await _wait_for_success(page)
         cookies = await cookie_snapshot(page)
         sso = _cookie_value(cookies, "sso", "sso-rw")

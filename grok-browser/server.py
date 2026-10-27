@@ -250,6 +250,7 @@ async def native_session_verify_email(req: NativeVerifyRequest, authorization: s
     try:
         return await xai_verify_email(req.session_id, req.email, req.code)
     except XaiBrowserFlowError as exc:
+        log.warning("native signup verify rejected stage=%s reason=%s retryable=%s", exc.stage, str(exc)[:120], exc.retryable)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup verify stage failed session=%s", req.session_id)
@@ -271,6 +272,7 @@ async def native_session_signup(req: NativeSignupRequest, authorization: str | N
             turnstile_token=req.turnstile_token,
         )
     except XaiBrowserFlowError as exc:
+        log.warning("native signup final rejected stage=%s reason=%s retryable=%s", exc.stage, str(exc)[:120], exc.retryable)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup final stage failed session=%s", req.session_id)
