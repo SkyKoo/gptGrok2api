@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-type HMEConfig struct{ BaseURL, Password, AccountID string }
+type HMEConfig struct{ SourceID, BaseURL, Password, AccountID string }
 
 func (c HMEConfig) Validate() error {
 	u, err := url.Parse(c.BaseURL)
@@ -34,6 +34,7 @@ type Mailbox struct {
 	ID              string `json:"id,omitempty"`
 	Email           string `json:"email"`
 	AccountID       string `json:"account_id"`
+	SourceID        string `json:"source_id,omitempty"`
 	SourceType      string `json:"source_type,omitempty"`
 	SourceMailboxID string `json:"source_mailbox_id,omitempty"`
 }
@@ -82,7 +83,7 @@ func (h *HME) ListMailboxes(ctx context.Context) ([]Mailbox, error) {
 		if id == "" {
 			id = strings.TrimSpace(alias.ID)
 		}
-		result = append(result, Mailbox{ID: id, Email: email, AccountID: h.cfg.AccountID, SourceType: "hme", SourceMailboxID: id})
+		result = append(result, Mailbox{ID: id, Email: email, AccountID: h.cfg.AccountID, SourceID: h.cfg.SourceID, SourceType: "hme", SourceMailboxID: id})
 	}
 	return result, nil
 }
@@ -105,7 +106,7 @@ type MailSessionPreparer interface {
 // existing mailbox, create a new provider mailbox, and persist the claim
 // lifecycle without exposing provider details to GPT or Grok flows.
 type MailboxClaimCoordinator interface {
-	Reserve(context.Context, string, string, func(context.Context) (Mailbox, error), func(context.Context, Mailbox) error) (Mailbox, error)
+	Reserve(context.Context, string, string, string, func(context.Context) (Mailbox, error), func(context.Context, Mailbox) error) (Mailbox, error)
 	EnsureClaim(context.Context, string, string, Mailbox) error
 	Commit(context.Context, string, string, string, Mailbox) error
 	Release(context.Context, string, string, Mailbox, string) error
@@ -119,11 +120,12 @@ type CoordinatedMailSource struct {
 	source      MailSource
 	coordinator MailboxClaimCoordinator
 	platform    string
+	sourceID    string
 	jobID       string
 }
 
-func NewCoordinatedMailSource(platform string, source MailSource, coordinator MailboxClaimCoordinator) *CoordinatedMailSource {
-	return &CoordinatedMailSource{source: source, coordinator: coordinator, platform: strings.ToLower(strings.TrimSpace(platform))}
+func NewCoordinatedMailSource(platform, sourceID string, source MailSource, coordinator MailboxClaimCoordinator) *CoordinatedMailSource {
+	return &CoordinatedMailSource{source: source, coordinator: coordinator, platform: strings.ToLower(strings.TrimSpace(platform)), sourceID: strings.TrimSpace(sourceID)}
 }
 
 func (c *CoordinatedMailSource) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
@@ -138,7 +140,7 @@ func (c *CoordinatedMailSource) Acquire(ctx context.Context, jobID string) (Mail
 		}
 		return preparer.Prepare(ctx, box)
 	}
-	return c.coordinator.Reserve(ctx, c.platform, c.jobID, func(ctx context.Context) (Mailbox, error) {
+	return c.coordinator.Reserve(ctx, c.platform, c.jobID, c.sourceID, func(ctx context.Context) (Mailbox, error) {
 		return c.source.Acquire(ctx, c.jobID)
 	}, prepare)
 }
@@ -358,6 +360,7 @@ func (h *HME) Acquire(ctx context.Context, jobID string) (Mailbox, error) {
 	if err != nil || address.Address != box.Email || box.AccountID != h.cfg.AccountID {
 		return Mailbox{}, fail("mail", "invalid_alias_response")
 	}
+	box.SourceID = h.cfg.SourceID
 	return box, nil
 }
 

@@ -2,7 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -13,20 +17,168 @@ import (
 
 type mailboxCoordinatorAdapter struct{ store *mailboxstore.Store }
 
+func mailboxSourceFromProvider(raw map[string]any, index int) mailboxstore.Source {
+	provider := cloneMap(raw)
+	typeName := strings.TrimSpace(strings.ToLower(stringValue(provider["type"])))
+	if typeName == "" {
+		typeName = "unknown"
+	}
+	id := strings.TrimSpace(stringValue(provider["id"]))
+	if id == "" {
+		id = fmt.Sprintf("%s-%d", typeName, index+1)
+		provider["id"] = id
+	}
+	label := firstNonEmpty(stringValue(provider["label"]), fmt.Sprintf("邮箱来源 %d", index+1))
+	capabilities := map[string]any{"openai": false, "grok": false, "create": false, "status": "config_only"}
+	if typeName == "icloud_hme" && strings.TrimSpace(stringValue(provider["api_base"])) != "" && strings.TrimSpace(stringValue(provider["admin_password"])) != "" && strings.TrimSpace(stringValue(provider["account_id"])) != "" {
+		capabilities = map[string]any{"openai": true, "grok": true, "create": true, "status": "available"}
+	}
+	return mailboxstore.Source{ID: id, Type: typeName, Label: label, Enabled: boolValue(provider["enable"], true), Config: provider, Capabilities: capabilities, Status: stringValue(capabilities["status"])}
+}
+
+func (s *Server) syncMailboxSources(ctx context.Context) error {
+	if s.mailboxStore == nil {
+		return nil
+	}
+	existing, err := s.mailboxStore.ListSources(ctx)
+	if err != nil {
+		return err
+	}
+	known := map[string]bool{}
+	for _, source := range existing {
+		known[source.ID] = true
+	}
+	mail := cloneMap(mapValue(s.registerStore.Get()["mail"]))
+	providers, _ := mail["providers"].([]any)
+	configChanged := false
+	for index, raw := range providers {
+		provider := mapValue(raw)
+		source := mailboxSourceFromProvider(provider, index)
+		if strings.TrimSpace(stringValue(mapValue(raw)["id"])) != source.ID {
+			provider["id"] = source.ID
+			configChanged = true
+		}
+		if known[source.ID] {
+			_, _ = s.mailboxStore.BackfillSourceID(ctx, source.ID, source.Type, stringValue(source.Config["account_id"]))
+			continue
+		}
+		if _, err := s.mailboxStore.UpsertSource(ctx, source); err != nil {
+			return err
+		}
+		_, _ = s.mailboxStore.BackfillSourceID(ctx, source.ID, source.Type, stringValue(source.Config["account_id"]))
+	}
+	if configChanged {
+		mail["providers"] = providers
+		if _, err := s.registerStore.Update(map[string]any{"mail": mail}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func mailboxSourcePublic(source mailboxstore.Source) map[string]any {
+	config := cloneMap(source.Config)
+	if _, ok := config["admin_password"]; ok {
+		config["admin_password_set"] = stringValue(config["admin_password"]) != ""
+		delete(config, "admin_password")
+	}
+	return map[string]any{
+		"id": source.ID, "type": source.Type, "label": source.Label, "enable": source.Enabled,
+		"status": source.Status, "last_error": source.LastError, "capabilities": source.Capabilities,
+		"config": config, "last_sync_at": source.LastSyncAt, "created_at": source.CreatedAt, "updated_at": source.UpdatedAt,
+	}
+}
+
+func (s *Server) iCloudMailboxSources(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sources, err := s.mailboxStore.ListSources(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
+			return
+		}
+		items := make([]map[string]any, 0, len(sources))
+		for _, source := range sources {
+			items = append(items, mailboxSourcePublic(source))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"sources": items})
+	case http.MethodPost:
+		var request struct {
+			Source map[string]any `json:"source"`
+		}
+		if !decodeJSON(w, r, &request) || request.Source == nil {
+			return
+		}
+		id := strings.TrimSpace(stringValue(request.Source["id"]))
+		if id == "" {
+			writeError(w, http.StatusBadRequest, "source id is required", "invalid_request_error")
+			return
+		}
+		existing, err := s.mailboxStore.GetSource(r.Context(), id)
+		if err != nil && err != sql.ErrNoRows {
+			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
+			return
+		}
+		config := cloneMap(existing.Config)
+		for key, value := range mapValue(request.Source["config"]) {
+			if key == "admin_password" && strings.TrimSpace(stringValue(value)) == "" {
+				continue
+			}
+			config[key] = value
+		}
+		config["id"] = id
+		config["type"] = firstNonEmpty(stringValue(request.Source["type"]), stringValue(existing.Type), stringValue(config["type"]))
+		config["label"] = firstNonEmpty(stringValue(request.Source["label"]), stringValue(existing.Label), stringValue(config["label"]))
+		config["enable"] = boolValue(request.Source["enable"], existing.Enabled)
+		source := mailboxSourceFromProvider(config, 0)
+		source.ID = id
+		if _, err := s.mailboxStore.UpsertSource(r.Context(), source); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
+			return
+		}
+		current := s.registerStore.Get()
+		mail := cloneMap(mapValue(current["mail"]))
+		providers, _ := mail["providers"].([]any)
+		updated := false
+		for index, raw := range providers {
+			provider := mapValue(raw)
+			if strings.TrimSpace(stringValue(provider["id"])) != id {
+				continue
+			}
+			mail["providers"] = append(append([]any{}, providers[:index]...), append([]any{source.Config}, providers[index+1:]...)...)
+			updated = true
+			break
+		}
+		if !updated {
+			mail["providers"] = append(providers, source.Config)
+		}
+		if _, err := s.registerStore.Update(map[string]any{"mail": mail}); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"source": mailboxSourcePublic(source)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+	}
+}
+
 func mailboxAsset(box registerruntime.Mailbox) mailboxstore.Mailbox {
 	sourceID := strings.TrimSpace(box.SourceMailboxID)
 	if sourceID == "" {
 		sourceID = strings.TrimSpace(box.ID)
 	}
-	return mailboxstore.Mailbox{ID: strings.TrimSpace(box.ID), Email: box.Email, SourceType: firstNonEmpty(stringValue(box.SourceType), "hme"), SourceAccountID: box.AccountID, SourceMailboxID: sourceID}
+	return mailboxstore.Mailbox{ID: strings.TrimSpace(box.ID), Email: box.Email, SourceID: strings.TrimSpace(box.SourceID), SourceType: firstNonEmpty(stringValue(box.SourceType), "hme"), SourceAccountID: box.AccountID, SourceMailboxID: sourceID}
 }
 
 func providerMailbox(item mailboxstore.Mailbox) registerruntime.Mailbox {
-	return registerruntime.Mailbox{ID: item.ID, Email: item.Email, AccountID: item.SourceAccountID, SourceType: item.SourceType, SourceMailboxID: item.SourceMailboxID}
+	return registerruntime.Mailbox{ID: item.ID, Email: item.Email, AccountID: item.SourceAccountID, SourceID: item.SourceID, SourceType: item.SourceType, SourceMailboxID: item.SourceMailboxID}
 }
 
-func (a mailboxCoordinatorAdapter) Reserve(ctx context.Context, platform, jobID string, acquire func(context.Context) (registerruntime.Mailbox, error), prepare func(context.Context, registerruntime.Mailbox) error) (registerruntime.Mailbox, error) {
-	item, err := a.store.Reserve(ctx, platform, jobID, func(ctx context.Context) (mailboxstore.Mailbox, error) {
+func (a mailboxCoordinatorAdapter) Reserve(ctx context.Context, platform, jobID, sourceID string, acquire func(context.Context) (registerruntime.Mailbox, error), prepare func(context.Context, registerruntime.Mailbox) error) (registerruntime.Mailbox, error) {
+	item, err := a.store.Reserve(ctx, platform, jobID, sourceID, func(ctx context.Context) (mailboxstore.Mailbox, error) {
 		box, err := acquire(ctx)
 		if err != nil {
 			return mailboxstore.Mailbox{}, err
@@ -121,7 +273,12 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	views, total, err := s.mailboxStore.List(r.Context(), page, pageSize, r.URL.Query().Get("search"))
+	views, total, err := s.mailboxStore.List(r.Context(), page, pageSize, mailboxstore.MailboxListFilter{
+		Search:   r.URL.Query().Get("search"),
+		Status:   r.URL.Query().Get("status"),
+		SourceID: r.URL.Query().Get("source_id"),
+		Platform: r.URL.Query().Get("platform"),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
 		return
@@ -133,7 +290,7 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 			status = "active"
 		}
 		items = append(items, map[string]any{
-			"id": view.ID, "email": view.Email, "source_type": view.SourceType,
+			"id": view.ID, "email": view.Email, "source_id": view.SourceID, "source_type": view.SourceType,
 			"source_account_id": view.SourceAccountID, "source_mailbox_id": view.SourceMailboxID,
 			"status": status, "api_active": true, "icloud_active": true,
 			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed,
@@ -151,6 +308,55 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 		totalPages = 1
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mailboxes": items, "pagination": map[string]any{"page": page, "page_size": pageSize, "total": total, "total_all": total, "total_pages": totalPages}})
+}
+
+// iCloudMailboxAction handles mutations for one canonical mailbox asset. The
+// exact list endpoint remains GET-only; status changes use
+// /api/icloud/mailboxes/{id}/status so they cannot be confused with an HME
+// provider request.
+func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/icloud/mailboxes/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[1] != "status" {
+		writeError(w, http.StatusNotFound, "mailbox action not found", "not_found")
+		return
+	}
+	mailboxID, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(mailboxID) == "" {
+		writeError(w, http.StatusBadRequest, "invalid mailbox id", "invalid_request_error")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	var request struct {
+		Status string `json:"status"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	updated, err := s.mailboxStore.SetStatus(r.Context(), mailboxID, request.Status)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		code := "mailbox_database_error"
+		switch {
+		case errors.Is(err, mailboxstore.ErrMailboxNotFound):
+			statusCode, code = http.StatusNotFound, "mailbox_not_found"
+		case errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
+			statusCode, code = http.StatusBadRequest, "invalid_request_error"
+		}
+		writeError(w, statusCode, err.Error(), code)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "mailbox": map[string]any{
+		"id": updated.ID, "email": updated.Email, "source_id": updated.SourceID, "source_type": updated.SourceType,
+		"source_account_id": updated.SourceAccountID, "source_mailbox_id": updated.SourceMailboxID,
+		"status": updated.Status, "last_error": updated.LastError, "created_at": updated.CreatedAt, "updated_at": updated.UpdatedAt,
+	}})
 }
 
 func (s *Server) iCloudMailboxEvents(w http.ResponseWriter, r *http.Request) {
@@ -171,16 +377,53 @@ func (s *Server) iCloudMailboxEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "total": total, "page": page, "page_size": pageSize})
 }
 
-func (s *Server) mailboxHMEConfig() (registerruntime.HMEConfig, bool) {
+func hmeConfigFromSource(source mailboxstore.Source) (registerruntime.HMEConfig, bool) {
+	if !strings.EqualFold(source.Type, "icloud_hme") || !source.Enabled {
+		return registerruntime.HMEConfig{}, false
+	}
+	config := source.Config
+	cfg := registerruntime.HMEConfig{SourceID: source.ID, BaseURL: strings.TrimRight(stringValue(config["api_base"]), "/"), Password: stringValue(config["admin_password"]), AccountID: stringValue(config["account_id"])}
+	return cfg, cfg.BaseURL != "" && cfg.Password != "" && cfg.AccountID != ""
+}
+
+func (s *Server) mailboxHMEConfigForSource(sourceID string) (registerruntime.HMEConfig, bool) {
+	if s.mailboxStore != nil && strings.TrimSpace(sourceID) != "" {
+		source, err := s.mailboxStore.GetSource(context.Background(), sourceID)
+		if err == nil {
+			return hmeConfigFromSource(source)
+		}
+	}
 	mail := mapValue(s.registerStore.Get()["mail"])
 	providers, _ := mail["providers"].([]any)
-	for _, raw := range providers {
+	for index, raw := range providers {
 		provider := mapValue(raw)
-		if !strings.EqualFold(stringValue(provider["type"]), "icloud_hme") || !boolValue(provider["enable"], true) {
+		if strings.TrimSpace(sourceID) != "" && strings.TrimSpace(stringValue(provider["id"])) != strings.TrimSpace(sourceID) {
 			continue
 		}
-		cfg := registerruntime.HMEConfig{BaseURL: strings.TrimRight(stringValue(provider["api_base"]), "/"), Password: stringValue(provider["admin_password"]), AccountID: stringValue(provider["account_id"])}
-		if cfg.BaseURL != "" && cfg.Password != "" && cfg.AccountID != "" {
+		source := mailboxSourceFromProvider(provider, index)
+		if cfg, ok := hmeConfigFromSource(source); ok {
+			return cfg, true
+		}
+	}
+	return registerruntime.HMEConfig{}, false
+}
+
+func (s *Server) mailboxHMEConfig() (registerruntime.HMEConfig, bool) {
+	if s.mailboxStore != nil {
+		if sources, err := s.mailboxStore.ListSources(context.Background()); err == nil {
+			for _, source := range sources {
+				if cfg, ok := hmeConfigFromSource(source); ok {
+					return cfg, true
+				}
+			}
+		}
+	}
+	mail := mapValue(s.registerStore.Get()["mail"])
+	providers, _ := mail["providers"].([]any)
+	for index, raw := range providers {
+		provider := mapValue(raw)
+		source := mailboxSourceFromProvider(provider, index)
+		if cfg, ok := hmeConfigFromSource(source); ok {
 			return cfg, true
 		}
 	}
@@ -196,7 +439,7 @@ func mailboxAccount(item map[string]any) (registerruntime.Mailbox, string, bool)
 	if provider != "icloud_hme" && provider != "hme" {
 		return registerruntime.Mailbox{}, "", false
 	}
-	box := registerruntime.Mailbox{ID: stringValue(raw["id"]), Email: stringValue(raw["email"]), AccountID: stringValue(raw["account_id"]), SourceType: "hme", SourceMailboxID: firstNonEmpty(stringValue(raw["source_mailbox_id"]), stringValue(raw["id"]))}
+	box := registerruntime.Mailbox{ID: stringValue(raw["id"]), Email: stringValue(raw["email"]), AccountID: stringValue(raw["account_id"]), SourceID: stringValue(raw["source_id"]), SourceType: "hme", SourceMailboxID: firstNonEmpty(stringValue(raw["source_mailbox_id"]), stringValue(raw["id"]))}
 	ref := firstNonEmpty(stringValue(item["id"]), stringValue(item["account_id"]), stringValue(item["user_id"]), stringValue(item["email"]))
 	return box, ref, true
 }
@@ -223,7 +466,7 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 				result["errors"] = append(result["errors"].([]string), listErr.Error())
 			} else {
 				for _, alias := range aliases {
-					if _, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{ID: alias.ID, Email: alias.Email, SourceType: "hme", SourceAccountID: alias.AccountID, SourceMailboxID: alias.SourceMailboxID}, "provider_reconciled"); err != nil {
+					if _, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{ID: alias.ID, Email: alias.Email, SourceID: alias.SourceID, SourceType: "hme", SourceAccountID: alias.AccountID, SourceMailboxID: alias.SourceMailboxID}, "provider_reconciled"); err != nil {
 						result["errors"] = append(result["errors"].([]string), err.Error())
 						continue
 					}
@@ -277,5 +520,5 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 }
 
 func mailboxstoreMailbox(box registerruntime.Mailbox) mailboxstore.Mailbox {
-	return mailboxstore.Mailbox{ID: box.ID, Email: box.Email, SourceType: "hme", SourceAccountID: box.AccountID, SourceMailboxID: firstNonEmpty(box.SourceMailboxID, box.ID, box.Email)}
+	return mailboxstore.Mailbox{ID: box.ID, Email: box.Email, SourceID: box.SourceID, SourceType: "hme", SourceAccountID: box.AccountID, SourceMailboxID: firstNonEmpty(box.SourceMailboxID, box.ID, box.Email)}
 }

@@ -190,6 +190,13 @@ func New(cfg config.Config) *Server {
 		codexProgress:      map[string]*codexOAuthProgress{},
 	}
 	server.codexProtocolLogin = oauth.NewCodexProtocolLogin(server.codexLogin)
+	if server.mailboxStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := server.syncMailboxSources(ctx); err != nil {
+			log.Printf("mailbox source migration unavailable: %v", err)
+		}
+		cancel()
+	}
 	server.initFreeRegistration()
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
@@ -424,8 +431,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/image-storage/sync", s.imageStorageSync)
 	mux.HandleFunc("/api/icloud/claim-status/sync", s.iCloudClaimStatusSync)
 	mux.HandleFunc("/api/icloud/bridge-status", s.iCloudBridgeStatus)
+	mux.HandleFunc("/api/icloud/sources", s.iCloudMailboxSources)
 	mux.HandleFunc("/api/icloud/status", s.iCloudMailboxStatus)
 	mux.HandleFunc("/api/icloud/mailboxes", s.iCloudMailboxes)
+	mux.HandleFunc("/api/icloud/mailboxes/", s.iCloudMailboxAction)
 	mux.HandleFunc("/api/icloud/events", s.iCloudMailboxEvents)
 	mux.HandleFunc("/api/icloud/reconcile", s.iCloudMailboxReconcile)
 	mux.HandleFunc("/api/images", s.adminImages)

@@ -30,6 +30,7 @@ type GrokConfig struct {
 	Timeout, MailTimeout, PollInterval time.Duration
 	RequestTimeout                     time.Duration
 	HME                                HMEConfig
+	MailboxSourceID                    string
 	DeleteMailboxOnAccountDelete       bool
 	Turnstile                          GrokTurnstileConfig
 	BrowserProfile                     *BrowserProfile
@@ -147,6 +148,7 @@ func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 		return c, err
 	}
 	c.HME = free.HME
+	c.MailboxSourceID = free.MailboxSourceID
 	c.DeleteMailboxOnAccountDelete = free.DeleteMailboxOnAccountDelete
 	return c, nil
 }

@@ -24,21 +24,23 @@ func (s *Server) initGrokRegistration() {
 			proxy = s.proxyManager.Resolve(nil, false)
 		}
 		cfg.Proxy = proxy
-		mailClient, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
-		if err != nil {
-			return nil, nil, err
-		}
-		var mail registerruntime.MailSource = mailClient
-		if strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "" && s.mailboxStore == nil {
-			mailClient.Close()
+		if s.mailboxStore == nil {
 			if s.mailboxInitErr != nil {
 				return nil, nil, s.mailboxInitErr
 			}
-			return nil, nil, errors.New("mailbox database is not configured")
+			return nil, nil, errors.New("mailbox asset database is required for registration")
 		}
-		if coordinator := s.mailboxCoordinator(); coordinator != nil {
-			mail = registerruntime.NewCoordinatedMailSource("grok", mailClient, coordinator)
+		hmeConfig := cfg.HME
+		if sourceConfig, ok := s.mailboxHMEConfigForSource(cfg.MailboxSourceID); ok {
+			hmeConfig = sourceConfig
+		} else {
+			return nil, nil, errors.New("selected mailbox source is unavailable")
 		}
+		mailClient, err := registerruntime.NewHME(hmeConfig, cfg.PollInterval)
+		if err != nil {
+			return nil, nil, err
+		}
+		mail := registerruntime.MailSource(registerruntime.NewCoordinatedMailSource("grok", cfg.HME.SourceID, mailClient, s.mailboxCoordinator()))
 		// The browser worker is an internal Docker service. Do not reuse the
 		// request client's proxy transport here: that transport is intended for
 		// upstream traffic and can send `grok-browser` through Clash, making the

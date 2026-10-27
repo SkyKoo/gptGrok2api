@@ -246,6 +246,7 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 	account["registration_job_id"] = id
 	account["registration_mailbox"] = map[string]any{
 		"provider":          "icloud_hme",
+		"source_id":         box.SourceID,
 		"source_type":       firstNonEmpty(box.SourceType, "hme"),
 		"source_mailbox_id": firstNonEmpty(box.SourceMailboxID, box.ID),
 		"id":                box.ID,
@@ -622,6 +623,7 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 	account["registration_job_id"] = id
 	account["registration_mailbox"] = map[string]any{
 		"provider":          "icloud_hme",
+		"source_id":         job.Mailbox.SourceID,
 		"source_type":       firstNonEmpty(job.Mailbox.SourceType, "hme"),
 		"source_mailbox_id": firstNonEmpty(job.Mailbox.SourceMailboxID, job.Mailbox.ID),
 		"id":                job.Mailbox.ID,

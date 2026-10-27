@@ -220,6 +220,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     wait_timeout: 180,
     wait_interval: 2,
     user_agent: '',
+    source_id: '',
     providers: [],
   },
   proxy: '',
@@ -480,6 +481,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
       ? raw.mail.providers.map(item => providerForRegisterTarget(normalizeProvider(item), target))
       : [],
   }
+  mail.source_id = String(raw.mail?.source_id || '').trim()
   if (!mail.providers.length) {
     mail.providers = [defaultProvider()]
   }
@@ -751,6 +753,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     },
     mail: {
       ...config.mail,
+      source_id: String(config.mail?.source_id || '').trim(),
       providers: (config.mail.providers || [])
         .map(provider => providerForRegisterTarget(provider, target))
         .map(sanitizedProviderPayload),

@@ -70,6 +70,7 @@ func hmeMailboxFromAccount(account map[string]any) (registerruntime.Mailbox, boo
 		ID:              strings.TrimSpace(stringValue(mailbox["id"])),
 		Email:           strings.TrimSpace(stringValue(mailbox["email"])),
 		AccountID:       strings.TrimSpace(stringValue(mailbox["account_id"])),
+		SourceID:        strings.TrimSpace(stringValue(mailbox["source_id"])),
 		SourceType:      firstNonEmpty(stringValue(mailbox["source_type"]), "hme"),
 		SourceMailboxID: strings.TrimSpace(stringValue(mailbox["source_mailbox_id"])),
 	}, true
@@ -212,7 +213,7 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, cfg registerru
 			continue
 		}
 		for _, candidate := range candidates {
-			if deleteErr := hme.DeleteMailbox(cleanupCtx, registerruntime.Mailbox{ID: candidate.SourceMailboxID, Email: candidate.Email, AccountID: candidate.SourceAccountID}); deleteErr != nil {
+			if deleteErr := hme.DeleteMailbox(cleanupCtx, registerruntime.Mailbox{ID: candidate.SourceMailboxID, Email: candidate.Email, AccountID: candidate.SourceAccountID, SourceID: candidate.SourceID}); deleteErr != nil {
 				if isHMEErrorCode(deleteErr, "mailbox_not_found") {
 					_ = s.mailboxStore.MarkCleanup(cleanupCtx, candidate, true, "mailbox_not_found")
 					result.Status = "not_found"
