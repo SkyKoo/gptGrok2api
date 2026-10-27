@@ -123,9 +123,48 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 		return nil, fail(stage, "browser_worker_read_failed")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &Failure{Stage: stage, Code: "browser_worker_rejected", HTTPStatus: resp.StatusCode}
+		failure := &Failure{Stage: stage, Code: "browser_worker_rejected", HTTPStatus: resp.StatusCode}
+		// The worker returns a structured FastAPI detail envelope. Preserve only
+		// stable, non-sensitive reason codes in the task journal so a 504 can be
+		// distinguished from rate limiting, duplicate email and page-state
+		// failures without storing page text, cookies or challenge values.
+		var envelope struct {
+			Detail struct {
+				Stage string `json:"stage"`
+				Error string `json:"error"`
+			} `json:"detail"`
+		}
+		if json.Unmarshal(body, &envelope) == nil {
+			if workerStage := sanitizeBrowserWorkerStage(envelope.Detail.Stage); workerStage != "" {
+				failure.UpstreamStage = workerStage
+			}
+			if workerReason := sanitizeBrowserWorkerReason(envelope.Detail.Error); workerReason != "" {
+				failure.Operation = "worker_error=" + workerReason
+			}
+		}
+		return nil, failure
 	}
 	return body, nil
+}
+
+func sanitizeBrowserWorkerStage(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "browser_start", "browser_session", "send_code", "validate_code", "turnstile", "signup", "sso":
+		return value
+	default:
+		return ""
+	}
+}
+
+func sanitizeBrowserWorkerReason(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "signup_rate_limited", "email_already_registered", "signup_unavailable", "verification_page_missing", "email_input_missing", "email_submit_button_missing":
+		return value
+	default:
+		return "unclassified"
+	}
 }
 
 func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy string) (GrokBrowserContext, error) {

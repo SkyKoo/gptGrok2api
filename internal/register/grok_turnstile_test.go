@@ -147,3 +147,25 @@ func TestHTTPGrokBrowserSolverNativeSignupFlow(t *testing.T) {
 		t.Fatalf("CompleteSignup() = %+v, %v", completed, err)
 	}
 }
+
+func TestHTTPGrokBrowserSolverPreservesSafeWorkerReason(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusGatewayTimeout,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":{"stage":"send_code","error":"signup_rate_limited"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	err := solver.SendEmailCode(context.Background(), "native-1", "person@example.com")
+	if err == nil {
+		t.Fatal("SendEmailCode() accepted a worker rejection")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "browser_worker_rejected (HTTP 504)") || !strings.Contains(got, "upstream_stage=send_code") || !strings.Contains(got, "operation=worker_error=signup_rate_limited") {
+		t.Fatalf("worker detail was not preserved safely: %s", got)
+	}
+	if strings.Contains(got, "page") || strings.Contains(got, "email@example") {
+		t.Fatalf("worker detail leaked unexpected content: %s", got)
+	}
+}

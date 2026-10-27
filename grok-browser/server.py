@@ -234,6 +234,9 @@ async def native_session_send_email(req: NativeEmailRequest, authorization: str 
     try:
         return await xai_send_email(req.session_id, req.email)
     except XaiBrowserFlowError as exc:
+        # Keep the task journal useful without logging email addresses,
+        # cookies, page HTML or challenge values.
+        log.warning("native signup email rejected stage=%s reason=%s retryable=%s", exc.stage, str(exc)[:120], exc.retryable)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup email stage failed session=%s", req.session_id)

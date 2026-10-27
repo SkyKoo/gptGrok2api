@@ -174,17 +174,38 @@ async def _set_native_input_value(page: Any, selector: str, value: str) -> bool:
 
 async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
     deadline = time.monotonic() + timeout_s
-    last = ""
     while time.monotonic() < deadline:
         last = await _body_text(page)
         if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[inputmode="numeric"]')):
             return
         if re.search(r"验证您的邮箱|验证码|Verify your email|verification code", last, re.I):
             return
-        if re.search(r"无法注册|请求过于频繁|already.*email|too many|signup.*unavailable", last, re.I):
-            raise XaiBrowserFlowError(re.sub(r"\s+", " ", last)[:240], stage="send_code", retryable=True)
+        reason = _classify_email_stage_error(last)
+        if reason:
+            raise XaiBrowserFlowError(reason, stage="send_code", retryable=True)
         await _pause(page, 300)
-    raise XaiBrowserFlowError("email verification page did not appear", stage="send_code", retryable=True)
+    raise XaiBrowserFlowError("verification_page_missing", stage="send_code", retryable=True)
+
+
+def _classify_email_stage_error(text: str) -> str | None:
+    """Return a stable, non-sensitive reason for a rejected signup page.
+
+    The previous implementation persisted a slice of page text.  That made
+    the Go task journal noisy and could accidentally retain user-facing page
+    content.  Stable reason codes are enough to distinguish rate limits,
+    duplicate emails and unavailable signup pages while keeping diagnostics
+    safe to persist.
+    """
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return None
+    if re.search(r"请求过于频繁|too many|rate limit|rate limited|try again later", normalized, re.I):
+        return "signup_rate_limited"
+    if re.search(r"already.*email|email.*already|已存在|已注册|已经注册", normalized, re.I):
+        return "email_already_registered"
+    if re.search(r"无法注册|signup.*unavailable|cannot.*sign up|can't.*sign up|registration.*unavailable", normalized, re.I):
+        return "signup_unavailable"
+    return None
 
 
 async def send_email(session_id: str, email: str) -> dict:
@@ -206,10 +227,10 @@ async def send_email(session_id: str, email: str) -> dict:
             if field is None:
                 await _pause(page, 400)
         if field is None:
-            raise XaiBrowserFlowError("email input not found", stage="send_code", retryable=True)
+            raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True)
         await field.fill(str(email).strip())
         if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
-            raise XaiBrowserFlowError("email submit button not found", stage="send_code", retryable=True)
+            raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True)
         await _wait_for_email_verification(page)
         return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
 
