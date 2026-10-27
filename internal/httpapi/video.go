@@ -57,9 +57,8 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seconds := positiveInt(r.FormValue("seconds"), 6)
-	allowedSeconds := map[int]bool{6: true, 10: true, 12: true, 16: true, 20: true}
-	if !allowedSeconds[seconds] {
-		writeError(w, http.StatusBadRequest, "seconds must be one of [6, 10, 12, 16, 20]", "invalid_request_error")
+	if _, ok := protocol.VideoSegmentLengths(seconds); !ok {
+		writeError(w, http.StatusBadRequest, "seconds must be one of [6, 10, 15]", "invalid_request_error")
 		return
 	}
 	size := strings.TrimSpace(r.FormValue("size"))

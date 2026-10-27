@@ -141,12 +141,11 @@ func VideoSegmentLengths(seconds int) ([]int, bool) {
 		return []int{6}, true
 	case 10:
 		return []int{10}, true
-	case 12:
-		return []int{6, 6}, true
-	case 16:
-		return []int{10, 6}, true
-	case 20:
-		return []int{10, 10}, true
+	case 15:
+		// Grok Web exposes 15 seconds as a ten-second segment followed by a
+		// five-second extension. The upstream videoDurationRanges config caps
+		// one request at ten seconds, so this must remain segmented.
+		return []int{10, 5}, true
 	default:
 		return nil, false
 	}
