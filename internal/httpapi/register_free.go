@@ -17,21 +17,17 @@ func (s *Server) initFreeRegistration() {
 		if proxy == "" {
 			proxy = s.proxyManager.Resolve(nil, false)
 		}
+		if s.mailboxStore == nil {
+			if s.mailboxInitErr != nil {
+				return nil, nil, s.mailboxInitErr
+			}
+			return nil, nil, errors.New("mailbox asset database is required for registration")
+		}
 		mailClient, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
 		if err != nil {
 			return nil, nil, err
 		}
-		var mail registerruntime.MailSource = mailClient
-		if strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "" && s.mailboxStore == nil {
-			mailClient.Close()
-			if s.mailboxInitErr != nil {
-				return nil, nil, s.mailboxInitErr
-			}
-			return nil, nil, errors.New("mailbox database is not configured")
-		}
-		if coordinator := s.mailboxCoordinator(); coordinator != nil {
-			mail = registerruntime.NewCoordinatedMailSource("openai", mailClient, coordinator)
-		}
+		mail := registerruntime.MailSource(registerruntime.NewCoordinatedMailSource("openai", mailClient, s.mailboxCoordinator()))
 		var profile []registerruntime.BrowserProfile
 		if cfg.BrowserProfile != nil {
 			profile = append(profile, *cfg.BrowserProfile)
