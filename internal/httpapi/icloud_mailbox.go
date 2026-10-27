@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -271,7 +273,12 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 	}
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	views, total, err := s.mailboxStore.List(r.Context(), page, pageSize, r.URL.Query().Get("search"))
+	views, total, err := s.mailboxStore.List(r.Context(), page, pageSize, mailboxstore.MailboxListFilter{
+		Search:   r.URL.Query().Get("search"),
+		Status:   r.URL.Query().Get("status"),
+		SourceID: r.URL.Query().Get("source_id"),
+		Platform: r.URL.Query().Get("platform"),
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
 		return
@@ -301,6 +308,55 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 		totalPages = 1
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mailboxes": items, "pagination": map[string]any{"page": page, "page_size": pageSize, "total": total, "total_all": total, "total_pages": totalPages}})
+}
+
+// iCloudMailboxAction handles mutations for one canonical mailbox asset. The
+// exact list endpoint remains GET-only; status changes use
+// /api/icloud/mailboxes/{id}/status so they cannot be confused with an HME
+// provider request.
+func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/icloud/mailboxes/")
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 2 || parts[1] != "status" {
+		writeError(w, http.StatusNotFound, "mailbox action not found", "not_found")
+		return
+	}
+	mailboxID, err := url.PathUnescape(parts[0])
+	if err != nil || strings.TrimSpace(mailboxID) == "" {
+		writeError(w, http.StatusBadRequest, "invalid mailbox id", "invalid_request_error")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	var request struct {
+		Status string `json:"status"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	updated, err := s.mailboxStore.SetStatus(r.Context(), mailboxID, request.Status)
+	if err != nil {
+		statusCode := http.StatusInternalServerError
+		code := "mailbox_database_error"
+		switch {
+		case errors.Is(err, mailboxstore.ErrMailboxNotFound):
+			statusCode, code = http.StatusNotFound, "mailbox_not_found"
+		case errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
+			statusCode, code = http.StatusBadRequest, "invalid_request_error"
+		}
+		writeError(w, statusCode, err.Error(), code)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "mailbox": map[string]any{
+		"id": updated.ID, "email": updated.Email, "source_id": updated.SourceID, "source_type": updated.SourceType,
+		"source_account_id": updated.SourceAccountID, "source_mailbox_id": updated.SourceMailboxID,
+		"status": updated.Status, "last_error": updated.LastError, "created_at": updated.CreatedAt, "updated_at": updated.UpdatedAt,
+	}})
 }
 
 func (s *Server) iCloudMailboxEvents(w http.ResponseWriter, r *http.Request) {

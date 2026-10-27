@@ -434,6 +434,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/icloud/sources", s.iCloudMailboxSources)
 	mux.HandleFunc("/api/icloud/status", s.iCloudMailboxStatus)
 	mux.HandleFunc("/api/icloud/mailboxes", s.iCloudMailboxes)
+	mux.HandleFunc("/api/icloud/mailboxes/", s.iCloudMailboxAction)
 	mux.HandleFunc("/api/icloud/events", s.iCloudMailboxEvents)
 	mux.HandleFunc("/api/icloud/reconcile", s.iCloudMailboxReconcile)
 	mux.HandleFunc("/api/images", s.adminImages)

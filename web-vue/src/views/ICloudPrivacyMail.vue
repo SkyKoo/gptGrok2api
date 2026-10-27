@@ -17,7 +17,7 @@
       <StateBlock v-if="pageError" compact dashed title="iCloud 邮箱模块暂不可用" :description="pageError" />
 
       <template v-if="bridge?.reachable">
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
           <div v-for="metric in metrics" :key="metric.label" class="rounded-lg border border-border bg-muted/20 px-3 py-3">
             <p class="text-xs text-muted-foreground">{{ metric.label }}</p>
             <p class="mt-1 text-xl font-semibold tabular-nums text-foreground">{{ metric.value }}</p>
@@ -84,13 +84,15 @@
           <template #actions>
             <span class="text-xs text-muted-foreground">共 {{ mailboxTotal }} 个</span>
           </template>
-          <div class="mb-4 flex flex-wrap items-end justify-between gap-3 border-b border-border pb-3">
-            <label class="min-w-0 flex-1 text-xs sm:max-w-md">
-              <span class="ui-field-label">搜索邮箱</span>
-              <Input v-model="search" block placeholder="邮箱地址或来源" @keyup.enter="searchMailboxes" />
-            </label>
-            <div class="flex items-center gap-2">
+          <div class="mb-4 border-b border-border pb-3">
+            <FilterToolbar :bordered="false" class="gap-2" mobile-mode="wrap">
+              <Input v-model="search" block placeholder="搜索邮箱 / 来源 / 上游账号" root-class="min-w-[14rem] flex-1 md:max-w-sm" @keyup.enter="searchMailboxes" />
+              <GroupedSelectMenu v-model="statusFilter" :options="mailboxStatusOptions" placeholder="状态筛选" selected-indicator="none" aria-label="邮箱状态筛选" @update:model-value="searchMailboxes" />
+              <GroupedSelectMenu v-model="platformFilter" :options="mailboxPlatformOptions" placeholder="平台占用筛选" selected-indicator="none" aria-label="平台占用筛选" @update:model-value="searchMailboxes" />
+              <GroupedSelectMenu v-model="sourceFilter" :options="sourceFilterOptions" placeholder="邮箱来源筛选" selected-indicator="none" aria-label="邮箱来源筛选" @update:model-value="searchMailboxes" />
               <Button size="sm" variant="outline" @click="searchMailboxes">搜索</Button>
+            </FilterToolbar>
+            <div class="mt-3 flex items-center justify-end gap-2">
               <span class="text-xs tabular-nums text-muted-foreground">第 {{ page }} / {{ totalPages }} 页</span>
               <Button size="xs" variant="outline" :disabled="page <= 1" @click="changePage(-1)">上一页</Button>
               <Button size="xs" variant="outline" :disabled="page >= totalPages" @click="changePage(1)">下一页</Button>
@@ -102,13 +104,23 @@
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
                   <p class="truncate font-mono text-sm font-medium text-foreground">{{ mailbox.email || '-' }}</p>
-                  <p class="mt-1 truncate text-xs text-muted-foreground">来源：{{ mailbox.source_type || 'iCloud 邮箱上游' }} · {{ mailbox.status || 'unknown' }}</p>
+                  <p class="mt-1 truncate text-xs text-muted-foreground">来源：{{ mailboxSourceLabel(mailbox) }} · {{ mailboxStatusLabel(mailbox) }}</p>
                 </div>
                 <MetaChip size="xs" :tone="mailboxTone(mailbox)">{{ mailboxLabel(mailbox) }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
                 <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailbox.openai_claimed ? '已占用' : '可用' }}</MetaChip>
                 <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '可用' }}</MetaChip>
+              </div>
+              <div class="mt-3 flex justify-end">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  :disabled="mailboxActionID === mailbox.id || mailbox.status === 'cleanup_pending' || mailbox.status === 'deleted'"
+                  @click="setMailboxStatus(mailbox)"
+                >
+                  {{ mailboxActionID === mailbox.id ? '处理中...' : mailbox.status === 'disabled' ? '启用邮箱' : '禁用邮箱' }}
+                </Button>
               </div>
               <p class="mt-3 break-all text-[11px] text-muted-foreground">资产 ID：{{ mailbox.id || '-' }}</p>
               <p v-if="mailbox.last_error" class="mt-1 break-words text-xs text-amber-700 dark:text-amber-300">{{ mailbox.last_error }}</p>
@@ -145,12 +157,14 @@
 import { computed, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
+import FilterToolbar from '@/components/ai/FilterToolbar.vue'
 import FormSection from '@/components/ai/FormSection.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import PanelHeader from '@/components/ai/PanelHeader.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
+import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 
 defineOptions({ name: 'ICloudPrivacyMail' })
 
@@ -170,6 +184,31 @@ const page = ref(1)
 const pageSize = 20
 const mailboxTotal = ref(0)
 const totalPages = ref(1)
+const mailboxActionID = ref('')
+const statusFilter = ref('')
+const platformFilter = ref('')
+const sourceFilter = ref('')
+
+const mailboxStatusOptions = [
+  { label: '全部状态', value: '' },
+  { label: '可用', value: 'available' },
+  { label: '使用中', value: 'active' },
+  { label: '已禁用', value: 'disabled' },
+  { label: '待清理', value: 'cleanup_pending' },
+  { label: '已删除', value: 'deleted' },
+]
+const mailboxPlatformOptions = [
+  { label: '全部占用', value: '' },
+  { label: 'GPT 已占用', value: 'openai' },
+  { label: 'Grok 已占用', value: 'grok' },
+  { label: '暂无平台占用', value: 'unclaimed' },
+]
+const sourceFilterOptions = computed(() => [
+  { label: '全部来源', value: '' },
+  ...sources.value
+    .map(source => ({ label: source.label || source.id || '未命名来源', value: String(source.id || '') }))
+    .filter(option => option.value),
+])
 
 function sourceTypeLabel(source: ICloudMailboxSource) {
   return source.type === 'icloud_hme' ? 'iCloud 邮箱上游' : String(source.type || '未接入来源')
@@ -228,6 +267,7 @@ const metrics = computed(() => [
   { label: '邮箱总数', value: counts.value.mailboxes || 0 },
   { label: '可用邮箱', value: counts.value.available || 0 },
   { label: '使用中', value: counts.value.active || 0 },
+  { label: '已禁用', value: counts.value.disabled || 0 },
   { label: '待清理', value: counts.value.cleanup_pending || 0 },
   { label: '操作事件', value: counts.value.events || 0 },
 ])
@@ -238,7 +278,25 @@ function formatDate(value?: string) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
+function mailboxSourceLabel(mailbox: ICloudMailbox) {
+  const source = sources.value.find(item => item.id === mailbox.source_id)
+  if (source?.label) return source.label
+  if (mailbox.source_type === 'hme' || mailbox.source_type === 'icloud_hme') return 'iCloud 邮箱上游'
+  return mailbox.source_type || '未接入来源'
+}
+
+function mailboxStatusLabel(mailbox: ICloudMailbox) {
+  return ({
+    available: '可用',
+    active: '使用中',
+    disabled: '已禁用',
+    cleanup_pending: '待清理',
+    deleted: '已删除',
+  } as Record<string, string>)[mailbox.status || ''] || mailbox.status || '未知'
+}
+
 function mailboxLabel(mailbox: ICloudMailbox) {
+  if (mailbox.status === 'disabled') return '已禁用'
   if (mailbox.status === 'cleanup_pending') return '待清理'
   if (mailbox.status === 'deleted') return '已删除'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return '两平台均占用'
@@ -247,6 +305,7 @@ function mailboxLabel(mailbox: ICloudMailbox) {
 }
 
 function mailboxTone(mailbox: ICloudMailbox): 'success' | 'info' | 'warning' | 'danger' | 'muted' {
+  if (mailbox.status === 'disabled') return 'muted'
   if (mailbox.status === 'cleanup_pending') return 'warning'
   if (mailbox.status === 'deleted') return 'danger'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return 'warning'
@@ -255,11 +314,42 @@ function mailboxTone(mailbox: ICloudMailbox): 'success' | 'info' | 'warning' | '
 }
 
 async function loadMailboxes() {
-  const result = await icloudApi.listMailboxes({ page: page.value, page_size: pageSize, search: search.value.trim() || undefined })
+  const result = await icloudApi.listMailboxes({
+    page: page.value,
+    page_size: pageSize,
+    search: search.value.trim() || undefined,
+    status: statusFilter.value || undefined,
+    platform: platformFilter.value || undefined,
+    source_id: sourceFilter.value || undefined,
+  })
   mailboxes.value = result.mailboxes || []
   mailboxTotal.value = Number(result.pagination?.total_all ?? result.pagination?.total ?? mailboxes.value.length)
   totalPages.value = Math.max(1, Number(result.pagination?.total_pages || 1))
   if (page.value > totalPages.value) page.value = totalPages.value
+}
+
+async function loadCounts() {
+  const status = await icloudApi.status()
+  counts.value = (status as { counts?: Record<string, number> }).counts || {}
+}
+
+async function setMailboxStatus(mailbox: ICloudMailbox) {
+  const id = String(mailbox.id || '')
+  if (!id) return
+  const target = mailbox.status === 'disabled' ? 'available' : 'disabled'
+  mailboxActionID.value = id
+  notice.value = ''
+  pageError.value = ''
+  try {
+    const result = await icloudApi.updateMailboxStatus(id, target)
+    if (!result.mailbox) throw new Error('邮箱状态更新失败')
+    notice.value = `${result.mailbox.email || id} 已${target === 'disabled' ? '禁用' : '启用'}。`
+    await Promise.all([loadCounts(), loadMailboxes(), loadEvents()])
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : String(error || '邮箱状态更新失败')
+  } finally {
+    mailboxActionID.value = ''
+  }
 }
 
 async function loadEvents() {
@@ -276,8 +366,7 @@ async function refreshAll() {
       pageError.value = bridge.value.error || '邮箱资产数据库不可用，请检查 GO_DATABASE_URL 和 PostgreSQL 服务。'
       return
     }
-    const status = await icloudApi.status()
-    counts.value = (status as { counts?: Record<string, number> }).counts || {}
+    await loadCounts()
     await Promise.all([loadSources(), loadMailboxes(), loadEvents()])
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '请求失败')
