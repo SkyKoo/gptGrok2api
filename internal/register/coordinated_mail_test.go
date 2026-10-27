@@ -23,10 +23,12 @@ func (s *coordinatedMailSourceStub) Close() {}
 
 type mailboxCoordinatorStub struct {
 	reserved, ensured, committed, released int
+	sourceID                               string
 }
 
-func (c *mailboxCoordinatorStub) Reserve(ctx context.Context, _ string, _ string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+func (c *mailboxCoordinatorStub) Reserve(ctx context.Context, _ string, _ string, sourceID string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
 	c.reserved++
+	c.sourceID = sourceID
 	box, err := acquire(ctx)
 	if err != nil {
 		return Mailbox{}, err
@@ -58,7 +60,7 @@ type existingMailboxCoordinatorStub struct {
 	prepareCall int
 }
 
-func (c *existingMailboxCoordinatorStub) Reserve(ctx context.Context, _ string, _ string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+func (c *existingMailboxCoordinatorStub) Reserve(ctx context.Context, _ string, _ string, _ string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
 	c.reserved++
 	if c.box.ID != "" {
 		if prepare != nil {
@@ -86,7 +88,7 @@ func (c *existingMailboxCoordinatorStub) Release(context.Context, string, string
 func TestCoordinatedMailSourceKeepsProviderAndClaimLifecycleTogether(t *testing.T) {
 	source := &coordinatedMailSourceStub{}
 	coordinator := &mailboxCoordinatorStub{}
-	mail := NewCoordinatedMailSource("openai", source, coordinator)
+	mail := NewCoordinatedMailSource("openai", "hme-main", source, coordinator)
 	box, err := mail.Acquire(context.Background(), "job-1")
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +98,9 @@ func TestCoordinatedMailSourceKeepsProviderAndClaimLifecycleTogether(t *testing.
 	}
 	if source.acquired != 1 || source.prepared != 1 || coordinator.reserved != 1 {
 		t.Fatalf("unexpected reserve calls: source=%+v coordinator=%+v", source, coordinator)
+	}
+	if coordinator.sourceID != "hme-main" {
+		t.Fatalf("mailbox source was not passed to coordinator: %q", coordinator.sourceID)
 	}
 	if err := mail.PrepareFor(context.Background(), "job-1", box); err != nil {
 		t.Fatal(err)
@@ -120,7 +125,7 @@ func TestCoordinatedMailSourceReusesExistingAssetWithoutCreatingAlias(t *testing
 		AccountID:       "icloud",
 		SourceType:      "hme",
 	}}
-	mail := NewCoordinatedMailSource("grok", source, coordinator)
+	mail := NewCoordinatedMailSource("grok", "hme-main", source, coordinator)
 
 	box, err := mail.Acquire(context.Background(), "grok-job-1")
 	if err != nil {

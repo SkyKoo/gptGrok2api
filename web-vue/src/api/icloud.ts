@@ -46,6 +46,8 @@ export type ICloudAccount = {
 export type ICloudMailbox = {
   id?: string
   email?: string
+  source_id?: string
+  source_type?: string
   api_url?: string
   api_token_mask?: string
   label?: string
@@ -114,6 +116,20 @@ export type ICloudMailboxEvent = {
   [key: string]: unknown
 }
 
+export type ICloudMailboxSource = {
+  id?: string
+  type?: string
+  label?: string
+  enable?: boolean
+  status?: string
+  last_error?: string
+  capabilities?: Record<string, unknown>
+  config?: Record<string, unknown>
+  last_sync_at?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export type ICloudMailboxSyncResult = {
   account_id?: string
   apple_id?: string
@@ -178,6 +194,8 @@ export type ICloudStatus = {
 
 export const icloudApi = {
   bridgeStatus: () => apiClient.get<never, ICloudBridgeStatus>(path('bridge-status'), requestConfig),
+  listSources: () => apiClient.get<never, { sources?: ICloudMailboxSource[] }>(path('sources'), requestConfig),
+  updateSource: (source: ICloudMailboxSource) => apiClient.post<{ source: ICloudMailboxSource }, { source?: ICloudMailboxSource }>(path('sources'), { source }, requestConfig),
   status: () => apiClient.get<never, ICloudStatus>(path('status'), requestConfig),
   session: () => apiClient.get<never, { sessions?: ICloudSession[]; session?: ICloudSession | null }>(path('session'), requestConfig),
   checkSession: (payload: { account_id?: string } = {}) =>

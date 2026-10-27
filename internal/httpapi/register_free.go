@@ -23,11 +23,17 @@ func (s *Server) initFreeRegistration() {
 			}
 			return nil, nil, errors.New("mailbox asset database is required for registration")
 		}
-		mailClient, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+		hmeConfig := cfg.HME
+		if sourceConfig, ok := s.mailboxHMEConfigForSource(cfg.MailboxSourceID); ok {
+			hmeConfig = sourceConfig
+		} else {
+			return nil, nil, errors.New("selected mailbox source is unavailable")
+		}
+		mailClient, err := registerruntime.NewHME(hmeConfig, cfg.PollInterval)
 		if err != nil {
 			return nil, nil, err
 		}
-		mail := registerruntime.MailSource(registerruntime.NewCoordinatedMailSource("openai", mailClient, s.mailboxCoordinator()))
+		mail := registerruntime.MailSource(registerruntime.NewCoordinatedMailSource("openai", cfg.HME.SourceID, mailClient, s.mailboxCoordinator()))
 		var profile []registerruntime.BrowserProfile
 		if cfg.BrowserProfile != nil {
 			profile = append(profile, *cfg.BrowserProfile)

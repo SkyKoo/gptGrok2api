@@ -34,59 +34,39 @@
               @update-custom-proxy="setCustomRegisterProxyInput"
             />
 
-            <FormSection title="邮箱来源" density="roomy">
+            <FormSection title="邮箱来源选择" density="roomy">
               <template #actions>
-                <MetaChip v-if="enabledProviderIssueCount" size="xs" tone="danger">
-                  缺失 {{ enabledProviderIssueCount }}
-                </MetaChip>
-                <MetaChip size="xs" tone="muted">已启用 {{ enabledProviderCount }} / {{ registerProviders.length }}</MetaChip>
-                <Button
-                  v-if="disabledProviderCount"
-                  size="sm"
-                  variant="ghost"
-                  :aria-expanded="showDisabledProviders"
-                  aria-controls="disabled-register-providers"
-                  @click="showDisabledProviders = !showDisabledProviders"
-                >
-                  {{ showDisabledProviders ? '收起未启用' : `查看未启用 (${disabledProviderCount})` }}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  :disabled="registerConfig.enabled"
-                  @click="addProvider"
-                >
-                  添加来源
-                </Button>
+                <MetaChip v-if="mailboxSourceIssue" size="xs" tone="danger">请选择可用来源</MetaChip>
+                <MetaChip v-else size="xs" tone="muted">由邮箱资产管理模块提供</MetaChip>
               </template>
-
-              <div id="disabled-register-providers" class="register-provider-list">
-                <div v-if="!visibleRegisterProviderEntries.length" class="register-provider-empty">
-                  <template v-if="disabledProviderCount">
-                    暂无已启用邮箱来源。展开未启用来源后可编辑或重新启用。
-                  </template>
-                  <template v-else>
-                    暂无邮箱来源，请添加来源后继续。
-                  </template>
-                </div>
-                <RegisterProviderCard
-                  v-for="({ provider, index }) in visibleRegisterProviderEntries"
-                  :key="providerKey(provider, index)"
-                  :provider="provider"
-                  :index="index"
-                  :provider-count="registerProviders.length"
-                  :disabled="registerConfig.enabled"
-                  :saving="legacySaving"
-                  :outlook-pool-action-items="outlookPoolActionItems"
-                  :gpt-mail="registerProviderGptMailUi"
-                  @update-type="updateProviderType"
-                  @update-field="updateProviderField"
-                  @update-array="updateProviderArray"
-                  @delete="deleteProvider"
-                  @check-gptmail="checkGptMailStatus"
-                  @outlook-action="handleOutlookPoolAction"
-                  @retry-outlook-failed="outlookPoolRuntime.retryFailedPool"
-                />
+              <div class="mailbox-source-selector">
+                <label
+                  v-for="source in mailboxSources"
+                  :key="source.id"
+                  class="mailbox-source-option"
+                  :class="{ 'mailbox-source-option--disabled': !sourceUsable(source) }"
+                >
+                  <input
+                    v-model="selectedMailboxSourceID"
+                    type="radio"
+                    name="register-mailbox-source"
+                    :value="source.id"
+                    :disabled="registerConfig.enabled || !sourceUsable(source)"
+                  />
+                  <span class="min-w-0">
+                    <strong>{{ source.label || source.id || '未命名来源' }}</strong>
+                    <small>{{ sourceTypeLabel(source) }} · {{ sourceStatusLabel(source) }}</small>
+                  </span>
+                  <MetaChip size="xs" :tone="sourceUsable(source) ? 'success' : 'muted'">
+                    {{ sourceUsable(source) ? '可用于注册' : '暂未接入' }}
+                  </MetaChip>
+                </label>
+                <p v-if="!mailboxSources.length" class="register-provider-empty">
+                  暂无邮箱来源，请先在“iCloud 邮箱”页面配置来源。
+                </p>
+                <p class="mailbox-source-hint">
+                  注册只选择来源；邮箱资产、上游连接、同步和删除策略统一在邮箱资产管理模块维护。
+                </p>
               </div>
             </FormSection>
           </div>
@@ -169,6 +149,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { Icon } from '@iconify/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from 'nanocat-ui'
+import { icloudApi, type ICloudMailboxSource } from '@/api/icloud'
 import { registerApi } from '@/api/register'
 import FormSection from '@/components/ai/FormSection.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
@@ -181,7 +162,6 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { useToast } from '@/composables/useToast'
 import { saveBlob } from '@/lib/downloads'
-import RegisterProviderCard from '@/views/register/RegisterProviderCard.vue'
 import CheckoutTaskTable from '@/views/register/CheckoutTaskTable.vue'
 import RegisterRuntimePanel from '@/views/register/RegisterRuntimePanel.vue'
 import RegisterTaskSettingsPanel from '@/views/register/RegisterTaskSettingsPanel.vue'
@@ -308,13 +288,25 @@ const liveRuntime = useRegisterLiveRuntime({
 })
 const startLiveUpdates = liveRuntime.startLiveUpdates
 registerConfigRuntime.onConfigApplied(() => pruneGptMailStates())
-const enabledProviderCount = computed(() => buildEnabledRegisterProviderCount(registerProviders.value))
-const disabledProviderCount = computed(() => registerProviders.value.length - enabledProviderCount.value)
-const showDisabledProviders = ref(false)
-const visibleRegisterProviderEntries = computed(() => registerProviders.value
-  .map((provider, index) => ({ provider, index }))
-  .filter(({ provider }) => showDisabledProviders.value || provider.enable !== false))
-const enabledProviderIssueCount = computed(() => buildRegisterProviderIssueCount(registerProviders.value))
+const mailboxSources = ref<ICloudMailboxSource[]>([])
+const selectedMailboxSourceID = computed({
+  get: () => String(registerConfig.value?.mail?.source_id || '').trim(),
+  set: (value: string) => {
+    if (registerConfig.value) registerConfig.value.mail.source_id = String(value || '').trim()
+  },
+})
+const sourceUsable = (source: ICloudMailboxSource) => {
+  const target = normalizeRegisterTarget(registerConfig.value?.target)
+  return source.enable !== false && source.capabilities?.[target] === true
+}
+const sourceTypeLabel = (source: ICloudMailboxSource) => source.type === 'icloud_hme' ? 'iCloud 邮箱上游' : String(source.type || '未接入来源')
+const sourceStatusLabel = (source: ICloudMailboxSource) => source.enable === false ? '已停用' : (source.status === 'available' ? '可用' : '仅已迁移配置')
+const mailboxSourceIssue = computed(() => {
+  const selected = mailboxSources.value.find(source => source.id === selectedMailboxSourceID.value)
+  return !selected || !sourceUsable(selected)
+})
+const enabledProviderCount = computed(() => mailboxSourceIssue.value ? 0 : 1)
+const enabledProviderIssueCount = computed(() => mailboxSourceIssue.value ? 1 : 0)
 const grokConfigIssueCount = computed(() => grokRequirementMessages(registerConfig.value).length)
 const sub2apiSyncIssueCount = computed(() => sub2apiSyncRequirementMessages(registerConfig.value).length)
 const autosaveLabel = computed(() => {
@@ -417,6 +409,20 @@ function grokExportFilename(format: 'cpa' | 'sub2api') {
   return format === 'cpa'
     ? `grok-accounts-cpa-${stamp}.zip`
     : `grok-accounts-sub2api-${stamp}.json`
+}
+
+async function loadMailboxSources() {
+  try {
+    const response = await icloudApi.listSources()
+    mailboxSources.value = response.sources || []
+    const selected = mailboxSources.value.find(source => source.id === selectedMailboxSourceID.value)
+    const firstUsable = mailboxSources.value.find(source => sourceUsable(source))
+    if (!selected && firstUsable && registerConfig.value && !registerConfig.value.mail.source_id) {
+      registerConfig.value.mail.source_id = String(firstUsable.id || '')
+    }
+  } catch {
+    mailboxSources.value = []
+  }
 }
 
 async function exportGrokAccounts(format: 'cpa' | 'sub2api') {
@@ -541,7 +547,7 @@ watch(
 function activateRegisterView(refresh = false) {
   startGptMailClock()
   if (refresh && !registerConfigRuntime.hasUnsavedChanges.value) {
-    void Promise.all([loadRegisterConfig(true), loadProxyGroups()])
+    void Promise.all([loadRegisterConfig(true), loadProxyGroups(), loadMailboxSources()])
   }
   startLiveUpdates()
 }
@@ -557,7 +563,7 @@ pageRuntime.onActivate(({ initial }) => {
   if (initial) {
     void (async () => {
       startGptMailClock()
-      await Promise.all([loadRegisterConfig(), loadProxyGroups()])
+      await Promise.all([loadRegisterConfig(), loadProxyGroups(), loadMailboxSources()])
       startLiveUpdates()
     })()
     return
@@ -576,6 +582,7 @@ pageRuntime.onHide(() => {
 pageRuntime.onShow(() => {
   startGptMailClock()
   if (!registerConfigRuntime.hasUnsavedChanges.value) void loadRegisterConfig(true)
+  void loadMailboxSources()
   startLiveUpdates()
 })
 </script>
@@ -655,6 +662,43 @@ pageRuntime.onShow(() => {
 .register-provider-empty {
   color: var(--text-muted);
   font-size: 13px;
+  line-height: 1.5;
+}
+
+.mailbox-source-selector {
+  display: grid;
+  gap: 10px;
+}
+
+.mailbox-source-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.mailbox-source-option small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mailbox-source-option--disabled {
+  cursor: not-allowed;
+  opacity: .6;
+}
+
+.mailbox-source-option > :nth-child(2) {
+  flex: 1;
+}
+
+.mailbox-source-hint {
+  color: var(--text-muted);
+  font-size: 12px;
   line-height: 1.5;
 }
 

@@ -45,7 +45,7 @@ func TestHMEInternalSecureSessionIsPinnedAndRedirectsAreRejected(t *testing.T) {
 				pinned = baseURL
 			}
 			t.Setenv("GO_HME_INTERNAL_BASE_URL", pinned)
-			h, err := NewHME(HMEConfig{baseURL, "password", "acc-test"}, time.Millisecond)
+			h, err := NewHME(HMEConfig{BaseURL: baseURL, Password: "password", AccountID: "acc-test"}, time.Millisecond)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestHMEInternalSecureSessionIsPinnedAndRedirectsAreRejected(t *testing.T) {
 	}))
 	defer origin.Close()
 	t.Setenv("GO_HME_INTERNAL_BASE_URL", origin.URL)
-	h, _ := NewHME(HMEConfig{origin.URL, "private-password", "acc-test"}, time.Millisecond)
+	h, _ := NewHME(HMEConfig{BaseURL: origin.URL, Password: "private-password", AccountID: "acc-test"}, time.Millisecond)
 	defer h.Close()
 	if _, err := h.Acquire(context.Background(), "job"); err == nil || foreignCalls != 0 {
 		t.Fatal("followed redirect with credentials")
@@ -221,7 +221,7 @@ func TestHMEListMailboxesReturnsStableSourceIdentifiers(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h, err := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Second)
+	h, err := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestHMEPrepareReauthenticatesWithoutCreatingAlias(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	h, err := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Millisecond)
+	h, err := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestHMETimeoutRedactionAndNoMutationRetry(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":false,"code":"unknown SECRET","message":"password=SECRET"}`))
 		}))
 		defer server.Close()
-		h, _ := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Millisecond)
+		h, _ := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Millisecond)
 		defer h.Close()
 		_, err := h.Acquire(context.Background(), "job")
 		if err == nil || strings.Contains(err.Error(), "SECRET") || creates != 1 {
@@ -308,7 +308,7 @@ func TestHMETimeoutRedactionAndNoMutationRetry(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"data":{"messages":[],"method":"imap"}}`))
 		}))
 		defer server.Close()
-		h, _ := NewHME(HMEConfig{server.URL, "password", "acc-test"}, time.Second)
+		h, _ := NewHME(HMEConfig{BaseURL: server.URL, Password: "password", AccountID: "acc-test"}, time.Second)
 		defer h.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 		defer cancel()

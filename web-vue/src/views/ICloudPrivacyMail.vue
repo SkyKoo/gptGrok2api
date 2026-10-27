@@ -29,6 +29,57 @@
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置 iCloud 邮箱上游。</span>
         </div>
 
+        <FormSection title="邮箱来源" density="roomy">
+          <template #actions>
+            <span class="text-xs text-muted-foreground">注册流程只选择来源，配置在这里维护</span>
+          </template>
+          <div v-if="sources.length" class="space-y-3">
+            <div v-for="source in sources" :key="source.id" class="rounded-lg border border-border bg-background p-3">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div class="min-w-0">
+                  <p class="font-medium text-foreground">{{ source.label || source.id || '未命名来源' }}</p>
+                  <p class="mt-1 text-xs text-muted-foreground">{{ sourceTypeLabel(source) }} · {{ sourceStatusLabel(source) }}</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <MetaChip size="xs" :tone="sourceUsable(source) ? 'success' : 'muted'">{{ sourceUsable(source) ? '可用于注册' : '仅已迁移配置' }}</MetaChip>
+                  <label class="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <input v-model="sourceDraft(source).enable" type="checkbox" :disabled="sourceSaving === source.id" />
+                    启用
+                  </label>
+                </div>
+              </div>
+
+              <div v-if="source.type === 'icloud_hme'" class="mt-3 grid gap-3 md:grid-cols-2">
+                <label class="text-xs md:col-span-2">
+                  <span class="ui-field-label">来源名称</span>
+                  <Input v-model="sourceDraft(source).label" block :disabled="sourceSaving === source.id" />
+                </label>
+                <label class="text-xs">
+                  <span class="ui-field-label">API Base</span>
+                  <Input v-model="sourceDraft(source).config.api_base" block placeholder="http://hme:8081" :disabled="sourceSaving === source.id" />
+                </label>
+                <label class="text-xs">
+                  <span class="ui-field-label">上游账号 ID</span>
+                  <Input v-model="sourceDraft(source).config.account_id" block :disabled="sourceSaving === source.id" />
+                </label>
+                <label class="text-xs">
+                  <span class="ui-field-label">管理员密码</span>
+                  <Input v-model="sourceDraft(source).config.admin_password" type="password" block :placeholder="source.config?.admin_password_set ? '已保存，留空保持不变' : '请输入管理员密码'" :disabled="sourceSaving === source.id" />
+                </label>
+                <label class="flex items-center gap-2 self-end pb-2 text-xs text-muted-foreground">
+                  <input v-model="sourceDraft(source).config.delete_hme_mailbox_on_account_delete" type="checkbox" :disabled="sourceSaving === source.id" />
+                  删除账号时同步删除上游邮箱
+                </label>
+              </div>
+              <p v-else class="mt-3 text-xs leading-5 text-muted-foreground">配置已迁移到邮箱资产管理模块，当前注册适配器尚未接入此来源。</p>
+              <div class="mt-3 flex justify-end">
+                <Button size="sm" variant="outline" :disabled="sourceSaving === source.id" @click="saveSource(source)">{{ sourceSaving === source.id ? '保存中...' : '保存来源' }}</Button>
+              </div>
+            </div>
+          </div>
+          <p v-else class="text-xs text-muted-foreground">暂无邮箱来源。请先完成来源迁移或添加 iCloud 邮箱上游。</p>
+        </FormSection>
+
         <FormSection title="邮箱资产" density="roomy">
           <template #actions>
             <span class="text-xs text-muted-foreground">共 {{ mailboxTotal }} 个</span>
@@ -93,7 +144,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
-import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent } from '@/api/icloud'
+import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
 import FormSection from '@/components/ai/FormSection.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
@@ -109,6 +160,9 @@ const pageError = ref('')
 const notice = ref('')
 const bridge = ref<ICloudBridgeStatus | null>(null)
 const counts = ref<Record<string, number>>({})
+const sources = ref<ICloudMailboxSource[]>([])
+const sourceDrafts = ref<Record<string, ICloudMailboxSource>>({})
+const sourceSaving = ref('')
 const mailboxes = ref<ICloudMailbox[]>([])
 const events = ref<ICloudMailboxEvent[]>([])
 const search = ref('')
@@ -116,6 +170,57 @@ const page = ref(1)
 const pageSize = 20
 const mailboxTotal = ref(0)
 const totalPages = ref(1)
+
+function sourceTypeLabel(source: ICloudMailboxSource) {
+  return source.type === 'icloud_hme' ? 'iCloud 邮箱上游' : String(source.type || '未接入来源')
+}
+
+function sourceStatusLabel(source: ICloudMailboxSource) {
+  if (source.enable === false) return '已停用'
+  return source.status === 'available' ? '可用' : '仅已迁移配置'
+}
+
+function sourceUsable(source: ICloudMailboxSource) {
+  return source.enable !== false && source.capabilities?.openai === true && source.capabilities?.grok === true
+}
+
+function sourceDraft(source: ICloudMailboxSource) {
+  const id = String(source.id || '')
+  if (!sourceDrafts.value[id]) {
+    sourceDrafts.value[id] = {
+      ...source,
+      config: { ...(source.config || {}) },
+    }
+  }
+  return sourceDrafts.value[id]
+}
+
+async function loadSources() {
+  const result = await icloudApi.listSources()
+  sources.value = result.sources || []
+  const validIDs = new Set(sources.value.map(source => String(source.id || '')))
+  sourceDrafts.value = Object.fromEntries(Object.entries(sourceDrafts.value).filter(([id]) => validIDs.has(id)))
+  for (const source of sources.value) sourceDraft(source)
+}
+
+async function saveSource(source: ICloudMailboxSource) {
+  const id = String(source.id || '')
+  if (!id) return
+  sourceSaving.value = id
+  notice.value = ''
+  try {
+    const result = await icloudApi.updateSource(sourceDraft(source))
+    const updated = result.source
+    if (!updated) throw new Error('来源保存失败')
+    sources.value = sources.value.map(item => item.id === updated.id ? updated : item)
+    sourceDrafts.value[id] = { ...updated, config: { ...(updated.config || {}) } }
+    notice.value = `来源“${updated.label || id}”已保存。`
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : String(error || '来源保存失败')
+  } finally {
+    sourceSaving.value = ''
+  }
+}
 
 const bridgeTone = computed(() => bridge.value?.reachable ? 'success' : bridge.value ? 'danger' : 'muted')
 const bridgeLabel = computed(() => bridge.value?.reachable ? '模块在线' : bridge.value ? '模块离线' : '检查中')
@@ -173,7 +278,7 @@ async function refreshAll() {
     }
     const status = await icloudApi.status()
     counts.value = (status as { counts?: Record<string, number> }).counts || {}
-    await Promise.all([loadMailboxes(), loadEvents()])
+    await Promise.all([loadSources(), loadMailboxes(), loadEvents()])
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '请求失败')
   } finally {
