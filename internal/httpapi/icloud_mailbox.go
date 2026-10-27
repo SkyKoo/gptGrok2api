@@ -15,8 +15,6 @@ import (
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
-type mailboxCoordinatorAdapter struct{ store *mailboxstore.Store }
-
 func mailboxSourceFromProvider(raw map[string]any, index int) mailboxstore.Source {
 	provider := cloneMap(raw)
 	typeName := strings.TrimSpace(strings.ToLower(stringValue(provider["type"])))
@@ -165,53 +163,6 @@ func (s *Server) iCloudMailboxSources(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func mailboxAsset(box registerruntime.Mailbox) mailboxstore.Mailbox {
-	sourceID := strings.TrimSpace(box.SourceMailboxID)
-	if sourceID == "" {
-		sourceID = strings.TrimSpace(box.ID)
-	}
-	return mailboxstore.Mailbox{ID: strings.TrimSpace(box.ID), Email: box.Email, SourceID: strings.TrimSpace(box.SourceID), SourceType: firstNonEmpty(stringValue(box.SourceType), "hme"), SourceAccountID: box.AccountID, SourceMailboxID: sourceID}
-}
-
-func providerMailbox(item mailboxstore.Mailbox) registerruntime.Mailbox {
-	return registerruntime.Mailbox{ID: item.ID, Email: item.Email, AccountID: item.SourceAccountID, SourceID: item.SourceID, SourceType: item.SourceType, SourceMailboxID: item.SourceMailboxID}
-}
-
-func (a mailboxCoordinatorAdapter) Reserve(ctx context.Context, platform, jobID, sourceID string, acquire func(context.Context) (registerruntime.Mailbox, error), prepare func(context.Context, registerruntime.Mailbox) error) (registerruntime.Mailbox, error) {
-	item, err := a.store.Reserve(ctx, platform, jobID, sourceID, func(ctx context.Context) (mailboxstore.Mailbox, error) {
-		box, err := acquire(ctx)
-		if err != nil {
-			return mailboxstore.Mailbox{}, err
-		}
-		return mailboxAsset(box), nil
-	}, func(ctx context.Context, item mailboxstore.Mailbox) error {
-		return prepare(ctx, providerMailbox(item))
-	})
-	if err != nil {
-		return registerruntime.Mailbox{}, err
-	}
-	return providerMailbox(item), nil
-}
-
-func (a mailboxCoordinatorAdapter) EnsureClaim(ctx context.Context, platform, jobID string, box registerruntime.Mailbox) error {
-	return a.store.EnsureClaim(ctx, platform, jobID, mailboxAsset(box))
-}
-
-func (a mailboxCoordinatorAdapter) Commit(ctx context.Context, platform, jobID, accountID string, box registerruntime.Mailbox) error {
-	return a.store.Commit(ctx, platform, jobID, accountID, mailboxAsset(box))
-}
-
-func (a mailboxCoordinatorAdapter) Release(ctx context.Context, platform, jobID string, box registerruntime.Mailbox, reason string) error {
-	return a.store.Release(ctx, platform, jobID, mailboxAsset(box), reason)
-}
-
-func (s *Server) mailboxCoordinator() registerruntime.MailboxClaimCoordinator {
-	if s.mailboxStore == nil {
-		return nil
-	}
-	return mailboxCoordinatorAdapter{store: s.mailboxStore}
-}
-
 func (s *Server) mailboxDBReady(w http.ResponseWriter) bool {
 	if s.mailboxStore != nil {
 		return true
@@ -233,13 +184,11 @@ func (s *Server) iCloudBridgeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := map[string]any{"enabled": s.mailboxStore != nil, "reachable": false, "database_configured": strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "", "hme_configured": false}
-	if s.mailboxStore != nil {
+	if s.mailboxManager != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		response["reachable"] = s.mailboxStore.Ping(ctx) == nil
+		response["reachable"] = s.mailboxStore != nil && s.mailboxStore.Ping(ctx) == nil
+		response["hme_configured"] = s.mailboxManager.HasEnabledSourceType(ctx, "icloud_hme")
 		cancel()
-	}
-	if _, ok := s.mailboxHMEConfig(); ok {
-		response["hme_configured"] = true
 	}
 	if s.mailboxInitErr != nil {
 		response["error"] = "mailbox_database_unavailable"
@@ -386,50 +335,6 @@ func hmeConfigFromSource(source mailboxstore.Source) (registerruntime.HMEConfig,
 	return cfg, cfg.BaseURL != "" && cfg.Password != "" && cfg.AccountID != ""
 }
 
-func (s *Server) mailboxHMEConfigForSource(sourceID string) (registerruntime.HMEConfig, bool) {
-	if s.mailboxStore != nil && strings.TrimSpace(sourceID) != "" {
-		source, err := s.mailboxStore.GetSource(context.Background(), sourceID)
-		if err == nil {
-			return hmeConfigFromSource(source)
-		}
-	}
-	mail := mapValue(s.registerStore.Get()["mail"])
-	providers, _ := mail["providers"].([]any)
-	for index, raw := range providers {
-		provider := mapValue(raw)
-		if strings.TrimSpace(sourceID) != "" && strings.TrimSpace(stringValue(provider["id"])) != strings.TrimSpace(sourceID) {
-			continue
-		}
-		source := mailboxSourceFromProvider(provider, index)
-		if cfg, ok := hmeConfigFromSource(source); ok {
-			return cfg, true
-		}
-	}
-	return registerruntime.HMEConfig{}, false
-}
-
-func (s *Server) mailboxHMEConfig() (registerruntime.HMEConfig, bool) {
-	if s.mailboxStore != nil {
-		if sources, err := s.mailboxStore.ListSources(context.Background()); err == nil {
-			for _, source := range sources {
-				if cfg, ok := hmeConfigFromSource(source); ok {
-					return cfg, true
-				}
-			}
-		}
-	}
-	mail := mapValue(s.registerStore.Get()["mail"])
-	providers, _ := mail["providers"].([]any)
-	for index, raw := range providers {
-		provider := mapValue(raw)
-		source := mailboxSourceFromProvider(provider, index)
-		if cfg, ok := hmeConfigFromSource(source); ok {
-			return cfg, true
-		}
-	}
-	return registerruntime.HMEConfig{}, false
-}
-
 func mailboxAccount(item map[string]any) (registerruntime.Mailbox, string, bool) {
 	raw := mapValue(item["registration_mailbox"])
 	if raw == nil || strings.TrimSpace(stringValue(raw["email"])) == "" {
@@ -455,18 +360,18 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 	result := map[string]any{"aliases": 0, "openai_claims": 0, "grok_claims": 0, "missing": []string{}, "errors": []string{}}
-	if cfg, ok := s.mailboxHMEConfig(); ok {
-		hme, err := registerruntime.NewHME(cfg, time.Second)
+	if s.mailboxManager != nil && s.mailboxManager.HasEnabledSourceType(ctx, "icloud_hme") {
+		session, err := s.mailboxManager.Open(ctx, "", time.Second)
 		if err != nil {
 			result["errors"] = append(result["errors"].([]string), err.Error())
 		} else {
-			aliases, listErr := hme.ListMailboxes(ctx)
-			hme.Close()
+			aliases, listErr := session.List(ctx)
+			session.Close()
 			if listErr != nil {
 				result["errors"] = append(result["errors"].([]string), listErr.Error())
 			} else {
 				for _, alias := range aliases {
-					if _, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{ID: alias.ID, Email: alias.Email, SourceID: alias.SourceID, SourceType: "hme", SourceAccountID: alias.AccountID, SourceMailboxID: alias.SourceMailboxID}, "provider_reconciled"); err != nil {
+					if _, err := s.mailboxStore.Upsert(ctx, alias, "provider_reconciled"); err != nil {
 						result["errors"] = append(result["errors"].([]string), err.Error())
 						continue
 					}
@@ -475,7 +380,7 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 	} else {
-		result["errors"] = append(result["errors"].([]string), "iCloud 邮箱上游未配置")
+		result["errors"] = append(result["errors"].([]string), "邮箱上游未配置")
 	}
 	reconcile := func(platform string, accounts []map[string]any, counter string) {
 		for _, account := range accounts {

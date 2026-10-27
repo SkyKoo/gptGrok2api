@@ -62,7 +62,7 @@
                   </MetaChip>
                 </label>
                 <p v-if="!mailboxSources.length" class="register-provider-empty">
-                  暂无邮箱来源，请先在“iCloud 邮箱”页面配置来源。
+                  暂无邮箱来源，请先在“邮箱管理”页面配置来源。
                 </p>
                 <p class="mailbox-source-hint">
                   注册只选择来源；邮箱资产、上游连接、同步和删除策略统一在邮箱资产管理模块维护。

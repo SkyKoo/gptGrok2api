@@ -46,6 +46,7 @@ type Server struct {
 	auth               *auth.Validator
 	store              *store.Store
 	mailboxStore       *mailboxstore.Store
+	mailboxManager     *mailboxstore.ResourceManager
 	mailboxInitErr     error
 	catalog            []model.Spec
 	discovery          *model.Registry
@@ -197,6 +198,16 @@ func New(cfg config.Config) *Server {
 		}
 		cancel()
 	}
+	server.mailboxManager = mailboxstore.NewResourceManager(server.mailboxStore, newMailboxProvider)
+	server.mailboxManager.SetSourceLoader(func(context.Context) ([]mailboxstore.Source, error) {
+		mail := cloneMap(mapValue(server.registerStore.Get()["mail"]))
+		providers, _ := mail["providers"].([]any)
+		sources := make([]mailboxstore.Source, 0, len(providers))
+		for index, raw := range providers {
+			sources = append(sources, mailboxSourceFromProvider(mapValue(raw), index))
+		}
+		return sources, nil
+	})
 	server.initFreeRegistration()
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)

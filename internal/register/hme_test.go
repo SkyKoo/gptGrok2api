@@ -327,6 +327,18 @@ func TestMailCodeRejectsAmbiguousAndEmbeddedDigits(t *testing.T) {
 	}
 }
 
+func TestMailCodeAcceptsGrokHyphenatedCode(t *testing.T) {
+	for _, input := range []string{
+		"Grok confirmation code: 230-250",
+		"Grok confirmation code: 230 250",
+		"Grok confirmation code: 230250",
+	} {
+		if got := mailCode(input); got != "230250" {
+			t.Errorf("mailCode(%q) = %q, want 230250", input, got)
+		}
+	}
+}
+
 func TestHMEAcceptsOpenAIForwarderAddress(t *testing.T) {
 	after := time.Now().UTC().Add(-time.Minute)
 	box := Mailbox{Email: "alias@example.test", AccountID: "acc-test"}

@@ -404,16 +404,20 @@ func (h *HME) DeleteMailbox(ctx context.Context, box Mailbox) error {
 
 type hmeMessage struct{ ID, Folder, From, To, Subject, Date, Preview, Body string }
 
-var codePattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]{6})(?:[^0-9]|$)`)
+// Grok formats its six-digit verification code as XXX-XXX while OpenAI
+// commonly uses a contiguous value. Normalize both forms before the caller
+// submits the code.
+var codePattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]{3})[-\s]?([0-9]{3})(?:[^0-9]|$)`)
 
 func mailCode(text string) string {
 	matches := codePattern.FindAllStringSubmatch(text, -1)
 	code := ""
 	for _, match := range matches {
-		if code != "" && code != match[1] {
+		candidate := match[1] + match[2]
+		if code != "" && code != candidate {
 			return ""
 		}
-		code = match[1]
+		code = candidate
 	}
 	return code
 }

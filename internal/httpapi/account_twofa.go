@@ -379,10 +379,10 @@ func (s *Server) twoFAAutoCode(ctx context.Context, t *accountTwoFATask, account
 		return
 	}
 	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
-	if err != nil || box.AccountID != cfg.HME.AccountID {
+	if err != nil {
 		return
 	}
-	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", firstNonEmpty(box.SourceID, cfg.MailboxSourceID), cfg.PollInterval)
 	if err != nil {
 		return
 	}

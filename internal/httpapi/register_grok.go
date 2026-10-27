@@ -30,17 +30,13 @@ func (s *Server) initGrokRegistration() {
 			}
 			return nil, nil, errors.New("mailbox asset database is required for registration")
 		}
-		hmeConfig := cfg.HME
-		if sourceConfig, ok := s.mailboxHMEConfigForSource(cfg.MailboxSourceID); ok {
-			hmeConfig = sourceConfig
-		} else {
-			return nil, nil, errors.New("selected mailbox source is unavailable")
+		if s.mailboxManager == nil || !s.mailboxManager.Enabled() {
+			return nil, nil, errors.New("mailbox asset database is required for registration")
 		}
-		mailClient, err := registerruntime.NewHME(hmeConfig, cfg.PollInterval)
+		mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "grok", cfg.MailboxSourceID, cfg.PollInterval)
 		if err != nil {
 			return nil, nil, err
 		}
-		mail := registerruntime.MailSource(registerruntime.NewCoordinatedMailSource("grok", cfg.HME.SourceID, mailClient, s.mailboxCoordinator()))
 		// The browser worker is an internal Docker service. Do not reuse the
 		// request client's proxy transport here: that transport is intended for
 		// upstream traffic and can send `grok-browser` through Clash, making the

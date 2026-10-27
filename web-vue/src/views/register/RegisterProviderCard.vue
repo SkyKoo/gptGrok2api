@@ -201,7 +201,7 @@
         </label>
 
         <div v-if="currentType === 'icloud_local'" class="register-field register-field--full">
-          <p class="text-xs leading-5 text-muted-foreground">使用当前系统的 iCloud 邮箱模块，不需要填写 API 地址、API Key 或邮箱域名。</p>
+          <p class="text-xs leading-5 text-muted-foreground">使用邮箱管理模块中已配置的来源，不需要在注册页面重复填写上游配置。</p>
         </div>
 
         <label v-if="providerUsesDefaultDomain(provider)" class="register-field">

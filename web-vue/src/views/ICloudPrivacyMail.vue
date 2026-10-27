@@ -1,9 +1,9 @@
 <template>
   <div class="space-y-6">
     <PagePanel class="space-y-5">
-      <PanelHeader title="iCloud 邮箱" align="start">
+      <PanelHeader title="邮箱管理" align="start">
         <template #copy>
-          <p class="mt-1 text-xs text-muted-foreground">统一管理 iCloud 邮箱资产，以及 GPT 和 Grok 的占用、释放和历史操作。</p>
+          <p class="mt-1 text-xs text-muted-foreground">统一管理邮箱来源、邮箱资产，以及 GPT 和 Grok 的占用、释放和历史操作。</p>
         </template>
         <template #actions>
           <StateBadge :tone="bridgeTone" shape="rounded">{{ bridgeLabel }}</StateBadge>
@@ -14,7 +14,7 @@
         </template>
       </PanelHeader>
 
-      <StateBlock v-if="pageError" compact dashed title="iCloud 邮箱模块暂不可用" :description="pageError" />
+      <StateBlock v-if="pageError" compact dashed title="邮箱管理模块暂不可用" :description="pageError" />
 
       <template v-if="bridge?.reachable">
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
@@ -25,8 +25,8 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由独立的 iCloud 邮箱上游提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号时只释放对应平台的占用，最后一个占用释放后才会删除上游邮箱。
-          <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置 iCloud 邮箱上游。</span>
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号时只释放对应平台的占用，最后一个占用释放后才会删除上游邮箱。
+          <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
         <FormSection title="邮箱来源" density="roomy">
@@ -77,7 +77,7 @@
               </div>
             </div>
           </div>
-          <p v-else class="text-xs text-muted-foreground">暂无邮箱来源。请先完成来源迁移或添加 iCloud 邮箱上游。</p>
+          <p v-else class="text-xs text-muted-foreground">暂无邮箱来源。请先完成来源迁移或添加可用邮箱上游。</p>
         </FormSection>
 
         <FormSection title="邮箱资产" density="roomy">
@@ -148,7 +148,7 @@
 
         <p v-if="notice" class="break-words rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800 dark:border-sky-900/50 dark:bg-sky-950/30 dark:text-sky-200">{{ notice }}</p>
       </template>
-      <p v-else class="rounded-lg border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">请先配置可访问的 PostgreSQL 邮箱资产数据库和 iCloud 邮箱上游。</p>
+      <p v-else class="rounded-lg border border-dashed border-border px-3 py-5 text-center text-xs text-muted-foreground">请先配置可访问的 PostgreSQL 邮箱资产数据库和邮箱上游。</p>
     </PagePanel>
   </div>
 </template>
