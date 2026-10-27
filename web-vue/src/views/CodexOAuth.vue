@@ -1,7 +1,7 @@
 <template>
   <div class="space-y-6 codex-oauth-page">
     <PagePanel class="space-y-5">
-      <PanelHeader title="Codex 授权" align="start">
+      <PanelHeader title="Codex OAuth" align="start">
         <template #copy>
           <p class="mt-1 text-sm text-muted-foreground">
             在这里获取或管理 Codex OAuth 凭据，并手动同步到 CPA。已从远程 CPA 绑定的凭据无需重新授权。
@@ -26,7 +26,7 @@
           :model-value="filter"
           :options="filterOptions"
           fit="content"
-          aria-label="Codex 授权状态筛选"
+          aria-label="Codex OAuth 状态筛选"
           @update:model-value="filter = String($event) as CodexFilter"
         />
       </div>

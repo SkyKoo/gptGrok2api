@@ -1,9 +1,10 @@
 <template>
-  <ModalShell :open="props.open" max-width="48rem" :z-index="150" @close="emit('close')">
+  <ModalShell :open="props.open" :inline="props.embedded" max-width="48rem" :z-index="150" @close="emit('close')">
     <ModalHeader
       title="OAuth 接入"
       :subtitle="`${accounts.length} 个 OAuth 账号 · ${availableModels.length ? availableModels.join('、') : '暂无已探测模型'}`"
       compact
+      :show-close="!props.embedded"
       @close="emit('close')"
     />
     <ModalBody density="compact" class="space-y-4">
@@ -143,7 +144,7 @@
         </div>
       </SurfaceBox>
     </ModalBody>
-    <ModalFooter>
+    <ModalFooter v-if="!props.embedded">
       <Button size="sm" variant="outline" :disabled="busy" @click="emit('close')">完成</Button>
     </ModalFooter>
   </ModalShell>
@@ -171,7 +172,7 @@ import { useToast } from '@/composables/useToast'
 import { errorMessage } from '@/lib/errorMessage'
 
 const toast = useToast()
-const props = withDefaults(defineProps<{ open?: boolean }>(), { open: false })
+const props = withDefaults(defineProps<{ open?: boolean; embedded?: boolean }>(), { open: false, embedded: false })
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'changed'): void

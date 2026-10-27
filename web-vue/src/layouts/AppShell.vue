@@ -596,7 +596,7 @@ const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
 const isRoutePending = ref(false)
 const pendingRouteTitle = ref('')
-const cachedRouteNames = ['Studio', 'Accounts', 'CodexOAuth', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Register', 'ICloud', 'Settings']
+const cachedRouteNames = ['Studio', 'Accounts', 'OAuth', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Register', 'ICloud', 'Settings']
 const cachedRouteMax = cachedRouteNames.length
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
@@ -636,8 +636,8 @@ const menuItems = [
     icon: 'M12 12a3.5 3.5 0 1 0-3.5-3.5A3.5 3.5 0 0 0 12 12zm0 2c-4.1 0-7.5 2.2-7.5 5v1h15v-1c0-2.8-3.4-5-7.5-5z',
   },
   {
-    path: '/codex-oauth',
-    label: 'Codex 授权',
+    path: '/oauth',
+    label: 'OAuth 授权',
     icon: 'M12 2a5 5 0 0 1 5 5v2h1a3 3 0 0 1 3 3v7H3v-7a3 3 0 0 1 3-3h1V7a5 5 0 0 1 5-5zm-3 7h6V7a3 3 0 0 0-6 0v2zm-3 3a1 1 0 0 0-1 1v4h14v-4a1 1 0 0 0-1-1H6z',
   },
   {
@@ -678,7 +678,8 @@ const utilityMenuItems = [
 const routeTitleMap: Record<string, string> = {
   dashboard: '概览中心',
   accounts: '账号管理',
-  'codex-oauth': 'Codex 授权',
+  oauth: 'OAuth 授权',
+  'codex-oauth': 'OAuth 授权',
   logs: '日志管理',
   gallery: '图片管理',
   proxy: '代理管理',
@@ -855,7 +856,8 @@ function currentVersionCandidate(value: string) {
 const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/': () => import('@/views/Dashboard.vue'),
   '/accounts': () => import('@/views/Accounts.vue'),
-  '/codex-oauth': () => import('@/views/CodexOAuth.vue'),
+  '/oauth': () => import('@/views/OAuth.vue'),
+  '/codex-oauth': () => import('@/views/OAuth.vue'),
   '/logs': () => import('@/views/Logs.vue'),
   '/gallery': () => import('@/views/Gallery.vue'),
   '/monitor': () => import('@/views/Monitor.vue'),
