@@ -603,7 +603,24 @@ func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job Re
 	}
 	defer mail.Close()
 	defer flow.Close()
+	if err := prepareSavedGrokMailbox(ctx, id, job.Mailbox, mail); err != nil {
+		e.failJob(id, err)
+		return
+	}
 	e.registerSaved(ctx, id, job, cfg, mail, flow)
+}
+
+func prepareSavedGrokMailbox(ctx context.Context, jobID string, box Mailbox, mail MailSource) error {
+	preparer, ok := mail.(MailSessionPreparer)
+	if !ok {
+		return fail("mail", "resume_not_supported")
+	}
+	if withJob, ok := mail.(interface {
+		PrepareFor(context.Context, string, Mailbox) error
+	}); ok {
+		return withJob.PrepareFor(ctx, jobID, box)
+	}
+	return preparer.Prepare(ctx, box)
 }
 
 func (e *GrokEngine) registerSaved(ctx context.Context, id string, job RegistrationJob, cfg GrokConfig, mail MailSource, flow GrokRegistrationFlow) {

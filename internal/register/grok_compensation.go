@@ -139,21 +139,8 @@ func (e *GrokEngine) runGrokCompensation(ctx context.Context, job RegistrationJo
 	}
 	defer mail.Close()
 	defer flow.Close()
-	preparer, ok := mail.(MailSessionPreparer)
-	if !ok {
-		e.failJob(job.ID, fail("mail", "resume_not_supported"))
-		return
-	}
-	var prepareErr error
-	if withJob, ok := mail.(interface {
-		PrepareFor(context.Context, string, Mailbox) error
-	}); ok {
-		prepareErr = withJob.PrepareFor(ctx, job.ID, job.Mailbox)
-	} else {
-		prepareErr = preparer.Prepare(ctx, job.Mailbox)
-	}
-	if prepareErr != nil {
-		e.failJob(job.ID, prepareErr)
+	if err := prepareSavedGrokMailbox(ctx, job.ID, job.Mailbox, mail); err != nil {
+		e.failJob(job.ID, err)
 		return
 	}
 	e.registerSaved(ctx, job.ID, job, cfg, mail, flow)
