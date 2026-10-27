@@ -1,6 +1,26 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestLoadUsesProjectVersionFile(t *testing.T) {
+	t.Setenv("GO_VERSION", "")
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "VERSION"), []byte("test-version\n"), 0o644); err != nil {
+		t.Fatalf("write VERSION: %v", err)
+	}
+
+	cfg, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Version != "test-version" {
+		t.Fatalf("Load() version = %q, want project VERSION", cfg.Version)
+	}
+}
 
 func TestMailboxDatabaseURLDoesNotReuseSQLiteDatabaseURL(t *testing.T) {
 	t.Setenv("GO_DATABASE_URL", "")

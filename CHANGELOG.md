@@ -7,6 +7,7 @@
 + [新增] 邮箱资产、事件查询和历史账号/上游别名核对接口：`/api/icloud/status`、`/api/icloud/mailboxes`、`/api/icloud/events` 和 `/api/icloud/reconcile`。
 + [新增] 默认 Go Compose 编排 PostgreSQL 服务，并保留 iCloud 邮箱上游为独立服务。
 + [测试] 增加邮箱资产生命周期、注册占用和删除清理的编译与回归覆盖。
++ [修复] Go 运行时版本默认从项目 `VERSION` 文件读取，避免 `/health` 和版本文件不一致。
 
 ## 1.3.0-go - 2026-10-24
 

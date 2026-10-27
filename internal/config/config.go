@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const fallbackVersion = "1.3.1-go"
+
 type Config struct {
 	RootDir                 string
 	ListenAddr              string
@@ -216,7 +218,7 @@ func Load(root string) (Config, error) {
 		RegisterCaptchaURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("GO_REGISTER_CAPTCHA_URL")), "/"),
 		RegisterDriverURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("GO_REGISTER_DRIVER_URL")), "/"),
 		RegisterDriverKey:       strings.TrimSpace(os.Getenv("GO_REGISTER_DRIVER_KEY")),
-		Version:                 env("GO_VERSION", "1.3.0-go"),
+		Version:                 env("GO_VERSION", projectVersion(root)),
 		AllowAnonymous:          envBool("GO_ALLOW_ANONYMOUS", false),
 		RequestTimeout:          time.Duration(requestTimeoutSeconds) * time.Second,
 		ChatMaxRetries:          chatMaxRetries,
@@ -381,6 +383,16 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func projectVersion(root string) string {
+	raw, err := os.ReadFile(filepath.Join(root, "VERSION"))
+	if err == nil {
+		if version := strings.TrimSpace(string(raw)); version != "" {
+			return version
+		}
+	}
+	return fallbackVersion
 }
 
 func mailboxDatabaseURL() string {
