@@ -88,7 +88,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	chat, images, videos := []string{}, []string{}, []string{}
+	chat, images, edits, videos := []string{}, []string{}, []string{}, []string{}
 	all := []string{}
 	public := []map[string]any{}
 	for _, item := range s.modelSpecs() {
@@ -97,18 +97,22 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		all = append(all, item.ID)
 		public = append(public, item.Public())
-		switch {
-		case item.Capability&model.Chat != 0:
+		if item.Capability&model.Chat != 0 {
 			chat = append(chat, item.ID)
-		case item.Capability&model.Image != 0 || item.Capability&model.ImageEdit != 0:
+		}
+		if item.Capability&model.Image != 0 {
 			images = append(images, item.ID)
-		case item.Capability&model.Video != 0:
+		}
+		if item.Capability&model.ImageEdit != 0 || isOpenAIImageModel(item.ID) {
+			edits = append(edits, item.ID)
+		}
+		if item.Capability&model.Video != 0 {
 			videos = append(videos, item.ID)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "model_catalog", "chat_models": chat, "image_models": images,
-		"image_edit_models": images, "video_models": videos, "models": public,
+		"image_edit_models": edits, "video_models": videos, "models": public,
 		"discovery":              s.discovery.Summary(s.openAIAccountIDs()),
 		"all_models":             all,
 		"source":                 map[string]string{"chat": "go", "image": "go", "grok": "unavailable"},

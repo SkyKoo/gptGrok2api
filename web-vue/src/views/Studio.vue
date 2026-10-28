@@ -195,6 +195,7 @@ import { useStudioSendRuntime } from '@/views/studio/studioSendRuntime'
 import StudioComposer from '@/components/studio/StudioComposer.vue'
 import StudioHistoryPanel from '@/components/studio/StudioHistoryPanel.vue'
 import StudioMessageList from '@/components/studio/StudioMessageList.vue'
+import { useStudioVideoRuntime } from './studio/studioVideoRuntime'
 import type {
   StudioConversation,
   StudioConversationBadgeState,
@@ -220,7 +221,7 @@ const pageRuntime = usePageRuntime('studio')
 const composerRuntime = useStudioComposerRuntime()
 const referenceRuntime = useStudioReferenceRuntime()
 const persistedConversationState = loadStudioConversationPersistenceState()
-const modelFormRuntime = useStudioModelFormRuntime({ settingsStore })
+const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0 })
 
 const composeMode = composerRuntime.composeMode
 const composerText = composerRuntime.composerText
@@ -252,6 +253,11 @@ const chatReasoningEffort = modelFormRuntime.chatReasoningEffort
 const imageForm = modelFormRuntime.imageForm
 
 const conversations = ref<StudioConversation[]>(persistedConversationState.conversations)
+const videoRuntime = useStudioVideoRuntime({
+  conversations,
+  touch: touchConversation,
+  notice: markConversationNotice,
+})
 const activeConversationId = ref(persistedConversationState.activeConversationId)
 const conversationNotices = ref<Record<string, StudioConversationBadgeState>>(persistedConversationState.conversationNotices)
 const conversationLookup = computed<StudioConversationLookup>(() => buildStudioConversationLookup(conversations.value))
@@ -297,6 +303,7 @@ const activeHeaderSubtitle = computed(() => {
   if (isSending.value) {
     if (composeMode.value === 'search') return '正在搜索'
     if (composeMode.value === 'image') return '正在提交图片'
+    if (composeMode.value === 'video') return '正在提交视频'
     return '正在请求'
   }
   if (activeRunningTaskCount.value > 0) return `图片处理中 ${activeRunningTaskCount.value}`
@@ -339,6 +346,7 @@ const sendRuntime = useStudioSendRuntime({
   messageRuntime,
   chatStreamRuntime,
   imageTaskRuntime,
+  videoRuntime,
   chatModel,
   chatReasoningEffort,
   imageForm,
@@ -662,15 +670,18 @@ function initializeStudio() {
   void modelFormRuntime.loadModelCatalog()
   void preloadPromptLibrary()
   void imageTaskRuntime.refresh()
+  videoRuntime.start()
 }
 
 function activateStudio() {
   void imageTaskRuntime.refresh()
   imageTaskRuntime.schedulePoll()
+  videoRuntime.start()
 }
 
 function deactivateStudio() {
   imageTaskRuntime.deactivate()
+  videoRuntime.stop()
   stopTransientStudioUi()
   conversationPersistenceRuntime.flush()
 }
@@ -678,6 +689,7 @@ function deactivateStudio() {
 function disposeStudio() {
   stopTransientStudioUi()
   imageTaskRuntime.dispose()
+  videoRuntime.stop()
   chatStreamRuntime.dispose()
   conversationPersistenceRuntime.flush()
   conversationPersistenceRuntime.dispose()

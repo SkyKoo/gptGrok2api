@@ -35,16 +35,28 @@ func (m *Media) GenerateLite(ctx context.Context, account accounts.Account, prom
 		return nil, err
 	}
 	defer response.Body.Close()
+	diagnostics := newLiteDiagnostics(response.StatusCode, response.Header.Get("Content-Type"))
 	results := make([]ImageResult, 0, count)
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 4096), 4<<20)
 	seen := map[string]bool{}
 	for scanner.Scan() {
+		diagnostics.observe(scanner.Text())
 		kind, events := protocol.ParseSSELine(scanner.Text())
 		if kind == "done" {
 			break
 		}
 		for _, event := range events {
+			if event.Kind == "image" {
+				diagnostics.ImageEvents++
+				if event.Moderated {
+					diagnostics.Moderated = true
+					continue
+				}
+				if event.Progress > 0 && event.Progress < 100 {
+					diagnostics.Previews++
+				}
+			}
 			// Grok may emit a preview URL before the finished image. Keep
 			// progress-less legacy finals, but never expose a known partial frame.
 			if event.Kind != "image" || event.URL == "" || (event.Progress > 0 && event.Progress < 100) || seen[event.URL] {
@@ -55,10 +67,13 @@ func (m *Media) GenerateLite(ctx context.Context, account accounts.Account, prom
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, diagnostics.err("stream_read_failed")
+	}
+	if diagnostics.Failure != "" {
+		return nil, diagnostics.err(diagnostics.Failure)
 	}
 	if len(results) == 0 {
-		return nil, fmt.Errorf("image generation returned no images")
+		return nil, diagnostics.err("no_images")
 	}
 	return results, nil
 }

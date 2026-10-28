@@ -89,6 +89,21 @@ func (s *HTTPGrokBrowserSolver) SetBrowserProfile(profile BrowserProfile) {
 	s.Profile = &copy
 }
 
+func (s *HTTPGrokBrowserSolver) browserProfilePayload() map[string]any {
+	if s == nil || s.Profile == nil {
+		return nil
+	}
+	raw, err := json.Marshal(s.Profile)
+	if err != nil {
+		return nil
+	}
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	return payload
+}
+
 func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, payload any, stage string) ([]byte, error) {
 	if s == nil || strings.TrimSpace(s.BaseURL) == "" {
 		return nil, fail(stage, "browser_worker_not_configured")
@@ -130,8 +145,11 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 		// failures without storing page text, cookies or challenge values.
 		var envelope struct {
 			Detail struct {
-				Stage string `json:"stage"`
-				Error string `json:"error"`
+				Stage      string `json:"stage"`
+				Error      string `json:"error"`
+				Diagnostic struct {
+					Reason string `json:"reason"`
+				} `json:"diagnostic"`
 			} `json:"detail"`
 		}
 		if json.Unmarshal(body, &envelope) == nil {
@@ -140,6 +158,9 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 			}
 			if workerReason := sanitizeBrowserWorkerReason(envelope.Detail.Error); workerReason != "" {
 				failure.Operation = "worker_error=" + workerReason
+				if diagnostic := sanitizeBrowserWorkerDiagnostic(envelope.Detail.Diagnostic.Reason); diagnostic != "" && diagnostic != workerReason {
+					failure.Operation += ";diagnostic=" + diagnostic
+				}
 			}
 		}
 		return nil, failure
@@ -160,10 +181,20 @@ func sanitizeBrowserWorkerStage(value string) string {
 func sanitizeBrowserWorkerReason(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
-	case "signup_rate_limited", "email_already_registered", "signup_unavailable", "verification_page_missing", "email_input_missing", "email_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
+	case "signup_rate_limited", "email_already_registered", "signup_unavailable", "verification_page_missing", "cloudflare_challenge", "proxy_connection_failed", "email_input_missing", "email_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
 		return value
 	default:
 		return "unclassified"
+	}
+}
+
+func sanitizeBrowserWorkerDiagnostic(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "cloudflare_challenge", "proxy_connection_failed":
+		return value
+	default:
+		return ""
 	}
 }
 
@@ -172,6 +203,9 @@ func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy 
 	if s.Profile != nil {
 		payload["timezone"] = strings.TrimSpace(s.Profile.TimezoneIANA)
 		payload["locale"] = strings.TrimSpace(s.Profile.NavigatorLanguage)
+		if profile := s.browserProfilePayload(); profile != nil {
+			payload["browser_profile"] = profile
+		}
 	}
 	body, err := s.workerPost(ctx, "/v1/session/start", payload, "bootstrap")
 	if err != nil {
@@ -271,6 +305,9 @@ func (s *HTTPGrokBrowserSolver) SolveContext(ctx context.Context, siteKey, pageU
 	if s.Profile != nil {
 		payload["timezone"] = strings.TrimSpace(s.Profile.TimezoneIANA)
 		payload["locale"] = strings.TrimSpace(s.Profile.NavigatorLanguage)
+		if profile := s.browserProfilePayload(); profile != nil {
+			payload["browser_profile"] = profile
+		}
 	}
 	endpoint := strings.TrimRight(s.BaseURL, "/") + "/v1/turnstile/session"
 	raw, err := json.Marshal(payload)

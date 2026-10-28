@@ -106,7 +106,7 @@ export function buildStudioConversationRuntimeIndex(conversations: StudioConvers
       if (isStudioImageMessageRunning(message)) {
         running += 1
         if (message.taskId) pendingIds.add(message.taskId)
-      } else if (message.status === 'sending' || message.status === 'streaming') {
+      } else if ((message.mode === 'video' && ['queued', 'running'].includes(message.status || '')) || message.status === 'sending' || message.status === 'streaming') {
         running += 1
       }
     })
@@ -147,7 +147,7 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
   const taskId = cleanStudioText(raw.taskId)
   if (!content && !taskId) return null
   const id = cleanStudioText(raw.id) || createStudioId('message')
-  const mode = raw.mode === 'chat' || raw.mode === 'search' ? raw.mode : 'image'
+  const mode = raw.mode === 'chat' || raw.mode === 'search' || raw.mode === 'video' ? raw.mode : 'image'
   const normalizedContent = mode === 'search' ? cleanStudioSearchAnswer(content) : content
   const migratedSearchResult = mode === 'search'
     ? splitStudioLegacySearchResult(normalizedContent)
@@ -170,6 +170,8 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
     imageSize: cleanStudioText(raw.imageSize) || undefined,
     imageCount: Number.isFinite(Number(raw.imageCount)) ? normalizeImageCount(raw.imageCount) : undefined,
     taskId: taskId || undefined,
+    videoTaskId: cleanStudioText(raw.videoTaskId) || undefined,
+    videoProgress: Number(raw.videoProgress) || 0,
     error: cleanStudioText(raw.error) || undefined,
     attachments: Array.isArray(raw.attachments) ? raw.attachments.map(cleanStudioText).filter(Boolean).slice(0, 8) : undefined,
     referenceImages: normalizeStudioReferenceImages(raw.referenceImages),

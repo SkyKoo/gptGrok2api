@@ -18,6 +18,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    networks:
+      default:
+      cfm_warp: {}
 
   redis:
     image: redis:7-alpine
@@ -119,3 +122,11 @@ services:
         condition: service_healthy
       grok-browser:
         condition: service_started
+    networks:
+      default:
+      cfm_warp: {}
+
+networks:
+  cfm_warp:
+    external: true
+    name: cfm-warp

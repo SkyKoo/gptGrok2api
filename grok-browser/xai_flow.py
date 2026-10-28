@@ -25,10 +25,11 @@ _SESSION_TTL = 20 * 60
 
 
 class XaiBrowserFlowError(RuntimeError):
-    def __init__(self, message: str, *, stage: str, retryable: bool = False):
+    def __init__(self, message: str, *, stage: str, retryable: bool = False, diagnostic: dict | None = None):
         super().__init__(message)
         self.stage = stage or "browser"
         self.retryable = retryable
+        self.diagnostic = diagnostic or {}
 
 
 @dataclass
@@ -37,6 +38,7 @@ class BrowserSession:
     browser: Any
     page: Any
     signup_url: str
+    initial_response_status: int = 0
     touched_at: float = field(default_factory=time.monotonic)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -79,18 +81,19 @@ async def cleanup_expired_sessions() -> None:
         await item.close()
 
 
-async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "", locale: str = "", timeout_s: int = 180) -> dict:
+async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "", locale: str = "", profile: dict | None = None, timeout_s: int = 180) -> dict:
     await cleanup_expired_sessions()
     target = _safe_url(signup_url, "browser_start")
-    browser = await cloakbrowser.launch_async(**browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None))
+    browser = await cloakbrowser.launch_async(**browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None, profile=profile))
     try:
         page = await browser.new_page()
-        await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
+        response = await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
+        response_status = int(response.status) if response is not None else 0
         session_id = f"xai-{uuid.uuid4().hex}"
-        current = BrowserSession(session_id=session_id, browser=browser, page=page, signup_url=target)
+        current = BrowserSession(session_id=session_id, browser=browser, page=page, signup_url=target, initial_response_status=response_status)
         async with _sessions_lock:
             _sessions[session_id] = current
-        return {"ok": True, "session_id": session_id, "url": page.url, "user_agent": await _user_agent(page), "cookies": await cookie_snapshot(page)}
+        return {"ok": True, "session_id": session_id, "url": page.url, "user_agent": await _user_agent(page), "cookies": await cookie_snapshot(page), "diagnostic": await _page_diagnostic(page, response_status=response_status)}
     except Exception:
         await browser.close()
         raise
@@ -108,6 +111,54 @@ async def _body_text(page: Any) -> str:
         return str(await page.locator("body").inner_text(timeout=3_000) or "")
     except Exception:
         return ""
+
+
+def _safe_page_url(raw: str) -> str:
+    value = str(raw or "").strip()
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return "unknown"
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        path = parsed.path or "/"
+        return f"{parsed.scheme}://{parsed.hostname}{path}"[:256]
+    if parsed.scheme == "chrome-error":
+        return "chrome-error://page"
+    return "unknown"
+
+
+async def _page_diagnostic(page: Any, *, body: str | None = None, response_status: int = 0) -> dict:
+    """Return bounded page metadata without persisting HTML, cookies or input."""
+    url = _safe_page_url(getattr(page, "url", ""))
+    try:
+        title = re.sub(r"\s+", " ", str(await page.title() or "")).strip()[:160]
+    except Exception:
+        title = ""
+    text = body if body is not None else await _body_text(page)
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    lowered = f"{title} {normalized}".lower()
+    proxy_error = url.startswith("chrome-error://") or bool(re.search(
+        r"err_proxy|proxy(?: connection)? (?:failed|refused|timed out)|unable to connect to the proxy",
+        lowered,
+    ))
+    cloudflare = bool(re.search(
+        r"attention required.*cloudflare|just a moment|challenge-platform|cf-chl-|cloudflare",
+        lowered,
+    )) or (response_status in {403, 429} and "cloudflare" in lowered)
+    reason = "proxy_connection_failed" if proxy_error else "cloudflare_challenge" if cloudflare else ""
+    return {
+        "url": url,
+        "title": title,
+        "http_status": int(response_status or 0),
+        "cloudflare_challenge": cloudflare,
+        "proxy_connection_failed": proxy_error,
+        "reason": reason,
+    }
+
+
+def _page_issue(diagnostic: dict) -> str:
+    reason = str(diagnostic.get("reason") or "").strip()
+    return reason if reason in {"proxy_connection_failed", "cloudflare_challenge"} else ""
 
 
 async def _first_visible(page: Any, selectors: tuple[str, ...]) -> Any | None:
@@ -174,6 +225,7 @@ async def _set_native_input_value(page: Any, selector: str, value: str) -> bool:
 
 async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
     deadline = time.monotonic() + timeout_s
+    last = ""
     while time.monotonic() < deadline:
         last = await _body_text(page)
         if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[inputmode="numeric"]')):
@@ -184,7 +236,9 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
         if reason:
             raise XaiBrowserFlowError(reason, stage="send_code", retryable=True)
         await _pause(page, 300)
-    raise XaiBrowserFlowError("verification_page_missing", stage="send_code", retryable=True)
+    diagnostic = await _page_diagnostic(page, body=last)
+    reason = _page_issue(diagnostic) or "verification_page_missing"
+    raise XaiBrowserFlowError(reason, stage="send_code", retryable=True, diagnostic=diagnostic)
 
 
 def _classify_email_stage_error(text: str) -> str | None:
@@ -227,10 +281,12 @@ async def send_email(session_id: str, email: str) -> dict:
             if field is None:
                 await _pause(page, 400)
         if field is None:
-            raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True)
+            diagnostic = await _page_diagnostic(page)
+            raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
         await field.fill(str(email).strip())
         if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
-            raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True)
+            diagnostic = await _page_diagnostic(page)
+            raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
         await _wait_for_email_verification(page)
         return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
 
@@ -257,6 +313,7 @@ async def _fill_code(page: Any, code: str) -> bool:
 
 async def _wait_for_profile(page: Any, timeout_s: int = 45) -> None:
     deadline = time.monotonic() + timeout_s
+    last = ""
     while time.monotonic() < deadline:
         if await _first_visible(page, ('input[name="givenName"]', 'input[autocomplete="given-name"]')):
             return
@@ -264,7 +321,9 @@ async def _wait_for_profile(page: Any, timeout_s: int = 45) -> None:
         if re.search(r"验证码.*(无效|错误|过期)|invalid.*code|expired.*code", last, re.I):
             raise XaiBrowserFlowError("verification_code_invalid", stage="validate_code")
         await _pause(page, 300)
-    raise XaiBrowserFlowError("profile_form_missing", stage="validate_code", retryable=True)
+    diagnostic = await _page_diagnostic(page, body=last)
+    reason = _page_issue(diagnostic) or "profile_form_missing"
+    raise XaiBrowserFlowError(reason, stage="validate_code", retryable=True, diagnostic=diagnostic)
 
 
 async def verify_email(session_id: str, email: str, code: str) -> dict:
@@ -296,6 +355,7 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 45) -> str:
 
 async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
     deadline = time.monotonic() + timeout_s
+    last = ""
     while time.monotonic() < deadline:
         parsed = urlparse(str(page.url or ""))
         last = await _body_text(page)
@@ -307,7 +367,9 @@ async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
         if reason:
             raise XaiBrowserFlowError(reason, stage="signup")
         await _pause(page, 500)
-    raise XaiBrowserFlowError("account_page_missing", stage="signup", retryable=True)
+    diagnostic = await _page_diagnostic(page, body=last)
+    reason = _page_issue(diagnostic) or "account_page_missing"
+    raise XaiBrowserFlowError(reason, stage="signup", retryable=True, diagnostic=diagnostic)
 
 
 async def signup(session_id: str, *, email: str, password: str, code: str, given_name: str, family_name: str, turnstile_token: str = "") -> dict:

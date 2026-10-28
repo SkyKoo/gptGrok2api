@@ -85,6 +85,7 @@ def browser_kwargs(
     *,
     timezone: str = None,
     locale: str = None,
+    profile: dict = None,
 ) -> dict:
     """Browser-trust levers, env-configurable per solver.
 
@@ -92,6 +93,7 @@ def browser_kwargs(
     the interactive-checkbox solvers (recaptcha/hcaptcha) default headless=0.
     """
     default_headless = "1" if prefix == "TURNSTILE" else "0"
+    saved_profile = profile if isinstance(profile, dict) else {}
     kw = {"humanize": True,
           "headless": os.getenv(f"{prefix}_HEADLESS", default_headless) != "0"}
     # The Go-side Grok protocol profile is a macOS Chrome profile. Keep the
@@ -105,12 +107,14 @@ def browser_kwargs(
         kw["args"] = [f"--fingerprint-platform={fingerprint_platform}"]
     configured_timezone = str(
         timezone
+        or saved_profile.get("timezone_iana")
         or os.getenv(f"{prefix}_TIMEZONE")
         or os.getenv("GROK_BROWSER_TIMEZONE")
         or ""
     ).strip()
     configured_locale = str(
         locale
+        or saved_profile.get("navigator_language")
         or os.getenv(f"{prefix}_LOCALE")
         or os.getenv("GROK_BROWSER_LOCALE")
         or ""
@@ -119,6 +123,33 @@ def browser_kwargs(
         kw["timezone"] = configured_timezone
     if configured_locale:
         kw["locale"] = configured_locale
+
+    # The Go registration engine persists the platform-specific browser
+    # environment with the task. Pass the stable browser fields to
+    # CloakBrowser as context options so the Worker does not silently fall
+    # back to one global UA and viewport for every account. Values are
+    # validated here because this is an internal API boundary.
+    user_agent = str(saved_profile.get("user_agent") or "").strip()
+    if 32 <= len(user_agent) <= 512:
+        kw["user_agent"] = user_agent
+
+    def bounded_int(name: str, low: int, high: int) -> int | None:
+        try:
+            value = int(saved_profile.get(name) or 0)
+        except (TypeError, ValueError):
+            return None
+        return value if low <= value <= high else None
+
+    width = bounded_int("inner_width", 320, 4096) or bounded_int("screen_width", 320, 4096)
+    height = bounded_int("inner_height", 240, 4096) or bounded_int("screen_height", 240, 4096)
+    if width and height:
+        kw["viewport"] = {"width": width, "height": height}
+    try:
+        device_scale_factor = float(saved_profile.get("device_pixel_ratio") or 0)
+    except (TypeError, ValueError):
+        device_scale_factor = 0
+    if 0.5 <= device_scale_factor <= 4:
+        kw["device_scale_factor"] = device_scale_factor
     configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
     if configured_proxy:
         kw["proxy"] = configured_proxy
