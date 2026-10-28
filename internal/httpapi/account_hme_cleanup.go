@@ -22,6 +22,7 @@ type hmeCleanupResult struct {
 type hmeCleanupSummary struct {
 	Enabled  bool               `json:"enabled"`
 	Deleted  int                `json:"deleted"`
+	Released int                `json:"released"`
 	Skipped  int                `json:"skipped"`
 	Retained int                `json:"retained"`
 	NotFound int                `json:"not_found"`
@@ -44,7 +45,7 @@ func isHMEErrorCode(err error, code string) bool {
 
 func hmeMailboxFromAccount(account map[string]any) (registerruntime.Mailbox, bool) {
 	mailbox := mapValue(account["registration_mailbox"])
-	if !strings.EqualFold(stringValue(mailbox["provider"]), "icloud_hme") {
+	if provider := stringValue(mailbox["provider"]); !strings.EqualFold(provider, "icloud_hme") && !strings.EqualFold(provider, "hme") {
 		return registerruntime.Mailbox{}, false
 	}
 	return registerruntime.Mailbox{
@@ -74,7 +75,7 @@ func mailboxPlatform(account map[string]any) string {
 	return "openai"
 }
 
-func (s *Server) cleanupHMEMailboxes(ctx context.Context, accounts []map[string]any) hmeCleanupSummary {
+func (s *Server) cleanupHMEMailboxes(ctx context.Context, accounts []map[string]any, deletedBefore ...time.Time) hmeCleanupSummary {
 	summary := hmeCleanupSummary{}
 	summary.Results = make([]hmeCleanupResult, 0, len(accounts))
 	if len(accounts) == 0 {
@@ -97,6 +98,9 @@ func (s *Server) cleanupHMEMailboxes(ctx context.Context, accounts []map[string]
 		return summary
 	}
 	summary.Enabled = true
+	if s.mailboxStore != nil {
+		return s.cleanupMailboxRegistry(ctx, accounts, summary, deletedBefore...)
+	}
 	return s.cleanupCoordinatedMailboxes(ctx, accounts, summary)
 }
 
@@ -137,8 +141,7 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, accounts []map
 			continue
 		}
 		if !boolValue(session.Source().Config["delete_hme_mailbox_on_account_delete"], false) {
-			result.Status = "retained"
-			result.Message = "邮箱来源未启用删除策略"
+			result.Status, result.Message = "retained", "邮箱来源未启用删除策略"
 			summary.Retained++
 			summary.Results = append(summary.Results, result)
 			continue
@@ -165,7 +168,7 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, accounts []map
 		}
 		for _, candidate := range candidates {
 			if deleteErr := session.Delete(cleanupCtx, candidate); deleteErr != nil {
-				if isHMEErrorCode(deleteErr, "mailbox_not_found") {
+				if errors.Is(deleteErr, mailboxstore.ErrProviderMailboxNotFound) {
 					_ = session.MarkCleanup(cleanupCtx, candidate, true, "mailbox_not_found")
 					result.Status = "not_found"
 					summary.NotFound++
@@ -186,10 +189,61 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, accounts []map
 	return summary
 }
 
+// Registry ownership is released before reading source settings or opening a
+// provider session. Upstream cleanup is a separate, optional second step.
+func (s *Server) cleanupMailboxRegistry(ctx context.Context, accounts []map[string]any, summary hmeCleanupSummary, deletedBefore ...time.Time) hmeCleanupSummary {
+	for _, account := range accounts {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
+		result := hmeCleanupResult{AccountRef: accountPublicRef(account), Email: firstNonEmpty(stringValue(mapValue(account["registration_mailbox"])["email"]), stringValue(account["email"]))}
+		accountID := firstNonEmpty(stringValue(account["id"]), stringValue(account["account_id"]), result.AccountRef)
+		assets, err := s.mailboxManager.ReleaseForAccount(cleanupCtx, mailboxPlatform(account), accountID, result.Email, deletedBefore...)
+		if err != nil {
+			result.Status, result.Message = "failed", "账号已删除，邮箱占用释放失败，请核对邮箱数据库"
+			summary.Failed++
+		} else if len(assets) == 0 {
+			result.Status, result.Message = "retained", "没有匹配的平台占用，已保留上游邮箱"
+			summary.Retained++
+		} else {
+			summary.Released++
+			result.Status, result.Message = "released", "已释放平台占用，保留上游邮箱"
+			for _, asset := range assets {
+				// Disabled assets are retained even when the source opts into cleanup.
+				if asset.Status != "available" {
+					summary.Retained++
+					continue
+				}
+				source, sourceErr := s.mailboxManager.SourceForMailbox(cleanupCtx, asset)
+				if sourceErr != nil || !boolValue(source.Config["delete_hme_mailbox_on_account_delete"], false) {
+					summary.Retained++
+					if sourceErr != nil {
+						result.Message = "已释放平台占用；邮箱来源无法匹配，已保留上游邮箱"
+					}
+					continue
+				}
+				_, deleteErr := s.mailboxManager.DeleteAsset(cleanupCtx, asset.ID, "account_cleanup")
+				if errors.Is(deleteErr, mailboxstore.ErrMailboxInUse) || errors.Is(deleteErr, mailboxstore.ErrMailboxBusy) {
+					result.Message = "已释放平台占用；邮箱已被其他任务占用，已保留上游邮箱"
+					summary.Retained++
+				} else if deleteErr != nil {
+					result.Status, result.Message = "failed", "已释放平台占用；上游邮箱删除失败，可在邮箱管理重试"
+					summary.Failed++
+				} else {
+					result.Status, result.Message = "deleted", "已释放平台占用并删除上游邮箱"
+					summary.Deleted++
+				}
+			}
+		}
+		cancel()
+		summary.Results = append(summary.Results, result)
+	}
+	return summary
+}
+
 func (s *Server) deleteAccountsAndCleanup(ctx context.Context, tokens []string, accounts []map[string]any) (int, []map[string]any, hmeCleanupSummary, error) {
+	deletedBefore := time.Now()
 	removed, remaining, err := s.store.DeleteAccounts(tokens)
 	if err != nil {
 		return 0, nil, hmeCleanupSummary{}, err
 	}
-	return removed, remaining, s.cleanupHMEMailboxes(ctx, accounts), nil
+	return removed, remaining, s.cleanupHMEMailboxes(ctx, accounts, deletedBefore), nil
 }

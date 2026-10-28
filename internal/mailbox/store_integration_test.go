@@ -2,8 +2,6 @@ package mailbox
 
 import (
 	"context"
-	"os"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,22 +11,11 @@ import (
 // PostgreSQL service. Run it with MAILBOX_TEST_DATABASE_URL pointing at an
 // isolated test database.
 func TestDisabledMailboxLifecycle(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("MAILBOX_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("MAILBOX_TEST_DATABASE_URL is not configured")
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	store, err := Open(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
+	store := isolatedMailboxStore(t)
 	prefix := "it_disabled_"
-	if _, err := store.db.ExecContext(ctx, `DELETE FROM mailboxes WHERE id LIKE $1`, prefix+"%"); err != nil {
-		t.Fatal(err)
-	}
-	defer store.db.ExecContext(context.Background(), `DELETE FROM mailboxes WHERE id LIKE $1`, prefix+"%")
+	var err error
 
 	first := Mailbox{ID: prefix + "first", SourceID: "hme-test", SourceType: "icloud_hme", SourceAccountID: "acc-test", SourceMailboxID: "alias-first", Email: prefix + "first@example.test", Status: "disabled"}
 	second := Mailbox{ID: prefix + "second", SourceID: "hme-test", SourceType: "icloud_hme", SourceAccountID: "acc-test", SourceMailboxID: "alias-second", Email: prefix + "second@example.test", Status: "disabled"}

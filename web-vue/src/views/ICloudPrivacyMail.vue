@@ -25,7 +25,7 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号时只释放对应平台的占用，最后一个占用释放后才会删除上游邮箱。
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱未禁用且没有其他占用时，才会自动删除上游邮箱。也可在此手动删除未占用邮箱，操作日志会保留。
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
@@ -68,7 +68,7 @@
                 </label>
                 <label class="flex items-center gap-2 self-end pb-2 text-xs text-muted-foreground">
                   <input v-model="sourceDraft(source).config.delete_hme_mailbox_on_account_delete" type="checkbox" :disabled="sourceSaving === source.id" />
-                  删除账号时同步删除上游邮箱
+                  最后一个账号删除后同步删除上游邮箱
                 </label>
               </div>
               <p v-else class="mt-3 text-xs leading-5 text-muted-foreground">配置已迁移到邮箱资产管理模块，当前注册适配器尚未接入此来源。</p>
@@ -109,10 +109,10 @@
                 <MetaChip size="xs" :tone="mailboxTone(mailbox)">{{ mailboxLabel(mailbox) }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
-                <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailbox.openai_claimed ? '已占用' : '可用' }}</MetaChip>
-                <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '可用' }}</MetaChip>
+                <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailbox.openai_claimed ? '已占用' : '未占用' }}</MetaChip>
+                <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '未占用' }}</MetaChip>
               </div>
-              <div class="mt-3 flex justify-end">
+              <div class="mt-3 flex justify-end gap-2">
                 <Button
                   size="xs"
                   variant="outline"
@@ -120,6 +120,16 @@
                   @click="setMailboxStatus(mailbox)"
                 >
                   {{ mailboxActionID === mailbox.id ? '处理中...' : mailbox.status === 'disabled' ? '启用邮箱' : '禁用邮箱' }}
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  :disabled="Boolean(mailboxActionID) || mailbox.status === 'deleted' || mailbox.openai_claimed || mailbox.grok_claimed"
+                  :title="mailbox.openai_claimed || mailbox.grok_claimed ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
+                  root-class="text-rose-600"
+                  @click="deleteMailbox(mailbox)"
+                >
+                  {{ mailboxActionID === mailbox.id ? '处理中...' : mailbox.status === 'cleanup_pending' ? '重试删除' : '删除邮箱' }}
                 </Button>
               </div>
               <p class="mt-3 break-all text-[11px] text-muted-foreground">资产 ID：{{ mailbox.id || '-' }}</p>
@@ -154,7 +164,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onActivated, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
@@ -352,12 +362,33 @@ async function setMailboxStatus(mailbox: ICloudMailbox) {
   }
 }
 
+async function deleteMailbox(mailbox: ICloudMailbox) {
+  const id = String(mailbox.id || '')
+  if (!id || mailbox.openai_claimed || mailbox.grok_claimed) return
+  if (!window.confirm(`确认删除邮箱 ${mailbox.email || id}？这会同步删除上游邮箱；在其他渠道使用过此邮箱的账号也会失去收件能力。操作日志将保留。`)) return
+  mailboxActionID.value = id
+  notice.value = ''
+  pageError.value = ''
+  try {
+    const result = await icloudApi.deleteMailbox(id)
+    if (!result.success) throw new Error('邮箱删除未完成')
+    notice.value = `${mailbox.email || id} 已删除，操作日志已保留。`
+    await Promise.all([loadCounts(), loadMailboxes(), loadEvents()])
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : String(error || '邮箱删除失败')
+    await Promise.allSettled([loadCounts(), loadMailboxes(), loadEvents()])
+  } finally {
+    mailboxActionID.value = ''
+  }
+}
+
 async function loadEvents() {
   const result = await icloudApi.listEvents({ page: 1, page_size: 50 })
   events.value = result.events || []
 }
 
 async function refreshAll() {
+  if (loading.value) return
   loading.value = true
   pageError.value = ''
   try {
@@ -382,7 +413,7 @@ async function reconcile() {
   try {
     const result = await icloudApi.reconcile()
     if (!result.success) throw new Error((result.errors || []).join('；') || '邮箱核对失败')
-    notice.value = `核对完成：发现 ${result.aliases || 0} 个上游邮箱，关联 GPT ${result.openai_claims || 0} 个、Grok ${result.grok_claims || 0} 个。`
+    notice.value = `核对完成：发现 ${result.aliases || 0} 个上游邮箱，关联 GPT ${result.openai_claims || 0} 个、Grok ${result.grok_claims || 0} 个，修复历史占用 ${result.released_claims || 0} 个。`
     await refreshAll()
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '核对失败')
@@ -408,4 +439,5 @@ async function changePage(offset: number) {
 }
 
 onMounted(refreshAll)
+onActivated(refreshAll)
 </script>

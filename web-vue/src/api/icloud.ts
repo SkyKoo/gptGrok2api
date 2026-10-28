@@ -231,7 +231,9 @@ export const icloudApi = {
     apiClient.get<never, ICloudMailboxList>(path('mailboxes'), { ...requestConfig, params }),
   updateMailboxStatus: (id: string, status: 'available' | 'disabled') =>
     apiClient.post<{ status: 'available' | 'disabled' }, { success?: boolean; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}/status`), { status }, requestConfig),
-  reconcile: () => apiClient.post<never, { success?: boolean; aliases?: number; openai_claims?: number; grok_claims?: number; missing?: string[]; errors?: string[] }>(path('reconcile'), {}, requestConfig),
+  deleteMailbox: (id: string) =>
+    apiClient.delete<never, { success?: boolean; status?: string; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}`), requestConfig),
+  reconcile: () => apiClient.post<never, { success?: boolean; aliases?: number; openai_claims?: number; grok_claims?: number; released_claims?: number; missing?: string[]; errors?: string[] }>(path('reconcile'), {}, requestConfig),
   listEvents: (params: { page?: number; page_size?: number; mailbox_id?: string; platform?: string } = {}) =>
     apiClient.get<never, { events?: ICloudMailboxEvent[]; total?: number; page?: number; page_size?: number }>(path('events'), { ...requestConfig, params }),
   syncMailbox: (id: string, after?: string) =>

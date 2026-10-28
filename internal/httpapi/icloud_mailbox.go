@@ -260,16 +260,14 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 }
 
 // iCloudMailboxAction handles mutations for one canonical mailbox asset. The
-// exact list endpoint remains GET-only; status changes use
-// /api/icloud/mailboxes/{id}/status so they cannot be confused with an HME
-// provider request.
+// list endpoint remains GET-only; status changes and explicit upstream deletion
+// use separate actions so provider requests stay behind the resource manager.
 func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/api/icloud/mailboxes/")
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) != 2 || parts[1] != "status" {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/icloud/mailboxes/"), "/")
+	if len(parts) > 2 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "mailbox action not found", "not_found")
 		return
 	}
@@ -278,30 +276,51 @@ func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid mailbox id", "invalid_request_error")
 		return
 	}
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+	var updated mailboxstore.Mailbox
+	if len(parts) == 1 {
+		if r.Method != http.MethodDelete {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+			return
+		}
+		if s.mailboxManager == nil {
+			writeError(w, http.StatusServiceUnavailable, "邮箱资源管理模块不可用", "mailbox_provider_unavailable")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 35*time.Second)
+		defer cancel()
+		updated, err = s.mailboxManager.DeleteAsset(ctx, mailboxID, "admin")
+	} else if parts[1] == "status" {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+			return
+		}
+		var request struct {
+			Status string `json:"status"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		updated, err = s.mailboxStore.SetStatus(r.Context(), mailboxID, request.Status)
+	} else {
+		writeError(w, http.StatusNotFound, "mailbox action not found", "not_found")
 		return
 	}
-	var request struct {
-		Status string `json:"status"`
-	}
-	if !decodeJSON(w, r, &request) {
-		return
-	}
-	updated, err := s.mailboxStore.SetStatus(r.Context(), mailboxID, request.Status)
 	if err != nil {
-		statusCode := http.StatusInternalServerError
-		code := "mailbox_database_error"
+		status, code, message := http.StatusInternalServerError, "mailbox_database_error", "邮箱操作未完成，请刷新后查看操作日志"
 		switch {
 		case errors.Is(err, mailboxstore.ErrMailboxNotFound):
-			statusCode, code = http.StatusNotFound, "mailbox_not_found"
+			status, code, message = http.StatusNotFound, "mailbox_not_found", "邮箱资产不存在"
+		case errors.Is(err, mailboxstore.ErrMailboxInUse), errors.Is(err, mailboxstore.ErrMailboxBusy):
+			status, code, message = http.StatusConflict, "mailbox_in_use", err.Error()
 		case errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
-			statusCode, code = http.StatusBadRequest, "invalid_request_error"
+			status, code, message = http.StatusBadRequest, "invalid_request_error", err.Error()
+		case updated.Status == "cleanup_pending":
+			status, code, message = http.StatusBadGateway, "mailbox_provider_error", "上游删除未完成，邮箱已保留为待清理，可查看日志并重试"
 		}
-		writeError(w, statusCode, err.Error(), code)
+		writeError(w, status, message, code)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"success": true, "mailbox": map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": updated.Status, "mailbox": map[string]any{
 		"id": updated.ID, "email": updated.Email, "source_id": updated.SourceID, "source_type": updated.SourceType,
 		"source_account_id": updated.SourceAccountID, "source_mailbox_id": updated.SourceMailboxID,
 		"status": updated.Status, "last_error": updated.LastError, "created_at": updated.CreatedAt, "updated_at": updated.UpdatedAt,
@@ -381,6 +400,11 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 		}
 	} else {
 		result["errors"] = append(result["errors"].([]string), "邮箱上游未配置")
+	}
+	released, repairErr := s.reconcileDeletedMailboxClaims(ctx)
+	result["released_claims"] = released
+	if repairErr != nil {
+		result["errors"] = append(result["errors"].([]string), "历史占用核对失败："+repairErr.Error())
 	}
 	reconcile := func(platform string, accounts []map[string]any, counter string) {
 		for _, account := range accounts {

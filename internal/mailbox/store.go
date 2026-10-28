@@ -89,9 +89,12 @@ type Store struct {
 }
 
 var (
-	ErrMailboxNotFound       = errors.New("mailbox not found")
-	ErrInvalidMailboxStatus  = errors.New("mailbox status must be available or disabled")
-	ErrMailboxStateImmutable = errors.New("mailbox is pending cleanup or deleted")
+	ErrMailboxNotFound         = errors.New("mailbox not found")
+	ErrInvalidMailboxStatus    = errors.New("mailbox status must be available or disabled")
+	ErrMailboxStateImmutable   = errors.New("mailbox is pending cleanup or deleted")
+	ErrMailboxInUse            = errors.New("邮箱仍被平台占用，请先删除关联账号或结束注册任务")
+	ErrMailboxBusy             = errors.New("邮箱正在执行删除，请稍后刷新状态")
+	ErrProviderMailboxNotFound = errors.New("upstream mailbox not found")
 )
 
 // MailboxListFilter controls the mailbox asset list shown in the admin UI.
@@ -301,7 +304,7 @@ func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox
 			source_account_id=EXCLUDED.source_account_id,
 			source_mailbox_id=EXCLUDED.source_mailbox_id,
 			email=EXCLUDED.email,
-			status=CASE WHEN mailboxes.status IN ('reserved','active','cleanup_pending','disabled') THEN mailboxes.status ELSE EXCLUDED.status END,
+			status=CASE WHEN mailboxes.status IN ('reserved','active','cleanup_pending','disabled','deleted') THEN mailboxes.status ELSE EXCLUDED.status END,
 			last_error=CASE WHEN EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailboxes.last_error END,
 			updated_at=now()
 		RETURNING id, source_id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at`,
@@ -448,6 +451,10 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 		tx.Rollback()
 		return Mailbox{}, err
 	}
+	if item.Status == "cleanup_pending" || item.Status == "deleted" {
+		tx.Rollback()
+		return Mailbox{}, ErrMailboxStateImmutable
+	}
 	claimID := newID("clm")
 	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, item.ID, platform, jobID); err != nil {
 		tx.Rollback()
@@ -497,6 +504,10 @@ func (s *Store) EnsureClaim(ctx context.Context, platform, jobID string, item Ma
 		tx.Rollback()
 		return err
 	}
+	if item.Status == "cleanup_pending" || item.Status == "deleted" {
+		tx.Rollback()
+		return ErrMailboxStateImmutable
+	}
 	var claimID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM mailbox_claims WHERE mailbox_id=$1 AND platform=$2 AND status IN ('reserved','active') LIMIT 1`, item.ID, platform).Scan(&claimID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -524,9 +535,13 @@ func (s *Store) Commit(ctx context.Context, platform, jobID, accountID string, i
 	if err != nil {
 		return err
 	}
-	var canonicalID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, item.Email).Scan(&canonicalID); err == nil {
+	var canonicalID, currentStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT id,status FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1 FOR UPDATE`, item.Email).Scan(&canonicalID, &currentStatus); err == nil {
 		item.ID = canonicalID
+		if currentStatus == "cleanup_pending" || currentStatus == "deleted" {
+			tx.Rollback()
+			return ErrMailboxStateImmutable
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		tx.Rollback()
 		return err
@@ -601,7 +616,7 @@ func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbo
 		status = "active"
 	}
 	var finalStatus string
-	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE $1 END, updated_at=now() WHERE id=$2 RETURNING status`, status, item.ID).Scan(&finalStatus); err != nil {
+	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status IN ('disabled','cleanup_pending','deleted') THEN status ELSE $1 END, updated_at=now() WHERE id=$2 RETURNING status`, status, item.ID).Scan(&finalStatus); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -612,7 +627,25 @@ func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbo
 	return tx.Commit()
 }
 
-func (s *Store) ReleaseForAccount(ctx context.Context, platform, accountID, email string) ([]Mailbox, error) {
+// ReleaseForAccount always releases local platform ownership, independently of
+// provider availability or the optional upstream deletion policy. Returned assets
+// include shared and disabled mailboxes, so callers can report retention precisely.
+func (s *Store) ReleaseForAccount(ctx context.Context, platform, accountID, email string, deletedBefore ...time.Time) ([]Mailbox, error) {
+	before := time.Now()
+	if len(deletedBefore) > 0 {
+		before = deletedBefore[0]
+	}
+	return s.releaseAccountClaims(ctx, platform, accountID, email, "", before, false)
+}
+
+// ReleaseDeletedAccount repairs a historical deletion only when a claim's saved
+// account/job identity matches and it predates the deletion. The caller also
+// verifies that no current account uses this email. Reservations are untouched.
+func (s *Store) ReleaseDeletedAccount(ctx context.Context, platform, accountID, jobID, email string, deletedAt time.Time) ([]Mailbox, error) {
+	return s.releaseAccountClaims(ctx, platform, accountID, email, jobID, deletedAt, true)
+}
+
+func (s *Store) releaseAccountClaims(ctx context.Context, platform, accountID, email, jobID string, before time.Time, exactOnly bool) ([]Mailbox, error) {
 	if !s.Enabled() {
 		return nil, nil
 	}
@@ -622,61 +655,53 @@ func (s *Store) ReleaseForAccount(ctx context.Context, platform, accountID, emai
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT c.id,c.mailbox_id,m.source_type,m.email FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.platform=$1 AND c.status IN ('reserved','active') AND (($2 <> '' AND c.account_id=$2) OR ($3 <> '' AND lower(m.email)=lower($3))) FOR UPDATE`, platform, accountID, email)
+	defer tx.Rollback()
+	// Email fallback is needed for legacy active claims whose account_id stored
+	// a registration job ID. Never release a reservation by email; the cutoff
+	// also protects newer activations while a deletion request is in flight.
+	predicate := `c.platform=$1 AND c.status='active' AND c.updated_at <= $4
+		AND (($2 <> '' AND c.account_id=$2) OR ($5 <> '' AND c.registration_job_id=$5)
+		 OR (NOT $6 AND $3 <> '' AND lower(m.email)=$3))`
+	rows, err := tx.QueryContext(ctx, `SELECT m.id FROM mailboxes m WHERE EXISTS (
+		SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND `+predicate+`)
+		ORDER BY m.id FOR UPDATE OF m`, platform, accountID, email, before, jobID, exactOnly)
 	if err != nil {
-		tx.Rollback()
 		return nil, err
 	}
-	defer rows.Close()
-	type released struct{ claimID, mailboxID, sourceType, email string }
-	var claims []released
+	var ids []string
 	for rows.Next() {
-		var item released
-		if err := rows.Scan(&item.claimID, &item.mailboxID, &item.sourceType, &item.email); err != nil {
-			tx.Rollback()
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		claims = append(claims, item)
+		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil {
-		tx.Rollback()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return nil, err
-	}
-	for _, claim := range claims {
-		if _, err := tx.ExecContext(ctx, `UPDATE mailbox_claims SET status='released', released_at=now(), updated_at=now() WHERE id=$1`, claim.claimID); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-		if err := s.writeEventTx(ctx, tx, Event{MailboxID: claim.mailboxID, ClaimID: claim.claimID, EventType: "account_claim_released", SourceType: claim.sourceType, Platform: platform, AccountID: accountID, Result: "released"}); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
 	}
 	var result []Mailbox
-	for _, claim := range claims {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')`, claim.mailboxID).Scan(&active); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
-		if active > 0 {
-			_, _ = tx.ExecContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'active' END, updated_at=now() WHERE id=$1`, claim.mailboxID)
+	for _, id := range ids {
+		var claimID string
+		err := tx.QueryRowContext(ctx, `UPDATE mailbox_claims c SET status='released', released_at=now(), updated_at=now()
+			FROM mailboxes m WHERE m.id=$7 AND c.mailbox_id=m.id AND `+predicate+`
+			RETURNING c.id`, platform, accountID, email, before, jobID, exactOnly, id).Scan(&claimID)
+		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
-		var currentStatus string
-		if err := tx.QueryRowContext(ctx, `SELECT status FROM mailboxes WHERE id=$1 FOR UPDATE`, claim.mailboxID).Scan(&currentStatus); err != nil {
-			tx.Rollback()
+		if err != nil {
 			return nil, err
 		}
-		// A disabled asset is intentionally retained in HME even after its
-		// last platform claim is released. It can be re-enabled later by an
-		// administrator and must not be sent to provider cleanup.
-		if currentStatus == "disabled" {
-			continue
+		item, err := scanMailbox(tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE
+			WHEN status IN ('disabled','cleanup_pending','deleted') THEN status
+			WHEN EXISTS (SELECT 1 FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')) THEN 'active'
+			ELSE 'available' END, updated_at=now() WHERE id=$1 RETURNING `+mailboxColumns, id))
+		if err != nil {
+			return nil, err
 		}
-		var item Mailbox
-		if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status='cleanup_pending', updated_at=now() WHERE id=$1 RETURNING id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, claim.mailboxID).Scan(&item.ID, &item.SourceID, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Email, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			tx.Rollback()
+		if err := s.writeEventTx(ctx, tx, Event{MailboxID: id, ClaimID: claimID, EventType: "account_claim_released", SourceType: item.SourceType, Platform: platform, AccountID: accountID, Result: item.Status}); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

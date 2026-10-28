@@ -51,7 +51,14 @@ func (p *hmeMailboxProvider) WaitCode(ctx context.Context, box mailboxstore.Mail
 }
 
 func (p *hmeMailboxProvider) Delete(ctx context.Context, box mailboxstore.Mailbox) error {
-	return p.client.DeleteMailbox(ctx, registerMailbox(box))
+	err := p.client.DeleteMailbox(ctx, registerMailbox(box))
+	if isHMEErrorCode(err, "mailbox_not_found") {
+		return mailboxstore.ErrProviderMailboxNotFound
+	}
+	if err != nil {
+		return errors.New(hmeCleanupMessage(err))
+	}
+	return nil
 }
 
 func (p *hmeMailboxProvider) List(ctx context.Context) ([]mailboxstore.Mailbox, error) {

@@ -275,3 +275,74 @@ func (s *ResourceSession) Close() {
 		s.provider.Close()
 	}
 }
+
+// ReleaseForAccount does not open a provider session: disabling a source or a
+// provider outage must never prevent releasing the deleted account's claim.
+func (m *ResourceManager) ReleaseForAccount(ctx context.Context, platform, accountID, email string, deletedBefore ...time.Time) ([]Mailbox, error) {
+	if m == nil || m.store == nil {
+		return nil, errors.New("mailbox database is not configured")
+	}
+	return m.store.ReleaseForAccount(ctx, platform, accountID, email, deletedBefore...)
+}
+
+// SourceForMailbox uses the asset's source, never whichever source happens to be
+// enabled first. Legacy assets without source_id require one unambiguous match.
+func (m *ResourceManager) SourceForMailbox(ctx context.Context, box Mailbox) (Source, error) {
+	sources, err := m.sources(ctx)
+	if err != nil {
+		return Source{}, err
+	}
+	matches := []Source{}
+	for _, source := range sources {
+		kind := strings.ToLower(source.Type)
+		boxKind := strings.ToLower(box.SourceType)
+		if kind == "icloud_hme" {
+			kind = "hme"
+		}
+		if boxKind == "icloud_hme" {
+			boxKind = "hme"
+		}
+		if box.SourceID != "" && source.ID != box.SourceID {
+			continue
+		}
+		if boxKind != "" && kind != boxKind {
+			continue
+		}
+		if account, _ := source.Config["account_id"].(string); box.SourceAccountID != "" && account != box.SourceAccountID {
+			continue
+		}
+		matches = append(matches, source)
+	}
+	if len(matches) != 1 {
+		return Source{}, errors.New("邮箱来源无法唯一匹配，请核对来源和上游账号配置")
+	}
+	return matches[0], nil
+}
+
+func (m *ResourceManager) DeleteAsset(ctx context.Context, id, actor string) (Mailbox, error) {
+	if m == nil || m.store == nil || m.factory == nil {
+		return Mailbox{}, errors.New("邮箱资源管理模块不可用")
+	}
+	box, err := m.store.Get(ctx, id)
+	if err != nil || box.Status == "deleted" {
+		return box, err
+	}
+	source, sourceErr := m.SourceForMailbox(ctx, box)
+	return m.store.Delete(ctx, id, actor, func(ctx context.Context, current Mailbox) error {
+		if sourceErr != nil {
+			return sourceErr
+		}
+		if current.SourceID != box.SourceID || current.SourceAccountID != box.SourceAccountID || current.SourceType != box.SourceType {
+			return errors.New("邮箱来源已变更，请刷新后重试")
+		}
+		// Enabled gates new registration. Explicit maintenance still works for a
+		// stopped source, using its saved configuration without re-enabling it.
+		source.Enabled = true
+		provider, err := m.factory(source, time.Second)
+		if err != nil {
+			return errors.New("邮箱来源未配置或暂不支持删除")
+		}
+		defer provider.Close()
+		return provider.Delete(ctx, box)
+	})
+}

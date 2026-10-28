@@ -691,12 +691,16 @@ func (s *Server) deleteRegisteredGrokAccounts(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
+	deletedBefore := time.Now()
 	removed, err := s.registerStore.Delete(ids)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accounts)
+	for _, account := range accounts {
+		account["platform"] = "grok"
+	}
+	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accounts, deletedBefore)
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"removed": removed, "count": removed, "upstream_deleted": 0, "hme_cleanup": hmeCleanup})
 }
 

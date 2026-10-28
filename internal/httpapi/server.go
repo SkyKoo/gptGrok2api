@@ -331,12 +331,22 @@ func (s *Server) maybeAutoRemoveInvalidAccount(account accounts.Account) {
 	if err != nil || !boolValue(settings["auto_remove_invalid_accounts"], false) {
 		return
 	}
+	deletedBefore := time.Now()
 	removed, _, err := s.store.DeleteAccounts([]string{account.Token})
 	if err != nil {
 		log.Printf("auto remove invalid account failed: %v", err)
 		return
 	}
 	if removed > 0 {
+		fields := cloneMap(account.Fields)
+		fields["access_token"] = account.Token
+		cleanup := s.cleanupHMEMailboxes(context.Background(), []map[string]any{fields}, deletedBefore)
+		if cleanup.Failed > 0 {
+			log.Printf("auto removed account %s but mailbox cleanup requires attention", accountPublicRef(account.Fields))
+		}
+		if cleanup.Released > 0 || cleanup.Deleted > 0 {
+			log.Printf("released mailbox claim while auto removing invalid account %s: released=%d deleted=%d", accountPublicRef(account.Fields), cleanup.Released, cleanup.Deleted)
+		}
 		log.Printf("auto removed invalid account %s", accountPublicRef(account.Fields))
 	}
 }
@@ -1758,13 +1768,14 @@ func (s *Server) deleteAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	deletedBefore := time.Now()
 	removed, items, err := s.store.DeleteAccounts(tokens)
 	s.authStartMu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
-	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accountsToDelete)
+	hmeCleanup := s.cleanupHMEMailboxes(r.Context(), accountsToDelete, deletedBefore)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"removed":     removed,
 		"errors":      missing,

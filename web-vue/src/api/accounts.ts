@@ -310,6 +310,8 @@ export type HMECleanupResult = {
 
 export type HMECleanupSummary = {
   enabled?: boolean
+  released?: number
+  retained?: number
   deleted?: number
   skipped?: number
   not_found?: number
