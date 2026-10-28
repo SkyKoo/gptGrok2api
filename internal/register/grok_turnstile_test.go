@@ -56,6 +56,9 @@ func TestHTTPGrokBrowserSolverPassesProfileEnvironment(t *testing.T) {
 		if !ok {
 			t.Fatalf("full browser profile was not forwarded: %s", body)
 		}
+		if workerProfile["navigator_language"] != "en-US" || workerProfile["accept_language"] != "en-US,en;q=0.9" {
+			t.Fatalf("old task language was not normalized: %v", workerProfile)
+		}
 		if workerProfile["user_agent"] != "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36" {
 			t.Fatalf("worker profile lost user agent: %v", workerProfile)
 		}
@@ -66,7 +69,9 @@ func TestHTTPGrokBrowserSolverPassesProfileEnvironment(t *testing.T) {
 	}), Timeout: time.Second}
 	profile := NewBrowserProfile()
 	profile.TimezoneIANA = "America/Phoenix"
-	profile.NavigatorLanguage = "en-US"
+	profile.NavigatorLanguage = "zh-CN"
+	profile.NavigatorLanguages = []string{"zh-CN", "zh"}
+	profile.AcceptLanguage = "zh-CN,zh;q=0.9"
 	profile.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
 	profile.InnerWidth = 1440
 	profile.DevicePixelRatio = 2
@@ -74,6 +79,9 @@ func TestHTTPGrokBrowserSolverPassesProfileEnvironment(t *testing.T) {
 	solver.SetBrowserProfile(profile)
 	if _, err := solver.SolveContext(context.Background(), "site-key", "https://accounts.x.ai/sign-up", "direct"); err != nil {
 		t.Fatalf("SolveContext() error = %v", err)
+	}
+	if _, err := solver.StartSignup(context.Background(), "https://accounts.x.ai/sign-up", "direct"); err != nil {
+		t.Fatalf("StartSignup() error = %v", err)
 	}
 }
 

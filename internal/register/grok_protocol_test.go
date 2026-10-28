@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -101,5 +102,35 @@ func TestGRPCResponseStatusTrailerRejects(t *testing.T) {
 	}
 	if grpcOK(body, nil) {
 		t.Fatal("non-zero grpc trailer status accepted")
+	}
+}
+
+func TestGrokProtocolFlowNormalizesSavedLanguage(t *testing.T) {
+	saved := NewBrowserProfile()
+	saved.NavigatorLanguage = "zh-CN"
+	saved.NavigatorLanguages = []string{"zh-CN", "zh"}
+	saved.AcceptLanguage = "zh-CN,zh;q=0.9"
+	saved.TimezoneIANA = "Asia/Shanghai"
+	want := saved
+	want.NavigatorLanguage = "en-US"
+	want.NavigatorLanguages = []string{"en-US", "en"}
+	want.AcceptLanguage = "en-US,en;q=0.9"
+	solver := &HTTPGrokBrowserSolver{}
+	flow, err := NewGrokProtocolFlow(GrokConfig{BrowserProfile: &saved}, solver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flow.Close()
+	for name, got := range map[string]BrowserProfile{
+		"saved flow":      flow.BrowserProfile(),
+		"protocol client": flow.Client.BrowserProfile(),
+		"browser worker":  *solver.Profile,
+	} {
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s changed account identity or did not normalize the language: got %+v want %+v", name, got, want)
+		}
+	}
+	if saved.NavigatorLanguage != "zh-CN" || saved.NavigatorLanguages[0] != "zh-CN" || saved.AcceptLanguage != "zh-CN,zh;q=0.9" {
+		t.Fatal("normalizing the Grok flow mutated the caller's saved profile")
 	}
 }

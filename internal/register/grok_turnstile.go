@@ -42,8 +42,8 @@ type GrokBrowserContextSolver interface {
 }
 
 // GrokBrowserProfileSetter supplies the account-scoped browser environment to
-// the worker. Locale and timezone must follow the persisted registration
-// profile instead of being global worker defaults.
+// the worker. The timezone follows the persisted registration profile; the
+// language is normalized to English for all Grok browser sessions.
 type GrokBrowserProfileSetter interface {
 	SetBrowserProfile(BrowserProfile)
 }
@@ -85,7 +85,7 @@ func (s *HTTPGrokBrowserSolver) SetBrowserProfile(profile BrowserProfile) {
 	if s == nil {
 		return
 	}
-	copy := profile
+	copy := normalizeGrokBrowserProfile(profile)
 	s.Profile = &copy
 }
 

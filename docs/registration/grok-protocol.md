@@ -24,7 +24,7 @@ worker 的可选环境变量：
 - `GROK_BROWSER_HEADLESS=0`：通过 Xvfb 运行 headed Chromium，用户不会看到窗口。
 - `GROK_BROWSER_CONCURRENCY=1`：浏览器并发槽位。
 - `GROK_BROWSER_TOKEN`：启用后，CFM 的 `grok.api_key` 作为 Bearer token 发送。
-- 注册任务会把账号 profile 中的语言和时区传给 worker；独立调试时可用 `GROK_BROWSER_LOCALE` 和 `GROK_BROWSER_TIMEZONE` 临时覆盖。
+- Grok 注册语言统一为 `en-US`，同时设置浏览器启动语言和 Context locale；旧任务的语言字段在恢复时统一为英文，其他画像字段继续复用。`GROK_BROWSER_LOCALE`、`TURNSTILE_LOCALE` 和请求中的 locale 不再覆盖此规则。时区仍跟随账号 profile，独立调试可用 `GROK_BROWSER_TIMEZONE` 设置默认时区。
 
 注册请求和 worker 必须使用同一代理出口。Token 是短期且单次使用的，worker 返回的 Cookie 仅用于当前注册任务，不写入日志。
 

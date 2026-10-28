@@ -1,6 +1,8 @@
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -38,6 +40,7 @@ class BrowserArgumentLayerTests(unittest.TestCase):
         self.assertEqual(context["user_agent"], self.profile["user_agent"])
         self.assertEqual(context["viewport"], {"width": 1440, "height": 900})
         self.assertEqual(context["device_scale_factor"], 2.0)
+        self.assertEqual(context["locale"], "en-US")
 
     def test_invalid_context_values_are_dropped(self):
         context = browser_context_kwargs(
@@ -49,7 +52,16 @@ class BrowserArgumentLayerTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(context, {})
+        self.assertEqual(context, {"locale": "en-US"})
+
+    def test_english_overrides_old_profiles_requests_and_host_settings(self):
+        with patch.dict(os.environ, {"TURNSTILE_LOCALE": "zh-CN", "GROK_BROWSER_LOCALE": "zh-CN", "LANG": "zh_CN.UTF-8"}):
+            for profile in (None, {}, {**self.profile, "navigator_language": "zh-CN"}):
+                with self.subTest(profile=profile):
+                    launch = browser_kwargs("TURNSTILE", locale="zh-CN", profile=profile)
+                    context = browser_context_kwargs(profile)
+                    self.assertEqual(launch["locale"], "en-US")
+                    self.assertEqual(context["locale"], "en-US")
 
 
 if __name__ == "__main__":

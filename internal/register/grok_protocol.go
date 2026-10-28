@@ -71,10 +71,20 @@ type GrokProtocolClient struct {
 	lastGRPCStatusPresent bool
 }
 
+// normalizeGrokBrowserProfile preserves the account identity while applying the
+// same English locale policy to saved tasks, protocol requests and the Worker.
+func normalizeGrokBrowserProfile(profile BrowserProfile) BrowserProfile {
+	profile.NavigatorLanguage = "en-US"
+	profile.NavigatorLanguages = []string{"en-US", "en"}
+	profile.AcceptLanguage = "en-US,en;q=0.9"
+	return profile
+}
+
 func NewGrokProtocolClient(proxy string, profile BrowserProfile, timeout time.Duration) (*GrokProtocolClient, error) {
 	if !profile.valid() {
 		profile = NewBrowserProfile()
 	}
+	profile = normalizeGrokBrowserProfile(profile)
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
@@ -898,6 +908,7 @@ func NewGrokProtocolFlow(cfg GrokConfig, solver GrokTurnstileSolver) (*GrokProto
 	if err != nil {
 		return nil, err
 	}
+	profile = client.BrowserProfile()
 	if materializer, ok := solver.(GrokSSOMaterializer); ok {
 		client.SetSSOMaterializer(materializer)
 	}

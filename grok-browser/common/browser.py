@@ -12,6 +12,8 @@ import re
 
 log = logging.getLogger(__name__)
 
+GROK_BROWSER_LANGUAGE = "en-US"
+
 # Parameterized fetch: caller values (url, method, body) arrive as evaluate() args,
 # NEVER interpolated into JS source — safe against quotes/injection.
 _FETCH_JS = (
@@ -112,17 +114,11 @@ def browser_kwargs(
         or os.getenv("GROK_BROWSER_TIMEZONE")
         or ""
     ).strip()
-    configured_locale = str(
-        locale
-        or saved_profile.get("navigator_language")
-        or os.getenv(f"{prefix}_LOCALE")
-        or os.getenv("GROK_BROWSER_LOCALE")
-        or ""
-    ).strip()
     if configured_timezone:
         kw["timezone"] = configured_timezone
-    if configured_locale:
-        kw["locale"] = configured_locale
+    # Grok uses one English language policy even when an old task or host
+    # has a different locale. Keep the argument for existing Worker callers.
+    kw["locale"] = GROK_BROWSER_LANGUAGE
 
     configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
     if configured_proxy:
@@ -143,7 +139,9 @@ def browser_context_kwargs(profile: dict = None) -> dict:
     Playwright.
     """
     saved_profile = profile if isinstance(profile, dict) else {}
-    context: dict = {}
+    # Chromium's --lang alone can retain the OS language on macOS. Setting
+    # the Context locale also applies to navigator.language, Intl and HTTP.
+    context: dict = {"locale": GROK_BROWSER_LANGUAGE}
 
     user_agent = str(saved_profile.get("user_agent") or "").strip()
     if 32 <= len(user_agent) <= 512:
