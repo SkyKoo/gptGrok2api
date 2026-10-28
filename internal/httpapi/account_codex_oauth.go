@@ -23,23 +23,26 @@ var codexSensitiveErrorPattern = regexp.MustCompile(`(?i)((?:access|refresh|id)_
 var codexJWTErrorPattern = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)
 
 type codexOAuthProgress struct {
-	Email             string
-	SessionID         string
-	AccountRef        string
-	CPAPoolID         string
-	RegistrationJobID string
-	EmailCodeSource   string
-	MailboxEmail      string
-	MailboxAccountID  string
-	EmailWaitAfter    time.Time
-	EmailAutoStarted  bool
-	Stage             string
-	Status            string
-	Message           string
-	Error             string
-	StartedAt         string
-	UpdatedAt         string
-	FinishedAt        string
+	Email                  string
+	SessionID              string
+	AccountRef             string
+	CPAPoolID              string
+	RegistrationJobID      string
+	EmailCodeSource        string
+	MailboxEmail           string
+	MailboxAccountID       string
+	MailboxSourceID        string
+	MailboxSourceType      string
+	MailboxSourceMailboxID string
+	EmailWaitAfter         time.Time
+	EmailAutoStarted       bool
+	Stage                  string
+	Status                 string
+	Message                string
+	Error                  string
+	StartedAt              string
+	UpdatedAt              string
+	FinishedAt             string
 }
 
 func codexProtocolEnvironment(account map[string]any, proxyURL string) (oauth.ProtocolEnvironment, error) {
@@ -148,6 +151,9 @@ func (s *Server) codexOAuthStart(w http.ResponseWriter, r *http.Request) {
 		progress.EmailCodeSource = "hme"
 		progress.MailboxEmail = mailbox.Email
 		progress.MailboxAccountID = mailbox.AccountID
+		progress.MailboxSourceID = mailbox.SourceID
+		progress.MailboxSourceType = mailbox.SourceType
+		progress.MailboxSourceMailboxID = mailbox.SourceMailboxID
 		if progress.Stage == "waiting_email_code" {
 			progress.Message = "上游要求邮箱验证码，正在从 iCloud 邮箱上游自动获取；也可手动输入"
 		}
@@ -330,7 +336,7 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游配置不可用，请手动输入邮箱验证码")
 		return
 	}
-	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", firstNonEmpty(progress.MailboxSourceID, cfg.MailboxSourceID), cfg.PollInterval)
 	if err != nil {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游连接不可用，请手动输入邮箱验证码")
 		return
@@ -338,7 +344,7 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 	defer mail.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.MailTimeout)
 	defer cancel()
-	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID}
+	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID, SourceID: progress.MailboxSourceID, SourceType: progress.MailboxSourceType, SourceMailboxID: progress.MailboxSourceMailboxID}
 	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
 		if err := preparer.Prepare(ctx, box); err != nil {
 			s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游会话不可用，请手动输入邮箱验证码")
@@ -423,7 +429,7 @@ func codexHMEMailbox(account map[string]any) (registerruntime.Mailbox, bool) {
 	if !strings.EqualFold(stringValue(mailbox["provider"]), "icloud_hme") {
 		return registerruntime.Mailbox{}, false
 	}
-	box := registerruntime.Mailbox{Email: strings.TrimSpace(stringValue(mailbox["email"])), AccountID: strings.TrimSpace(stringValue(mailbox["account_id"]))}
+	box := registerruntime.Mailbox{Email: strings.TrimSpace(stringValue(mailbox["email"])), AccountID: strings.TrimSpace(stringValue(mailbox["account_id"])), SourceID: strings.TrimSpace(stringValue(mailbox["source_id"])), SourceType: strings.TrimSpace(stringValue(mailbox["source_type"])), SourceMailboxID: strings.TrimSpace(stringValue(mailbox["source_mailbox_id"]))}
 	return box, box.Email != "" && box.AccountID != ""
 }
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	mailboxstore "github.com/auucoder/gptgrok2api-go/internal/mailbox"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -28,32 +29,12 @@ type hmeCleanupSummary struct {
 	Results  []hmeCleanupResult `json:"results,omitempty"`
 }
 
-func (s *Server) hmeCleanupConfig() (registerruntime.HMEConfig, bool) {
-	mail := mapValue(s.registerStore.Get()["mail"])
-	providers, _ := mail["providers"].([]any)
-	for _, raw := range providers {
-		provider := mapValue(raw)
-		if stringValue(provider["type"]) != "icloud_hme" || !boolValue(provider["enable"], true) {
-			continue
-		}
-		if !boolValue(provider["delete_hme_mailbox_on_account_delete"], false) {
-			return registerruntime.HMEConfig{}, false
-		}
-		return registerruntime.HMEConfig{
-			BaseURL:   strings.TrimRight(stringValue(provider["api_base"]), "/"),
-			Password:  stringValue(provider["admin_password"]),
-			AccountID: stringValue(provider["account_id"]),
-		}, true
-	}
-	return registerruntime.HMEConfig{}, false
-}
-
 func hmeCleanupMessage(err error) string {
 	var failure *registerruntime.Failure
 	if errors.As(err, &failure) {
 		return failure.Error()
 	}
-	return "HME 邮箱删除失败"
+	return "上游邮箱删除失败"
 }
 
 func isHMEErrorCode(err error, code string) bool {
@@ -70,6 +51,7 @@ func hmeMailboxFromAccount(account map[string]any) (registerruntime.Mailbox, boo
 		ID:              strings.TrimSpace(stringValue(mailbox["id"])),
 		Email:           strings.TrimSpace(stringValue(mailbox["email"])),
 		AccountID:       strings.TrimSpace(stringValue(mailbox["account_id"])),
+		SourceID:        strings.TrimSpace(stringValue(mailbox["source_id"])),
 		SourceType:      firstNonEmpty(stringValue(mailbox["source_type"]), "hme"),
 		SourceMailboxID: strings.TrimSpace(stringValue(mailbox["source_mailbox_id"])),
 	}, true
@@ -93,87 +75,40 @@ func mailboxPlatform(account map[string]any) string {
 }
 
 func (s *Server) cleanupHMEMailboxes(ctx context.Context, accounts []map[string]any) hmeCleanupSummary {
-	cfg, enabled := s.hmeCleanupConfig()
-	summary := hmeCleanupSummary{Enabled: enabled}
-	if !enabled {
-		return summary
-	}
+	summary := hmeCleanupSummary{}
 	summary.Results = make([]hmeCleanupResult, 0, len(accounts))
 	if len(accounts) == 0 {
 		return summary
 	}
-	if strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "" {
-		if s.mailboxStore == nil {
-			message := "邮箱资产数据库不可用，已保留上游邮箱"
-			if s.mailboxInitErr == nil {
-				message = "邮箱资产数据库未配置，已保留上游邮箱"
-			}
-			for _, account := range accounts {
-				box, isHME := hmeMailboxFromAccount(account)
-				result := hmeCleanupResult{AccountRef: accountPublicRef(account), Email: box.Email}
-				if !isHME {
-					result.Status = "not_hme_source"
-					summary.Skipped++
-				} else {
-					result.Status = "retained"
-					result.Message = message
-					summary.Retained++
-				}
-				summary.Results = append(summary.Results, result)
-			}
-			return summary
-		}
-		return s.cleanupCoordinatedMailboxes(ctx, cfg, accounts, summary)
-	}
-	cleanupCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
-	defer cancel()
-
-	hme, err := registerruntime.NewHME(cfg, time.Second)
-	if err == nil {
-		defer hme.Close()
-	}
-	for _, account := range accounts {
-		result := hmeCleanupResult{AccountRef: accountPublicRef(account)}
-		box, isHME := hmeMailboxFromAccount(account)
-		result.Email = box.Email
-		if !isHME {
-			result.Status = "not_hme_source"
-			summary.Skipped++
-			summary.Results = append(summary.Results, result)
-			continue
-		}
-		if err != nil {
-			result.Status = "failed"
-			result.Message = hmeCleanupMessage(err)
-			summary.Failed++
-			summary.Results = append(summary.Results, result)
-			continue
-		}
-		if cleanupErr := hme.DeleteMailbox(cleanupCtx, box); cleanupErr != nil {
-			if isHMEErrorCode(cleanupErr, "mailbox_not_found") {
-				result.Status = "not_found"
-				summary.NotFound++
+	if s.mailboxManager == nil || !s.mailboxManager.Enabled() {
+		for _, account := range accounts {
+			box, isHME := hmeMailboxFromAccount(account)
+			result := hmeCleanupResult{AccountRef: accountPublicRef(account), Email: box.Email}
+			if !isHME {
+				result.Status = "not_hme_source"
+				summary.Skipped++
 			} else {
-				result.Status = "failed"
-				result.Message = hmeCleanupMessage(cleanupErr)
-				summary.Failed++
+				result.Status = "retained"
+				result.Message = "邮箱资源管理模块不可用，已保留上游邮箱"
+				summary.Retained++
 			}
-		} else {
-			result.Status = "deleted"
-			summary.Deleted++
+			summary.Results = append(summary.Results, result)
 		}
-		summary.Results = append(summary.Results, result)
+		return summary
 	}
-	return summary
+	summary.Enabled = true
+	return s.cleanupCoordinatedMailboxes(ctx, accounts, summary)
 }
 
-func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, cfg registerruntime.HMEConfig, accounts []map[string]any, summary hmeCleanupSummary) hmeCleanupSummary {
+func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, accounts []map[string]any, summary hmeCleanupSummary) hmeCleanupSummary {
 	cleanupCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
-	hme, err := registerruntime.NewHME(cfg, time.Second)
-	if err == nil {
-		defer hme.Close()
-	}
+	sessions := map[string]*mailboxstore.ResourceSession{}
+	defer func() {
+		for _, session := range sessions {
+			session.Close()
+		}
+	}()
 	for _, account := range accounts {
 		result := hmeCleanupResult{AccountRef: accountPublicRef(account)}
 		box, isHME := hmeMailboxFromAccount(account)
@@ -184,16 +119,33 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, cfg registerru
 			summary.Results = append(summary.Results, result)
 			continue
 		}
+		sourceID := strings.TrimSpace(box.SourceID)
+		session := sessions[sourceID]
+		var err error
+		if session == nil {
+			session, err = s.mailboxManager.Open(cleanupCtx, sourceID, time.Second)
+			if err == nil {
+				sourceID = session.Source().ID
+				sessions[sourceID] = session
+			}
+		}
 		if err != nil {
 			result.Status = "failed"
 			result.Message = hmeCleanupMessage(err)
 			summary.Failed++
+			summary.Results = append(summary.Results, result)
+			continue
+		}
+		if !boolValue(session.Source().Config["delete_hme_mailbox_on_account_delete"], false) {
+			result.Status = "retained"
+			result.Message = "邮箱来源未启用删除策略"
+			summary.Retained++
 			summary.Results = append(summary.Results, result)
 			continue
 		}
 		platform := mailboxPlatform(account)
 		accountID := firstNonEmpty(stringValue(account["id"]), stringValue(account["account_id"]), result.AccountRef)
-		candidates, releaseErr := s.mailboxStore.ReleaseForAccount(cleanupCtx, platform, accountID, box.Email)
+		candidates, releaseErr := session.ReleaseForAccount(cleanupCtx, platform, accountID, box.Email)
 		if releaseErr != nil {
 			result.Status = "failed"
 			result.Message = releaseErr.Error()
@@ -212,19 +164,19 @@ func (s *Server) cleanupCoordinatedMailboxes(ctx context.Context, cfg registerru
 			continue
 		}
 		for _, candidate := range candidates {
-			if deleteErr := hme.DeleteMailbox(cleanupCtx, registerruntime.Mailbox{ID: candidate.SourceMailboxID, Email: candidate.Email, AccountID: candidate.SourceAccountID}); deleteErr != nil {
+			if deleteErr := session.Delete(cleanupCtx, candidate); deleteErr != nil {
 				if isHMEErrorCode(deleteErr, "mailbox_not_found") {
-					_ = s.mailboxStore.MarkCleanup(cleanupCtx, candidate, true, "mailbox_not_found")
+					_ = session.MarkCleanup(cleanupCtx, candidate, true, "mailbox_not_found")
 					result.Status = "not_found"
 					summary.NotFound++
 				} else {
-					_ = s.mailboxStore.MarkCleanup(cleanupCtx, candidate, false, hmeCleanupMessage(deleteErr))
+					_ = session.MarkCleanup(cleanupCtx, candidate, false, hmeCleanupMessage(deleteErr))
 					result.Status = "failed"
 					result.Message = hmeCleanupMessage(deleteErr)
 					summary.Failed++
 				}
 			} else {
-				_ = s.mailboxStore.MarkCleanup(cleanupCtx, candidate, true, "")
+				_ = session.MarkCleanup(cleanupCtx, candidate, true, "")
 				result.Status = "deleted"
 				summary.Deleted++
 			}

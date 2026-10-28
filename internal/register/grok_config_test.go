@@ -49,6 +49,40 @@ func TestParseGrokConfigReusesHMEAndProtocolDefaults(t *testing.T) {
 	}
 }
 
+func TestParseGrokConfigUsesSelectedMailboxSource(t *testing.T) {
+	raw := grokConfigFixture()
+	mail := raw["mail"].(map[string]any)
+	mail["source_id"] = "hme-primary"
+	mail["providers"] = []any{
+		map[string]any{
+			"id":             "unused-source",
+			"type":           "icloud_hme",
+			"enable":         true,
+			"api_base":       "https://unused.example.test",
+			"admin_password": "unused-secret",
+			"account_id":     "unused-account",
+		},
+		map[string]any{
+			"id":             "hme-primary",
+			"type":           "icloud_hme",
+			"enable":         true,
+			"api_base":       "https://primary.example.test",
+			"admin_password": "primary-secret",
+			"account_id":     "primary-account",
+		},
+	}
+	cfg, err := ParseGrokConfig(raw)
+	if err != nil {
+		t.Fatalf("ParseGrokConfig() error = %v", err)
+	}
+	if cfg.MailboxSourceID != "hme-primary" || cfg.HME.SourceID != "hme-primary" {
+		t.Fatalf("selected mailbox source was not retained: source=%q hme=%+v", cfg.MailboxSourceID, cfg.HME)
+	}
+	if cfg.HME.BaseURL != "https://primary.example.test" || cfg.HME.AccountID != "primary-account" {
+		t.Fatalf("selected source config was not used: %+v", cfg.HME)
+	}
+}
+
 func TestParseGrokConfigRejectsUnsupportedTarget(t *testing.T) {
 	raw := grokConfigFixture()
 	raw["target"] = "openai"

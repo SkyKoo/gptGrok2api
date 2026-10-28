@@ -3,7 +3,7 @@
     <div ref="scrollEl" class="studio-chat-scroll custom-scrollbar" @scroll="handleScroll">
       <div v-if="!displayedConversation || !displayedConversation.messages.length" class="studio-chat-empty">
         <h1>对话画图</h1>
-        <p>输入文字可以直接对话；切到画图后，在同一个窗口里生成图片、上传参考图和继续编辑。</p>
+        <p>输入文字可以直接对话；切到画图后，在同一个窗口里生成图片、上传参考图和继续编辑；切到视频可以生成短视频。</p>
       </div>
 
       <div v-else ref="turnsEl" class="studio-turns">
@@ -250,6 +250,8 @@ function messageViewSignature(
     message.imageSize,
     message.imageCount,
     message.taskId,
+    message.videoTaskId,
+    message.videoProgress,
     compactStringSignature(message.error),
     arraySignature(message.attachments),
     referenceImagesSignature(message.referenceImages),

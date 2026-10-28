@@ -24,20 +24,18 @@ func (s *Server) initGrokRegistration() {
 			proxy = s.proxyManager.Resolve(nil, false)
 		}
 		cfg.Proxy = proxy
-		mailClient, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
-		if err != nil {
-			return nil, nil, err
-		}
-		var mail registerruntime.MailSource = mailClient
-		if strings.TrimSpace(s.cfg.MailboxDatabaseURL) != "" && s.mailboxStore == nil {
-			mailClient.Close()
+		if s.mailboxStore == nil {
 			if s.mailboxInitErr != nil {
 				return nil, nil, s.mailboxInitErr
 			}
-			return nil, nil, errors.New("mailbox database is not configured")
+			return nil, nil, errors.New("mailbox asset database is required for registration")
 		}
-		if coordinator := s.mailboxCoordinator(); coordinator != nil {
-			mail = registerruntime.NewCoordinatedMailSource("grok", mailClient, coordinator)
+		if s.mailboxManager == nil || !s.mailboxManager.Enabled() {
+			return nil, nil, errors.New("mailbox asset database is required for registration")
+		}
+		mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "grok", cfg.MailboxSourceID, cfg.PollInterval)
+		if err != nil {
+			return nil, nil, err
 		}
 		// The browser worker is an internal Docker service. Do not reuse the
 		// request client's proxy transport here: that transport is intended for

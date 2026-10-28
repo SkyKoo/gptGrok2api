@@ -1,4 +1,6 @@
 import { nextTick, type Ref } from 'vue'
+import { videosApi } from '@/api/videos'
+import { DEFAULT_VIDEO_OPTIONS } from '@/lib/studioMedia'
 import { normalizeImageCount } from '@/api/imageTasks'
 import type {
   StudioComposeMode,
@@ -31,6 +33,7 @@ export type StudioSendRuntimeInput = {
   messageRuntime: ReturnType<typeof useStudioMessageRuntime>
   chatStreamRuntime: ReturnType<typeof useStudioChatStreamRuntime>
   imageTaskRuntime: Pick<ReturnType<typeof useStudioImageTaskRuntime>, 'rememberTask' | 'merge' | 'schedulePoll'>
+  videoRuntime: { apply: (message: StudioMessage, task: import('@/api/videos').VideoTask) => void }
   chatModel: Ref<string>
   chatReasoningEffort: Ref<string>
   imageForm: StudioImageForm
@@ -57,6 +60,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     hooks,
     imageForm,
     imageTaskRuntime,
+    videoRuntime,
     messageRuntime,
     referenceRuntime,
     toast,
@@ -73,7 +77,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
     const conversation = hooks.ensureConversation(content)
     const mode = composerRuntime.composeMode.value
-    const withReferences = mode === 'image' || mode === 'chat'
+    const withReferences = mode === 'image' || mode === 'chat' || mode === 'video'
     const files = referenceRuntime.selectedFiles()
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
@@ -108,7 +112,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
     const { conversation, message } = target
     const mode = composerRuntime.composeMode.value
-    const withReferences = mode === 'image' || mode === 'chat'
+    const withReferences = mode === 'image' || mode === 'chat' || mode === 'video'
     const files = referenceRuntime.selectedFiles()
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
@@ -267,6 +271,8 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       return true
     } else if (mode === 'search') {
       return sendSearchMessage(conversation, prompt)
+    } else if (mode === 'video') {
+      return sendVideoMessage(conversation, prompt, files)
     } else {
       return sendImageMessage(conversation, prompt, files, imageOptions)
     }
@@ -316,6 +322,24 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     } finally {
       hooks.touchConversation(conversation)
       hooks.scheduleScrollToBottom()
+    }
+  }
+
+  async function sendVideoMessage(conversation: StudioConversation, prompt: string, files: File[]) {
+    const assistantMessage = messageRuntime.addMessage(conversation, {
+      role: 'assistant', mode: 'video', content: '视频任务已提交', status: 'queued', model: 'grok-imagine-video',
+    })
+    try {
+      const task = await videosApi.create(prompt, DEFAULT_VIDEO_OPTIONS, files)
+      videoRuntime.apply(assistantMessage, task)
+      hooks.touchConversation(conversation)
+      toast.success('视频任务已提交')
+      return true
+    } catch (error) {
+      const message = studioErrorMessage(error, '视频任务提交失败')
+      assistantMessage.status = 'error'; assistantMessage.content = message; assistantMessage.error = message
+      hooks.touchConversation(conversation); hooks.markConversationNotice(conversation.id, 'error')
+      return false
     }
   }
 

@@ -3,7 +3,7 @@ import type { StudioComposeMode, StudioMessage } from '@/components/studio/types
 import { getStringPreference, preferenceKeys, setStringPreference } from '@/lib/preferences'
 
 export function normalizeStudioComposeMode(value: string): StudioComposeMode {
-  if (value === 'chat' || value === 'search') return value
+  if (value === 'chat' || value === 'search' || value === 'video') return value
   return 'image'
 }
 

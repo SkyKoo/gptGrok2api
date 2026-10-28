@@ -56,6 +56,7 @@ type FreeConfig struct {
 	Proxy                              string
 	Timeout, MailTimeout, PollInterval time.Duration
 	HME                                HMEConfig
+	MailboxSourceID                    string
 	DeleteMailboxOnAccountDelete       bool
 	AutoTwoFA                          bool
 	// BrowserProfile is selected by the registration flow factory. It is not
@@ -119,10 +120,15 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 		c.PollInterval = time.Duration(value) * time.Second
 	}
 	providers, _ := mail["providers"].([]any)
+	selectedSourceID := strings.TrimSpace(stringValue(mail["source_id"]))
 	count := 0
 	for _, rawProvider := range providers {
 		p := object(rawProvider)
 		if !boolValue(p["enable"], true) {
+			continue
+		}
+		providerID := strings.TrimSpace(stringValue(p["id"]))
+		if selectedSourceID != "" && providerID != selectedSourceID {
 			continue
 		}
 		count++
@@ -130,10 +136,14 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 			return c, fail("config", "only_icloud_hme_supported")
 		}
 		password, _ := p["admin_password"].(string)
-		c.HME = HMEConfig{BaseURL: strings.TrimRight(stringValue(p["api_base"]), "/"), Password: password, AccountID: stringValue(p["account_id"])}
+		c.MailboxSourceID = providerID
+		c.HME = HMEConfig{SourceID: providerID, BaseURL: strings.TrimRight(stringValue(p["api_base"]), "/"), Password: password, AccountID: stringValue(p["account_id"])}
 		c.DeleteMailboxOnAccountDelete = boolValue(p["delete_hme_mailbox_on_account_delete"], false)
 	}
 	if count != 1 {
+		if selectedSourceID != "" {
+			return c, fail("config", "selected_mailbox_source_unavailable")
+		}
 		return c, fail("config", "enable_exactly_one_icloud_hme_provider")
 	}
 	if err := c.HME.Validate(); err != nil {

@@ -13,6 +13,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Header, HTTPException
@@ -48,6 +49,7 @@ class SessionRequest(BaseModel):
     proxy: str = Field(default="", max_length=2048)
     timezone: str = Field(default="", max_length=128)
     locale: str = Field(default="", max_length=64)
+    browser_profile: dict[str, Any] = Field(default_factory=dict)
     timeout_s: int = Field(default=180, ge=30, le=900)
 
 
@@ -60,6 +62,7 @@ class NativeStartRequest(BaseModel):
     proxy: str = Field(default="", max_length=2048)
     timezone: str = Field(default="", max_length=128)
     locale: str = Field(default="", max_length=64)
+    browser_profile: dict[str, Any] = Field(default_factory=dict)
     timeout_s: int = Field(default=180, ge=30, le=900)
 
 
@@ -94,6 +97,23 @@ def _authorized(authorization: str | None) -> bool:
 def _normalize_proxy(raw: str) -> str:
     value = (raw or "").strip()
     return "" if value.lower() in ("direct", "none", "null") else value
+
+
+def _profile_for_worker(value: Any) -> dict[str, Any]:
+    """Keep only the non-secret browser environment fields used by the Worker."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "user_agent", "navigator_language", "timezone_iana", "screen_width",
+        "screen_height", "inner_width", "inner_height", "device_pixel_ratio",
+        "browser_family", "browser_os", "chrome_major", "tls_profile",
+    }
+    output: dict[str, Any] = {}
+    for key in allowed:
+        item = value.get(key)
+        if isinstance(item, (str, int, float)) and str(item).strip():
+            output[key] = item
+    return output
 
 
 def _validate_url(raw: str) -> str:
@@ -201,8 +221,18 @@ async def session_close(req: SessionCloseRequest, authorization: str | None = He
 
 def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
     status = 504 if exc.retryable else 422
-    # Do not return page HTML, cookies, or challenge values to the caller.
-    return HTTPException(status_code=status, detail={"stage": exc.stage, "error": str(exc)[:300]})
+    # Return only bounded page metadata. Never return page HTML, cookies,
+    # challenge tokens, form values or mailbox content to the caller.
+    diagnostic = exc.diagnostic if isinstance(exc.diagnostic, dict) else {}
+    safe_diagnostic = {
+        key: diagnostic[key]
+        for key in ("url", "title", "http_status", "cloudflare_challenge", "proxy_connection_failed", "reason")
+        if key in diagnostic
+    }
+    detail = {"stage": exc.stage, "error": str(exc)[:300]}
+    if safe_diagnostic:
+        detail["diagnostic"] = safe_diagnostic
+    return HTTPException(status_code=status, detail=detail)
 
 
 @app.post("/v1/session/start")
@@ -216,6 +246,7 @@ async def native_session_start(req: NativeStartRequest, authorization: str | Non
                 proxy=_normalize_proxy(req.proxy),
                 timezone=req.timezone.strip(),
                 locale=req.locale.strip(),
+                profile=_profile_for_worker(req.browser_profile),
                 timeout_s=req.timeout_s,
             )
     except XaiBrowserFlowError as exc:
@@ -234,6 +265,9 @@ async def native_session_send_email(req: NativeEmailRequest, authorization: str 
     try:
         return await xai_send_email(req.session_id, req.email)
     except XaiBrowserFlowError as exc:
+        # Keep the task journal useful without logging email addresses,
+        # cookies, page HTML or challenge values.
+        log.warning("native signup email rejected stage=%s reason=%s retryable=%s diagnostic=%s", exc.stage, str(exc)[:120], exc.retryable, exc.diagnostic)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup email stage failed session=%s", req.session_id)
@@ -247,6 +281,7 @@ async def native_session_verify_email(req: NativeVerifyRequest, authorization: s
     try:
         return await xai_verify_email(req.session_id, req.email, req.code)
     except XaiBrowserFlowError as exc:
+        log.warning("native signup verify rejected stage=%s reason=%s retryable=%s diagnostic=%s", exc.stage, str(exc)[:120], exc.retryable, exc.diagnostic)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup verify stage failed session=%s", req.session_id)
@@ -268,6 +303,7 @@ async def native_session_signup(req: NativeSignupRequest, authorization: str | N
             turnstile_token=req.turnstile_token,
         )
     except XaiBrowserFlowError as exc:
+        log.warning("native signup final rejected stage=%s reason=%s retryable=%s diagnostic=%s", exc.stage, str(exc)[:120], exc.retryable, exc.diagnostic)
         raise _native_error(exc)
     except Exception:
         log.exception("native signup final stage failed session=%s", req.session_id)
@@ -353,6 +389,7 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
                 proxy=_normalize_proxy(req.proxy) or None,
                 timezone=req.timezone.strip() or None,
                 locale=req.locale.strip() or None,
+                profile=_profile_for_worker(req.browser_profile),
             )
             live_session = {"browser": browser, "page": page,
                             "expires_at": asyncio.get_running_loop().time() + max(900, req.timeout_s)}

@@ -224,7 +224,7 @@
               class="chat-input-send"
               :class="text.trim() && !isSending ? 'chat-input-send-ready' : 'chat-input-send-idle'"
               :disabled="isSending || !text.trim()"
-              :aria-label="mode === 'image' ? '提交图片任务' : '发送消息'"
+              :aria-label="mode === 'image' ? '提交图片任务' : mode === 'video' ? '提交视频任务' : '发送消息'"
               @click.stop
             >
               <Icon :icon="isSending ? 'lucide:loader-circle' : 'lucide:send-horizontal'" class="h-4 w-4" :class="{ 'animate-spin': isSending }" />
@@ -310,6 +310,7 @@ let composerResizeObserver: ResizeObserver | null = null
 const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
   { label: '对话', value: 'chat' },
   { label: '画图', value: 'image' },
+  { label: '视频', value: 'video' },
   { label: '搜索', value: 'search' },
 ]
 
@@ -385,7 +386,7 @@ const resolutionOptions = computed(() => {
   return order.filter((value) => values.has(value)).map((value) => ({ label: value === 'auto' ? '自动' : value, value }))
 })
 const selectedSizeDetailLabel = computed(() => formatImageSizeLabel(props.imageForm.size))
-const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat')
+const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat' || props.mode === 'video')
 const selectedChatModelLabel = computed(() => chatModelSelectOptions.value.find((option) => option.value === props.chatModel)?.label || props.chatModel || '自动模型')
 const selectedReasoningEffortLabel = computed(() => {
   const current = props.chatReasoningEffort || 'default'

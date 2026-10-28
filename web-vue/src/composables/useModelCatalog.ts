@@ -50,8 +50,8 @@ function catalogFromOpenAIModels(response: ModelListResponse): ModelCatalogRespo
   if (ids.length === 0) return null
   return {
     object: 'model_catalog',
-    chat_models: ids.filter(model => !isImageModelId(model)),
-    image_models: ids.filter(model => isImageModelId(model)),
+    chat_models: ids.filter(model => !isImageModelId(model) && !model.toLowerCase().includes('video')),
+    image_models: ids.filter(model => isImageModelId(model) && model !== 'grok-imagine-image-edit'),
     image_edit_models: ids.filter(model => isImageModelId(model) && (!model.startsWith('grok-') || model.includes('edit'))),
     video_models: ids.filter(model => model.toLowerCase().includes('video')),
     all_models: ids,

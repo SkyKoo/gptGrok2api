@@ -1,5 +1,14 @@
 <template>
-  <Teleport to="body">
+  <div
+    v-if="inline"
+    class="modal-shell__panel modal-shell__panel--inline"
+    :class="panelClass"
+    :style="{ maxWidth }"
+    role="region"
+  >
+    <slot />
+  </div>
+  <Teleport v-else to="body">
     <div
       v-if="open"
       class="modal-shell"
@@ -25,6 +34,7 @@
 <script setup lang="ts">
 const props = withDefaults(defineProps<{
   open: boolean
+  inline?: boolean
   maxWidth?: string
   zIndex?: number
   closeOnBackdrop?: boolean
@@ -38,6 +48,7 @@ const props = withDefaults(defineProps<{
   align: 'center',
   placement: 'center',
   panelClass: '',
+  inline: false,
 })
 
 const emit = defineEmits<{
@@ -87,6 +98,11 @@ function handleBackdropClick() {
   border-radius: 16px;
   background: hsl(var(--card));
   box-shadow: 0 36px 120px -45px rgb(16 24 40 / 0.4);
+}
+
+.modal-shell__panel--inline {
+  max-width: none !important;
+  box-shadow: none;
 }
 
 @media (max-width: 640px) {

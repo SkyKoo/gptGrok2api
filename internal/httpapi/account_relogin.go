@@ -274,7 +274,7 @@ func (s *Server) accountReloginProfile(account map[string]any) (*registerruntime
 	return nil, nil
 }
 
-func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConfig, *registerruntime.HME, *registerruntime.WebRegistrar, error) {
+func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConfig, *mailboxResourceSource, *registerruntime.WebRegistrar, error) {
 	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
 	if err != nil {
 		return cfg, nil, nil, err
@@ -287,7 +287,7 @@ func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConf
 	if profile != nil {
 		profiles = append(profiles, *profile)
 	}
-	mail, err := registerruntime.NewHME(cfg.HME, cfg.PollInterval)
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", mailboxSourceIDFromAccount(account, cfg.MailboxSourceID), cfg.PollInterval)
 	if err != nil {
 		return cfg, nil, nil, err
 	}
@@ -333,7 +333,7 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 	defer flow.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
-	box := registerruntime.Mailbox{Email: stringValue(account["email"]), AccountID: cfg.HME.AccountID}
+	box := mailboxFromAccount(account, cfg.HME.AccountID, cfg.MailboxSourceID)
 	s.updateAccountReloginStage(progressID, "mailbox")
 	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
 		if err := preparer.Prepare(ctx, box); err != nil {

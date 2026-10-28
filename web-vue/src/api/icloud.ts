@@ -46,6 +46,8 @@ export type ICloudAccount = {
 export type ICloudMailbox = {
   id?: string
   email?: string
+  source_id?: string
+  source_type?: string
   api_url?: string
   api_token_mask?: string
   label?: string
@@ -114,6 +116,20 @@ export type ICloudMailboxEvent = {
   [key: string]: unknown
 }
 
+export type ICloudMailboxSource = {
+  id?: string
+  type?: string
+  label?: string
+  enable?: boolean
+  status?: string
+  last_error?: string
+  capabilities?: Record<string, unknown>
+  config?: Record<string, unknown>
+  last_sync_at?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export type ICloudMailboxSyncResult = {
   account_id?: string
   apple_id?: string
@@ -178,6 +194,8 @@ export type ICloudStatus = {
 
 export const icloudApi = {
   bridgeStatus: () => apiClient.get<never, ICloudBridgeStatus>(path('bridge-status'), requestConfig),
+  listSources: () => apiClient.get<never, { sources?: ICloudMailboxSource[] }>(path('sources'), requestConfig),
+  updateSource: (source: ICloudMailboxSource) => apiClient.post<{ source: ICloudMailboxSource }, { source?: ICloudMailboxSource }>(path('sources'), { source }, requestConfig),
   status: () => apiClient.get<never, ICloudStatus>(path('status'), requestConfig),
   session: () => apiClient.get<never, { sessions?: ICloudSession[]; session?: ICloudSession | null }>(path('session'), requestConfig),
   checkSession: (payload: { account_id?: string } = {}) =>
@@ -209,8 +227,10 @@ export const icloudApi = {
   clearSchedulerLogs: () => apiClient.post<never, { message?: string; scheduler?: ICloudScheduler }>(path('icloud/scheduler/logs/clear'), {}, requestConfig),
   syncExistingClaims: () => apiClient.post<never, { success?: boolean; projects?: Record<string, { emails?: number; updated?: number; missing?: string[] }> }>(path('claim-status/sync'), {}, requestConfig),
   listAccounts: () => apiClient.get<never, { accounts?: ICloudAccount[] }>(path('accounts'), requestConfig),
-  listMailboxes: (params: { page?: number; page_size?: number; search?: string; account_id?: string } = {}) =>
+  listMailboxes: (params: { page?: number; page_size?: number; search?: string; account_id?: string; status?: string; source_id?: string; platform?: string } = {}) =>
     apiClient.get<never, ICloudMailboxList>(path('mailboxes'), { ...requestConfig, params }),
+  updateMailboxStatus: (id: string, status: 'available' | 'disabled') =>
+    apiClient.post<{ status: 'available' | 'disabled' }, { success?: boolean; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}/status`), { status }, requestConfig),
   reconcile: () => apiClient.post<never, { success?: boolean; aliases?: number; openai_claims?: number; grok_claims?: number; missing?: string[]; errors?: string[] }>(path('reconcile'), {}, requestConfig),
   listEvents: (params: { page?: number; page_size?: number; mailbox_id?: string; platform?: string } = {}) =>
     apiClient.get<never, { events?: ICloudMailboxEvent[]; total?: number; page?: number; page_size?: number }>(path('events'), { ...requestConfig, params }),

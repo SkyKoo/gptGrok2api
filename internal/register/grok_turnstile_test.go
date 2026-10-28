@@ -52,11 +52,24 @@ func TestHTTPGrokBrowserSolverPassesProfileEnvironment(t *testing.T) {
 		if payload["timezone"] != "America/Phoenix" || payload["locale"] != "en-US" {
 			t.Fatalf("profile environment was not forwarded: %s", body)
 		}
+		workerProfile, ok := payload["browser_profile"].(map[string]any)
+		if !ok {
+			t.Fatalf("full browser profile was not forwarded: %s", body)
+		}
+		if workerProfile["user_agent"] != "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36" {
+			t.Fatalf("worker profile lost user agent: %v", workerProfile)
+		}
+		if workerProfile["inner_width"] != float64(1440) || workerProfile["device_pixel_ratio"] != float64(2) {
+			t.Fatalf("worker profile lost viewport fields: %v", workerProfile)
+		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true,"session_id":"session-1","token":"turnstile-token"}`)), Header: make(http.Header)}, nil
 	}), Timeout: time.Second}
 	profile := NewBrowserProfile()
 	profile.TimezoneIANA = "America/Phoenix"
 	profile.NavigatorLanguage = "en-US"
+	profile.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+	profile.InnerWidth = 1440
+	profile.DevicePixelRatio = 2
 	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
 	solver.SetBrowserProfile(profile)
 	if _, err := solver.SolveContext(context.Background(), "site-key", "https://accounts.x.ai/sign-up", "direct"); err != nil {
@@ -145,5 +158,49 @@ func TestHTTPGrokBrowserSolverNativeSignupFlow(t *testing.T) {
 	completed, err := solver.CompleteSignup(context.Background(), started.SessionID, "person@example.com", "secret-pass", "123456", "Grok", "User", "")
 	if err != nil || completed.SSO != "session-token" || completed.SSORW != "session-token-rw" {
 		t.Fatalf("CompleteSignup() = %+v, %v", completed, err)
+	}
+}
+
+func TestHTTPGrokBrowserSolverPreservesSafeWorkerReason(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusGatewayTimeout,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":{"stage":"send_code","error":"signup_rate_limited"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	err := solver.SendEmailCode(context.Background(), "native-1", "person@example.com")
+	if err == nil {
+		t.Fatal("SendEmailCode() accepted a worker rejection")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "browser_worker_rejected (HTTP 504)") || !strings.Contains(got, "upstream_stage=send_code") || !strings.Contains(got, "operation=worker_error=signup_rate_limited") {
+		t.Fatalf("worker detail was not preserved safely: %s", got)
+	}
+	if strings.Contains(got, "page") || strings.Contains(got, "email@example") {
+		t.Fatalf("worker detail leaked unexpected content: %s", got)
+	}
+}
+
+func TestHTTPGrokBrowserSolverPreservesSafeWorkerDiagnostic(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusGatewayTimeout,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":{"stage":"send_code","error":"verification_page_missing","diagnostic":{"reason":"cloudflare_challenge","url":"https://accounts.x.ai/sign-up?email=secret@example.com","title":"Attention Required! | Cloudflare","http_status":403}}}`)),
+			Header:     make(http.Header),
+		}, nil
+	}), Timeout: time.Second}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	err := solver.SendEmailCode(context.Background(), "native-1", "person@example.com")
+	if err == nil {
+		t.Fatal("SendEmailCode() accepted a worker rejection")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "operation=worker_error=verification_page_missing;diagnostic=cloudflare_challenge") {
+		t.Fatalf("safe diagnostic was not preserved: %s", got)
+	}
+	if strings.Contains(got, "secret@example.com") || strings.Contains(got, "Attention Required") || strings.Contains(got, "accounts.x.ai") {
+		t.Fatalf("worker diagnostic leaked sensitive page details: %s", got)
 	}
 }

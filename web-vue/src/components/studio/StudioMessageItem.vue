@@ -75,6 +75,8 @@
               </div>
             </template>
 
+            <StudioVideoResult v-else-if="message.mode === 'video'" :message="message" />
+
             <template v-else-if="message.mode !== 'image'">
               <div v-if="message.searchQueries.length" class="studio-search-call-list">
                 <div
@@ -255,6 +257,7 @@
 </template>
 
 <script setup lang="ts">
+import StudioVideoResult from './StudioVideoResult.vue'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
 import type { CSSProperties } from 'vue'

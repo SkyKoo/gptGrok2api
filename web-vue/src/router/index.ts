@@ -32,9 +32,15 @@ const router = createRouter({
           meta: { adminOnly: true },
         },
         {
+          path: 'oauth',
+          name: 'oauth',
+          component: () => import('@/views/OAuth.vue'),
+          meta: { adminOnly: true },
+        },
+        {
           path: 'codex-oauth',
           name: 'codex-oauth',
-          component: () => import('@/views/CodexOAuth.vue'),
+          redirect: (to) => ({ name: 'oauth', query: { ...to.query, tab: 'codex' } }),
           meta: { adminOnly: true },
         },
         {

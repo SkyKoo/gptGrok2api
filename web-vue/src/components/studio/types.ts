@@ -1,4 +1,4 @@
-export type StudioComposeMode = 'chat' | 'image' | 'search'
+export type StudioComposeMode = 'chat' | 'image' | 'search' | 'video'
 export type StudioRole = 'user' | 'assistant'
 export type StudioMessageStatus = 'sending' | 'streaming' | 'queued' | 'running' | 'done' | 'error'
 export type StudioConversationBadgeState = 'running' | 'done' | 'error'
@@ -19,6 +19,8 @@ export interface StudioMessage {
   model?: string
   imageSize?: string
   imageCount?: number
+  videoTaskId?: string
+  videoProgress?: number
   taskId?: string
   error?: string
   attachments?: string[]

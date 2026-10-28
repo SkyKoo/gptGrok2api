@@ -40,6 +40,42 @@ func TestChatRoutesUseProviderSpecificAccountPools(t *testing.T) {
 	}
 }
 
+func TestModelCatalogSeparatesImageGenerationAndEditModels(t *testing.T) {
+	s := New(testConfig())
+	req := httptest.NewRequest(http.MethodGet, "/api/model-catalog", nil)
+	req.Header.Set("Authorization", "Bearer admin-secret")
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected catalog status: %d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		ImageModels     []string `json:"image_models"`
+		ImageEditModels []string `json:"image_edit_models"`
+		VideoModels     []string `json:"video_models"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	contains := func(values []string, target string) bool {
+		for _, value := range values {
+			if value == target {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(payload.ImageModels, "grok-imagine-image") || contains(payload.ImageModels, "grok-imagine-image-edit") {
+		t.Fatalf("generation models are not separated: %#v", payload.ImageModels)
+	}
+	if !contains(payload.ImageEditModels, "grok-imagine-image-edit") || !contains(payload.ImageEditModels, "gpt-image-2") {
+		t.Fatalf("edit models are incomplete: %#v", payload.ImageEditModels)
+	}
+	if contains(payload.ImageEditModels, "grok-imagine-image") || !contains(payload.VideoModels, "grok-imagine-video") {
+		t.Fatalf("catalog capability lists are incorrect: edits=%#v videos=%#v", payload.ImageEditModels, payload.VideoModels)
+	}
+}
+
 func TestDynamicModelRoutesBothAPIsAndKeepsRequestedModel(t *testing.T) {
 	s, _ := multimodalTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		var v map[string]any

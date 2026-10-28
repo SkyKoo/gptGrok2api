@@ -101,6 +101,15 @@ export type RegisterProvider = {
   [key: string]: unknown
 }
 
+export type RegisterMailboxConfig = {
+  request_timeout?: number
+  wait_timeout?: number
+  wait_interval?: number
+  user_agent?: string
+  source_id?: string
+  providers?: RegisterProvider[]
+}
+
 export type RegisterTarget = 'openai' | 'grok'
 
 export type GrokTurnstileProvider = 'browser'
@@ -219,7 +228,7 @@ export type LegacyRegisterConfig = {
   agent_identity_archive: {
     enabled: boolean
   }
-  mail: {
+  mail: RegisterMailboxConfig & {
     request_timeout?: number
     wait_timeout?: number
     wait_interval?: number

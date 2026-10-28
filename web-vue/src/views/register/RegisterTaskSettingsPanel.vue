@@ -756,7 +756,7 @@
     </FormSection>
 
     <FormSection
-      title="邮箱请求"
+      title="验证码接收"
       density="roomy"
       :class="{ 'register-collapsible-section--collapsed': !mailRequestExpanded }"
     >
@@ -766,8 +766,8 @@
           variant="ghost"
           icon-only
           root-class="h-8 w-8 shrink-0"
-          :title="mailRequestExpanded ? '收起邮箱请求' : '展开邮箱请求'"
-          :aria-label="mailRequestExpanded ? '收起邮箱请求' : '展开邮箱请求'"
+          :title="mailRequestExpanded ? '收起验证码接收设置' : '展开验证码接收设置'"
+          :aria-label="mailRequestExpanded ? '收起验证码接收设置' : '展开验证码接收设置'"
           :aria-expanded="mailRequestExpanded"
           aria-controls="register-mail-request-settings"
           @click="mailRequestExpanded = !mailRequestExpanded"
@@ -784,17 +784,6 @@
         id="register-mail-request-settings"
         class="register-form-grid register-form-grid--mail"
       >
-        <label class="register-field">
-          <span class="register-label">请求超时（秒）</span>
-          <Input
-            v-model.number="config.mail.request_timeout"
-            type="number"
-            min="1"
-            block
-            :disabled="config.enabled"
-          />
-        </label>
-
         <label class="register-field">
           <span class="register-label">验证码等待（秒）</span>
           <Input
@@ -818,16 +807,6 @@
           />
         </label>
 
-        <label class="register-field register-field--full">
-          <span class="register-label">请求 User-Agent</span>
-          <Input
-            v-model.trim="config.mail.user_agent"
-            block
-            root-class="font-mono"
-            placeholder="留空使用默认 UA"
-            :disabled="config.enabled"
-          />
-        </label>
       </div>
     </FormSection>
   </div>

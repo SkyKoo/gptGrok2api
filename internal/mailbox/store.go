@@ -19,6 +19,7 @@ import (
 type Mailbox struct {
 	ID              string
 	Email           string
+	SourceID        string
 	SourceType      string
 	SourceAccountID string
 	SourceMailboxID string
@@ -26,6 +27,22 @@ type Mailbox struct {
 	LastError       string
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+// Source is a configured upstream mailbox source. Config is kept internal to
+// the server; API callers receive a redacted projection.
+type Source struct {
+	ID           string
+	Type         string
+	Label        string
+	Enabled      bool
+	Config       map[string]any
+	Capabilities map[string]any
+	Status       string
+	LastError    string
+	LastSyncAt   *time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 type Claim struct {
@@ -69,6 +86,22 @@ type Event struct {
 
 type Store struct {
 	db *sql.DB
+}
+
+var (
+	ErrMailboxNotFound       = errors.New("mailbox not found")
+	ErrInvalidMailboxStatus  = errors.New("mailbox status must be available or disabled")
+	ErrMailboxStateImmutable = errors.New("mailbox is pending cleanup or deleted")
+)
+
+// MailboxListFilter controls the mailbox asset list shown in the admin UI.
+// Platform filters are based on active or reserved claims, so a mailbox can
+// be selected independently for GPT and Grok.
+type MailboxListFilter struct {
+	Search   string
+	Status   string
+	SourceID string
+	Platform string
 }
 
 // Open connects to PostgreSQL and applies the mailbox schema. An empty URL
@@ -125,6 +158,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS mailboxes (
 			id text PRIMARY KEY,
+			source_id text NOT NULL DEFAULT '',
 			source_type text NOT NULL,
 			source_account_id text NOT NULL DEFAULT '',
 			source_mailbox_id text NOT NULL DEFAULT '',
@@ -138,7 +172,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at timestamptz NOT NULL DEFAULT now(),
 			UNIQUE (source_type, source_account_id, source_mailbox_id)
 		)`,
+		`ALTER TABLE mailboxes ADD COLUMN IF NOT EXISTS source_id text NOT NULL DEFAULT ''`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_email_ci_idx ON mailboxes (lower(email))`,
+		`CREATE INDEX IF NOT EXISTS mailboxes_source_idx ON mailboxes (source_id, created_at ASC)`,
 		`CREATE INDEX IF NOT EXISTS mailboxes_status_idx ON mailboxes (status, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_claims (
 			id text PRIMARY KEY,
@@ -176,6 +212,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS mailbox_events_mailbox_idx ON mailbox_events (mailbox_id, created_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS mailbox_events_created_idx ON mailbox_events (created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mailbox_sources (
+			id text PRIMARY KEY,
+			type text NOT NULL,
+			label text NOT NULL DEFAULT '',
+			enabled boolean NOT NULL DEFAULT true,
+			config jsonb NOT NULL DEFAULT '{}'::jsonb,
+			capabilities jsonb NOT NULL DEFAULT '{}'::jsonb,
+			status text NOT NULL DEFAULT 'unknown',
+			last_error text NOT NULL DEFAULT '',
+			last_sync_at timestamptz,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS mailbox_sources_enabled_idx ON mailbox_sources (enabled, updated_at DESC)`,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -243,19 +293,20 @@ func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox
 	}
 	var out Mailbox
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO mailboxes(id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
+		INSERT INTO mailboxes(id, source_id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
 		ON CONFLICT (id) DO UPDATE SET
+			source_id=CASE WHEN EXCLUDED.source_id <> '' THEN EXCLUDED.source_id ELSE mailboxes.source_id END,
 			source_type=EXCLUDED.source_type,
 			source_account_id=EXCLUDED.source_account_id,
 			source_mailbox_id=EXCLUDED.source_mailbox_id,
 			email=EXCLUDED.email,
-			status=CASE WHEN mailboxes.status IN ('reserved','active','cleanup_pending') THEN mailboxes.status ELSE EXCLUDED.status END,
+			status=CASE WHEN mailboxes.status IN ('reserved','active','cleanup_pending','disabled') THEN mailboxes.status ELSE EXCLUDED.status END,
 			last_error=CASE WHEN EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailboxes.last_error END,
 			updated_at=now()
-		RETURNING id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at`,
-		id, sourceType, sourceAccountID, sourceMailboxID, email, status, strings.TrimSpace(item.LastError)).Scan(
-		&out.ID, &out.SourceType, &out.SourceAccountID, &out.SourceMailboxID, &out.Email, &out.Status, &out.LastError, &out.CreatedAt, &out.UpdatedAt)
+		RETURNING id, source_id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at`,
+		id, strings.TrimSpace(item.SourceID), sourceType, sourceAccountID, sourceMailboxID, email, status, strings.TrimSpace(item.LastError)).Scan(
+		&out.ID, &out.SourceID, &out.SourceType, &out.SourceAccountID, &out.SourceMailboxID, &out.Email, &out.Status, &out.LastError, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return Mailbox{}, fmt.Errorf("upsert mailbox: %w", err)
 	}
@@ -315,12 +366,13 @@ func (s *Store) Upsert(ctx context.Context, item Mailbox, eventType string) (Mai
 // Reserve reserves an existing mailbox that is free for the requested
 // platform, or creates one through acquire when no suitable mailbox exists.
 // The prepare callback re-authenticates an existing provider mailbox.
-func (s *Store) Reserve(ctx context.Context, platform, jobID string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
 	if !s.Enabled() {
 		return acquire(ctx)
 	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	jobID = strings.TrimSpace(jobID)
+	sourceID = strings.TrimSpace(sourceID)
 	if platform == "" || jobID == "" {
 		return Mailbox{}, errors.New("mailbox platform and job are required")
 	}
@@ -336,18 +388,21 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID string, acquire fun
 	}
 
 	// Claim an existing alias first. The partial unique index serializes races
-	// between GPT and Grok while keeping their claims independent.
+	// between GPT and Grok while keeping their claims independent. Creation time
+	// is the allocation order: a later claim, sync, or error update must not
+	// move an older mailbox behind newer assets.
 	var candidate Mailbox
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Mailbox{}, err
 	}
-	row := tx.QueryRowContext(ctx, `SELECT m.id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at
+	row := tx.QueryRowContext(ctx, `SELECT m.id,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at
 		FROM mailboxes m
 		WHERE m.status IN ('available','active')
-		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$1 AND c.status IN ('reserved','active'))
-		ORDER BY m.updated_at ASC FOR UPDATE SKIP LOCKED LIMIT 1`, platform)
-	if scanErr := row.Scan(&candidate.ID, &candidate.SourceType, &candidate.SourceAccountID, &candidate.SourceMailboxID, &candidate.Email, &candidate.Status, &candidate.LastError, &candidate.CreatedAt, &candidate.UpdatedAt); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
+		AND ($1='' OR m.source_id=$1)
+		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$2 AND c.status IN ('reserved','active'))
+		ORDER BY m.created_at ASC, m.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, sourceID, platform)
+	if scanErr := row.Scan(&candidate.ID, &candidate.SourceID, &candidate.SourceType, &candidate.SourceAccountID, &candidate.SourceMailboxID, &candidate.Email, &candidate.Status, &candidate.LastError, &candidate.CreatedAt, &candidate.UpdatedAt); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
 		tx.Rollback()
 		return Mailbox{}, scanErr
 	}
@@ -410,10 +465,10 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID string, acquire fun
 
 func (s *Store) claimForJob(ctx context.Context, platform, jobID string) (Mailbox, bool, error) {
 	var item Mailbox
-	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.email,m.source_type,m.source_account_id,m.source_mailbox_id,m.status,m.last_error,m.created_at,m.updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT m.id,m.email,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.status,m.last_error,m.created_at,m.updated_at
 		FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id
 		WHERE c.platform=$1 AND c.registration_job_id=$2 AND c.status IN ('reserved','active')
-		ORDER BY c.updated_at DESC LIMIT 1`, platform, jobID).Scan(&item.ID, &item.Email, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
+		ORDER BY c.updated_at DESC LIMIT 1`, platform, jobID).Scan(&item.ID, &item.Email, &item.SourceID, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Mailbox{}, false, nil
 	}
@@ -492,11 +547,12 @@ func (s *Store) Commit(ctx context.Context, platform, jobID, accountID string, i
 		tx.Rollback()
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET status='active', updated_at=now(), last_error='' WHERE id=$1`, item.ID); err != nil {
+	var finalStatus string
+	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'active' END, updated_at=now(), last_error='' WHERE id=$1 RETURNING status`, item.ID).Scan(&finalStatus); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_committed", SourceType: sourceType, Platform: platform, AccountID: accountID, RegistrationJob: jobID, Result: "active"}); err != nil {
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_committed", SourceType: sourceType, Platform: platform, AccountID: accountID, RegistrationJob: jobID, Result: finalStatus}); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -544,11 +600,12 @@ func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbo
 	if count > 0 {
 		status = "active"
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE mailboxes SET status=$1, updated_at=now() WHERE id=$2`, status, item.ID); err != nil {
+	var finalStatus string
+	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE $1 END, updated_at=now() WHERE id=$2 RETURNING status`, status, item.ID).Scan(&finalStatus); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_released", SourceType: sourceType, Platform: platform, RegistrationJob: jobID, Result: status, Error: reason}); err != nil {
+	if err := s.writeEventTx(ctx, tx, Event{MailboxID: item.ID, ClaimID: claimID, EventType: "claim_released", SourceType: sourceType, Platform: platform, RegistrationJob: jobID, Result: finalStatus, Error: reason}); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -603,11 +660,22 @@ func (s *Store) ReleaseForAccount(ctx context.Context, platform, accountID, emai
 			return nil, err
 		}
 		if active > 0 {
-			_, _ = tx.ExecContext(ctx, `UPDATE mailboxes SET status='active', updated_at=now() WHERE id=$1`, claim.mailboxID)
+			_, _ = tx.ExecContext(ctx, `UPDATE mailboxes SET status=CASE WHEN status='disabled' THEN 'disabled' ELSE 'active' END, updated_at=now() WHERE id=$1`, claim.mailboxID)
+			continue
+		}
+		var currentStatus string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM mailboxes WHERE id=$1 FOR UPDATE`, claim.mailboxID).Scan(&currentStatus); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+		// A disabled asset is intentionally retained in HME even after its
+		// last platform claim is released. It can be re-enabled later by an
+		// administrator and must not be sent to provider cleanup.
+		if currentStatus == "disabled" {
 			continue
 		}
 		var item Mailbox
-		if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status='cleanup_pending', updated_at=now() WHERE id=$1 RETURNING id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, claim.mailboxID).Scan(&item.ID, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Email, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status='cleanup_pending', updated_at=now() WHERE id=$1 RETURNING id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, claim.mailboxID).Scan(&item.ID, &item.SourceID, &item.SourceType, &item.SourceAccountID, &item.SourceMailboxID, &item.Email, &item.Status, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			tx.Rollback()
 			return nil, err
 		}
@@ -647,7 +715,76 @@ func (s *Store) MarkCleanup(ctx context.Context, item Mailbox, success bool, mes
 	return tx.Commit()
 }
 
-func (s *Store) List(ctx context.Context, page, pageSize int, search string) ([]MailboxView, int, error) {
+// SetStatus changes the administrative availability of a mailbox asset.
+// Disabled assets remain in the registry and in the upstream provider, but
+// Reserve deliberately skips them. Enabling an asset restores the derived
+// status from its active claims.
+func (s *Store) SetStatus(ctx context.Context, mailboxID, requested string) (Mailbox, error) {
+	if !s.Enabled() {
+		return Mailbox{}, errors.New("mailbox database is not configured")
+	}
+	mailboxID = strings.TrimSpace(mailboxID)
+	requested = strings.ToLower(strings.TrimSpace(requested))
+	if mailboxID == "" {
+		return Mailbox{}, ErrMailboxNotFound
+	}
+	if requested != "disabled" && requested != "available" {
+		return Mailbox{}, ErrInvalidMailboxStatus
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Mailbox{}, err
+	}
+	defer tx.Rollback()
+	var current Mailbox
+	err = tx.QueryRowContext(ctx, `SELECT id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at
+		FROM mailboxes WHERE id=$1 FOR UPDATE`, mailboxID).Scan(
+		&current.ID, &current.SourceID, &current.SourceType, &current.SourceAccountID, &current.SourceMailboxID,
+		&current.Email, &current.Status, &current.LastError, &current.CreatedAt, &current.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Mailbox{}, ErrMailboxNotFound
+	}
+	if err != nil {
+		return Mailbox{}, err
+	}
+	if current.Status == "cleanup_pending" || current.Status == "deleted" {
+		return Mailbox{}, ErrMailboxStateImmutable
+	}
+	finalStatus := requested
+	if requested == "available" {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')`, mailboxID).Scan(&active); err != nil {
+			return Mailbox{}, err
+		}
+		if active > 0 {
+			finalStatus = "active"
+		}
+	}
+	var updated Mailbox
+	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=$1,updated_at=now() WHERE id=$2
+		RETURNING id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, finalStatus, mailboxID).Scan(
+		&updated.ID, &updated.SourceID, &updated.SourceType, &updated.SourceAccountID, &updated.SourceMailboxID,
+		&updated.Email, &updated.Status, &updated.LastError, &updated.CreatedAt, &updated.UpdatedAt); err != nil {
+		return Mailbox{}, err
+	}
+	eventType := "mailbox_enabled"
+	if requested == "disabled" {
+		eventType = "mailbox_disabled"
+	}
+	if err := s.writeEventTx(ctx, tx, Event{
+		MailboxID: updated.ID, EventType: eventType, SourceType: updated.SourceType,
+		Actor: "admin", Result: updated.Status,
+		Metadata: map[string]any{"previous_status": current.Status, "requested_status": requested},
+	}); err != nil {
+		return Mailbox{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Mailbox{}, err
+	}
+	return updated, nil
+}
+
+func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxListFilter) ([]MailboxView, int, error) {
 	if !s.Enabled() {
 		return nil, 0, errors.New("mailbox database is not configured")
 	}
@@ -657,21 +794,38 @@ func (s *Store) List(ctx context.Context, page, pageSize int, search string) ([]
 	if pageSize < 1 || pageSize > 200 {
 		pageSize = 20
 	}
-	search = strings.TrimSpace(search)
 	args := []any{}
-	where := ""
-	if search != "" {
-		args = append(args, "%"+strings.ToLower(search)+"%")
-		where = "WHERE lower(m.email) LIKE $1 OR lower(m.source_type) LIKE $1 OR lower(m.source_account_id) LIKE $1"
+	conditions := []string{"1=1"}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
 	}
+	if search := strings.TrimSpace(filter.Search); search != "" {
+		placeholder := addArg("%" + strings.ToLower(search) + "%")
+		conditions = append(conditions, "(lower(m.email) LIKE "+placeholder+" OR lower(m.source_type) LIKE "+placeholder+" OR lower(m.source_account_id) LIKE "+placeholder+")")
+	}
+	if status := strings.TrimSpace(strings.ToLower(filter.Status)); status != "" {
+		conditions = append(conditions, "m.status="+addArg(status))
+	}
+	if sourceID := strings.TrimSpace(filter.SourceID); sourceID != "" {
+		conditions = append(conditions, "m.source_id="+addArg(sourceID))
+	}
+	switch platform := strings.TrimSpace(strings.ToLower(filter.Platform)); platform {
+	case "openai", "grok":
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.platform="+addArg(platform)+" AND fp.status IN ('reserved','active'))")
+	case "unclaimed":
+		conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.status IN ('reserved','active'))")
+	}
+	where := "WHERE " + strings.Join(conditions, " AND ")
 	var total int
 	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mailboxes m "+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	args = append(args, pageSize, (page-1)*pageSize)
-	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at,m.last_sync_at,
+	limitPlaceholder := addArg(pageSize)
+	offsetPlaceholder := addArg((page - 1) * pageSize)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at,m.last_sync_at,
 		COALESCE(bool_or(c.platform='openai' AND c.status IN ('reserved','active')),false), COALESCE(bool_or(c.platform='grok' AND c.status IN ('reserved','active')),false)
-		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder, args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -679,7 +833,7 @@ func (s *Store) List(ctx context.Context, page, pageSize int, search string) ([]
 	views := []MailboxView{}
 	for rows.Next() {
 		var view MailboxView
-		if err := rows.Scan(&view.ID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
+		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
 			return nil, 0, err
 		}
 		views = append(views, view)
@@ -733,6 +887,129 @@ func (s *Store) Events(ctx context.Context, page, pageSize int, mailboxID, platf
 	return events, total, rows.Err()
 }
 
+func sourceJSON(value map[string]any) ([]byte, error) {
+	if value == nil {
+		return []byte(`{}`), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// UpsertSource stores a source configuration during migration or from the
+// mailbox management module. Secrets remain server-side and are never exposed
+// by ListSources.
+func (s *Store) UpsertSource(ctx context.Context, source Source) (Source, error) {
+	if !s.Enabled() {
+		return Source{}, errors.New("mailbox database is not configured")
+	}
+	source.ID = strings.TrimSpace(source.ID)
+	source.Type = strings.TrimSpace(strings.ToLower(source.Type))
+	if source.ID == "" || source.Type == "" {
+		return Source{}, errors.New("mailbox source id and type are required")
+	}
+	config, err := sourceJSON(source.Config)
+	if err != nil {
+		return Source{}, err
+	}
+	capabilities, err := sourceJSON(source.Capabilities)
+	if err != nil {
+		return Source{}, err
+	}
+	var out Source
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO mailbox_sources(id,type,label,enabled,config,capabilities,status,last_error,last_sync_at,created_at,updated_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+		ON CONFLICT (id) DO UPDATE SET
+			type=EXCLUDED.type,
+			label=EXCLUDED.label,
+			enabled=EXCLUDED.enabled,
+			config=EXCLUDED.config,
+			capabilities=EXCLUDED.capabilities,
+			status=CASE WHEN EXCLUDED.status <> '' THEN EXCLUDED.status ELSE mailbox_sources.status END,
+			last_error=CASE WHEN EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailbox_sources.last_error END,
+			updated_at=now()
+		RETURNING id,type,label,enabled,config,capabilities,status,last_error,last_sync_at,created_at,updated_at`,
+		source.ID, source.Type, strings.TrimSpace(source.Label), source.Enabled, config, capabilities, strings.TrimSpace(source.Status), strings.TrimSpace(source.LastError), source.LastSyncAt).
+		Scan(&out.ID, &out.Type, &out.Label, &out.Enabled, &config, &capabilities, &out.Status, &out.LastError, &out.LastSyncAt, &out.CreatedAt, &out.UpdatedAt)
+	if err != nil {
+		return Source{}, err
+	}
+	_ = json.Unmarshal(config, &out.Config)
+	_ = json.Unmarshal(capabilities, &out.Capabilities)
+	return out, nil
+}
+
+func (s *Store) ListSources(ctx context.Context) ([]Source, error) {
+	if !s.Enabled() {
+		return nil, errors.New("mailbox database is not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,type,label,enabled,config,capabilities,status,last_error,last_sync_at,created_at,updated_at FROM mailbox_sources ORDER BY created_at ASC,id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []Source{}
+	for rows.Next() {
+		var source Source
+		var config, capabilities []byte
+		if err := rows.Scan(&source.ID, &source.Type, &source.Label, &source.Enabled, &config, &capabilities, &source.Status, &source.LastError, &source.LastSyncAt, &source.CreatedAt, &source.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(config, &source.Config)
+		_ = json.Unmarshal(capabilities, &source.Capabilities)
+		result = append(result, source)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) GetSource(ctx context.Context, id string) (Source, error) {
+	if !s.Enabled() {
+		return Source{}, errors.New("mailbox database is not configured")
+	}
+	var source Source
+	var config, capabilities []byte
+	err := s.db.QueryRowContext(ctx, `SELECT id,type,label,enabled,config,capabilities,status,last_error,last_sync_at,created_at,updated_at FROM mailbox_sources WHERE id=$1`, strings.TrimSpace(id)).Scan(&source.ID, &source.Type, &source.Label, &source.Enabled, &config, &capabilities, &source.Status, &source.LastError, &source.LastSyncAt, &source.CreatedAt, &source.UpdatedAt)
+	if err != nil {
+		return Source{}, err
+	}
+	_ = json.Unmarshal(config, &source.Config)
+	_ = json.Unmarshal(capabilities, &source.Capabilities)
+	return source, nil
+}
+
+// BackfillSourceID associates legacy mailbox rows with a migrated source. It
+// only touches rows that have no source id, so an explicit association made by
+// reconciliation or an administrator is preserved.
+func (s *Store) BackfillSourceID(ctx context.Context, sourceID, sourceType, accountID string) (int64, error) {
+	if !s.Enabled() {
+		return 0, errors.New("mailbox database is not configured")
+	}
+	sourceID = strings.TrimSpace(sourceID)
+	sourceType = strings.TrimSpace(strings.ToLower(sourceType))
+	accountID = strings.TrimSpace(accountID)
+	if sourceID == "" {
+		return 0, errors.New("mailbox source id is required")
+	}
+	args := []any{sourceID}
+	where := "source_id = '' AND lower(source_type) IN ('hme','icloud_hme')"
+	if sourceType != "" && sourceType != "hme" && sourceType != "icloud_hme" {
+		where = "source_id = '' AND lower(source_type) = $2"
+		args = append(args, sourceType)
+	}
+	if accountID != "" {
+		args = append(args, accountID)
+		where += fmt.Sprintf(" AND source_account_id = $%d", len(args))
+	}
+	result, err := s.db.ExecContext(ctx, "UPDATE mailboxes SET source_id=$1, updated_at=updated_at WHERE "+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
 	if !s.Enabled() {
 		return nil, errors.New("mailbox database is not configured")
@@ -742,6 +1019,7 @@ func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
 		"mailboxes":       "SELECT count(*) FROM mailboxes",
 		"available":       "SELECT count(*) FROM mailboxes WHERE status='available'",
 		"active":          "SELECT count(*) FROM mailboxes WHERE status='active'",
+		"disabled":        "SELECT count(*) FROM mailboxes WHERE status='disabled'",
 		"cleanup_pending": "SELECT count(*) FROM mailboxes WHERE status='cleanup_pending'",
 		"events":          "SELECT count(*) FROM mailbox_events",
 	} {

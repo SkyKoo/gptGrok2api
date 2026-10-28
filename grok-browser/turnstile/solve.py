@@ -15,8 +15,8 @@ from common.browser import browser_kwargs, run_pre_actions, run_post_fetch
 log = logging.getLogger("grok-browser-turnstile")
 _solve_lock = asyncio.Lock()
 
-def _browser_kwargs(proxy: str = None, timezone: str = None, locale: str = None) -> dict:
-    return browser_kwargs("TURNSTILE", proxy, timezone=timezone, locale=locale)
+def _browser_kwargs(proxy: str = None, timezone: str = None, locale: str = None, profile: dict = None) -> dict:
+    return browser_kwargs("TURNSTILE", proxy, timezone=timezone, locale=locale, profile=profile)
 
 
 # ── Real-page solver ────────────────────────────────────────────────
@@ -200,9 +200,10 @@ async def solve_turnstile_realpage_session(
     proxy: str = None,
     timezone: str = None,
     locale: str = None,
+    profile: dict = None,
 ):
     """Real-page solver variant that keeps Chromium alive for same-origin auth."""
-    browser = await cloakbrowser.launch_async(**_browser_kwargs(proxy, timezone, locale))
+    browser = await cloakbrowser.launch_async(**_browser_kwargs(proxy, timezone, locale, profile))
     page = await browser.new_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)

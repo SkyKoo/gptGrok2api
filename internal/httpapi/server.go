@@ -46,6 +46,7 @@ type Server struct {
 	auth               *auth.Validator
 	store              *store.Store
 	mailboxStore       *mailboxstore.Store
+	mailboxManager     *mailboxstore.ResourceManager
 	mailboxInitErr     error
 	catalog            []model.Spec
 	discovery          *model.Registry
@@ -190,6 +191,23 @@ func New(cfg config.Config) *Server {
 		codexProgress:      map[string]*codexOAuthProgress{},
 	}
 	server.codexProtocolLogin = oauth.NewCodexProtocolLogin(server.codexLogin)
+	if server.mailboxStore != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := server.syncMailboxSources(ctx); err != nil {
+			log.Printf("mailbox source migration unavailable: %v", err)
+		}
+		cancel()
+	}
+	server.mailboxManager = mailboxstore.NewResourceManager(server.mailboxStore, newMailboxProvider)
+	server.mailboxManager.SetSourceLoader(func(context.Context) ([]mailboxstore.Source, error) {
+		mail := cloneMap(mapValue(server.registerStore.Get()["mail"]))
+		providers, _ := mail["providers"].([]any)
+		sources := make([]mailboxstore.Source, 0, len(providers))
+		for index, raw := range providers {
+			sources = append(sources, mailboxSourceFromProvider(mapValue(raw), index))
+		}
+		return sources, nil
+	})
 	server.initFreeRegistration()
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
@@ -424,8 +442,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/image-storage/sync", s.imageStorageSync)
 	mux.HandleFunc("/api/icloud/claim-status/sync", s.iCloudClaimStatusSync)
 	mux.HandleFunc("/api/icloud/bridge-status", s.iCloudBridgeStatus)
+	mux.HandleFunc("/api/icloud/sources", s.iCloudMailboxSources)
 	mux.HandleFunc("/api/icloud/status", s.iCloudMailboxStatus)
 	mux.HandleFunc("/api/icloud/mailboxes", s.iCloudMailboxes)
+	mux.HandleFunc("/api/icloud/mailboxes/", s.iCloudMailboxAction)
 	mux.HandleFunc("/api/icloud/events", s.iCloudMailboxEvents)
 	mux.HandleFunc("/api/icloud/reconcile", s.iCloudMailboxReconcile)
 	mux.HandleFunc("/api/images", s.adminImages)

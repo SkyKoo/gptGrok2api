@@ -1,3 +1,4 @@
+import { validateStudioImageModel } from '@/lib/studioMedia'
 import { streamChatCompletion } from '@/api/chatStream'
 import { debugApi, type DebugChatContentPart, type DebugChatMessage } from '@/api/debug'
 import {
@@ -49,12 +50,14 @@ export function buildStudioChatMessages(conversation: StudioConversation, curren
 }
 
 export function studioModeRequestErrorFallback(mode: StudioComposeMode) {
+  if (mode === 'video') return '视频生成失败'
   if (mode === 'image') return '图片生成失败'
   if (mode === 'search') return '搜索请求失败'
   return '对话请求失败'
 }
 
 export function studioModeRetryErrorFallback(mode: StudioComposeMode) {
+  if (mode === 'video') return '视频重新生成失败'
   if (mode === 'image') return '图片重新生成失败'
   if (mode === 'search') return '搜索重新请求失败'
   return '对话重新生成失败'
@@ -94,6 +97,7 @@ export async function runStudioSearchRequest(prompt: string, ownerId: string): P
 
 export async function createStudioImageTask(input: StudioImageTaskInput): Promise<ImageTask> {
   const model = input.imageForm.model || DEFAULT_IMAGE_MODEL
+  validateStudioImageModel(model, input.files.length > 0)
   const n = normalizeImageCount(input.imageForm.n)
   const size = input.imageForm.size
   const quality = input.imageForm.quality || DEFAULT_IMAGE_QUALITY
