@@ -2,6 +2,7 @@ package register
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -111,7 +112,7 @@ func (e *GrokEngine) startGrokCompensationLocked(index int, cfg GrokConfig, now 
 	job.AutoRetry.NextAttemptAt = now.Add(cfg.Timeout + compensationDelays[min(job.AutoRetry.Attempts, len(compensationDelays)-1)]).UTC().Format(time.RFC3339Nano)
 	job.Status, job.Stage, job.Error = "running", "compensation", ""
 	job.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
-	job.Logs = append(job.Logs, JobLog{Time: job.UpdatedAt, Text: "automatic_compensation_started", Level: "info"})
+	appendRegistrationLogAt(&job, job.UpdatedAt, "automatic_compensation", fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", job.AutoRetry.Attempts, len(compensationDelays)), "info")
 	previous := e.jobs[index]
 	e.jobs[index] = job
 	if err := e.saveLocked(); err != nil {

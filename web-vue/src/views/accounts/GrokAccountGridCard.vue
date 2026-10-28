@@ -2,7 +2,7 @@
   <article
     class="ui-card flex h-full flex-col gap-4 transition-all hover:border-primary/30"
     :class="[grokAccountRowClass(item), selected ? 'ring-2 ring-primary/30' : '']"
-    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, chatting, toggling, deleting, oauthAction]"
+    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, toggling, deleting, oauthAction]"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
@@ -63,7 +63,6 @@
       :syncing="syncing"
       :refreshing="refreshing"
       :testing="testing"
-      :chatting="chatting"
       :toggling="toggling"
       :deleting="deleting"
       :authorizing="authorizing"
@@ -73,7 +72,6 @@
       @sync="emit('sync', item)"
       @refresh="emit('refresh', item)"
       @test="emit('test', item)"
-      @chat="emit('chat', item)"
       @toggle-disabled="emit('toggle-disabled', item)"
       @remove="emit('remove', item)"
       @oauth-sync="emit('oauth-sync', item)"
@@ -122,7 +120,6 @@ const props = withDefaults(defineProps<{
   syncing?: boolean
   refreshing?: boolean
   testing?: boolean
-  chatting?: boolean
   toggling?: boolean
   deleting?: boolean
   authorizing?: boolean
@@ -134,7 +131,6 @@ const props = withDefaults(defineProps<{
   syncing: false,
   refreshing: false,
   testing: false,
-  chatting: false,
   toggling: false,
   deleting: false,
   authorizing: false,
@@ -149,7 +145,6 @@ const emit = defineEmits<{
   (e: 'sync', item: GrokAccount): void
   (e: 'refresh', item: GrokAccount): void
   (e: 'test', item: GrokAccount): void
-  (e: 'chat', item: GrokAccount): void
   (e: 'toggle-disabled', item: GrokAccount): void
   (e: 'remove', item: GrokAccount): void
   (e: 'oauth-sync', item: GrokAccount): void

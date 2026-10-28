@@ -7,7 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -226,7 +227,11 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 		e.failJob(id, err)
 		return
 	}
-	if err := e.change(id, func(j *RegistrationJob) { j.Mailbox = box }); err != nil {
+	if err := e.change(id, func(j *RegistrationJob) {
+		j.Mailbox = box
+		attachRegistrationLogAccount(j)
+		appendRegistrationLog(j, "mailbox_acquired", "邮箱资源已分配，开始注册", "info")
+	}); err != nil {
 		e.failJob(id, err)
 		return
 	}
@@ -315,7 +320,7 @@ func (e *GrokEngine) importAndVerify(ctx context.Context, id string) error {
 		j.Error = ""
 		j.Account = nil
 		finishRegistrationCompensation(j, "completed")
-		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: "account_imported_and_verified", Level: "success"})
+		appendRegistrationLog(j, "completed", "账号已入库并通过校验", "success")
 	})
 }
 
@@ -338,10 +343,7 @@ func (e *GrokEngine) progress(id, stage string, flow GrokRegistrationFlow) error
 			profile := provider.BrowserProfile()
 			job.BrowserProfile = &profile
 		}
-		job.Logs = append(job.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: stage, Level: "info"})
-		if len(job.Logs) > 60 {
-			job.Logs = job.Logs[len(job.Logs)-60:]
-		}
+		appendRegistrationLog(job, stage, stage, "info")
 	})
 }
 
@@ -387,7 +389,11 @@ func (e *GrokEngine) failJob(id string, err error) {
 			}
 		}
 		planRegistrationCompensation(job, err, time.Now())
-		job.Logs = append(job.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: job.Error, Level: "error"})
+		action := job.Stage
+		if index := strings.Index(job.Error, ":"); index > 0 {
+			action = strings.TrimSpace(job.Error[:index])
+		}
+		appendRegistrationLog(job, action, job.Error, "error")
 	})
 }
 
@@ -706,12 +712,15 @@ func (e *GrokEngine) SnapshotPage(page int) map[string]any {
 		_, active := e.active[job.ID]
 		jobs = append(jobs, map[string]any{"id": job.ID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": nil})
 	}
-	for i := len(e.jobs) - 1; i >= 0 && len(logs) < 200; i-- {
-		for k := len(e.jobs[i].Logs) - 1; k >= 0 && len(logs) < 200; k-- {
-			logs = append(logs, e.jobs[i].Logs[k])
-		}
+	for _, job := range e.jobs {
+		logs = append(logs, job.Logs...)
 	}
-	slices.Reverse(logs)
+	sort.SliceStable(logs, func(i, j int) bool {
+		return logs[i].Time < logs[j].Time
+	})
+	if len(logs) > 200 {
+		logs = logs[len(logs)-200:]
+	}
 	running := len(activeIDs)
 	threads := e.runThreads
 	if threads == 0 && running > 0 {

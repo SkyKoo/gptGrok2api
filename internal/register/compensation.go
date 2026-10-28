@@ -3,6 +3,7 @@ package register
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -292,11 +293,13 @@ func (e *FreeEngine) startCompensationLocked(index int, cfg FreeConfig, automati
 	job.Status, job.Stage, job.Error = "running", "compensation", ""
 	job.MailboxAPIBase = cfg.HME.BaseURL
 	job.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
-	text := "manual_compensation_started"
+	action := "manual_compensation"
+	detail := "复用已创建邮箱，开始手动补偿注册"
 	if automatic {
-		text = "automatic_compensation_started"
+		action = "automatic_compensation"
+		detail = fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", job.AutoRetry.Attempts, len(compensationDelays))
 	}
-	job.Logs = append(job.Logs, JobLog{Time: job.UpdatedAt, Text: text, Level: "info"})
+	appendRegistrationLogAt(&job, job.UpdatedAt, action, detail, "info")
 	before := e.jobs[index]
 	e.jobs[index] = job
 	if err := e.saveLocked(); err != nil {

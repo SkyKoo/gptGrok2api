@@ -229,18 +229,6 @@ export type GrokAccountLoginCredentials = {
   password: string
 }
 
-export type GrokAccountChatTestRequest = {
-  prompt: string
-  model?: string
-}
-
-export type GrokAccountChatTestResponse = {
-  id: string
-  model: string
-  content: string
-  elapsed_ms: number
-}
-
 const GROK_ACCOUNTS_PATH = '/api/register/grok/accounts'
 
 export const grokAccountsApi = {
@@ -299,13 +287,6 @@ export const grokAccountsApi = {
     return apiClient.post<{ ids: string[] }, GrokAccountsVerifyResponse>(
       `${GROK_ACCOUNTS_PATH}/runtime/verify`,
       { ids },
-    )
-  },
-
-  chatTest(id: string, payload: GrokAccountChatTestRequest) {
-    return apiClient.post<GrokAccountChatTestRequest, GrokAccountChatTestResponse>(
-      `${GROK_ACCOUNTS_PATH}/${encodeURIComponent(id)}/runtime/chat-test`,
-      payload,
     )
   },
 

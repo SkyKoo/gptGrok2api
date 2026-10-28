@@ -392,7 +392,6 @@
               :syncing="grokSyncingAccountId === item.id"
               :refreshing="grokRefreshingAccountId === item.id"
               :testing="grokTestingAccountId === item.id"
-              :chatting="grokChattingAccountId === item.id"
               :toggling="grokTogglingAccountId === item.id"
               :deleting="grokRemovingAccountId === item.id"
               :authorizing="grokAuthorizingAccountId === item.id"
@@ -402,7 +401,6 @@
               @sync="syncGrokAccount"
               @refresh="refreshGrokAccount"
               @test="testGrokAccount"
-              @chat="openGrokConversationTest"
               @toggle-disabled="toggleGrokAccountDisabled"
               @remove="removeGrokAccount"
               @oauth-sync="syncGrokOAuthAccount"
@@ -434,7 +432,6 @@
           :syncing="grokSyncingAccountId === item.id"
           :refreshing="grokRefreshingAccountId === item.id"
           :testing="grokTestingAccountId === item.id"
-          :chatting="grokChattingAccountId === item.id"
           :toggling="grokTogglingAccountId === item.id"
           :deleting="grokRemovingAccountId === item.id"
           :authorizing="grokAuthorizingAccountId === item.id"
@@ -444,7 +441,6 @@
           @sync="syncGrokAccount"
           @refresh="refreshGrokAccount"
           @test="testGrokAccount"
-          @chat="openGrokConversationTest"
           @toggle-disabled="toggleGrokAccountDisabled"
           @remove="removeGrokAccount"
           @oauth-sync="syncGrokOAuthAccount"
@@ -491,12 +487,6 @@
       @close="grokCredentialsAccount = null"
     />
 
-    <GrokAccountConversationTestModal
-      :open="Boolean(grokConversationAccount)"
-      :account="grokConversationAccount"
-      @close="closeGrokConversationTest"
-      @running="setGrokConversationRunning"
-    />
 
     <GrokOAuthAccountsPanel
       ref="grokOAuthPanelRef"
@@ -1175,7 +1165,6 @@ import AccountTableRow from './accounts/AccountTableRow.vue'
 import AccountTwoFAPanel from './accounts/AccountTwoFAPanel.vue'
 import AccountReloginPanel from './accounts/AccountReloginPanel.vue'
 import AccountHistoryModal from './accounts/AccountHistoryModal.vue'
-import GrokAccountConversationTestModal from './accounts/GrokAccountConversationTestModal.vue'
 import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
 import GrokAccountTableRow from './accounts/GrokAccountTableRow.vue'
 import GrokLoginCredentialsModal from './accounts/GrokLoginCredentialsModal.vue'
@@ -1438,8 +1427,6 @@ function accountPlatformFromQuery(value: unknown): AccountPlatformView {
 
 const activeAccountPlatform = ref<AccountPlatformView>(accountPlatformFromQuery(route.query.platform))
 const grokCredentialsAccount = ref<GrokAccount | null>(null)
-const grokConversationAccount = ref<GrokAccount | null>(null)
-const grokChattingAccountId = ref('')
 type GrokOAuthPanelRef = {
   refreshAccount: (id: string) => Promise<void>
   syncModels: (id: string) => Promise<void>
@@ -1589,7 +1576,6 @@ function applyActiveAccountPlatform(value: AccountPlatformView) {
   activeAccountPlatform.value = value
   if (value !== 'grok') grokCredentialsAccount.value = null
   if (value !== 'grok') showGrokOAuthAccess.value = false
-  if (value !== 'grok' && !grokChattingAccountId.value) grokConversationAccount.value = null
   if (value === 'grok' && !grokLoading.value && grokAccounts.value.length === 0) {
     void loadGrokAccounts({ silentErrorToast: true })
   }
@@ -1638,31 +1624,6 @@ async function refreshGrokAccount(item: GrokAccount) {
 
 async function testGrokAccount(item: GrokAccount) {
   await testGrokAccountValidity(item)
-}
-
-function openGrokConversationTest(item: GrokAccount) {
-  if (!item.has_sso || grokChattingAccountId.value) return
-  grokConversationAccount.value = item
-}
-
-function closeGrokConversationTest() {
-  if (grokChattingAccountId.value) return
-  grokConversationAccount.value = null
-}
-
-function setGrokConversationRunning(accountId: string, running: boolean) {
-  if (running) {
-    grokChattingAccountId.value = accountId
-    return
-  }
-  if (grokChattingAccountId.value !== accountId) return
-  grokChattingAccountId.value = ''
-  void loadGrokAccounts({ silentErrorToast: true }).then(() => {
-    const refreshed = grokAccounts.value.find((item) => item.id === accountId)
-    if (refreshed && grokConversationAccount.value?.id === accountId) {
-      grokConversationAccount.value = refreshed
-    }
-  })
 }
 
 async function toggleGrokAccountDisabled(item: GrokAccount) {

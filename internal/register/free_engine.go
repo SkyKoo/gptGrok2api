@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -48,9 +48,12 @@ type CodexOAuthTask struct {
 	FinishedAt string `json:"finished_at,omitempty"`
 }
 type JobLog struct {
-	Time  string `json:"time"`
-	Text  string `json:"text"`
-	Level string `json:"level"`
+	Time    string `json:"time"`
+	Text    string `json:"text"`
+	Level   string `json:"level"`
+	Account string `json:"account,omitempty"`
+	Action  string `json:"action,omitempty"`
+	Detail  string `json:"detail,omitempty"`
 }
 type FreeFactory func(FreeConfig) (MailSource, RegistrationFlow, error)
 type ImportAccount func(context.Context, string, map[string]any) error
@@ -319,7 +322,7 @@ func (e *FreeEngine) cancelQueued(id string, reason error) {
 		}
 		e.jobs[i].Status = "cancelled"
 		e.jobs[i].Error = safeFailure(reason)
-		e.jobs[i].Logs = append(e.jobs[i].Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: e.jobs[i].Error, Level: "error"})
+		appendRegistrationLog(&e.jobs[i], "cancel", e.jobs[i].Error, "error")
 		e.jobs[i].UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 		changed = true
 	}
@@ -358,6 +361,54 @@ func cloneJob(j RegistrationJob) RegistrationJob {
 	_ = json.Unmarshal(raw, &out)
 	return out
 }
+
+// appendRegistrationLog keeps the durable registration journal useful to an
+// operator. Text remains compatible with older clients while the structured
+// account/action/detail fields let the UI explain which account was affected
+// and what the engine was doing, including compensation attempts.
+func appendRegistrationLog(job *RegistrationJob, action, detail, level string) {
+	if job == nil {
+		return
+	}
+	action = strings.TrimSpace(action)
+	detail = strings.TrimSpace(detail)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	job.Logs = append(job.Logs, JobLog{Time: now, Text: detail, Level: level, Account: strings.TrimSpace(job.Mailbox.Email), Action: action, Detail: detail})
+	if len(job.Logs) > 60 {
+		job.Logs = job.Logs[len(job.Logs)-60:]
+	}
+}
+
+func appendRegistrationLogAt(job *RegistrationJob, at, action, detail, level string) {
+	if job == nil {
+		return
+	}
+	at = strings.TrimSpace(at)
+	if at == "" {
+		at = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	detail = strings.TrimSpace(detail)
+	job.Logs = append(job.Logs, JobLog{Time: at, Text: detail, Level: level, Account: strings.TrimSpace(job.Mailbox.Email), Action: strings.TrimSpace(action), Detail: detail})
+	if len(job.Logs) > 60 {
+		job.Logs = job.Logs[len(job.Logs)-60:]
+	}
+}
+
+func attachRegistrationLogAccount(job *RegistrationJob) {
+	if job == nil {
+		return
+	}
+	account := strings.TrimSpace(job.Mailbox.Email)
+	if account == "" {
+		return
+	}
+	for i := range job.Logs {
+		if strings.TrimSpace(job.Logs[i].Account) == "" {
+			job.Logs[i].Account = account
+		}
+	}
+}
+
 func (e *FreeEngine) progress(id, stage string, profile ...BrowserProfile) error {
 	return e.change(id, func(j *RegistrationJob) {
 		if len(profile) > 0 {
@@ -365,10 +416,7 @@ func (e *FreeEngine) progress(id, stage string, profile ...BrowserProfile) error
 		}
 		j.Status = "running"
 		j.Stage = stage
-		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: stage, Level: "info"})
-		if len(j.Logs) > 60 {
-			j.Logs = j.Logs[len(j.Logs)-60:]
-		}
+		appendRegistrationLog(j, stage, stage, "info")
 	})
 }
 func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail MailSource, flow RegistrationFlow) {
@@ -392,7 +440,11 @@ func (e *FreeEngine) run(ctx context.Context, id string, cfg FreeConfig, mail Ma
 		runErr = err
 		return
 	}
-	if runErr = e.change(id, func(j *RegistrationJob) { j.Mailbox = box }); runErr != nil {
+	if runErr = e.change(id, func(j *RegistrationJob) {
+		j.Mailbox = box
+		attachRegistrationLogAccount(j)
+		appendRegistrationLog(j, "mailbox_acquired", "邮箱资源已分配，开始注册", "info")
+	}); runErr != nil {
 		return
 	}
 	runErr = e.runWithMailbox(ctx, id, cfg, mail, flow, box)
@@ -527,7 +579,7 @@ func (e *FreeEngine) importAndVerify(ctx context.Context, id string) error {
 		j.Error = ""
 		j.Account = nil
 		finishRegistrationCompensation(j, "completed")
-		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: "account_imported_and_verified", Level: "success"})
+		appendRegistrationLog(j, "completed", "账号已入库并通过校验", "success")
 	})
 }
 func (e *FreeEngine) failJob(id string, err error) {
@@ -561,7 +613,11 @@ func (e *FreeEngine) failJob(id string, err error) {
 		} else {
 			planRegistrationCompensation(j, err, time.Now())
 		}
-		j.Logs = append(j.Logs, JobLog{Time: time.Now().UTC().Format(time.RFC3339), Text: j.Error, Level: "error"})
+		action := j.Stage
+		if index := strings.Index(j.Error, ":"); index > 0 {
+			action = strings.TrimSpace(j.Error[:index])
+		}
+		appendRegistrationLog(j, action, j.Error, "error")
 	})
 }
 func (e *FreeEngine) Stop() {
@@ -714,15 +770,18 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 		_, active := e.active[j.ID]
 		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "twofa": registrationTwoFASummary(j.TwoFA), "auto_retry": compensationSummary(j.AutoRetry)})
 	}
-	// Gather only the existing 200-line live-log window, without allocating the
-	// logs for the entire retained history on every SSE tick.
-	for i := len(e.jobs) - 1; i >= 0 && len(logs) < 200; i-- {
-		lines := e.jobs[i].Logs
-		for k := len(lines) - 1; k >= 0 && len(logs) < 200; k-- {
-			logs = append(logs, lines[k])
-		}
+	// Compensation appends to an old job, so job order is not event order.
+	// Sort the bounded live window by event time before returning it; otherwise
+	// a later retry can be hidden by the frontend's tail limit.
+	for _, job := range e.jobs {
+		logs = append(logs, job.Logs...)
 	}
-	slices.Reverse(logs)
+	sort.SliceStable(logs, func(i, j int) bool {
+		return logs[i].Time < logs[j].Time
+	})
+	if len(logs) > 200 {
+		logs = logs[len(logs)-200:]
+	}
 	running := len(activeIDs)
 	if e.runCancel != nil && running == 0 {
 		running = 0

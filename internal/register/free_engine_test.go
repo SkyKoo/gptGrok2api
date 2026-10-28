@@ -172,6 +172,39 @@ func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 	if retryProfile == nil || retryProfile.Name != flow.profile.Name {
 		t.Fatalf("compensation did not reuse browser profile: %#v", retryProfile)
 	}
+	var sawMailbox, sawCompensation, sawCompletion bool
+	for _, line := range job.Logs {
+		if line.Account != "alias@example.test" {
+			t.Errorf("registration log lost account: %+v", line)
+		}
+		sawMailbox = sawMailbox || line.Action == "mailbox_acquired"
+		sawCompensation = sawCompensation || line.Action == "manual_compensation"
+		sawCompletion = sawCompletion || line.Action == "completed"
+	}
+	if !sawMailbox || !sawCompensation || !sawCompletion {
+		t.Fatalf("registration log did not expose mailbox, compensation and completion actions: %+v", job.Logs)
+	}
+}
+
+func TestRegistrationSnapshotOrdersLogsAcrossCompensationJobs(t *testing.T) {
+	engine := &FreeEngine{jobs: []RegistrationJob{
+		{ID: "older", Mailbox: Mailbox{Email: "older@example.test"}},
+		{ID: "newer", Mailbox: Mailbox{Email: "newer@example.test"}},
+	}}
+	appendRegistrationLogAt(&engine.jobs[0], "2026-10-28T22:00:00Z", "bootstrap", "旧任务初始化", "info")
+	appendRegistrationLogAt(&engine.jobs[1], "2026-10-28T22:02:00Z", "bootstrap", "新任务初始化", "info")
+	appendRegistrationLogAt(&engine.jobs[0], "2026-10-28T22:03:00Z", "automatic_compensation", "旧任务补偿注册", "info")
+	snapshot := engine.SnapshotPage(1)
+	logs, ok := snapshot["logs"].([]JobLog)
+	if !ok || len(logs) != 3 {
+		t.Fatalf("unexpected snapshot logs: %#v", snapshot["logs"])
+	}
+	if logs[0].Action != "bootstrap" || logs[1].Action != "bootstrap" || logs[2].Action != "automatic_compensation" {
+		t.Fatalf("logs were not ordered by event time: %+v", logs)
+	}
+	if logs[2].Account != "older@example.test" {
+		t.Fatalf("compensation log was not associated with its account: %+v", logs[2])
+	}
 }
 
 func TestFreeEngineCancellationAndConcurrentStart(t *testing.T) {

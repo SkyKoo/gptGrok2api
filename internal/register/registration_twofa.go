@@ -64,7 +64,7 @@ func (e *FreeEngine) registrationTwoFAProgress(id, status, stage, message string
 		if status == "running" {
 			j.Status, j.Stage = "running", "twofa_"+stage
 		}
-		j.Logs = append(j.Logs, JobLog{Time: now, Text: "twofa_" + stage + ": " + message, Level: level})
+		appendRegistrationLogAt(j, now, "twofa_"+stage, "2FA · "+message, level)
 	})
 }
 

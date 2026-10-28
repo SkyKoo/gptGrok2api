@@ -145,6 +145,34 @@ def _safe_page_url(raw: str) -> str:
     return "unknown"
 
 
+async def _visible_control_summary(page: Any) -> dict:
+    """Return names and labels of visible controls, never their values."""
+    try:
+        result = await page.evaluate("""() => {
+          const visible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = window.getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+          };
+          const inputs = Array.from(document.querySelectorAll('input')).filter(visible).slice(0, 16).map((element) => ({
+            type: element.getAttribute('type') || '',
+            name: element.getAttribute('name') || '',
+            autocomplete: element.getAttribute('autocomplete') || '',
+            inputmode: element.getAttribute('inputmode') || '',
+            aria: element.getAttribute('aria-label') || '',
+          }));
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"]')).filter(visible).slice(0, 16).map((element) => ({
+            type: element.getAttribute('type') || '',
+            aria: element.getAttribute('aria-label') || '',
+            text: element.tagName === 'INPUT' ? (element.getAttribute('value') || '') : (element.innerText || ''),
+          })).map((item) => ({ ...item, text: String(item.text || '').replace(/\\s+/g, ' ').trim().slice(0, 100) }));
+          return { inputs, buttons };
+        }""")
+        return result if isinstance(result, dict) else {}
+    except Exception:
+        return {}
+
+
 async def _page_diagnostic(page: Any, *, body: str | None = None, response_status: int = 0) -> dict:
     """Return bounded page metadata without persisting HTML, cookies or input."""
     url = _safe_page_url(getattr(page, "url", ""))
@@ -164,6 +192,7 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
         lowered,
     )) or (response_status in {403, 429} and "cloudflare" in lowered)
     reason = "proxy_connection_failed" if proxy_error else "cloudflare_challenge" if cloudflare else ""
+    controls = await _visible_control_summary(page)
     return {
         "url": url,
         "title": title,
@@ -171,6 +200,7 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
         "cloudflare_challenge": cloudflare,
         "proxy_connection_failed": proxy_error,
         "reason": reason,
+        "visible_controls": controls,
     }
 
 
@@ -246,7 +276,7 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
     last = ""
     while time.monotonic() < deadline:
         last = await _body_text(page)
-        if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[inputmode="numeric"]')):
+        if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]')):
             return
         if re.search(r"验证您的邮箱|验证码|Verify your email|verification code", last, re.I):
             return
@@ -288,7 +318,7 @@ async def send_email(session_id: str, email: str) -> dict:
         field = await _first_visible(page, ('input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]'))
         # A mailbox timeout may trigger a resend on the already-open code
         # page.  Keep the same browser session instead of restarting it.
-        if field is None and await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[inputmode="numeric"]')):
+        if field is None and await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]')):
             await _click_any(page, ("Resend code", "Send again", "重新发送验证码", "重新发送"))
             return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
         deadline = time.monotonic() + 30
@@ -311,7 +341,7 @@ async def send_email(session_id: str, email: str) -> dict:
 
 async def _fill_code(page: Any, code: str) -> bool:
     normalized = re.sub(r"[^A-Za-z0-9]", "", str(code or ""))
-    selectors = ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[inputmode="numeric"]', 'input[inputmode="text"]', 'input[type="text"]')
+    selectors = ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]', 'input[inputmode="text"]', 'input[type="text"]')
     for selector in selectors:
         try:
             locator = page.locator(selector)
@@ -333,7 +363,7 @@ async def _wait_for_profile(page: Any, timeout_s: int = 45) -> None:
     deadline = time.monotonic() + timeout_s
     last = ""
     while time.monotonic() < deadline:
-        if await _first_visible(page, ('input[name="givenName"]', 'input[autocomplete="given-name"]')):
+        if await _first_visible(page, ('input[name="givenName"]', 'input[name="firstName"]', 'input[autocomplete="given-name"]')):
             return
         last = await _body_text(page)
         if re.search(r"验证码.*(无效|错误|过期)|invalid.*code|expired.*code", last, re.I):
@@ -349,8 +379,11 @@ async def verify_email(session_id: str, email: str, code: str) -> dict:
     current = await _session(session_id)
     async with current.lock:
         if not await _fill_code(current.page, code):
-            raise XaiBrowserFlowError("verification code input not found", stage="validate_code", retryable=True)
-        await _click_any(current.page, ("Confirm email", "Verify email", "确认邮箱", "验证邮箱", "Continue", "继续"))
+            diagnostic = await _page_diagnostic(current.page)
+            raise XaiBrowserFlowError("verification_code_input_missing", stage="validate_code", retryable=True, diagnostic=diagnostic)
+        if not await _click_submit(current.page, ("Confirm email", "Verify email", "Verify email address", "Confirm", "Submit code", "确认邮箱", "验证邮箱", "继续", "Continue")):
+            diagnostic = await _page_diagnostic(current.page)
+            raise XaiBrowserFlowError("verification_submit_button_missing", stage="validate_code", retryable=True, diagnostic=diagnostic)
         await _wait_for_profile(current.page)
         return {"ok": True, "url": current.page.url, "cookies": await cookie_snapshot(current.page), "user_agent": await _user_agent(current.page)}
 
@@ -396,14 +429,14 @@ async def signup(session_id: str, *, email: str, password: str, code: str, given
     async with current.lock:
         page = current.page
         fields = [
-            (("input[name=givenName]", 'input[autocomplete="given-name"]'), given_name),
-            (("input[name=familyName]", 'input[autocomplete="family-name"]'), family_name),
+            (("input[name=givenName]", "input[name=firstName]", 'input[autocomplete="given-name"]'), given_name),
+            (("input[name=familyName]", "input[name=lastName]", 'input[autocomplete="family-name"]'), family_name),
             (("input[name=password]", 'input[type=password]', 'input[autocomplete="new-password"]'), password),
         ]
         for selectors, value in fields:
             if not await _fill_first(page, selectors, value):
                 raise XaiBrowserFlowError("signup_profile_field_missing", stage="signup", retryable=True)
-        await _set_native_input_value(page, "input[name=password]", password)
+        await _set_native_input_value(page, 'input[name=password], input[type=password], input[autocomplete="new-password"]', password)
         await _pause(page, 900)
         token = await _native_turnstile_token(page)
         if not token and turnstile_token:

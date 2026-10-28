@@ -4,7 +4,7 @@
       size="xs"
       variant="outline"
       root-class="w-16 justify-center whitespace-nowrap"
-      :disabled="busy || !item.has_sso || !runtimeAvailable || syncing || chatting"
+      :disabled="busy || !item.has_sso || !runtimeAvailable || syncing"
       @click="emit('sync')"
     >
       {{ syncing ? '加入中' : (item.sync_state === 'synced' ? '重加' : '加入') }}
@@ -13,24 +13,15 @@
       size="xs"
       variant="outline"
       root-class="w-16 justify-center whitespace-nowrap"
-      :disabled="busy || !item.has_sso || testing || chatting"
+      :disabled="busy || !item.has_sso || testing"
       @click="emit('test')"
     >
       {{ testing ? '测试中' : '测试' }}
     </Button>
-    <Button
-      size="xs"
-      variant="outline"
-      root-class="w-16 justify-center whitespace-nowrap"
-      :disabled="busy || !item.has_sso || chatting"
-      @click="emit('chat')"
-    >
-      {{ chatting ? '对话中' : '对话' }}
-    </Button>
     <FloatingActionMenu
       label="更多"
       :items="menuItems"
-      :disabled="busy || syncing || refreshing || testing || chatting || toggling || deleting"
+      :disabled="busy || syncing || refreshing || testing || toggling || deleting"
       align="right"
       size="sm"
       trigger-class="h-7 justify-center px-2 text-[11px]"
@@ -57,7 +48,6 @@ const props = withDefaults(defineProps<{
   syncing?: boolean
   refreshing?: boolean
   testing?: boolean
-  chatting?: boolean
   toggling?: boolean
   deleting?: boolean
   authorizing?: boolean
@@ -70,7 +60,6 @@ const props = withDefaults(defineProps<{
   syncing: false,
   refreshing: false,
   testing: false,
-  chatting: false,
   toggling: false,
   deleting: false,
   authorizing: false,
@@ -84,7 +73,6 @@ const emit = defineEmits<{
   (e: 'sync'): void
   (e: 'refresh'): void
   (e: 'test'): void
-  (e: 'chat'): void
   (e: 'toggle-disabled'): void
   (e: 'remove'): void
   (e: 'oauth-sync'): void

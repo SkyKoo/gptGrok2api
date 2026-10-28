@@ -1197,7 +1197,7 @@ export function registerRuntimeLogLines(
   format: (value?: string | null) => string = formatClock,
 ): RegisterRuntimeLogLine[] {
   return logs.slice().reverse().map((item, index) => {
-    const message = runtimeLogMessageParts(item.text)
+    const message = runtimeLogMessageParts(item)
     return {
       key: registerRuntimeLogLineKey(item, logs.length - index - 1),
       time: format(item.time),
@@ -1208,8 +1208,19 @@ export function registerRuntimeLogLines(
   })
 }
 
-function runtimeLogMessageParts(value: unknown): { tag?: string; text: string } {
-  const text = String(value || '-').trim() || '-'
+function runtimeLogMessageParts(item: NonNullable<LegacyRegisterConfig['logs']>[number]): { tag?: string; text: string } {
+  const account = String(item.account || '').trim()
+  const action = String(item.action || '').trim()
+  const detail = String(item.detail || item.text || '').trim() || '-'
+  if (account || action || item.detail) {
+    const actionText = registerRuntimeActionLabel(action)
+    const suffix = detail && detail !== action && detail !== actionText ? ` · ${detail}` : ''
+    return {
+      tag: account || undefined,
+      text: `${actionText || '注册进度'}${suffix}`,
+    }
+  }
+  const text = String(item.text || '-').trim() || '-'
   const taskMatch = text.match(/^(?:\[Checkout\]\s*)?\[?任务\s*(\d+)\]?\s*(.*)$/)
   if (taskMatch) {
     return {
@@ -1221,15 +1232,49 @@ function runtimeLogMessageParts(value: unknown): { tag?: string; text: string } 
   return { text }
 }
 
+const registerRuntimeActionLabels: Record<string, string> = {
+  queued: '排队等待',
+  cancel: '取消任务',
+  mailbox: '准备邮箱资源',
+  mailbox_acquired: '分配邮箱资源',
+  manual_compensation: '手动补偿注册',
+  automatic_compensation: '自动补偿注册',
+  bootstrap: '初始化浏览器会话',
+  authorize: '初始化授权会话',
+  submit_email: '提交邮箱',
+  send_code: '发送验证码',
+  wait_code: '等待邮箱验证码',
+  validate_code: '提交邮箱验证码',
+  verification_submit_button_missing: '提交验证码',
+  signup: '提交注册资料',
+  create_profile: '填写账号资料',
+  turnstile: '完成安全验证',
+  session: '获取会话',
+  sso: '获取账号凭据',
+  import: '账号入库',
+  verify: '校验账号',
+  completed: '注册完成',
+  compensation: '补偿注册',
+}
+
+function registerRuntimeActionLabel(action: string): string {
+  if (!action) return ''
+  if (registerRuntimeActionLabels[action]) return registerRuntimeActionLabels[action]
+  if (action.startsWith('twofa_')) return `2FA · ${action.slice(6)}`
+  return action.replaceAll('_', ' ')
+}
+
 function registerRuntimeLogLineKey(
   item: NonNullable<LegacyRegisterConfig['logs']>[number],
   sourceIndex: number,
 ): string {
   const time = String(item.time || 'log').replaceAll('|', '/')
   const level = String(item.level || 'info').replaceAll('|', '/')
-  const text = String(item.text || '-').replaceAll('|', '/')
+  const text = String(item.detail || item.text || '-').replaceAll('|', '/')
+  const account = String(item.account || '').replaceAll('|', '/')
+  const action = String(item.action || '').replaceAll('|', '/')
   const sample = text.length <= 96 ? text : `${text.length}:${text.slice(0, 72)}:${text.slice(-16)}`
-  return `${time}|${level}|${sample}|${sourceIndex}`
+  return `${time}|${level}|${account}|${action}|${sample}|${sourceIndex}`
 }
 
 export function normalizeRuntimeLogLevel(level?: string): RuntimeLogLevel {

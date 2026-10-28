@@ -261,6 +261,9 @@ export type LegacyRegisterConfig = {
     time: string
     text: string
     level?: string
+    account?: string
+    action?: string
+    detail?: string
   }>
   grok_oauth_logs?: Array<{
     time: string

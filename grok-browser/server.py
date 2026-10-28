@@ -229,7 +229,7 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
     diagnostic = exc.diagnostic if isinstance(exc.diagnostic, dict) else {}
     safe_diagnostic = {
         key: diagnostic[key]
-        for key in ("url", "title", "http_status", "cloudflare_challenge", "proxy_connection_failed", "reason")
+        for key in ("url", "title", "http_status", "cloudflare_challenge", "proxy_connection_failed", "reason", "visible_controls")
         if key in diagnostic
     }
     detail = {"stage": exc.stage, "error": str(exc)[:300]}
