@@ -7,6 +7,7 @@ the Go registration engine waits for the mailbox code.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
@@ -173,7 +174,36 @@ async def _visible_control_summary(page: Any) -> dict:
         return {}
 
 
-async def _page_diagnostic(page: Any, *, body: str | None = None, response_status: int = 0) -> dict:
+def _upstream_email_error(code: str) -> tuple[str, str] | None:
+    """Map known xAI email-submit errors to safe stable diagnostics."""
+    normalized = re.sub(r"\s+", "", str(code or "").strip().lower())
+    known = {
+        "account:email-signup-unavailable": ("signup_unavailable", "email_signup_unavailable"),
+        "account:email-already-exists": ("email_already_registered", "email_already_exists"),
+        "account:email-invalid": ("email_invalid", "email_invalid"),
+        "account:rate-limited": ("signup_rate_limited", "rate_limited"),
+    }
+    return known.get(normalized)
+
+
+async def _capture_email_submit_response(response: Any, state: dict) -> None:
+    """Capture only a bounded, allow-listed xAI response code."""
+    try:
+        parsed = urlparse(str(response.url or ""))
+        if (parsed.hostname or "").lower() != "accounts.x.ai" or int(response.status) < 400:
+            return
+        payload = json.loads(await response.text())
+        code = payload.get("code") if isinstance(payload, dict) else ""
+        mapped = _upstream_email_error(str(code))
+        if mapped is None:
+            return
+        reason, safe_code = mapped
+        state.update({"reason": reason, "code": safe_code, "status": int(response.status)})
+    except Exception:
+        return
+
+
+async def _page_diagnostic(page: Any, *, body: str | None = None, response_status: int = 0, upstream: dict | None = None) -> dict:
     """Return bounded page metadata without persisting HTML, cookies or input."""
     url = _safe_page_url(getattr(page, "url", ""))
     try:
@@ -191,9 +221,9 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
         r"attention required.*cloudflare|just a moment|challenge-platform|cf-chl-|cloudflare",
         lowered,
     )) or (response_status in {403, 429} and "cloudflare" in lowered)
-    reason = "proxy_connection_failed" if proxy_error else "cloudflare_challenge" if cloudflare else ""
+    reason = "proxy_connection_failed" if proxy_error else "cloudflare_challenge" if cloudflare else _classify_email_stage_error(normalized) or ""
     controls = await _visible_control_summary(page)
-    return {
+    diagnostic = {
         "url": url,
         "title": title,
         "http_status": int(response_status or 0),
@@ -202,11 +232,26 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
         "reason": reason,
         "visible_controls": controls,
     }
+    if isinstance(upstream, dict):
+        if upstream.get("status"):
+            diagnostic["upstream_status"] = int(upstream["status"])
+        if upstream.get("code"):
+            diagnostic["upstream_code"] = str(upstream["code"])
+        if upstream.get("reason") and not diagnostic["reason"]:
+            diagnostic["reason"] = str(upstream["reason"])
+    return diagnostic
 
 
 def _page_issue(diagnostic: dict) -> str:
     reason = str(diagnostic.get("reason") or "").strip()
-    return reason if reason in {"proxy_connection_failed", "cloudflare_challenge"} else ""
+    return reason if reason in {
+        "proxy_connection_failed",
+        "cloudflare_challenge",
+        "signup_rate_limited",
+        "email_already_registered",
+        "signup_unavailable",
+        "email_invalid",
+    } else ""
 
 
 async def _first_visible(page: Any, selectors: tuple[str, ...]) -> Any | None:
@@ -271,10 +316,13 @@ async def _set_native_input_value(page: Any, selector: str, value: str) -> bool:
     }""", [selector, str(value)]))
 
 
-async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
+async def _wait_for_email_verification(page: Any, timeout_s: int = 45, upstream: dict | None = None) -> None:
     deadline = time.monotonic() + timeout_s
     last = ""
     while time.monotonic() < deadline:
+        if isinstance(upstream, dict) and upstream.get("reason"):
+            diagnostic = await _page_diagnostic(page, upstream=upstream)
+            raise XaiBrowserFlowError(str(upstream["reason"]), stage="send_code", retryable=True, diagnostic=diagnostic)
         last = await _body_text(page)
         if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]')):
             return
@@ -282,9 +330,10 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45) -> None:
             return
         reason = _classify_email_stage_error(last)
         if reason:
-            raise XaiBrowserFlowError(reason, stage="send_code", retryable=True)
+            diagnostic = await _page_diagnostic(page, body=last, upstream=upstream)
+            raise XaiBrowserFlowError(reason, stage="send_code", retryable=True, diagnostic=diagnostic)
         await _pause(page, 300)
-    diagnostic = await _page_diagnostic(page, body=last)
+    diagnostic = await _page_diagnostic(page, body=last, upstream=upstream)
     reason = _page_issue(diagnostic) or "verification_page_missing"
     raise XaiBrowserFlowError(reason, stage="send_code", retryable=True, diagnostic=diagnostic)
 
@@ -305,7 +354,13 @@ def _classify_email_stage_error(text: str) -> str | None:
         return "signup_rate_limited"
     if re.search(r"already.*email|email.*already|已存在|已注册|已经注册", normalized, re.I):
         return "email_already_registered"
-    if re.search(r"无法注册|signup.*unavailable|cannot.*sign up|can't.*sign up|registration.*unavailable", normalized, re.I):
+    if re.search(
+        r"无法注册|signup.*unavailable|sign[- ]?up.*(?:isn['’]t|is not|not)\s+available|"
+        r"(?:email|e-mail).*sign[- ]?up.*(?:isn['’]t|is not|not)\s+available|"
+        r"cannot.*sign up|can't.*sign up|registration.*unavailable",
+        normalized,
+        re.I,
+    ):
         return "signup_unavailable"
     return None
 
@@ -331,11 +386,24 @@ async def send_email(session_id: str, email: str) -> dict:
         if field is None:
             diagnostic = await _page_diagnostic(page)
             raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
-        await field.fill(str(email).strip())
-        if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
-            diagnostic = await _page_diagnostic(page)
-            raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
-        await _wait_for_email_verification(page)
+        upstream: dict = {}
+        response_handler = lambda response: asyncio.create_task(_capture_email_submit_response(response, upstream))
+        page.on("response", response_handler)
+        try:
+            await field.fill(str(email).strip())
+            if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
+                diagnostic = await _page_diagnostic(page)
+                raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
+            # The submit request can return a structured xAI error while the
+            # page remains on the email form. Capture it before the generic
+            # verification-page timeout masks the actual cause.
+            await _pause(page, 250)
+            await _wait_for_email_verification(page, upstream=upstream)
+        finally:
+            try:
+                page.remove_listener("response", response_handler)
+            except Exception:
+                pass
         return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
 
 

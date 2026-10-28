@@ -148,7 +148,9 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				Stage      string `json:"stage"`
 				Error      string `json:"error"`
 				Diagnostic struct {
-					Reason string `json:"reason"`
+					Reason         string `json:"reason"`
+					UpstreamCode   string `json:"upstream_code"`
+					UpstreamStatus int    `json:"upstream_status"`
 				} `json:"diagnostic"`
 			} `json:"detail"`
 		}
@@ -160,6 +162,12 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				failure.Operation = "worker_error=" + workerReason
 				if diagnostic := sanitizeBrowserWorkerDiagnostic(envelope.Detail.Diagnostic.Reason); diagnostic != "" && diagnostic != workerReason {
 					failure.Operation += ";diagnostic=" + diagnostic
+				}
+				if code := sanitizeBrowserWorkerUpstreamCode(envelope.Detail.Diagnostic.UpstreamCode); code != "" {
+					failure.Operation += ";upstream_code=" + code
+				}
+				if status := envelope.Detail.Diagnostic.UpstreamStatus; status >= 400 && status <= 599 {
+					failure.Operation += fmt.Sprintf(";upstream_status=%d", status)
 				}
 			}
 		}
@@ -191,7 +199,17 @@ func sanitizeBrowserWorkerReason(value string) string {
 func sanitizeBrowserWorkerDiagnostic(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
-	case "cloudflare_challenge", "proxy_connection_failed":
+	case "cloudflare_challenge", "proxy_connection_failed", "signup_rate_limited", "email_already_registered", "signup_unavailable", "email_invalid":
+		return value
+	default:
+		return ""
+	}
+}
+
+func sanitizeBrowserWorkerUpstreamCode(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	switch value {
+	case "email_signup_unavailable", "email_already_exists", "email_invalid", "rate_limited":
 		return value
 	default:
 		return ""

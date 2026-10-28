@@ -50,6 +50,14 @@ func transientRegistrationFailure(message string) bool {
 	if code[1] == "verification_required" {
 		return false
 	}
+	// xAI has explicitly rejected the email path. Repeating the same browser
+	// action only burns another attempt while the upstream capability is
+	// unavailable (or the address is permanently invalid/already registered).
+	for _, reason := range []string{"signup_unavailable", "email_already_registered", "email_invalid"} {
+		if strings.Contains(message, "worker_error="+reason) {
+			return false
+		}
+	}
 	if match := legacyFailureHTTP.FindStringSubmatch(message); len(match) > 1 {
 		status, _ := strconv.Atoi(match[1])
 		return status == 408 || status == 429 || status >= 500 && status <= 599

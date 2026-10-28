@@ -212,3 +212,28 @@ func TestHTTPGrokBrowserSolverPreservesSafeWorkerDiagnostic(t *testing.T) {
 		t.Fatalf("worker diagnostic leaked sensitive page details: %s", got)
 	}
 }
+
+func TestHTTPGrokBrowserSolverPreservesUpstreamEmailAvailabilityError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadGateway,
+			Body:       io.NopCloser(strings.NewReader(`{"detail":{"stage":"send_code","error":"signup_unavailable","diagnostic":{"reason":"signup_unavailable","upstream_code":"email_signup_unavailable","upstream_status":400}}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	err := solver.SendEmailCode(context.Background(), "native-1", "person@example.com")
+	if err == nil {
+		t.Fatal("SendEmailCode() accepted a worker rejection")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"browser_worker_rejected (HTTP 502)",
+		"upstream_stage=send_code",
+		"operation=worker_error=signup_unavailable;upstream_code=email_signup_unavailable;upstream_status=400",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("worker upstream detail missing %q: %s", want, got)
+		}
+	}
+}
