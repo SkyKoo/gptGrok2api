@@ -10,7 +10,7 @@ import time
 
 import cloakbrowser
 
-from common.browser import browser_kwargs, run_pre_actions, run_post_fetch
+from common.browser import browser_context_kwargs, browser_kwargs, run_pre_actions, run_post_fetch
 
 log = logging.getLogger("grok-browser-turnstile")
 _solve_lock = asyncio.Lock()
@@ -142,7 +142,8 @@ async def solve_turnstile_realpage(url: str, sitekey: str = None,
 
     async with _solve_lock:
         async with await cloakbrowser.launch_async(**_browser_kwargs(proxy)) as browser:
-            page = await browser.new_page()
+            context = await browser.new_context(**browser_context_kwargs())
+            page = await context.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
@@ -191,6 +192,7 @@ async def solve_turnstile_realpage(url: str, sitekey: str = None,
                 return result
             finally:
                 await page.close()
+                await context.close()
 
 
 async def solve_turnstile_realpage_session(
@@ -203,9 +205,14 @@ async def solve_turnstile_realpage_session(
     profile: dict = None,
 ):
     """Real-page solver variant that keeps Chromium alive for same-origin auth."""
-    browser = await cloakbrowser.launch_async(**_browser_kwargs(proxy, timezone, locale, profile))
-    page = await browser.new_page()
+    browser = await cloakbrowser.launch_async(
+        **browser_kwargs("TURNSTILE", proxy, timezone=timezone, locale=locale, profile=profile)
+    )
+    context = None
+    page = None
     try:
+        context = await browser.new_context(**browser_context_kwargs(profile))
+        page = await context.new_page()
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         if sitekey:
             await _inject_turnstile_widget(page, sitekey)
@@ -233,6 +240,15 @@ async def solve_turnstile_realpage_session(
                                "user_agent": str(user_agent or ""),
                                "method": "real-page-session"}
     except Exception:
-        await page.close()
+        if context is not None:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            try:
+                await context.close()
+            except Exception:
+                pass
         await browser.close()
         raise

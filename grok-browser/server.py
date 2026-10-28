@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 import cloakbrowser
 
-from common.browser import browser_kwargs
+from common.browser import browser_context_kwargs, browser_kwargs
 from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
     XaiBrowserFlowError,
@@ -207,7 +207,10 @@ async def _close_session(session_id: str) -> None:
     try:
         await session["page"].close()
     finally:
-        await session["browser"].close()
+        try:
+            await session["context"].close()
+        finally:
+            await session["browser"].close()
 
 
 @app.post("/v1/session/close")
@@ -319,7 +322,8 @@ async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict])
         urls.append(success_url)
     urls.extend(["https://accounts.x.ai/", "https://grok.com/"])
     async with await cloakbrowser.launch_async(**browser_kwargs("TURNSTILE", proxy or None)) as browser:
-        page = await browser.new_page()
+        context = await browser.new_context(**browser_context_kwargs())
+        page = await context.new_page()
         try:
             rows = _worker_cookie_rows(cookies)
             for domain in (".x.ai", ".grok.com"):
@@ -344,6 +348,7 @@ async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict])
             return "", _cookies_for_cfm(current), str(ua or "")
         finally:
             await page.close()
+            await context.close()
 
 
 @app.get("/health")
@@ -391,7 +396,7 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
                 locale=req.locale.strip() or None,
                 profile=_profile_for_worker(req.browser_profile),
             )
-            live_session = {"browser": browser, "page": page,
+            live_session = {"browser": browser, "context": page.context, "page": page,
                             "expires_at": asyncio.get_running_loop().time() + max(900, req.timeout_s)}
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="browser turnstile timeout")
@@ -404,7 +409,10 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
             try:
                 await live_session["page"].close()
             finally:
-                await live_session["browser"].close()
+                try:
+                    await live_session["context"].close()
+                finally:
+                    await live_session["browser"].close()
         raise HTTPException(status_code=502, detail="browser worker did not receive a token")
     if live_session is not None:
         async with _sessions_lock:

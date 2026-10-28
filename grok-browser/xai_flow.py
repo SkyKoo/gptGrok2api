@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import cloakbrowser
 
-from common.browser import browser_kwargs
+from common.browser import browser_context_kwargs, browser_kwargs
 from turnstile.solve import _click_turnstile_checkbox
 
 _ALLOWED_HOSTS = {"accounts.x.ai", "auth.x.ai", "auth.grokusercontent.com", "grok.com", "www.grok.com"}
@@ -36,6 +36,7 @@ class XaiBrowserFlowError(RuntimeError):
 class BrowserSession:
     session_id: str
     browser: Any
+    context: Any
     page: Any
     signup_url: str
     initial_response_status: int = 0
@@ -43,6 +44,14 @@ class BrowserSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def close(self) -> None:
+        try:
+            await self.page.close()
+        except Exception:
+            pass
+        try:
+            await self.context.close()
+        except Exception:
+            pass
         try:
             await self.browser.close()
         except Exception:
@@ -84,17 +93,26 @@ async def cleanup_expired_sessions() -> None:
 async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "", locale: str = "", profile: dict | None = None, timeout_s: int = 180) -> dict:
     await cleanup_expired_sessions()
     target = _safe_url(signup_url, "browser_start")
-    browser = await cloakbrowser.launch_async(**browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None, profile=profile))
+    browser = await cloakbrowser.launch_async(
+        **browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None, profile=profile)
+    )
+    context = None
     try:
-        page = await browser.new_page()
+        context = await browser.new_context(**browser_context_kwargs(profile))
+        page = await context.new_page()
         response = await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
         response_status = int(response.status) if response is not None else 0
         session_id = f"xai-{uuid.uuid4().hex}"
-        current = BrowserSession(session_id=session_id, browser=browser, page=page, signup_url=target, initial_response_status=response_status)
+        current = BrowserSession(session_id=session_id, browser=browser, context=context, page=page, signup_url=target, initial_response_status=response_status)
         async with _sessions_lock:
             _sessions[session_id] = current
         return {"ok": True, "session_id": session_id, "url": page.url, "user_agent": await _user_agent(page), "cookies": await cookie_snapshot(page), "diagnostic": await _page_diagnostic(page, response_status=response_status)}
     except Exception:
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
         await browser.close()
         raise
 

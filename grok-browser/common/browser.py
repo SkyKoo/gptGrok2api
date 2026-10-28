@@ -124,14 +124,30 @@ def browser_kwargs(
     if configured_locale:
         kw["locale"] = configured_locale
 
-    # The Go registration engine persists the platform-specific browser
-    # environment with the task. Pass the stable browser fields to
-    # CloakBrowser as context options so the Worker does not silently fall
-    # back to one global UA and viewport for every account. Values are
-    # validated here because this is an internal API boundary.
+    configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
+    if configured_proxy:
+        kw["proxy"] = configured_proxy
+    if os.getenv(f"{prefix}_GEOIP") == "1":
+        kw["geoip"] = True
+    return kw
+
+
+def browser_context_kwargs(profile: dict = None) -> dict:
+    """Build Playwright BrowserContext options from a saved browser profile.
+
+    CloakBrowser's ``launch_async`` starts the browser process and forwards
+    unknown keywords to Playwright's ``chromium.launch``. User agent,
+    viewport, and device scale factor are context-level options, so passing
+    them to ``launch_async`` makes the worker fail before a page is opened.
+    Keep this boundary explicit and validate values before they reach
+    Playwright.
+    """
+    saved_profile = profile if isinstance(profile, dict) else {}
+    context: dict = {}
+
     user_agent = str(saved_profile.get("user_agent") or "").strip()
     if 32 <= len(user_agent) <= 512:
-        kw["user_agent"] = user_agent
+        context["user_agent"] = user_agent
 
     def bounded_int(name: str, low: int, high: int) -> int | None:
         try:
@@ -143,19 +159,16 @@ def browser_kwargs(
     width = bounded_int("inner_width", 320, 4096) or bounded_int("screen_width", 320, 4096)
     height = bounded_int("inner_height", 240, 4096) or bounded_int("screen_height", 240, 4096)
     if width and height:
-        kw["viewport"] = {"width": width, "height": height}
+        context["viewport"] = {"width": width, "height": height}
+
     try:
         device_scale_factor = float(saved_profile.get("device_pixel_ratio") or 0)
     except (TypeError, ValueError):
         device_scale_factor = 0
     if 0.5 <= device_scale_factor <= 4:
-        kw["device_scale_factor"] = device_scale_factor
-    configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
-    if configured_proxy:
-        kw["proxy"] = configured_proxy
-    if os.getenv(f"{prefix}_GEOIP") == "1":
-        kw["geoip"] = True
-    return kw
+        context["device_scale_factor"] = device_scale_factor
+
+    return context
 
 
 def route_glob(url: str) -> str:
