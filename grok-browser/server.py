@@ -239,6 +239,13 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
             "upstream_status",
             "upstream_code",
             "visible_controls",
+            "turnstile_clicks",
+            "turnstile_frames",
+            "turnstile_visible_frames",
+            "turnstile_widgets",
+            "turnstile_ready",
+            "turnstile_callback_seen",
+            "turnstile_token_present",
         )
         if key in diagnostic
     }

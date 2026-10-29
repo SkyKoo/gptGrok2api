@@ -24,6 +24,41 @@ _ALLOWED_HOSTS = {"accounts.x.ai", "auth.x.ai", "auth.grokusercontent.com", "gro
 _COOKIE_SUFFIXES = ("x.ai", "grok.com", "grokusercontent.com")
 _SESSION_TTL = 20 * 60
 
+# Capture the callback and widget id before the xAI page renders Turnstile.
+# The native page owns the widget, so reading only a top-level hidden input is
+# unreliable when the response is kept inside the challenge iframe.  This
+# wrapper preserves the page callback and records only bounded, non-secret
+# state in window properties for the worker to inspect later.
+_TURNSTILE_CAPTURE_INIT_JS = r"""
+(() => {
+  window.__cfmGrokTurnstileToken = '';
+  window.__cfmGrokTurnstileWidgetId = '';
+  window.__cfmGrokTurnstileCallbackSeen = false;
+  const install = () => {
+    const api = window.turnstile;
+    if (!api || typeof api.render !== 'function' || api.render.__cfmWrapped) return;
+    const original = api.render.bind(api);
+    const wrapped = (container, options = {}) => {
+      const next = {...options};
+      const callback = next.callback;
+      next.callback = (token) => {
+        window.__cfmGrokTurnstileCallbackSeen = true;
+        window.__cfmGrokTurnstileToken = String(token || '');
+        if (typeof callback === 'function') return callback(token);
+      };
+      const widgetId = original(container, next);
+      window.__cfmGrokTurnstileWidgetId = String(widgetId || '');
+      return widgetId;
+    };
+    wrapped.__cfmWrapped = true;
+    try { api.render = wrapped; } catch (_) {}
+  };
+  install();
+  const timer = setInterval(install, 100);
+  setTimeout(() => clearInterval(timer), 120000);
+})();
+"""
+
 
 class XaiBrowserFlowError(RuntimeError):
     def __init__(self, message: str, *, stage: str, retryable: bool = False, diagnostic: dict | None = None):
@@ -101,6 +136,7 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
     try:
         context = await browser.new_context(**browser_context_kwargs(profile))
         page = await context.new_page()
+        await page.add_init_script(_TURNSTILE_CAPTURE_INIT_JS)
         response = await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
         response_status = int(response.status) if response is not None else 0
         session_id = f"xai-{uuid.uuid4().hex}"
@@ -456,20 +492,90 @@ async def verify_email(session_id: str, email: str, code: str) -> dict:
         return {"ok": True, "url": current.page.url, "cookies": await cookie_snapshot(current.page), "user_agent": await _user_agent(current.page)}
 
 
-async def _native_turnstile_token(page: Any, timeout_s: int = 45) -> str:
+_TURNSTILE_STATE_JS = r"""
+() => {
+  const visible = (element) => {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  let apiResponse = '';
+  const widgetId = String(window.__cfmGrokTurnstileWidgetId || '');
+  try {
+    if (window.turnstile?.getResponse) {
+      apiResponse = String(window.turnstile.getResponse(widgetId) || '');
+      if (!apiResponse && !widgetId) apiResponse = String(window.turnstile.getResponse() || '');
+    }
+  } catch (_) {}
+  const responses = Array.from(document.querySelectorAll(
+    'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+  )).map((element) => String(element.value || '')).filter(Boolean);
+  const frames = Array.from(document.querySelectorAll('iframe')).filter((element) =>
+    String(element.src || '').includes('challenges.cloudflare.com')
+  );
+  const token = String(window.__cfmGrokTurnstileToken || apiResponse || responses[0] || '');
+  return {
+    token_present: Boolean(token),
+    callback_seen: Boolean(window.__cfmGrokTurnstileCallbackSeen),
+    widget_id_present: Boolean(widgetId),
+    widget_count: document.querySelectorAll('[data-sitekey], .cf-turnstile, [data-cfm-grok-turnstile]').length,
+    iframe_count: frames.length,
+    visible_iframe_count: frames.filter(visible).length,
+    visible_response_input_count: Array.from(document.querySelectorAll(
+      'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+    )).filter(visible).length,
+    ready: Boolean(window.turnstile?.render && window.turnstile?.getResponse),
+  };
+}
+"""
+
+
+async def _turnstile_state(page: Any) -> dict:
+    try:
+        state = await page.evaluate(_TURNSTILE_STATE_JS)
+        return state if isinstance(state, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
     deadline = time.monotonic() + timeout_s
     clicks = 0
+    last_state: dict = {}
     while time.monotonic() < deadline:
-        try:
-            token = await page.evaluate("""() => window.__cfmGrokTurnstileToken || document.querySelector('[name=cf-turnstile-response]')?.value || ''""")
-        except Exception:
-            token = ""
-        if token:
-            return str(token)
-        if clicks < 3 and await _click_turnstile_checkbox(page):
+        last_state = await _turnstile_state(page)
+        if last_state.get("token_present"):
+            # Read the value only after the bounded state probe confirms that a
+            # token exists. The token is never included in diagnostics/logs.
+            try:
+                token = await page.evaluate("""() => {
+                  let response = '';
+                  const id = String(window.__cfmGrokTurnstileWidgetId || '');
+                  try {
+                    response = String(window.turnstile?.getResponse?.(id) || '');
+                    if (!response && !id) response = String(window.turnstile?.getResponse?.() || '');
+                  } catch (_) {}
+                  return window.__cfmGrokTurnstileToken || response || document.querySelector('[name=cf-turnstile-response]')?.value || '';
+                }""")
+            except Exception:
+                token = ""
+            if token:
+                return str(token)
+        if clicks < 4 and await _click_turnstile_checkbox(page, attempts=12):
             clicks += 1
         await _pause(page, 500)
-    raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=True)
+    diagnostic = await _page_diagnostic(page)
+    diagnostic.update({
+        "reason": diagnostic.get("reason") or "turnstile_incomplete",
+        "turnstile_clicks": clicks,
+        "turnstile_frames": int(last_state.get("iframe_count") or 0),
+        "turnstile_visible_frames": int(last_state.get("visible_iframe_count") or 0),
+        "turnstile_widgets": int(last_state.get("widget_count") or 0),
+        "turnstile_ready": bool(last_state.get("ready")),
+        "turnstile_callback_seen": bool(last_state.get("callback_seen")),
+        "turnstile_token_present": bool(last_state.get("token_present")),
+    })
+    raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=True, diagnostic=diagnostic)
 
 
 async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:

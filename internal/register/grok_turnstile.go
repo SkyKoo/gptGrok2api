@@ -151,6 +151,13 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 					Reason         string `json:"reason"`
 					UpstreamCode   string `json:"upstream_code"`
 					UpstreamStatus int    `json:"upstream_status"`
+					TurnstileClicks        int  `json:"turnstile_clicks"`
+					TurnstileFrames        int  `json:"turnstile_frames"`
+					TurnstileVisibleFrames int  `json:"turnstile_visible_frames"`
+					TurnstileWidgets       int  `json:"turnstile_widgets"`
+					TurnstileReady         bool `json:"turnstile_ready"`
+					TurnstileCallbackSeen  bool `json:"turnstile_callback_seen"`
+					TurnstileTokenPresent  bool `json:"turnstile_token_present"`
 				} `json:"diagnostic"`
 			} `json:"detail"`
 		}
@@ -168,6 +175,23 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				}
 				if status := envelope.Detail.Diagnostic.UpstreamStatus; status >= 400 && status <= 599 {
 					failure.Operation += fmt.Sprintf(";upstream_status=%d", status)
+				}
+				if workerReason == "turnstile_incomplete" {
+					diagnostic := envelope.Detail.Diagnostic
+					if diagnostic.TurnstileClicks >= 0 && diagnostic.TurnstileClicks <= 10 {
+						failure.Operation += fmt.Sprintf(";turnstile_clicks=%d", diagnostic.TurnstileClicks)
+					}
+					if diagnostic.TurnstileFrames >= 0 && diagnostic.TurnstileFrames <= 20 {
+						failure.Operation += fmt.Sprintf(";turnstile_frames=%d", diagnostic.TurnstileFrames)
+					}
+					if diagnostic.TurnstileVisibleFrames >= 0 && diagnostic.TurnstileVisibleFrames <= 20 {
+						failure.Operation += fmt.Sprintf(";turnstile_visible_frames=%d", diagnostic.TurnstileVisibleFrames)
+					}
+					if diagnostic.TurnstileWidgets >= 0 && diagnostic.TurnstileWidgets <= 20 {
+						failure.Operation += fmt.Sprintf(";turnstile_widgets=%d", diagnostic.TurnstileWidgets)
+					}
+					failure.Operation += fmt.Sprintf(";turnstile_ready=%t;turnstile_callback=%t;turnstile_token=%t",
+						diagnostic.TurnstileReady, diagnostic.TurnstileCallbackSeen, diagnostic.TurnstileTokenPresent)
 				}
 			}
 		}

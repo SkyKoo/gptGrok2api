@@ -213,6 +213,31 @@ func TestHTTPGrokBrowserSolverPreservesSafeWorkerDiagnostic(t *testing.T) {
 	}
 }
 
+func TestHTTPGrokBrowserSolverPreservesTurnstileState(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusGatewayTimeout,
+			Body: io.NopCloser(strings.NewReader(`{"detail":{"stage":"turnstile","error":"turnstile_incomplete","diagnostic":{"reason":"turnstile_incomplete","turnstile_clicks":4,"turnstile_frames":2,"turnstile_visible_frames":1,"turnstile_widgets":1,"turnstile_ready":true,"turnstile_callback_seen":false,"turnstile_token_present":false}}}`)),
+			Header: make(http.Header),
+		}, nil
+	})}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	_, err := solver.CompleteSignup(context.Background(), "native-1", "person@example.com", "secret-pass", "123456", "Grok", "User", "")
+	if err == nil {
+		t.Fatal("CompleteSignup() accepted an incomplete Turnstile response")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"browser_worker_rejected (HTTP 504)",
+		"upstream_stage=turnstile",
+		"operation=worker_error=turnstile_incomplete;turnstile_clicks=4;turnstile_frames=2;turnstile_visible_frames=1;turnstile_widgets=1;turnstile_ready=true;turnstile_callback=false;turnstile_token=false",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Turnstile state missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestHTTPGrokBrowserSolverPreservesUpstreamEmailAvailabilityError(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
