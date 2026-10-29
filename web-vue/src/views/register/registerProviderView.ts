@@ -571,8 +571,8 @@ export function providerTypeLabel(type: string) {
 
 export function registerProxyHint(mode: RegisterProxyMode) {
   if (mode === 'direct') return '本次注册任务强制直连，不读取默认代理。'
-  if (mode === 'group') return '注册任务会使用所选代理组；代理组为空时不会偷偷回退到默认代理。'
-  if (mode === 'custom') return '仅本注册任务使用该代理地址。'
+  if (mode === 'group') return 'GPT 和 Grok 共用代理组：任务启动时轮询可用节点，全程固定；补偿复用原节点，成功后绑定到账号。无可用节点时停止。'
+  if (mode === 'custom') return '任务全程使用该地址，成功后账号继续使用；补偿不会自动换出口。'
   return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
 }
 

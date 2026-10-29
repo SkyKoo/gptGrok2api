@@ -291,9 +291,14 @@ func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConf
 	if err != nil {
 		return cfg, nil, nil, err
 	}
-	proxy := cfg.Proxy
-	if proxy == "" {
-		proxy = s.proxyManager.Resolve(nil, false)
+	proxy := s.proxyManager.Resolve(account, false)
+	if _, bound, bindingErr := s.proxyManager.ResolveBound(account); bound && bindingErr != nil {
+		mail.Close()
+		return cfg, nil, nil, bindingErr
+	}
+	cfg.Proxy = proxy
+	if cfg.Proxy == "" {
+		cfg.Proxy = "direct"
 	}
 	flow, err := registerruntime.NewWebRegistrar(strings.TrimSuffix(strings.TrimRight(s.cfg.OpenAIBaseURL, "/"), "/backend-api"), s.cfg.OpenAIAuthBaseURL, proxy, profiles...)
 	if err != nil {

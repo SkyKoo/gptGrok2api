@@ -210,3 +210,19 @@ func TestRuntimeFailuresRemoveAndBlacklistSubscriptionNode(t *testing.T) {
 		}
 	}
 }
+
+func TestSubscriptionRefreshKeepsRegistrationCapacity(t *testing.T) {
+	s := New(adminTestConfig(t.TempDir()))
+	group := map[string]any{"id": "shared", "subscription_url": "https://subscription.invalid/list", "nodes": []any{map[string]any{"id": "old", "url": "http://node.invalid:8080", "subscription_managed": true, "task_concurrency_limit": 3}}}
+	if _, err := s.store.UpdateConfig("proxy_groups", []any{group}); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := s.applyProxySubscription("shared", "https://subscription.invalid/list", []string{"http://node.invalid:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := mapList(updated["nodes"])
+	if len(nodes) != 1 || intValue(nodes[0]["task_concurrency_limit"]) != 3 {
+		t.Fatal("subscription reset registration capacity")
+	}
+}

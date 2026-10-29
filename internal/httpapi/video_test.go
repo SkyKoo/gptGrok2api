@@ -205,6 +205,9 @@ func TestVideosAPICompletesAndServesContent(t *testing.T) {
 		t.Fatalf("invalid video create response: %v %s", err, created.Body.String())
 	}
 
+	if initial.Status != "queued" || initial.Progress != 0 || initial.Error != nil {
+		t.Fatal("submission response was mutated by background worker")
+	}
 	deadline := time.Now().Add(2 * time.Second)
 	var latest videoJob
 	for time.Now().Before(deadline) {

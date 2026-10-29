@@ -143,7 +143,7 @@ func (s *Server) proxyRuntime(w http.ResponseWriter, r *http.Request) {
 	if value, ok := cfg["proxy_runtime"].(map[string]any); ok {
 		runtime = value
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runtime": runtime, "status": s.proxyManager.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"runtime": runtime, "status": s.proxyManager.Snapshot(), "tasks": s.proxyManager.TaskSnapshot()})
 }
 
 func (s *Server) logsAPI(w http.ResponseWriter, r *http.Request) {

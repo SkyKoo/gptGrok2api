@@ -586,6 +586,22 @@ func (s *Server) syncRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 // values can be mistaken for OpenAI sessions and be invalidated by GPT-only
 // account checks. Grok media routes then cannot find the account either.
 func (s *Server) syncRegisteredGrokRuntimeAccount(item map[string]any, token string) (int, int, error) {
+	s.proxyBindingMu.Lock()
+	defer s.proxyBindingMu.Unlock()
+	// Background refresh may carry an older account snapshot. Fetch routing
+	// metadata again under the binding lock before syncing the runtime pool.
+	if id := stringValue(item["id"]); id != "" {
+		rows, err := s.registerStore.ExportAccounts([]string{id})
+		if err != nil {
+			return 0, 0, err
+		}
+		if len(rows) > 0 {
+			item = rows[0]
+		}
+	}
+	return s.syncRegisteredGrokRuntimeAccountLocked(item, token)
+}
+func (s *Server) syncRegisteredGrokRuntimeAccountLocked(item map[string]any, token string) (int, int, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return 0, 0, errors.New("registered Grok account missing SSO")
@@ -597,6 +613,11 @@ func (s *Server) syncRegisteredGrokRuntimeAccount(item map[string]any, token str
 		"pool":         "basic",
 		"status":       "正常",
 		"enabled":      true,
+	}
+	for _, key := range []string{"proxy", "proxy_binding", "proxy_binding_history", "browser_profile", "fp", "web_cookies", "registration_job_id"} {
+		if value, ok := item[key]; ok {
+			fields[key] = value
+		}
 	}
 	for _, key := range []string{"email", "cookie_header", "sso_rw"} {
 		if value := stringValue(item[key]); value != "" {

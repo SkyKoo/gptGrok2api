@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"os"
 	"sort"
 	"strings"
@@ -14,13 +15,14 @@ import (
 )
 
 type RegistrationJob struct {
-	ID        string  `json:"id"`
-	Status    string  `json:"status"`
-	Stage     string  `json:"stage"`
-	Error     string  `json:"error,omitempty"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
-	Mailbox   Mailbox `json:"mailbox"`
+	ProxyBinding *proxyruntime.Binding `json:"proxy_binding,omitempty"`
+	ID           string                `json:"id"`
+	Status       string                `json:"status"`
+	Stage        string                `json:"stage"`
+	Error        string                `json:"error,omitempty"`
+	CreatedAt    string                `json:"created_at"`
+	UpdatedAt    string                `json:"updated_at"`
+	Mailbox      Mailbox               `json:"mailbox"`
 	// BrowserProfile is private task state. Snapshot deliberately omits it,
 	// while compensation retries use it to keep the protocol environment stable.
 	BrowserProfile *BrowserProfile           `json:"browser_profile,omitempty"`
@@ -69,6 +71,7 @@ type activeRegistration struct {
 // credentials are recorded before import, so retry/restart cannot accidentally
 // create another account.
 type FreeEngine struct {
+	ProxyRouting      *ProxyRouting
 	mu                sync.Mutex
 	path              string
 	jobs              []RegistrationJob
@@ -254,6 +257,12 @@ func (e *FreeEngine) runTask(parent context.Context, id string, cfg FreeConfig) 
 			e.failJob(id, fail("task", "internal_error"))
 		}
 	}()
+	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "openai", &cfg.Proxy, e.getJob, e.change)
+	if err != nil {
+		e.failJob(id, err)
+		return
+	}
+	defer releaseProxy()
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
 		e.failJob(id, err)
@@ -483,6 +492,7 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err = e.change(id, func(j *RegistrationJob) {
+		attachProxyBinding(j, account)
 		j.Account = account
 		j.Stage = "import"
 		j.Status = "import_pending"
@@ -584,6 +594,7 @@ func (e *FreeEngine) importAndVerify(ctx context.Context, id string) error {
 }
 func (e *FreeEngine) failJob(id string, err error) {
 	_ = e.change(id, func(j *RegistrationJob) {
+		e.ProxyRouting.recordFailure(j, err)
 		j.Error = safeFailure(err)
 		if j.TwoFA != nil && j.TwoFA.Status == "running" {
 			j.TwoFA.Status, j.TwoFA.Stage = "failed", "interrupted"

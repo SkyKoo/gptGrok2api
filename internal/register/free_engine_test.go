@@ -379,7 +379,7 @@ func TestFreeEngineCorruptJournalAndInvalidConfigFailBeforeNetwork(t *testing.T)
 		t.Fatal("ignored corrupt journal")
 	}
 	for _, change := range []func(map[string]any){
-		func(c map[string]any) { c["threads"] = 0 }, func(c map[string]any) { c["total"] = 0 }, func(c map[string]any) { c["mode"] = "quota" }, func(c map[string]any) { c["proxy"] = "group:foo" },
+		func(c map[string]any) { c["threads"] = 0 }, func(c map[string]any) { c["total"] = 0 }, func(c map[string]any) { c["mode"] = "quota" }, func(c map[string]any) { c["proxy"] = "group:" },
 		func(c map[string]any) { c["checkout"] = map[string]any{"enabled": true} }, func(c map[string]any) { c["openai_free"] = map[string]any{"timeout_seconds": 1} },
 		func(c map[string]any) {
 			p := object(c["mail"])["providers"].([]any)

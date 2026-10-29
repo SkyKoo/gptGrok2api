@@ -42,6 +42,7 @@ export interface ProxyNode {
   name: string
   url: string
   enabled: boolean
+  task_concurrency_limit?: number
   image_concurrency_limit?: number
   last_status?: number
   last_latency_ms?: number
@@ -120,7 +121,20 @@ export function proxyReferenceLabel(value: unknown): string {
   return reference.value
 }
 
+export interface AccountProxyBinding {
+  platform: 'openai' | 'grok'
+  account_id: string
+  label: string
+  available: boolean
+  binding: { reference: string; bound_at: string } | null
+  history: Array<{ at: string; from: string; to: string; reason: string }> | null
+}
+
 export const proxyApi = {
+  getBinding: (platform: string, accountId: string) =>
+    apiClient.get<never, AccountProxyBinding>('/api/proxy/binding', { params: { platform, account_id: accountId } }),
+  saveBinding: (payload: { platform: string; account_id: string; reference: string; reason: string }) =>
+    apiClient.post<typeof payload, AccountProxyBinding>('/api/proxy/binding', payload),
   test: (url: string) =>
     apiClient.post<{ url: string }, { result: ProxyTestResult }>('/api/proxy/test', { url }),
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1070,4 +1071,27 @@ func boolValue(value any, fallback bool) bool {
 		}
 	}
 	return fallback
+}
+
+// BindProxy stores the binding and audit entry atomically with the account.
+func (s *Store) BindProxy(token string, binding proxyruntime.Binding, reason string) (map[string]any, error) {
+	s.accountsWriteMu.Lock()
+	defer s.accountsWriteMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.loadAccountsLocked(); err != nil {
+		return nil, err
+	}
+	index, ok := s.accountsIndex[strings.TrimSpace(token)]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	updates := proxyruntime.RebindFields(s.accountsCache[index], binding, reason)
+	rows, next, _ := s.updatedAccountsLocked(token, updates)
+	if err := writeJSON(s.accountsPath, rows); err != nil {
+		return nil, err
+	}
+	s.replaceAccountsLocked(rows)
+	s.accountsDirty = false
+	return cloneMap(next), nil
 }

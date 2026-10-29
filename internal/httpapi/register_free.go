@@ -48,6 +48,7 @@ func (s *Server) initFreeRegistration() {
 	s.registrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "openai_registration_schedule.json"))
 	s.registrationStop = make(chan struct{})
 	s.freeRegister = registerruntime.NewFreeEngine(filepath.Join(journalDir, "openai_registration_tasks.json"), factory, s.importRegisteredAccount, s.verifyRegisteredAccount)
+	s.freeRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
 }
 func (s *Server) importRegisteredAccount(ctx context.Context, id string, account map[string]any) error {
 	if err := ctx.Err(); err != nil {

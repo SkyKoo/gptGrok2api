@@ -132,8 +132,12 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Serialize a submission snapshot; the worker immediately mutates job.
+	s.videoMu.RLock()
+	initial := *job
+	s.videoMu.RUnlock()
 	go s.runVideoJob(job, prompt, aspect, resolution, seconds, preset, references)
-	writeJSON(w, http.StatusOK, job)
+	writeJSON(w, http.StatusOK, initial)
 }
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, refs []string) {

@@ -40,6 +40,9 @@ var legacyRetryAfter = regexp.MustCompile(`retry_after=("[^"\r\n]*")`)
 // Recognize the fixed diagnostics emitted by the registration journal.
 // Unknown errors, challenge/identity failures and cancellations require review.
 func transientRegistrationFailure(message string) bool {
+	if strings.Contains(message, "turnstile_incomplete") || strings.Contains(message, "email_signup_unavailable") {
+		return false
+	}
 	if message == "task_timeout" {
 		return true
 	}
@@ -337,6 +340,12 @@ func (e *FreeEngine) runCompensation(ctx context.Context, job RegistrationJob, c
 			e.failJob(job.ID, runErr)
 		}
 	}()
+	releaseProxy, err := e.ProxyRouting.acquire(ctx, job.ID, "openai", &cfg.Proxy, e.getJob, e.change)
+	if err != nil {
+		runErr = err
+		return
+	}
+	defer releaseProxy()
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
 		runErr = err

@@ -67,6 +67,7 @@ function createDefaultNode(index = 0): ProxyNode {
     name: `出口 ${index + 1}`,
     url: '',
     enabled: true,
+    task_concurrency_limit: 1,
     image_concurrency_limit: DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY,
     notes: '',
   }
@@ -96,6 +97,7 @@ function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
     name: String(item.name || `出口 ${index + 1}`).trim(),
     url: String(item.url || '').trim(),
     enabled: item.enabled !== false,
+    task_concurrency_limit: Math.max(1, Math.min(100, Number(item.task_concurrency_limit) || 1)),
     image_concurrency_limit: normalizeImageConcurrencyLimit(item.image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY),
     last_status: Number(item.last_status || 0),
     last_latency_ms: Number(item.last_latency_ms || 0),

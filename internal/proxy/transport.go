@@ -96,20 +96,27 @@ func DialContext(ctx context.Context, target, proxyURL string) (net.Conn, error)
 
 // Manager resolves an account-specific proxy first, then rotates the global pool.
 type Manager struct {
-	mu              sync.Mutex
-	url             string
-	pool            []string
-	cursor          int
-	resourceURL     string
-	resourcePool    []string
-	resourceCursor  int
-	upstreamRouter  *UpstreamRouter
-	imageGroups     map[string]*imageGroup
-	imageGroupID    string
-	imageCursor     int
-	imageSelections uint64
-	imageWake       chan struct{}
-	onImageResult   func(ImageNodeRuntimeResult)
+	defaultSelection  string
+	resourceSelection string
+	requestCursors    map[string]int
+	taskNodes         map[string]*taskNode
+	taskGroups        map[string][]string
+	taskCursors       map[string]int
+	taskWake          chan struct{}
+	mu                sync.Mutex
+	url               string
+	pool              []string
+	cursor            int
+	resourceURL       string
+	resourcePool      []string
+	resourceCursor    int
+	upstreamRouter    *UpstreamRouter
+	imageGroups       map[string]*imageGroup
+	imageGroupID      string
+	imageCursor       int
+	imageSelections   uint64
+	imageWake         chan struct{}
+	onImageResult     func(ImageNodeRuntimeResult)
 }
 
 type GroupConfig struct {
@@ -121,6 +128,7 @@ type GroupConfig struct {
 type NodeConfig struct {
 	ID, Name, URL         string
 	Enabled               bool
+	TaskConcurrencyLimit  int
 	ImageConcurrencyLimit int
 	LastStatus            int
 	LastError             string
@@ -223,7 +231,7 @@ func NewManager(single string, pool []string) *Manager {
 			clean = append(clean, value)
 		}
 	}
-	return &Manager{url: normalizeURL(single), pool: clean, imageGroups: map[string]*imageGroup{}, imageWake: make(chan struct{})}
+	return &Manager{defaultSelection: strings.TrimSpace(single), url: normalizeURL(single), pool: clean, imageGroups: map[string]*imageGroup{}, imageWake: make(chan struct{})}
 }
 
 func (m *Manager) SetDefault(single string, pool []string) {
@@ -237,6 +245,7 @@ func (m *Manager) SetDefault(single string, pool []string) {
 		}
 	}
 	m.mu.Lock()
+	m.defaultSelection = strings.TrimSpace(single)
 	m.url = normalizeURL(single)
 	m.pool = clean
 	m.cursor = 0
@@ -308,6 +317,13 @@ func probeAllowsRuntimeValidation(status int, lastError string) bool {
 // AcquireImage chooses one proxy for the complete multi-stage image request.
 // The caller must release the lease so node concurrency and cooldown state stay accurate.
 func (m *Manager) AcquireImage(fields map[string]any) *Lease {
+	fields = m.withExplicitDefault(fields)
+	if raw, bound, err := m.ResolveBound(fields); bound {
+		if err != nil {
+			return &Lease{URL: blockedProxyURL, Source: "unavailable"}
+		}
+		return &Lease{URL: raw, Source: "account"}
+	}
 	if m == nil {
 		return &Lease{}
 	}
@@ -321,7 +337,7 @@ func (m *Manager) AcquireImage(fields map[string]any) *Lease {
 				if lease := m.acquireGroup(strings.TrimSpace(value[len("group:"):])); lease != nil {
 					return lease
 				}
-				break
+				return &Lease{URL: blockedProxyURL, Source: "unavailable"}
 			}
 			if normalized := normalizeURL(value); normalized != "" && imageProxyCompatible(normalized) {
 				return &Lease{URL: normalized, Source: "account"}
@@ -347,6 +363,13 @@ func (m *Manager) AcquireImage(fields map[string]any) *Lease {
 // overflowing concurrent requests onto one default proxy. It falls back only
 // when the requested group has no usable runtime nodes at all.
 func (m *Manager) AcquireImageContext(ctx context.Context, fields map[string]any) (*Lease, error) {
+	fields = m.withExplicitDefault(fields)
+	if raw, bound, err := m.ResolveBound(fields); bound {
+		if err != nil {
+			return nil, err
+		}
+		return &Lease{URL: raw, Source: "account"}, nil
+	}
 	if m == nil {
 		return &Lease{}, nil
 	}
@@ -354,6 +377,7 @@ func (m *Manager) AcquireImageContext(ctx context.Context, fields map[string]any
 		ctx = context.Background()
 	}
 	groupID := ""
+	explicitGroup := false
 	if fields != nil {
 		for _, key := range []string{"proxy", "proxy_url", "proxyUrl"} {
 			value := strings.TrimSpace(stringValue(fields[key]))
@@ -362,6 +386,7 @@ func (m *Manager) AcquireImageContext(ctx context.Context, fields map[string]any
 			}
 			if strings.HasPrefix(strings.ToLower(value), "group:") {
 				groupID = strings.TrimSpace(value[len("group:"):])
+				explicitGroup = true
 				break
 			}
 			if normalized := normalizeURL(value); normalized != "" && imageProxyCompatible(normalized) {
@@ -383,6 +408,9 @@ func (m *Manager) AcquireImageContext(ctx context.Context, fields map[string]any
 		if lease != nil {
 			return lease, nil
 		}
+	}
+	if explicitGroup {
+		return nil, ErrBindingUnavailable
 	}
 	proxyURL, configured := m.resolveImageFallback()
 	if proxyURL == "" && configured {
@@ -572,6 +600,9 @@ func (m *Manager) acquireGroup(groupID string) *Lease {
 // completed several real image requests. It never falls back to direct mode
 // or the default proxy.
 func (m *Manager) AcquireStableImage(fields map[string]any, excludedURL string) *Lease {
+	if _, bound, _ := m.ResolveBound(fields); bound {
+		return nil
+	}
 	if m == nil {
 		return nil
 	}
@@ -719,6 +750,7 @@ func (m *Manager) SetResource(single string, pool []string) {
 		}
 	}
 	m.mu.Lock()
+	m.resourceSelection = strings.TrimSpace(single)
 	m.resourceURL = normalizeURL(single)
 	m.resourcePool = clean
 	m.resourceCursor = 0
@@ -736,9 +768,23 @@ func (m *Manager) SetUpstreamsFile(path string) {
 }
 
 func (m *Manager) Resolve(fields map[string]any, resource bool) string {
+	if raw, bound, err := m.ResolveBound(fields); bound {
+		if err != nil {
+			return blockedProxyURL
+		}
+		return raw
+	}
 	if fields != nil {
 		for _, key := range []string{"proxy", "proxy_url", "proxyUrl"} {
-			if value := stringValue(fields[key]); value != "" && !strings.HasPrefix(strings.ToLower(value), "group:") {
+			if value := stringValue(fields[key]); strings.HasPrefix(value, "group:") {
+				if m == nil {
+					return blockedProxyURL
+				}
+				m.mu.Lock()
+				raw := m.resolveRequestGroupLocked(strings.TrimPrefix(value, "group:"))
+				m.mu.Unlock()
+				return raw
+			} else if value != "" {
 				if normalized := normalizeURL(value); normalized != "" {
 					return normalized
 				}
@@ -750,6 +796,16 @@ func (m *Manager) Resolve(fields map[string]any, resource bool) string {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	selection := m.defaultSelection
+	if resource && (m.resourceSelection != "" || len(m.resourcePool) > 0) {
+		selection = m.resourceSelection
+	}
+	if selection == "direct" {
+		return ""
+	}
+	if strings.HasPrefix(selection, "group:") {
+		return m.resolveRequestGroupLocked(strings.TrimPrefix(selection, "group:"))
+	}
 	pool := m.pool
 	baseURL := m.url
 	if resource && len(m.resourcePool) > 0 {
@@ -818,7 +874,24 @@ func NewTransport(base http.RoundTripper) *Transport {
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	proxyURL := URLFromContext(req.Context())
+	proxyURL, selected := URLSelectionFromContext(req.Context())
+	if selected && proxyURL == "" {
+		// Explicit direct routing must not inherit HTTP_PROXY/HTTPS_PROXY.
+		t.mu.Lock()
+		direct := t.cache["@direct"]
+		if direct == nil {
+			if _, ok := t.base.(*http.Transport); ok {
+				transport := cloneHTTPTransport(t.base)
+				transport.Proxy = nil
+				direct = transport
+			} else {
+				direct = t.base
+			}
+			t.cache["@direct"] = direct
+		}
+		t.mu.Unlock()
+		return direct.RoundTrip(req)
+	}
 	roundTripper, err := t.forProxy(proxyURL)
 	if err != nil {
 		return nil, err
@@ -1061,7 +1134,7 @@ func socks5Connect(conn io.ReadWriter, address string) error {
 
 func normalizeURL(value string) string {
 	value = strings.TrimSpace(value)
-	if value == "" || strings.EqualFold(value, "direct") {
+	if value == "" || strings.EqualFold(value, "direct") || strings.HasPrefix(value, "group:") {
 		return ""
 	}
 	if !strings.Contains(value, "://") {

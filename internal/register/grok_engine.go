@@ -34,6 +34,7 @@ func waitGrokCode(mail MailSource, ctx context.Context, box Mailbox, after time.
 // GrokEngine mirrors FreeEngine's durable task lifecycle while keeping its
 // journal and account callbacks separate from OpenAI.
 type GrokEngine struct {
+	ProxyRouting      *ProxyRouting
 	mu                sync.Mutex
 	path              string
 	jobs              []RegistrationJob
@@ -200,6 +201,12 @@ func (e *GrokEngine) runTask(parent context.Context, id string, cfg GrokConfig) 
 			e.failJob(id, fail("task", "internal_error"))
 		}
 	}()
+	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "grok", &cfg.Proxy, e.getJob, e.change)
+	if err != nil {
+		e.failJob(id, err)
+		return
+	}
+	defer releaseProxy()
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
 		e.failJob(id, err)
@@ -261,6 +268,7 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(j *RegistrationJob) {
+		attachProxyBinding(j, account)
 		j.Account = account
 		j.Stage = "import"
 		j.Status = "import_pending"
@@ -373,6 +381,7 @@ func (e *GrokEngine) saveLocked() error {
 
 func (e *GrokEngine) failJob(id string, err error) {
 	_ = e.change(id, func(job *RegistrationJob) {
+		e.ProxyRouting.recordFailure(job, err)
 		job.Error = safeFailure(err)
 		if errors.Is(err, context.Canceled) {
 			job.Status = "cancelled"
@@ -602,6 +611,12 @@ func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job Re
 			e.failJob(id, fail("task", "internal_error"))
 		}
 	}()
+	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "grok", &cfg.Proxy, e.getJob, e.change)
+	if err != nil {
+		e.failJob(id, err)
+		return
+	}
+	defer releaseProxy()
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
 		e.failJob(id, err)
@@ -656,6 +671,7 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(current *RegistrationJob) {
+		attachProxyBinding(current, account)
 		current.Account = account
 		current.Stage = "import"
 		current.Status = "import_pending"

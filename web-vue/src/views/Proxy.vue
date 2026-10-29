@@ -1,10 +1,11 @@
 ﻿<template>
   <div class="space-y-6">
+    <ProxyAccountBinding :groups="groups" />
     <PagePanel class="space-y-5">
       <PanelHeader title="代理管理" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            出口优先级：账号个人代理 > 账号组代理/代理组 > 默认出口；默认出口可配置代理组、代理 URL 或直连。
+            已绑定账号优先使用固定节点；未绑定账号沿用个人代理、账号组和默认出口配置。注册任务从所选代理组依次分配节点。
           </p>
         </template>
         <template #actions>
@@ -334,7 +335,11 @@
                         />
                       </label>
                       <label class="text-xs">
-                        <span class="ui-field-label">图片并发</span>
+                        <span class="ui-field-label">注册任务并发</span>
+ <Input :model-value="String(node.task_concurrency_limit ?? 1)" type="number" min="1" max="100" block title="GPT、Grok 等注册任务共享的节点容量；单次任务始终固定节点。" @update:model-value="node.task_concurrency_limit = Math.max(1, Math.min(100, Number($event) || 1))" />
+ </label>
+ <label class="text-xs">
+ <span class="ui-field-label">图片并发</span>
                         <Input
                           :model-value="String(node.image_concurrency_limit ?? 0)"
                           block
@@ -418,6 +423,7 @@ import {
   normalizeImageConcurrencyLimit,
   useProxyGroupRuntime,
 } from '@/views/proxy/proxyGroupRuntime'
+import ProxyAccountBinding from '@/views/proxy/ProxyAccountBinding.vue'
 import ProxyGroupRow from '@/views/proxy/ProxyGroupRow.vue'
 
 defineOptions({ name: 'Proxy' })

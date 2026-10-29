@@ -56,6 +56,7 @@ func (s *Server) initGrokRegistration() {
 		return mail, flow, nil
 	}
 	s.grokRegister = registerruntime.NewGrokEngine(filepath.Join(journalDir, "grok_registration_tasks.json"), factory, s.importRegisteredGrokAccount, s.verifyRegisteredGrokAccount)
+	s.grokRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
 }
 
 func (s *Server) importRegisteredGrokAccount(ctx context.Context, id string, account map[string]any) error {

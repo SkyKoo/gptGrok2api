@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"os"
 	"path/filepath"
 	"sort"
@@ -678,6 +679,7 @@ func publicAccount(item map[string]any) map[string]any {
 	delete(result, "sso_rw")
 	delete(result, "cookie_header")
 	delete(result, "browser_profile")
+	delete(result, "proxy_binding")
 	delete(result, "registration_mailbox")
 	result["has_password"] = stringValue(item["password"]) != ""
 	result["has_sso"] = stringValue(item["sso"]) != ""
@@ -810,4 +812,25 @@ func NewID() string {
 		return fmt.Sprintf("register-%d", time.Now().UnixNano())
 	}
 	return "register-" + hex.EncodeToString(raw)
+}
+
+func (s *Store) BindProxy(id string, binding proxyruntime.Binding, reason string) (map[string]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.loadAccountsLocked()
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if stringValue(item["id"]) == id {
+			for key, value := range proxyruntime.RebindFields(item, binding, reason) {
+				item[key] = value
+			}
+			if err = writeJSON0600(s.accountsPath, items); err != nil {
+				return nil, err
+			}
+			return cloneMap(item), nil
+		}
+	}
+	return nil, os.ErrNotExist
 }

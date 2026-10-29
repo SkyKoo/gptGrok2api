@@ -221,6 +221,7 @@ func (s *Server) applyProxySubscription(id, subscriptionURL string, proxyURLs []
 			}
 			next := cloneMap(current)
 			manualNodes := make([]map[string]any, 0)
+			taskLimits := map[string]any{}
 			seen := map[string]bool{}
 			blocked := map[string]bool{}
 			for _, blockedURL := range stringList(current["runtime_removed_proxy_urls"]) {
@@ -230,6 +231,9 @@ func (s *Server) applyProxySubscription(id, subscriptionURL string, proxyURLs []
 			}
 			for _, node := range mapList(current["nodes"]) {
 				if isSubscriptionProxyNode(node) {
+					if limit, ok := node["task_concurrency_limit"]; ok {
+						taskLimits[normalizeSubscriptionProxyURL(stringValue(node["url"]))] = limit
+					}
 					continue
 				}
 				manualNodes = append(manualNodes, node)
@@ -244,7 +248,11 @@ func (s *Server) applyProxySubscription(id, subscriptionURL string, proxyURLs []
 					continue
 				}
 				seen[proxyURL] = true
-				manualNodes = append(manualNodes, proxySubscriptionNode(proxyURL, subscriptionCount, concurrency))
+				node := proxySubscriptionNode(proxyURL, subscriptionCount, concurrency)
+				if limit, ok := taskLimits[proxyURL]; ok {
+					node["task_concurrency_limit"] = limit
+				}
+				manualNodes = append(manualNodes, node)
 				subscriptionCount++
 			}
 			next["nodes"] = manualNodes

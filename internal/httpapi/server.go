@@ -38,6 +38,7 @@ import (
 )
 
 type Server struct {
+	proxyBindingMu     sync.Mutex
 	authStartMu        sync.Mutex
 	cpaSyncing         sync.Map
 	twofaMu            sync.Mutex
@@ -132,6 +133,7 @@ func New(cfg config.Config) *Server {
 	proxyManager := proxyruntime.NewManager(cfg.ProxyURL, cfg.ProxyPool)
 	groups := runtimeProxyGroups(cfg.ProxyGroups)
 	proxyManager.ConfigureImageGroups(cfg.FallbackProxy, groups)
+	proxyManager.ConfigureTaskGroups(groups)
 	proxyManager.SetResource(cfg.ResourceProxyURL, cfg.ResourceProxyPool)
 	proxyManager.SetUpstreamsFile(cfg.ProxyUpstreamsFile)
 	proxyTransport := proxyruntime.NewTransport(http.DefaultTransport)
@@ -246,7 +248,7 @@ func runtimeProxyGroups(groups []config.ProxyGroup) []proxyruntime.GroupConfig {
 		for _, node := range group.Nodes {
 			item.Nodes = append(item.Nodes, proxyruntime.NodeConfig{
 				ID: node.ID, Name: node.Name, URL: node.URL, Enabled: node.Enabled,
-				ImageConcurrencyLimit: node.ImageConcurrencyLimit, LastStatus: node.LastStatus, LastError: node.LastError,
+				TaskConcurrencyLimit: node.TaskConcurrencyLimit, ImageConcurrencyLimit: node.ImageConcurrencyLimit, LastStatus: node.LastStatus, LastError: node.LastError,
 				RuntimeFailures: node.RuntimeFailures, RuntimeSuccesses: node.RuntimeSuccesses, RuntimeLatencyMS: node.RuntimeLatencyMS,
 			})
 		}
@@ -282,6 +284,7 @@ func (s *Server) refreshProxyRuntime() error {
 	s.proxyManager.SetDefault(runtimeConfig.ProxyURL, runtimeConfig.ProxyPool)
 	s.proxyManager.SetResource(runtimeConfig.ResourceProxyURL, runtimeConfig.ResourceProxyPool)
 	s.proxyManager.ConfigureImageGroups(runtimeConfig.FallbackProxy, runtimeProxyGroups(runtimeConfig.ProxyGroups))
+	s.proxyManager.ConfigureTaskGroups(runtimeProxyGroups(runtimeConfig.ProxyGroups))
 	return nil
 }
 
@@ -423,6 +426,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
 	mux.HandleFunc("/api/runtime-logs", s.runtimeLogs)
 	mux.HandleFunc("/api/proxy/runtime", s.proxyRuntime)
+	mux.HandleFunc("/api/proxy/binding", s.proxyBindingAPI)
 	mux.HandleFunc("/api/prompts", s.prompts)
 	mux.HandleFunc("/api/admin/prompt-sources", s.promptSources)
 	mux.HandleFunc("/api/admin/prompt-sources/", s.promptSource)
@@ -1815,6 +1819,14 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if next, changing := body["proxy"]; changing {
+		for _, row := range current {
+			if accountToken(row) == token && row["proxy_binding"] != nil && stringValue(next) != stringValue(row["proxy"]) {
+				writeError(w, 409, "该账号已绑定出口，请在代理管理中填写原因后切换节点", "proxy_binding_required")
+				return
+			}
+		}
+	}
 	updates := map[string]any{}
 	for _, key := range []string{"type", "source_type", "status", "quota", "proxy", "group_id", "enabled", "email", "user_id", "login_password", "two_factor_secret"} {
 		if value, ok := body[key]; ok {
