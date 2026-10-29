@@ -232,6 +232,10 @@ async def _capture_email_submit_response(response: Any, state: dict) -> None:
     """Capture only a bounded, allow-listed xAI response code."""
     try:
         parsed = urlparse(str(response.url or ""))
+        request = getattr(response, "request", None)
+        method = str(getattr(request, "method", "") or "").upper()
+        if method not in {"POST", "PUT", "PATCH"}:
+            return
         if (parsed.hostname or "").lower() != "accounts.x.ai" or int(response.status) < 400:
             return
         payload = json.loads(await response.text())
@@ -240,9 +244,54 @@ async def _capture_email_submit_response(response: Any, state: dict) -> None:
         if mapped is None:
             return
         reason, safe_code = mapped
-        state.update({"reason": reason, "code": safe_code, "status": int(response.status)})
+        state.update({
+            "reason": reason,
+            "code": safe_code,
+            "status": int(response.status),
+            "method": method,
+            "path": (parsed.path or "/")[:160],
+        })
     except Exception:
         return
+
+
+class _EmailSubmitCapture:
+    """Associate xAI error responses with the current email submit action."""
+
+    def __init__(self, state: dict):
+        self.state = state
+        self.armed = False
+        self._requests: set[int] = set()
+        self._tasks: set[asyncio.Task] = set()
+
+    def arm(self) -> None:
+        self.armed = True
+
+    def disarm(self) -> None:
+        self.armed = False
+
+    def request(self, request: Any) -> None:
+        if not self.armed:
+            return
+        try:
+            parsed = urlparse(str(request.url or ""))
+            method = str(request.method or "").upper()
+            if (parsed.hostname or "").lower() == "accounts.x.ai" and method in {"POST", "PUT", "PATCH"}:
+                self._requests.add(id(request))
+        except Exception:
+            return
+
+    def response(self, response: Any) -> None:
+        request = getattr(response, "request", None)
+        if id(request) not in self._requests:
+            return
+        task = asyncio.create_task(_capture_email_submit_response(response, self.state))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def drain(self) -> None:
+        if self._tasks:
+            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
 
 
 async def _page_diagnostic(page: Any, *, body: str | None = None, response_status: int = 0, upstream: dict | None = None) -> dict:
@@ -282,6 +331,10 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
             diagnostic["upstream_status"] = int(upstream["status"])
         if upstream.get("code"):
             diagnostic["upstream_code"] = str(upstream["code"])
+        if upstream.get("method"):
+            diagnostic["upstream_method"] = str(upstream["method"])
+        if upstream.get("path"):
+            diagnostic["upstream_path"] = str(upstream["path"])
         if upstream.get("reason") and not diagnostic["reason"]:
             diagnostic["reason"] = str(upstream["reason"])
     return diagnostic
@@ -419,7 +472,29 @@ async def send_email(session_id: str, email: str) -> dict:
         # A mailbox timeout may trigger a resend on the already-open code
         # page.  Keep the same browser session instead of restarting it.
         if field is None and await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]')):
-            await _click_any(page, ("Resend code", "Send again", "重新发送验证码", "重新发送"))
+            upstream: dict = {}
+            capture = _EmailSubmitCapture(upstream)
+            page.on("request", capture.request)
+            page.on("response", capture.response)
+            try:
+                capture.arm()
+                if not await _click_any(page, ("Resend code", "Send again", "重新发送验证码", "重新发送")):
+                    diagnostic = await _page_diagnostic(page)
+                    raise XaiBrowserFlowError("resend_button_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
+                await _pause(page, 250)
+                await _wait_for_email_verification(page, upstream=upstream)
+                await capture.drain()
+                if upstream.get("reason"):
+                    diagnostic = await _page_diagnostic(page, upstream=upstream)
+                    raise XaiBrowserFlowError(str(upstream["reason"]), stage="send_code", retryable=upstream["reason"] not in REVIEW_REASONS, diagnostic=diagnostic)
+            finally:
+                capture.disarm()
+                await capture.drain()
+                try:
+                    page.remove_listener("request", capture.request)
+                    page.remove_listener("response", capture.response)
+                except Exception:
+                    pass
             return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
         deadline = time.monotonic() + 30
         while field is None and time.monotonic() < deadline:
@@ -432,10 +507,12 @@ async def send_email(session_id: str, email: str) -> dict:
             diagnostic = await _page_diagnostic(page)
             raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
         upstream: dict = {}
-        response_handler = lambda response: asyncio.create_task(_capture_email_submit_response(response, upstream))
-        page.on("response", response_handler)
+        capture = _EmailSubmitCapture(upstream)
+        page.on("request", capture.request)
+        page.on("response", capture.response)
         try:
             await field.fill(str(email).strip())
+            capture.arm()
             if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
                 diagnostic = await _page_diagnostic(page)
                 raise XaiBrowserFlowError("email_submit_button_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
@@ -445,8 +522,11 @@ async def send_email(session_id: str, email: str) -> dict:
             await _pause(page, 250)
             await _wait_for_email_verification(page, upstream=upstream)
         finally:
+            capture.disarm()
+            await capture.drain()
             try:
-                page.remove_listener("response", response_handler)
+                page.remove_listener("request", capture.request)
+                page.remove_listener("response", capture.response)
             except Exception:
                 pass
         return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}

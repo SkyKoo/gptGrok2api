@@ -1,7 +1,9 @@
+import asyncio
 import sys
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -25,6 +27,68 @@ class XaiEmailErrorTests(unittest.TestCase):
             ("signup_unavailable", "email_signup_unavailable"),
         )
         self.assertIsNone(xai_flow._upstream_email_error("password=secret"))
+
+
+class XaiEmailSubmitCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_only_post_response_for_armed_submit_is_captured(self):
+        state = {}
+        capture = xai_flow._EmailSubmitCapture(state)
+        ignored_request = SimpleNamespace(url="https://accounts.x.ai/background", method="POST")
+        submit_request = SimpleNamespace(url="https://accounts.x.ai/api/send-email", method="POST")
+        capture.request(ignored_request)
+        capture.arm()
+        capture.request(submit_request)
+        capture.response(
+            SimpleNamespace(
+                url=submit_request.url,
+                status=400,
+                request=submit_request,
+                text=AsyncMock(return_value='{"code":"account:email-signup-unavailable"}'),
+            ),
+        )
+        await capture.drain()
+        self.assertEqual(state["reason"], "signup_unavailable")
+        self.assertEqual(state["method"], "POST")
+        self.assertEqual(state["path"], "/api/send-email")
+
+        unrelated = {}
+        other_capture = xai_flow._EmailSubmitCapture(unrelated)
+        other_capture.arm()
+        other_capture.response(
+            SimpleNamespace(
+                url=ignored_request.url,
+                status=400,
+                request=ignored_request,
+                text=AsyncMock(return_value='{"code":"account:email-signup-unavailable"}'),
+            ),
+        )
+        await other_capture.drain()
+        self.assertEqual(unrelated, {})
+
+    async def test_capture_listener_ignores_unarmed_and_get_requests(self):
+        state = {}
+        capture = xai_flow._EmailSubmitCapture(state)
+        request = SimpleNamespace(url="https://accounts.x.ai/api/send-email", method="GET")
+        capture.arm()
+        capture.request(request)
+        capture.response(SimpleNamespace(request=request, url=request.url, status=400, text=AsyncMock(return_value='{"code":"account:email-signup-unavailable"}')))
+        await capture.drain()
+        self.assertEqual(state, {})
+
+    async def test_resend_click_failure_is_not_reported_as_success(self):
+        page = SimpleNamespace(
+            url="https://accounts.x.ai/sign-up",
+            on=lambda *args: None,
+            remove_listener=lambda *args: None,
+        )
+        session = SimpleNamespace(page=page, lock=asyncio.Lock())
+        with patch.object(xai_flow, "_session", new=AsyncMock(return_value=session)), \
+             patch.object(xai_flow, "_first_visible", new=AsyncMock(side_effect=[None, object()])), \
+             patch.object(xai_flow, "_click_any", new=AsyncMock(side_effect=[False, False])), \
+             patch.object(xai_flow, "_page_diagnostic", new=AsyncMock(return_value={})):
+            with self.assertRaises(xai_flow.XaiBrowserFlowError) as raised:
+                await xai_flow.send_email("xai-test", "person@example.invalid")
+        self.assertEqual(str(raised.exception), "resend_button_missing")
 
 
 class FakeTurnstilePage:

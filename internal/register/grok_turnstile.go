@@ -251,7 +251,7 @@ func sanitizeBrowserWorkerStage(value string) string {
 func sanitizeBrowserWorkerReason(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
-	case "signup_rate_limited", "email_already_registered", "email_invalid", "signup_unavailable", "verification_page_missing", "cloudflare_challenge", "proxy_connection_failed", "email_input_missing", "email_submit_button_missing", "verification_code_input_missing", "verification_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
+	case "signup_rate_limited", "email_already_registered", "email_invalid", "signup_unavailable", "verification_page_missing", "cloudflare_challenge", "proxy_connection_failed", "email_input_missing", "email_submit_button_missing", "resend_button_missing", "verification_code_input_missing", "verification_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
 		return value
 	default:
 		return "unclassified"
