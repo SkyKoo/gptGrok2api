@@ -239,6 +239,8 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
             "reason",
             "upstream_status",
             "upstream_code",
+            "upstream_method",
+            "upstream_path",
             "visible_controls",
             "network_failures",
             "turnstile_clicks",
