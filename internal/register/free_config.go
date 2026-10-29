@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 // Failure contains only a fixed diagnostic code, never an upstream response or secret.
@@ -97,10 +99,13 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 		c.Timeout = time.Duration(value) * time.Second
 	}
 	c.Proxy = stringValue(raw["proxy"])
+	if c.Proxy == proxyruntime.RegistrationResinChannel && proxyruntime.ValidateNodeType("resin", stringValue(raw["resin_proxy_url"])) != nil {
+		return c, fail("config", "invalid_resin_channel")
+	}
 	if c.Proxy == "group:" {
 		return c, fail("config", "proxy_group_required")
 	}
-	if c.Proxy != "" && c.Proxy != "direct" && !strings.HasPrefix(c.Proxy, "group:") {
+	if c.Proxy != "" && c.Proxy != "direct" && c.Proxy != proxyruntime.RegistrationResinChannel && !strings.HasPrefix(c.Proxy, "group:") {
 		u, err := url.Parse(c.Proxy)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
 			return c, fail("config", "invalid_proxy")

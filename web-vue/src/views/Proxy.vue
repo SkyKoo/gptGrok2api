@@ -324,10 +324,9 @@
                           @update:model-value="node.name = $event.trim()"
                         />
                       </label>
-                      <label class="text-xs">
-                        <span class="ui-field-label">代理类型</span>
-                        <GroupedSelectMenu :model-value="node.proxy_type || 'standard'" :groups="[{ options: [{ value: 'standard', label: '普通代理' }, { value: 'resin', label: 'Resin（任务粘性出口）' }] }]" block @update:model-value="node.proxy_type = $event === 'resin' ? 'resin' : 'standard'" />
-                      </label>
+                      <p v-if="node.proxy_type === 'resin'" class="text-xs text-muted-foreground">
+                        旧版 Resin 配置（保留已有绑定）。新任务可在注册页直接选择「Resin 代理」。
+                      </p>
                       <label v-if="node.proxy_type !== 'resin'" class="text-xs">
                         <span class="ui-field-label">代理 URL</span>
                         <Input

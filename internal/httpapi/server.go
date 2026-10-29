@@ -210,6 +210,7 @@ func New(cfg config.Config) *Server {
 		}
 		return sources, nil
 	})
+	server.refreshRegistrationResinChannel()
 	server.initFreeRegistration()
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)

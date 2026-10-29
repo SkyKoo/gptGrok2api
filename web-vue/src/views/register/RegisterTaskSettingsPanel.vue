@@ -125,6 +125,14 @@
           />
         </label>
 
+        <div v-if="proxyMode === 'resin'" class="register-field--full">
+          <ResinProxyFields
+            :model-value="config.resin_proxy_url || ''"
+            :disabled="config.enabled"
+            @update:model-value="config.resin_proxy_url = $event"
+          />
+        </div>
+
         <p class="register-proxy-hint register-field--full">
           {{ proxyHint }}
         </p>
@@ -813,6 +821,7 @@
 </template>
 
 <script setup lang="ts">
+import ResinProxyFields from '@/views/proxy/ResinProxyFields.vue'
 import { computed, ref, watch } from 'vue'
 import { Icon } from '@iconify/vue'
 import { Button, Checkbox, Input, SegmentedTabs } from 'nanocat-ui'

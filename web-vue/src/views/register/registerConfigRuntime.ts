@@ -94,12 +94,12 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
     customProxyInput.value = controls.customProxy
   }
 
-  function applyConfig(nextConfig: LegacyRegisterConfig) {
+  function applyConfig(nextConfig: LegacyRegisterConfig, preserveProxyControls = false) {
     config.value = normalizeRegisterConfig(nextConfig)
     savedConfigSnapshot = configSnapshot(config.value)
     autosaveStatus.value = 'saved'
     autosaveMessage.value = '配置已保存'
-    syncProxyControlsFromValue(config.value.proxy)
+    if (!preserveProxyControls) syncProxyControlsFromValue(config.value.proxy)
     applyListeners.forEach((callback) => callback())
   }
 
@@ -213,7 +213,9 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
         const response = await registerApi.updateConfig(payload())
         const normalizedResponse = normalizeRegisterConfig(response.register)
         if (config.value && configSnapshot(config.value) === requestSnapshot) {
-          applyConfig(normalizedResponse)
+          // An empty custom/group draft serializes as the default proxy. Keep
+          // the selected controls while saving so the input does not disappear.
+          applyConfig(normalizedResponse, normalizedResponse.proxy === config.value.proxy)
         } else {
           // Keep edits made while the request was in flight and use the
           // server response as the new baseline for the next autosave.

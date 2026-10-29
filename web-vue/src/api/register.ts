@@ -237,6 +237,7 @@ export type LegacyRegisterConfig = {
     [key: string]: unknown
   }
   proxy: string
+  resin_proxy_url?: string
   total: number
   threads: number
   mode: 'total' | 'quota' | 'available' | string

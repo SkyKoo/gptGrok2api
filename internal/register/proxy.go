@@ -26,6 +26,10 @@ func (r *ProxyRouting) acquire(ctx context.Context, id, platform string, selecti
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
 		}
+		var cooldown *proxyruntime.BindingCooldownError
+		if errors.As(err, &cooldown) {
+			return nil, &Failure{Stage: "proxy", Code: "registration_cooldown", RetryAfter: cooldown.Until.UTC().Format(time.RFC3339)}
+		}
 		return nil, fail("proxy", "binding_unavailable")
 	}
 	if err = change(id, func(j *RegistrationJob) {

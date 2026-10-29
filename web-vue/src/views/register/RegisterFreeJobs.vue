@@ -11,7 +11,7 @@
         <span v-if="job.twofa.pending">（待激活密钥已保留）</span>
         <span v-if="job.twofa.error"> · {{ job.twofa.error }}</span>
       </p>
-      <p v-if="job.error" class="text-xs break-all">{{ job.error }}</p>
+      <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
       <p v-if="registrationCompensationText(job.auto_retry, running, now)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now) }}</p>
       <Button v-if="job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
@@ -32,6 +32,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
+import { registrationProxyFailureText } from '@/lib/registrationProxy'
 import { registrationCompensationText } from '@/lib/registrationCompensation'
 const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()

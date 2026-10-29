@@ -49,10 +49,24 @@ func (f *routedGrokFlow) Register(ctx context.Context, b Mailbox, c GrokConfig, 
 	return map[string]any{"email": b.Email, "sso": "test-sso"}, nil
 }
 func TestRegistrationRoutesBothPlatformsThroughSharedPool(t *testing.T) {
+	t.Run("pool", func(t *testing.T) { testRegistrationRoutesBothPlatforms(t, false) })
+	t.Run("resin-channel", func(t *testing.T) { testRegistrationRoutesBothPlatforms(t, true) })
+}
+func testRegistrationRoutesBothPlatforms(t *testing.T, channel bool) {
 	routing := routingFixture()
+	selection := "group:shared"
+	channelURL := "http://P:secret@resin.invalid:2260"
+	if channel {
+		selection = proxyruntime.RegistrationResinChannel
+		routing = &ProxyRouting{Manager: proxyruntime.NewManager("", nil)}
+		routing.Manager.ConfigureResinChannel(selection, channelURL)
+	}
 	mail := &fakeMail{}
 	var free *FreeEngine
 	free = NewFreeEngine(filepath.Join(t.TempDir(), "tasks.json"), func(c FreeConfig) (MailSource, RegistrationFlow, error) {
+		if channel && !strings.Contains(c.Proxy, "P.task-") {
+			t.Error("GPT factory missing Resin Account")
+		}
 		free.mu.Lock()
 		j := free.jobs[len(free.jobs)-1]
 		free.mu.Unlock()
@@ -62,14 +76,15 @@ func TestRegistrationRoutesBothPlatformsThroughSharedPool(t *testing.T) {
 		return mail, &routedFreeFlow{t: t, selected: c.Proxy, get: func() RegistrationJob { v, _ := free.getJob(j.ID); return v }}, nil
 	}, func(ctx context.Context, id string, a map[string]any) error {
 		b := proxyruntime.ParseBinding(a["proxy_binding"])
-		if b == nil || b.NodeID != "a" {
+		if b == nil || (channel && (b.Reference != selection || b.ResinAccount == "")) || (!channel && b.NodeID != "a") {
 			t.Error("GPT import lost binding")
 		}
 		return nil
 	}, nil)
 	free.SetProxyRouting(routing)
 	cfg := freeTestConfig()
-	cfg["proxy"] = "group:shared"
+	cfg["proxy"] = selection
+	cfg["resin_proxy_url"] = channelURL
 	id, e := free.Start(cfg)
 	if e != nil {
 		t.Fatal(e)
@@ -81,20 +96,24 @@ func TestRegistrationRoutesBothPlatformsThroughSharedPool(t *testing.T) {
 	}
 	var grok *GrokEngine
 	grok = NewGrokEngine(filepath.Join(t.TempDir(), "tasks.json"), func(c GrokConfig) (MailSource, GrokRegistrationFlow, error) {
+		if channel && !strings.Contains(c.Proxy, "P.task-") {
+			t.Error("Grok factory missing Resin Account")
+		}
 		grok.mu.Lock()
 		job := grok.jobs[len(grok.jobs)-1]
 		grok.mu.Unlock()
 		return &fakeMail{}, &routedGrokFlow{t: t, selected: c.Proxy, get: func() RegistrationJob { v, _ := grok.getJob(job.ID); return v }}, nil
 	}, func(ctx context.Context, id string, a map[string]any) error {
 		b := proxyruntime.ParseBinding(a["proxy_binding"])
-		if b == nil || b.NodeID != "b" {
+		if b == nil || (channel && (b.Reference != selection || b.ResinAccount == "")) || (!channel && b.NodeID != "b") {
 			t.Error("Grok import lost binding or shared pool cursor")
 		}
 		return nil
 	}, nil)
 	grok.SetProxyRouting(routing)
 	gc := grokConfigFixture()
-	gc["proxy"] = "group:shared"
+	gc["proxy"] = selection
+	gc["resin_proxy_url"] = channelURL
 	gc["total"] = 1
 	gid, e := grok.Start(gc)
 	if e != nil {
@@ -257,11 +276,29 @@ func resinRoutingFixture() *ProxyRouting {
 }
 
 func TestSavedResinRegistrationEnginesKeepOriginalProxy(t *testing.T) {
+	for _, channel := range []bool{false, true} {
+		t.Run(fmt.Sprintf("channel=%v", channel), func(t *testing.T) { testSavedResinRegistrationEngines(t, channel) })
+	}
+}
+
+func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
+	fixture := func() *ProxyRouting {
+		if !channel {
+			return resinRoutingFixture()
+		}
+		m := proxyruntime.NewManager("", nil)
+		m.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, "http://CFM:fixture-secret@resin.invalid:2260")
+		return &ProxyRouting{Manager: m}
+	}
+	selection := "node:shared/a"
+	if channel {
+		selection = proxyruntime.RegistrationResinChannel
+	}
 	for _, platform := range []string{"openai", "grok"} {
 		for _, missing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/missing=%v", platform, missing), func(t *testing.T) {
-				routing := resinRoutingFixture()
-				lease, err := routing.Manager.AcquireTask(context.Background(), "node:shared/a", platform, "registration", nil)
+				routing := fixture()
+				lease, err := routing.Manager.AcquireTask(context.Background(), selection, platform, "registration", nil)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -273,9 +310,10 @@ func TestSavedResinRegistrationEnginesKeepOriginalProxy(t *testing.T) {
 				if err = os.WriteFile(path, raw, 0600); err != nil {
 					t.Fatal(err)
 				}
-				routing = resinRoutingFixture()
+				routing = fixture()
 				if missing {
 					routing.Manager.ConfigureTaskGroups(nil)
+					routing.Manager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, "")
 				}
 				calls := 0
 				mail := &grokSavedMailStub{}

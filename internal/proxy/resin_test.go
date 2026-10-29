@@ -80,6 +80,10 @@ func TestResinTaskAffinitySurvivesRestartAndAccountUse(t *testing.T) {
 }
 
 func TestResinNewConnectionsKeepProxyAuthorization(t *testing.T) {
+	t.Run("legacy-group", func(t *testing.T) { testResinConnections(t, false) })
+	t.Run("channel", func(t *testing.T) { testResinConnections(t, true) })
+}
+func testResinConnections(t *testing.T, channel bool) {
 	auth := make(chan string, 3)
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "CONNECT" {
@@ -92,7 +96,12 @@ func TestResinNewConnectionsKeepProxyAuthorization(t *testing.T) {
 	endpoint, _ := url.Parse(gateway.URL)
 	endpoint.User = url.UserPassword("CFM-Grok", "fixture-token")
 	m := resinManager(endpoint.String())
-	lease, err := m.AcquireTask(context.Background(), "group:resin", "grok", "registration", nil, "signup-1")
+	selection := "group:resin"
+	if channel {
+		m = channelManager(endpoint.String())
+		selection = RegistrationResinChannel
+	}
+	lease, err := m.AcquireTask(context.Background(), selection, "grok", "registration", nil, "signup-1")
 	if err != nil {
 		t.Fatal(err)
 	}

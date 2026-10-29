@@ -72,3 +72,41 @@ func boundResinURL(raw string, b Binding) (string, error) {
 	u.User = url.UserPassword(b.ResinPlatform+"."+b.ResinAccount, token)
 	return u.String(), nil
 }
+
+// RegistrationResinChannel is a credential-free reference. Its gateway is
+// configured independently of ordinary proxy nodes and groups.
+const RegistrationResinChannel = "resin:registration"
+
+// ConfigureResinChannel keeps credentials in configuration, never in a task's
+// binding. Changing/removing the gateway invalidates old endpoint hashes.
+func (m *Manager) ConfigureResinChannel(reference, raw string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.resinChannels == nil {
+		m.resinChannels = map[string]string{}
+	}
+	if strings.HasPrefix(reference, "resin:") {
+		m.resinChannels[reference] = strings.TrimSpace(raw)
+	}
+}
+
+func (m *Manager) acquireResinChannel(reference string, b Binding, taskIDs []string) (*TaskLease, error) {
+	if m == nil {
+		return nil, ErrBindingUnavailable
+	}
+	m.mu.Lock()
+	raw := m.resinChannels[reference]
+	m.mu.Unlock()
+	if ValidateNodeType("resin", raw) != nil || (b.EndpointHash != "" && b.EndpointHash != proxyHash(raw)) {
+		return nil, ErrBindingUnavailable
+	}
+	if err := taskResinBinding(raw, &b, taskIDs); err != nil {
+		return nil, err
+	}
+	b.Reference, b.EndpointHash = reference, proxyHash(raw)
+	resolved, err := boundResinURL(raw, b)
+	if err != nil {
+		return nil, err
+	}
+	return &TaskLease{URL: resolved, Binding: b}, nil
+}

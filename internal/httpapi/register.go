@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -106,6 +107,12 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) refreshRegistrationResinChannel() {
+	if s.proxyManager != nil {
+		s.proxyManager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, stringValue(s.registerStore.Get()["resin_proxy_url"]))
+	}
+}
+
 func (s *Server) registerConfig(w http.ResponseWriter) {
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
 }
@@ -130,6 +137,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
+	s.refreshRegistrationResinChannel()
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
 }
 

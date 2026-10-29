@@ -100,6 +100,7 @@ type Manager struct {
 	resourceSelection string
 	requestCursors    map[string]int
 	taskNodes         map[string]*taskNode
+	resinChannels     map[string]string
 	taskGroups        map[string][]string
 	taskCursors       map[string]int
 	taskWake          chan struct{}

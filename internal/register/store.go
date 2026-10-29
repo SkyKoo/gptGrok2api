@@ -579,6 +579,7 @@ func (s *Store) getLocked() map[string]any {
 func defaultConfig() map[string]any {
 	return map[string]any{
 		"enabled":                  false,
+		"resin_proxy_url":          "",
 		"target":                   "openai",
 		"total":                    1,
 		"threads":                  1,

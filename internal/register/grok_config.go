@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 // GrokTurnstileConfig describes the external Turnstile provider used by the
@@ -57,10 +59,13 @@ func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 		return c, fail("config", "threads_must_be_1_to_100")
 	}
 	c.Proxy = stringValue(raw["proxy"])
+	if c.Proxy == proxyruntime.RegistrationResinChannel && proxyruntime.ValidateNodeType("resin", stringValue(raw["resin_proxy_url"])) != nil {
+		return c, fail("config", "invalid_resin_channel")
+	}
 	if c.Proxy == "group:" {
 		return c, fail("config", "proxy_group_required")
 	}
-	if c.Proxy != "" && c.Proxy != "direct" && !strings.HasPrefix(c.Proxy, "group:") {
+	if c.Proxy != "" && c.Proxy != "direct" && c.Proxy != proxyruntime.RegistrationResinChannel && !strings.HasPrefix(c.Proxy, "group:") {
 		u, err := url.Parse(c.Proxy)
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5") {
 			return c, fail("config", "invalid_proxy")

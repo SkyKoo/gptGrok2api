@@ -14,6 +14,14 @@ import (
 
 var ErrBindingUnavailable = errors.New("proxy binding unavailable; select a node explicitly before retrying")
 
+// BindingCooldownError distinguishes a retry wait from an invalid binding.
+type BindingCooldownError struct{ Until time.Time }
+
+func (e *BindingCooldownError) Error() string {
+	return "proxy registration cooling down until " + e.Until.UTC().Format(time.RFC3339)
+}
+func (e *BindingCooldownError) Unwrap() error { return ErrBindingUnavailable }
+
 const blockedProxyURL = "blocked://proxy-binding-unavailable"
 
 // Binding is account/task metadata, separate from the browser profile. Group
@@ -68,7 +76,11 @@ func NodeReference(group, node string) string {
 }
 func (b Binding) Label() string {
 	if b.ResinAccount != "" {
-		return b.GroupID + "/" + b.NodeID + " Resin " + b.ResinPlatform + " / " + b.ResinAccount
+		prefix := ""
+		if b.GroupID != "" {
+			prefix = b.GroupID + "/" + b.NodeID + " "
+		}
+		return prefix + "Resin " + b.ResinPlatform + " / " + b.ResinAccount
 	}
 	if b.GroupID != "" {
 		return b.GroupID + "/" + b.NodeID
@@ -179,10 +191,13 @@ func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose 
 	}
 	if saved != nil {
 		if time.Now().Before(saved.BlockedUntil) {
-			return nil, ErrBindingUnavailable
+			return nil, &BindingCooldownError{Until: saved.BlockedUntil}
 		}
 		b = *saved
 		selection = b.Reference
+	}
+	if strings.HasPrefix(selection, "resin:") {
+		return m.acquireResinChannel(selection, b, taskIDs)
 	}
 	if !strings.HasPrefix(selection, "group:") && !strings.HasPrefix(selection, "node:") {
 		raw := selection
@@ -228,11 +243,18 @@ func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose 
 			}
 		}
 		usable := false
+		var coolingUntil time.Time
 		for i := 0; i < len(refs); i++ {
 			index := (start + i) % len(refs)
 			ref := refs[index]
 			n := m.taskNodes[ref]
-			if n == nil || !n.enabled || time.Now().Before(n.blocked[platform+":"+purpose]) {
+			if n == nil || !n.enabled {
+				continue
+			}
+			if until := n.blocked[platform+":"+purpose]; n.proxyType != "resin" && time.Now().Before(until) {
+				if coolingUntil.IsZero() || until.Before(coolingUntil) {
+					coolingUntil = until
+				}
 				continue
 			}
 			if saved != nil && b.EndpointHash != "" && b.EndpointHash != proxyHash(n.url) {
@@ -272,6 +294,9 @@ func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose 
 		wake := m.taskWake
 		m.mu.Unlock()
 		if !usable {
+			if !coolingUntil.IsZero() {
+				return nil, &BindingCooldownError{Until: coolingUntil}
+			}
 			return nil, ErrBindingUnavailable
 		}
 		select {
@@ -293,6 +318,11 @@ func (m *Manager) resolveBinding(b Binding) (string, error) {
 	defer m.mu.Unlock()
 	var raw string
 	switch {
+	case strings.HasPrefix(b.Reference, "resin:"):
+		if b.ResinAccount == "" {
+			return "", ErrBindingUnavailable
+		}
+		raw = m.resinChannels[b.Reference]
 	case strings.HasPrefix(b.Reference, "node:"):
 		n := m.taskNodes[b.Reference]
 		if n == nil || !n.enabled || (b.ResinAccount != "" && n.proxyType != "resin") {
@@ -344,7 +374,7 @@ func (m *Manager) ResolveBound(fields map[string]any) (string, bool, error) {
 		if ref == "direct" {
 			return "", true, nil
 		}
-		if strings.HasPrefix(ref, "node:") || strings.HasPrefix(ref, "default:") {
+		if strings.HasPrefix(ref, "node:") || strings.HasPrefix(ref, "default:") || strings.HasPrefix(ref, "resin:") {
 			raw, err := m.resolveBinding(Binding{Reference: ref})
 			return raw, true, err
 		}
@@ -360,7 +390,9 @@ func (m *Manager) BlockTaskScope(b Binding, until time.Time) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if n := m.taskNodes[b.Reference]; n != nil {
+	// A Resin gateway represents a channel, not one physical exit. Keep
+	// refusal cooldown on the saved task, including legacy group bindings.
+	if n := m.taskNodes[b.Reference]; n != nil && n.proxyType != "resin" {
 		if until.After(n.blocked[b.Platform+":"+b.Purpose]) {
 			n.blocked[b.Platform+":"+b.Purpose] = until
 		}

@@ -1,3 +1,4 @@
+import { registrationResinChannel, registrationProxyFailureText } from '@/lib/registrationProxy'
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
 import type { ProxyGroup } from '@/api/proxy'
 import type {
@@ -10,7 +11,7 @@ import type {
 } from '@/api/register'
 
 export type RegisterMode = 'total' | 'quota' | 'available'
-export type RegisterProxyMode = 'global' | 'direct' | 'group' | 'custom'
+export type RegisterProxyMode = 'global' | 'direct' | 'group' | 'custom' | 'resin'
 export type RuntimeLogLevel = 'info' | 'success' | 'warning' | 'error'
 
 export type GptMailStatusState = {
@@ -90,6 +91,7 @@ export const registerProxyModeOptions = [
   { value: 'direct', label: '直连' },
   { value: 'group', label: '代理组' },
   { value: 'custom', label: '自定义代理' },
+  { value: 'resin', label: 'Resin 代理' },
 ] as const
 
 export const registerProxyModeGroups = [{ options: registerProxyModeOptions }]
@@ -224,6 +226,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
     providers: [],
   },
   proxy: '',
+  resin_proxy_url: '',
   total: 1,
   threads: 1,
   mode: 'total',
@@ -572,6 +575,7 @@ export function providerTypeLabel(type: string) {
 export function registerProxyHint(mode: RegisterProxyMode) {
   if (mode === 'direct') return '本次注册任务强制直连，不读取默认代理。'
   if (mode === 'group') return 'GPT 和 Grok 共用代理组：任务启动时轮询可用节点，全程固定；补偿复用原节点，成功后绑定到账号。无可用节点时停止。'
+  if (mode === 'resin') return '直接使用 Resin 渠道，无需创建代理组。Account 按任务自动生成，重试和补偿沿用，注册成功后保存到账号。'
   if (mode === 'custom') return '任务全程使用该地址，成功后账号继续使用；补偿不会自动换出口。'
   return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
 }
@@ -591,12 +595,13 @@ export function registerProxyGroupOptions(groups: readonly ProxyGroup[], selecte
 }
 
 export function normalizeRegisterProxyMode(value: string): RegisterProxyMode {
-  return ['global', 'direct', 'group', 'custom'].includes(value)
+  return ['global', 'direct', 'group', 'custom', 'resin'].includes(value)
     ? value as RegisterProxyMode
     : 'global'
 }
 
 export function registerProxyControlFromValue(value: unknown): RegisterProxyControlState {
+  if (value === registrationResinChannel) return { mode: 'resin', groupId: '', customProxy: '' }
   const reference = parseProxyReference(value)
   if (reference.mode === 'group') {
     return { mode: 'group', groupId: reference.value, customProxy: '' }
@@ -620,6 +625,7 @@ export function registerProxyValueFromControl(
   customProxy = '',
 ): string {
   const nextMode = normalizeRegisterProxyMode(mode)
+  if (nextMode === 'resin') return registrationResinChannel
   if (nextMode === 'global') return serializeProxyReference('global')
   if (nextMode === 'direct') return serializeProxyReference('direct')
   if (nextMode === 'group') return serializeProxyReference('group', groupId)
@@ -759,6 +765,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
         .map(sanitizedProviderPayload),
     },
     proxy: String(config.proxy || '').trim(),
+    resin_proxy_url: String(config.resin_proxy_url || '').trim(),
     total: Math.max(1, Number(config.total) || 1),
     threads: Math.max(1, Number(config.threads) || 1),
     mode: target === 'grok' ? 'total' : (config.mode || 'total') as RegisterMode,
@@ -1211,7 +1218,7 @@ export function registerRuntimeLogLines(
 function runtimeLogMessageParts(item: NonNullable<LegacyRegisterConfig['logs']>[number]): { tag?: string; text: string } {
   const account = String(item.account || '').trim()
   const action = String(item.action || '').trim()
-  const detail = String(item.detail || item.text || '').trim() || '-'
+  const detail = registrationProxyFailureText(String(item.detail || item.text || '').trim() || '-')
   if (account || action || item.detail) {
     const actionText = registerRuntimeActionLabel(action)
     const suffix = detail && detail !== action && detail !== actionText ? ` · ${detail}` : ''
@@ -1220,7 +1227,7 @@ function runtimeLogMessageParts(item: NonNullable<LegacyRegisterConfig['logs']>[
       text: `${actionText || '注册进度'}${suffix}`,
     }
   }
-  const text = String(item.text || '-').trim() || '-'
+  const text = registrationProxyFailureText(String(item.text || '-').trim() || '-')
   const taskMatch = text.match(/^(?:\[Checkout\]\s*)?\[?任务\s*(\d+)\]?\s*(.*)$/)
   if (taskMatch) {
     return {
@@ -1233,6 +1240,9 @@ function runtimeLogMessageParts(item: NonNullable<LegacyRegisterConfig['logs']>[
 }
 
 const registerRuntimeActionLabels: Record<string, string> = {
+  proxy: '注册代理',
+  proxy_selected: '选择注册代理',
+  proxy_reused: '复用注册代理',
   queued: '排队等待',
   cancel: '取消任务',
   mailbox: '准备邮箱资源',
