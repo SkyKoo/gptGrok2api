@@ -529,6 +529,9 @@ async def send_email(session_id: str, email: str) -> dict:
                 page.remove_listener("response", capture.response)
             except Exception:
                 pass
+        if upstream.get("reason"):
+            diagnostic = await _page_diagnostic(page, upstream=upstream)
+            raise XaiBrowserFlowError(str(upstream["reason"]), stage="send_code", retryable=upstream["reason"] not in REVIEW_REASONS, diagnostic=diagnostic)
         return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
 
 
