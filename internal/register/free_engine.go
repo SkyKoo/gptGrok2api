@@ -17,6 +17,9 @@ import (
 type RegistrationJob struct {
 	ProxyBinding *proxyruntime.Binding `json:"proxy_binding,omitempty"`
 	ID           string                `json:"id"`
+	ParentJobID  string                `json:"parent_job_id,omitempty"`
+	RootJobID    string                `json:"root_job_id,omitempty"`
+	RetryJobID   string                `json:"retry_job_id,omitempty"`
 	Status       string                `json:"status"`
 	Stage        string                `json:"stage"`
 	Error        string                `json:"error,omitempty"`
@@ -779,7 +782,7 @@ func (e *FreeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[j.ID]
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "twofa": registrationTwoFASummary(j.TwoFA), "auto_retry": compensationSummary(j.AutoRetry)})
+		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && !active, "can_retry_registration": j.RetryJobID == "" && j.Mailbox.Email != "" && len(j.Account) == 0 && !j.Imported && !j.Verified && !active, "can_codex_oauth": j.Verified && j.Mailbox.Email != "" && !active, "codex_oauth": j.CodexOAuth, "twofa": registrationTwoFASummary(j.TwoFA), "auto_retry": compensationSummary(j.AutoRetry)})
 	}
 	// Compensation appends to an old job, so job order is not event order.
 	// Sort the bounded live window by event time before returning it; otherwise

@@ -82,7 +82,7 @@ func TestGrokRetryRegistrationPreparesSavedMailbox(t *testing.T) {
 		t.Fatal("Grok retry did not finish")
 	}
 	engine.mu.Unlock()
-	got, err := engine.getJob(job.ID)
+	got, err := latestAttempt(engine.getJob, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

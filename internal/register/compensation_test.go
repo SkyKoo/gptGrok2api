@@ -28,7 +28,7 @@ func writeCompensationJobs(t *testing.T, path string, jobs ...RegistrationJob) {
 }
 func mustCompensationJob(t *testing.T, e *FreeEngine, id string) RegistrationJob {
 	t.Helper()
-	j, err := e.getJob(id)
+	j, err := latestAttempt(e.getJob, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestAutomaticCompensationReusesMailboxProfileAndDurableClaim(t *testing.T) 
 			}
 			var jobs []RegistrationJob
 			_ = json.Unmarshal(raw, &jobs)
-			if len(jobs) != 1 || jobs[0].AutoRetry == nil || jobs[0].AutoRetry.Attempts != 1 || jobs[0].AutoRetry.State != "running" {
+			if len(jobs) != 2 || jobs[1].AutoRetry == nil || jobs[1].AutoRetry.Attempts != 1 || jobs[1].AutoRetry.State != "running" || jobs[0].RetryJobID != jobs[1].ID {
 				t.Error("network started before durable claim")
 			}
 		}
@@ -119,8 +119,8 @@ func TestAutomaticCompensationReusesMailboxProfileAndDurableClaim(t *testing.T) 
 			t.Errorf("leaked %s", private)
 		}
 	}
-	if engine.Snapshot()["jobs_total"] != 1 {
-		t.Fatal("created new task instead of compensating")
+	if engine.Snapshot()["jobs_total"] != 2 {
+		t.Fatal("compensation did not create a child task")
 	}
 }
 
@@ -164,7 +164,7 @@ func TestAutomaticCompensationBudgetPersistsAcrossRestartsAndManualRetry(t *test
 	if calls.Load() != 3 {
 		t.Fatal("exceeded automatic retry limit")
 	}
-	if err := engine.RetryRegistration(freeTestConfig(), job.ID); err != nil {
+	if err := engine.RetryRegistration(freeTestConfig(), mustCompensationJob(t, engine, job.ID).ID); err != nil {
 		t.Fatal(err)
 	}
 	waitEngine(t, engine)

@@ -13,7 +13,7 @@
       <Input v-model="fields.token" type="password" :disabled="disabled" block autocomplete="new-password" @update:model-value="update" />
     </label>
     <p class="text-xs text-muted-foreground md:col-span-3">
-      已启用任务身份绑定：Account 自动生成，整个注册任务及重试复用同一身份，成功后保存到账号。Resin 在节点失效时仍可能切换出口；延长租约不能阻止故障切换。
+      已启用任务身份绑定：Account 自动生成，单次注册尝试复用同一身份，补偿子任务生成新身份，成功后保存到账号。新的身份不保证分到不同节点。Resin 在节点失效时仍可能切换出口；延长租约不能阻止故障切换。
     </p>
   </div>
 </template>

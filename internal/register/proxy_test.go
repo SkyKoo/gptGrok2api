@@ -185,7 +185,7 @@ func TestRoutingFailureReleasesLeaseAndRestoresScopedCooldown(t *testing.T) {
 	other.Release()
 }
 
-func TestSavedRegistrationEnginesKeepOriginalProxy(t *testing.T) {
+func TestCompensationEnginesUseCurrentProxySelection(t *testing.T) {
 	for _, platform := range []string{"openai", "grok"} {
 		for _, missing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/missing=%v", platform, missing), func(t *testing.T) {
@@ -214,13 +214,13 @@ func TestSavedRegistrationEnginesKeepOriginalProxy(t *testing.T) {
 					engine := NewFreeEngine(path, func(cfg FreeConfig) (MailSource, RegistrationFlow, error) {
 						calls++
 						if cfg.Proxy != lease.URL {
-							t.Error("compensation changed route")
+							t.Error("unexpected proxy allocation for child attempt")
 						}
 						return mail, &fakeFlow{}, nil
 					}, nil, nil)
 					engine.SetProxyRouting(routing)
 					cfg := freeTestConfig()
-					cfg["proxy"] = "direct"
+					cfg["proxy"] = "group:shared"
 					err = engine.RetryRegistration(cfg, job.ID)
 					get = engine.getJob
 					snapshot = engine.Snapshot
@@ -233,13 +233,13 @@ func TestSavedRegistrationEnginesKeepOriginalProxy(t *testing.T) {
 					engine := NewGrokEngine(path, func(cfg GrokConfig) (MailSource, GrokRegistrationFlow, error) {
 						calls++
 						if cfg.Proxy != lease.URL {
-							t.Error("saved Grok route changed")
+							t.Error("unexpected Grok child proxy allocation")
 						}
 						return mail, &grokSavedFlowStub{}, nil
 					}, nil, nil)
 					engine.SetProxyRouting(routing)
 					cfg := grokConfigFixture()
-					cfg["proxy"] = "direct"
+					cfg["proxy"] = "group:shared"
 					err = engine.RetryRegistration(cfg, job.ID)
 					get = engine.getJob
 					snapshot = engine.Snapshot
@@ -254,14 +254,14 @@ func TestSavedRegistrationEnginesKeepOriginalProxy(t *testing.T) {
 				if snapshot()["running"] == true {
 					t.Fatal("retry did not finish")
 				}
-				saved, _ := get(job.ID)
+				saved, _ := latestAttempt(get, job.ID)
 				if missing {
 					if calls != 0 || mail.prepared.Load() != 0 || saved.Error != "proxy: binding_unavailable" {
 						t.Fatal("missing binding allowed upstream work", saved.Error)
 					}
 				} else {
 					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil {
-						t.Fatal("saved registration lost route or mailbox", saved.Error)
+						t.Fatal("child registration lost route or mailbox", saved.Error)
 					}
 				}
 			})
@@ -275,7 +275,7 @@ func resinRoutingFixture() *ProxyRouting {
 	return &ProxyRouting{Manager: m}
 }
 
-func TestSavedResinRegistrationEnginesKeepOriginalProxy(t *testing.T) {
+func TestResinCompensationEnginesAllocateNewAttemptIdentity(t *testing.T) {
 	for _, channel := range []bool{false, true} {
 		t.Run(fmt.Sprintf("channel=%v", channel), func(t *testing.T) { testSavedResinRegistrationEngines(t, channel) })
 	}
@@ -290,7 +290,7 @@ func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
 		m.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, "http://CFM:fixture-secret@resin.invalid:2260")
 		return &ProxyRouting{Manager: m}
 	}
-	selection := "node:shared/a"
+	selection := "group:shared"
 	if channel {
 		selection = proxyruntime.RegistrationResinChannel
 	}
@@ -322,14 +322,15 @@ func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
 				if platform == "openai" {
 					engine := NewFreeEngine(path, func(cfg FreeConfig) (MailSource, RegistrationFlow, error) {
 						calls++
-						if cfg.Proxy != lease.URL || !strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
-							t.Error("compensation changed route")
+						if cfg.Proxy == lease.URL || strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
+							t.Error("unexpected proxy allocation for child attempt")
 						}
 						return mail, &fakeFlow{}, nil
 					}, nil, nil)
 					engine.SetProxyRouting(routing)
 					cfg := freeTestConfig()
-					cfg["proxy"] = "direct"
+					cfg["proxy"] = selection
+					cfg["resin_proxy_url"] = "http://CFM:fixture-secret@resin.invalid:2260"
 					err = engine.RetryRegistration(cfg, job.ID)
 					get = engine.getJob
 					snapshot = engine.Snapshot
@@ -341,14 +342,15 @@ func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
 					}
 					engine := NewGrokEngine(path, func(cfg GrokConfig) (MailSource, GrokRegistrationFlow, error) {
 						calls++
-						if cfg.Proxy != lease.URL || !strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
-							t.Error("saved Grok route changed")
+						if cfg.Proxy == lease.URL || strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
+							t.Error("unexpected Grok child proxy allocation")
 						}
 						return mail, &grokSavedFlowStub{}, nil
 					}, nil, nil)
 					engine.SetProxyRouting(routing)
 					cfg := grokConfigFixture()
-					cfg["proxy"] = "direct"
+					cfg["proxy"] = selection
+					cfg["resin_proxy_url"] = "http://CFM:fixture-secret@resin.invalid:2260"
 					err = engine.RetryRegistration(cfg, job.ID)
 					get = engine.getJob
 					snapshot = engine.Snapshot
@@ -363,14 +365,14 @@ func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
 				if snapshot()["running"] == true {
 					t.Fatal("retry did not finish")
 				}
-				saved, _ := get(job.ID)
+				saved, _ := latestAttempt(get, job.ID)
 				if missing {
 					if calls != 0 || mail.prepared.Load() != 0 || saved.Error != "proxy: binding_unavailable" {
 						t.Fatal("missing binding allowed upstream work", saved.Error)
 					}
 				} else {
-					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil || saved.ProxyBinding.ResinAccount != lease.Binding.ResinAccount {
-						t.Fatal("saved registration lost route or mailbox", saved.Error)
+					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil || saved.ProxyBinding.ResinAccount == lease.Binding.ResinAccount {
+						t.Fatal("child registration lost route or mailbox", saved.Error)
 					}
 				}
 			})

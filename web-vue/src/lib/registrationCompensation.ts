@@ -35,7 +35,8 @@ export function registrationCompensationText(state: RegistrationCompensation | n
   return `自动补偿已尝试 ${attempts} · ${remaining}重试（${new Date(due).toLocaleString()}），有注册任务时顺延。`
 }
 
-export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null): string {
+export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null, retryJobId?: string): string {
+  if (retryJobId) return '已创建补偿任务，原记录已保留'
   if (status === 'registration_pending') {
     if (state?.state === 'waiting') return '邮箱已保留，等待自动补偿'
     if (state?.state === 'running') return '邮箱已保留，正在自动补偿'

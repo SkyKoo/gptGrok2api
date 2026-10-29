@@ -13,8 +13,8 @@ import (
 
 var compensationDelays = [...]time.Duration{5 * time.Minute, 30 * time.Minute, 2 * time.Hour}
 
-// Stored on the original job, never on a replacement job. Attempts are claimed
-// durably before network traffic, so a restart cannot reset the retry budget.
+// The retry budget follows the task chain. Each child durably claims its attempt
+// before network traffic, so a new ID or restart cannot reset the retry budget.
 type RegistrationCompensation struct {
 	State         string `json:"state"`
 	Attempts      int    `json:"attempts"`
@@ -31,7 +31,7 @@ func compensationSummary(state *RegistrationCompensation) any {
 }
 
 func savedRegistrationMailbox(j RegistrationJob) bool {
-	return j.Status == "registration_pending" && j.Mailbox.Email != "" && !j.Imported && !j.Verified && len(j.Account) == 0
+	return j.RetryJobID == "" && j.Status == "registration_pending" && j.Mailbox.Email != "" && !j.Imported && !j.Verified && len(j.Account) == 0
 }
 
 var legacyFailureHTTP = regexp.MustCompile(`\(HTTP ([0-9]{3})\)`)
@@ -292,7 +292,11 @@ func (e *FreeEngine) RunCompensation(raw map[string]any, now time.Time) (bool, e
 // The snapshot, duplicate check, durable claim and active slot share one lock
 // with manual retry/start/cleanup. There is no unlocked stale-job launch window.
 func (e *FreeEngine) startCompensationLocked(index int, cfg FreeConfig, automatic bool, now time.Time) error {
-	job := cloneJob(e.jobs[index])
+	parent := cloneJob(e.jobs[index])
+	job, err := newRegistrationAttempt(parent, now)
+	if err != nil {
+		return err
+	}
 	if job.Mailbox.Email == "" || len(job.Account) > 0 || job.Imported || job.Verified {
 		return fail("task", "no_saved_mailbox")
 	}
@@ -325,15 +329,17 @@ func (e *FreeEngine) startCompensationLocked(index int, cfg FreeConfig, automati
 	job.MailboxAPIBase = cfg.HME.BaseURL
 	job.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
 	action := "manual_compensation"
-	detail := "复用已创建邮箱，开始手动补偿注册"
+	detail := "复用已创建邮箱，开始手动补偿注册；原任务 " + parent.ID
 	if automatic {
 		action = "automatic_compensation"
-		detail = fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", job.AutoRetry.Attempts, len(compensationDelays))
+		detail = fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", job.AutoRetry.Attempts, len(compensationDelays)) + "；原任务 " + parent.ID
 	}
 	appendRegistrationLogAt(&job, job.UpdatedAt, action, detail, "info")
 	before := e.jobs[index]
-	e.jobs[index] = job
+	e.jobs[index] = registrationParentWithChild(parent, job)
+	e.jobs = append(e.jobs, job)
 	if err := e.saveLocked(); err != nil {
+		e.jobs = e.jobs[:len(e.jobs)-1]
 		e.jobs[index] = before
 		e.loadError = err
 		return err
@@ -388,7 +394,7 @@ func (e *FreeEngine) runCompensation(ctx context.Context, job RegistrationJob, c
 	if withJob, ok := mail.(interface {
 		PrepareFor(context.Context, string, Mailbox) error
 	}); ok {
-		runErr = withJob.PrepareFor(ctx, job.ID, job.Mailbox)
+		runErr = withJob.PrepareFor(ctx, mailboxClaimJobID(job), job.Mailbox)
 	} else {
 		runErr = preparer.Prepare(ctx, job.Mailbox)
 	}

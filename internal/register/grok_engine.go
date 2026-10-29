@@ -585,29 +585,46 @@ func (e *GrokEngine) RetryRegistration(raw map[string]any, id string) error {
 		e.mu.Unlock()
 		return fail("task", "already_running")
 	}
-	job, found := RegistrationJob{}, false
-	for _, candidate := range e.jobs {
-		if candidate.ID == id && candidate.Mailbox.Email != "" && len(candidate.Account) == 0 && !candidate.Imported && !candidate.Verified && candidate.Status == "registration_pending" {
-			job, found = cloneJob(candidate), true
+	parent, index := RegistrationJob{}, -1
+	for i, candidate := range e.jobs {
+		if candidate.ID == id && candidate.Status == "registration_pending" {
+			parent, index = cloneJob(candidate), i
 			break
 		}
 	}
-	if !found {
+	if index < 0 {
 		e.mu.Unlock()
 		return fail("task", "no_saved_mailbox")
 	}
-	// Do not restore job.BrowserProfile here. A Grok retry must get a new
-	// protocol fingerprint, HTTP client and browser-worker session; the saved
-	// profile remains private history for the original attempt/account.
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	done := make(chan struct{})
-	e.active[id] = &activeRegistration{cancel: cancel, done: done}
-	e.mu.Unlock()
-	if err := e.progress(id, "compensation", nil); err != nil {
-		e.finishTask(id)
+	for i, other := range e.jobs {
+		if i != index && strings.EqualFold(other.Mailbox.Email, parent.Mailbox.Email) && (other.Verified || other.Imported || len(other.Account) > 0) {
+			e.mu.Unlock()
+			return fail("task", "mailbox_already_has_saved_account")
+		}
+	}
+	job, err := newRegistrationAttempt(parent, time.Now())
+	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
-	go e.runSavedRegistration(ctx, id, job, cfg)
+	// A new browser session belongs to this attempt, while the parent retains its profile.
+	job.BrowserProfile = nil
+	job.AutoRetry = nil
+	appendRegistrationLog(&job, "manual_compensation", "复用已创建邮箱，开始手动补偿注册；原任务 "+parent.ID, "info")
+	before := e.jobs[index]
+	e.jobs[index] = registrationParentWithChild(parent, job)
+	e.jobs = append(e.jobs, job)
+	if err := e.saveLocked(); err != nil {
+		e.jobs = e.jobs[:len(e.jobs)-1]
+		e.jobs[index] = before
+		e.loadError = err
+		e.mu.Unlock()
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	e.active[job.ID] = &activeRegistration{cancel: cancel, done: make(chan struct{})}
+	e.mu.Unlock()
+	go e.runSavedRegistration(ctx, job.ID, job, cfg)
 	return nil
 }
 
@@ -631,7 +648,7 @@ func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job Re
 	}
 	defer mail.Close()
 	defer flow.Close()
-	if err := prepareSavedGrokMailbox(ctx, id, job.Mailbox, mail); err != nil {
+	if err := prepareSavedGrokMailbox(ctx, mailboxClaimJobID(job), job.Mailbox, mail); err != nil {
 		e.failJob(id, err)
 		return
 	}
@@ -753,7 +770,7 @@ func (e *GrokEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[job.ID]
-		jobs = append(jobs, map[string]any{"id": job.ID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": compensationSummary(grokRegistrationCompensation(job))})
+		jobs = append(jobs, map[string]any{"id": job.ID, "parent_job_id": job.ParentJobID, "root_job_id": job.RootJobID, "retry_job_id": job.RetryJobID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.RetryJobID == "" && job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": compensationSummary(grokRegistrationCompensation(job))})
 	}
 	for _, job := range e.jobs {
 		logs = append(logs, job.Logs...)

@@ -4,7 +4,9 @@
     <p v-if="compensationError" class="text-xs text-amber-600 mb-3">自动补偿暂缓：请检查已保存的批次和邮箱来源配置。</p>
     <EmptyState v-if="!visibleJobs.length" plain title="暂无注册任务" description="启动注册后会在这里显示任务记录。" />
     <div v-for="job in visibleJobs" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words">
-      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry) }}</p>
+      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id) }}</p>
+      <p v-if="job.parent_job_id" class="text-xs text-muted-foreground break-all">补偿任务 {{ job.id }} · 来源任务 {{ job.parent_job_id }}</p>
+      <p v-if="job.retry_job_id" class="text-xs text-muted-foreground break-all">后续补偿任务 {{ job.retry_job_id }}</p>
       <p class="text-xs text-muted-foreground">{{ stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
       <p v-if="job.twofa" class="text-xs" :class="job.twofa.status === 'completed' ? 'text-teal-600' : 'text-amber-600'" role="status">
         2FA · {{ twoFALabels[job.twofa.status] || job.twofa.status }} · {{ job.twofa.message }}

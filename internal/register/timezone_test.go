@@ -108,9 +108,9 @@ func TestResolvedRegistrationTimezoneSurvivesFailureAndCompensation(t *testing.T
 		i := int(requests.Add(1)) - 1
 		raw, err := os.ReadFile(path)
 		var jobs []RegistrationJob
-		if err != nil || json.Unmarshal(raw, &jobs) != nil || len(jobs) != 1 || jobs[0].BrowserProfile == nil {
+		if err != nil || json.Unmarshal(raw, &jobs) != nil || len(jobs) != i+1 || jobs[len(jobs)-1].BrowserProfile == nil {
 			t.Error("missing durable profile before auth")
-		} else if i >= len(zones) || jobs[0].BrowserProfile.TimezoneIANA != zones[i] || jobs[0].BrowserProfile.Name != stable.Name {
+		} else if i >= len(zones) || jobs[len(jobs)-1].BrowserProfile.TimezoneIANA != zones[i] || jobs[len(jobs)-1].BrowserProfile.Name != stable.Name {
 			t.Error("durable profile did not match actual attempt")
 		}
 		http.Error(w, "temporary outage", http.StatusServiceUnavailable)

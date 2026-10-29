@@ -43,3 +43,10 @@ test('legacy HTTP 504 refusals and challenge errors explain the actual failure',
   assert.match(registrationProxyFailureText('signup: browser_worker_rejected (HTTP 504) operation=worker_error=turnstile_incomplete;network_failures=brunhild.challenges.cloudflare.com|proxy_tunnel_failed|0'), /尚未点击.*网络失败/)
   assert.equal(registrationProxyFailureText('unrecognized failure'), 'unrecognized failure')
 })
+
+test('superseded attempt points to a child and no longer advertises waiting', async () => {
+  const { registrationJobStatusText } = await import('../src/lib/registrationCompensation.ts')
+  assert.match(registrationJobStatusText('registration_pending', waiting, 'child-id'), /补偿任务.*原记录/)
+  assert.doesNotMatch(registrationJobStatusText('registration_pending', waiting, 'child-id'), /等待自动/)
+  assert.equal(registrationCompensationText({...waiting,state:'superseded'}, false, now), '')
+})

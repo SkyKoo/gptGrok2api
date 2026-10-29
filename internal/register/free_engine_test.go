@@ -162,7 +162,7 @@ func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitEngine(t, engine)
-	job, _ = engine.getJob(id)
+	job, _ = latestAttempt(engine.getJob, id)
 	if job.Status != "completed" || !job.Verified || job.Mailbox.Email != "alias@example.test" {
 		t.Fatalf("compensation did not complete: %+v", job)
 	}
@@ -173,7 +173,8 @@ func TestFreeEngineCompensationReusesSavedMailbox(t *testing.T) {
 		t.Fatalf("compensation did not reuse browser profile: %#v", retryProfile)
 	}
 	var sawMailbox, sawCompensation, sawCompletion bool
-	for _, line := range job.Logs {
+	parent, _ := engine.getJob(id)
+	for _, line := range append(parent.Logs, job.Logs...) {
 		if line.Account != "alias@example.test" {
 			t.Errorf("registration log lost account: %+v", line)
 		}

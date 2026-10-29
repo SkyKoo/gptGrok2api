@@ -574,9 +574,9 @@ export function providerTypeLabel(type: string) {
 
 export function registerProxyHint(mode: RegisterProxyMode) {
   if (mode === 'direct') return '本次注册任务强制直连，不读取默认代理。'
-  if (mode === 'group') return 'GPT 和 Grok 共用代理组：任务启动时轮询可用节点，全程固定；补偿复用原节点，成功后绑定到账号。无可用节点时停止。'
-  if (mode === 'resin') return '直接使用 Resin 渠道，无需创建代理组。Account 按任务自动生成，重试和补偿沿用，注册成功后保存到账号。'
-  if (mode === 'custom') return '任务全程使用该地址，成功后账号继续使用；补偿不会自动换出口。'
+  if (mode === 'group') return 'GPT 和 Grok 共用代理组：任务启动时轮询可用节点，全程固定；补偿创建子任务并重新分配，成功后绑定到账号。无可用节点时停止。'
+  if (mode === 'resin') return '直接使用 Resin 渠道，无需创建代理组。Account 按任务自动生成，补偿子任务使用新身份，注册成功后保存到账号；新身份不保证节点不同。'
+  if (mode === 'custom') return '单次任务全程使用该地址，成功后账号继续使用；补偿子任务按当前配置选择出口。'
   return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
 }
 
@@ -1248,6 +1248,7 @@ const registerRuntimeActionLabels: Record<string, string> = {
   mailbox: '准备邮箱资源',
   mailbox_acquired: '分配邮箱资源',
   manual_compensation: '手动补偿注册',
+  retry_created: '创建补偿任务',
   automatic_compensation: '自动补偿注册',
   bootstrap: '初始化浏览器会话',
   authorize: '初始化授权会话',
