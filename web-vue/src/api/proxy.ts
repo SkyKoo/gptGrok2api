@@ -38,6 +38,7 @@ export type ProxyProfilePayload = Partial<ProxyProfile> & {
 }
 
 export interface ProxyNode {
+  proxy_type?: 'standard' | 'resin'
   id: string
   name: string
   url: string
@@ -126,7 +127,7 @@ export interface AccountProxyBinding {
   account_id: string
   label: string
   available: boolean
-  binding: { reference: string; bound_at: string } | null
+  binding: { reference: string; bound_at: string; resin_platform?: string; resin_account?: string } | null
   history: Array<{ at: string; from: string; to: string; reason: string }> | null
 }
 

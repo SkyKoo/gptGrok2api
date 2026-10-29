@@ -13,6 +13,7 @@ import (
 
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 func (s *Server) files(w http.ResponseWriter, r *http.Request) {
@@ -397,6 +398,12 @@ func (s *Server) proxyGroups(w http.ResponseWriter, r *http.Request) {
 	id := slugID(stringValue(request["id"]))
 	if id == "" {
 		id = fmt.Sprintf("group-%d", time.Now().UnixNano())
+	}
+	for _, node := range mapList(request["nodes"]) {
+		if err := proxyruntime.ValidateNodeType(stringValue(node["proxy_type"]), stringValue(node["url"])); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
 	}
 	request["id"] = id
 	next := make([]map[string]any, 0, len(groups))

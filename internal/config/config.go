@@ -94,6 +94,7 @@ type ProxyGroup struct {
 }
 
 type ProxyNode struct {
+	ProxyType             string
 	TaskConcurrencyLimit  int
 	ID                    string
 	Name                  string
@@ -325,6 +326,7 @@ func parseProxyGroups(value any) []ProxyGroup {
 				continue
 			}
 			node := ProxyNode{
+				ProxyType:            firstString(nodeMap, "proxy_type"),
 				TaskConcurrencyLimit: configInt(nodeMap["task_concurrency_limit"]),
 				ID:                   firstString(nodeMap, "id"), Name: firstString(nodeMap, "name"), URL: firstString(nodeMap, "url"),
 				Enabled: configBool(nodeMap["enabled"], true), ImageConcurrencyLimit: configInt(nodeMap["image_concurrency_limit"]),

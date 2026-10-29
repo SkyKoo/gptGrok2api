@@ -96,6 +96,7 @@ function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
     id,
     name: String(item.name || `出口 ${index + 1}`).trim(),
     url: String(item.url || '').trim(),
+    proxy_type: item.proxy_type === 'resin' ? 'resin' : 'standard',
     enabled: item.enabled !== false,
     task_concurrency_limit: Math.max(1, Math.min(100, Number(item.task_concurrency_limit) || 1)),
     image_concurrency_limit: normalizeImageConcurrencyLimit(item.image_concurrency_limit ?? DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY),

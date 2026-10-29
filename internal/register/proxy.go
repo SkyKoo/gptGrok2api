@@ -21,7 +21,7 @@ func (r *ProxyRouting) acquire(ctx context.Context, id, platform string, selecti
 	if err != nil {
 		return nil, err
 	}
-	lease, err := r.Manager.AcquireTask(ctx, *selection, platform, "registration", job.ProxyBinding)
+	lease, err := r.Manager.AcquireTask(ctx, *selection, platform, "registration", job.ProxyBinding, id)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, err
@@ -36,6 +36,12 @@ func (r *ProxyRouting) acquire(ctx context.Context, id, platform string, selecti
 		if job.ProxyBinding != nil {
 			action = "proxy_reused"
 			detail = "复用任务原出口："
+		}
+		if b.ResinAccount != "" {
+			detail = "注册代理身份已固定："
+			if job.ProxyBinding != nil {
+				detail = "复用任务原代理身份："
+			}
 		}
 		appendRegistrationLog(j, action, detail+b.Label(), "info")
 	}); err != nil {

@@ -48,6 +48,7 @@ function boundedSignatureText(value: unknown, limit = 160): string {
 function proxyNodeSignature(node: ProxyNode) {
   return [
     node.id,
+    node.proxy_type,
     node.name,
     boundedSignatureText(node.url, 96),
     node.enabled !== false ? 1 : 0,

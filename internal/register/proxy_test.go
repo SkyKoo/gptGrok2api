@@ -8,6 +8,7 @@ import (
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -246,5 +247,131 @@ func TestSavedRegistrationEnginesKeepOriginalProxy(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func resinRoutingFixture() *ProxyRouting {
+	m := proxyruntime.NewManager("", nil)
+	m.ConfigureTaskGroups([]proxyruntime.GroupConfig{{ID: "shared", Enabled: true, Nodes: []proxyruntime.NodeConfig{{ID: "a", URL: "http://CFM:fixture-secret@resin.invalid:2260", ProxyType: "resin", Enabled: true}}}})
+	return &ProxyRouting{Manager: m}
+}
+
+func TestSavedResinRegistrationEnginesKeepOriginalProxy(t *testing.T) {
+	for _, platform := range []string{"openai", "grok"} {
+		for _, missing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/missing=%v", platform, missing), func(t *testing.T) {
+				routing := resinRoutingFixture()
+				lease, err := routing.Manager.AcquireTask(context.Background(), "node:shared/a", platform, "registration", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lease.Release()
+				profile := browserProfileBase(1440, 900, 8, 4294967296)
+				job := RegistrationJob{ID: "saved", Status: "registration_pending", Stage: "wait_code", ProxyBinding: &lease.Binding, BrowserProfile: &profile, Mailbox: Mailbox{Email: "existing@example.test", AccountID: "acc-test"}}
+				path := filepath.Join(t.TempDir(), "tasks.json")
+				raw, _ := json.Marshal([]RegistrationJob{job})
+				if err = os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				routing = resinRoutingFixture()
+				if missing {
+					routing.Manager.ConfigureTaskGroups(nil)
+				}
+				calls := 0
+				mail := &grokSavedMailStub{}
+				var get func(string) (RegistrationJob, error)
+				var snapshot func() map[string]any
+				if platform == "openai" {
+					engine := NewFreeEngine(path, func(cfg FreeConfig) (MailSource, RegistrationFlow, error) {
+						calls++
+						if cfg.Proxy != lease.URL || !strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
+							t.Error("compensation changed route")
+						}
+						return mail, &fakeFlow{}, nil
+					}, nil, nil)
+					engine.SetProxyRouting(routing)
+					cfg := freeTestConfig()
+					cfg["proxy"] = "direct"
+					err = engine.RetryRegistration(cfg, job.ID)
+					get = engine.getJob
+					snapshot = engine.Snapshot
+				} else {
+					job.Mailbox.AccountID = "hme-account"
+					raw, _ = json.Marshal([]RegistrationJob{job})
+					if err = os.WriteFile(path, raw, 0600); err != nil {
+						t.Fatal(err)
+					}
+					engine := NewGrokEngine(path, func(cfg GrokConfig) (MailSource, GrokRegistrationFlow, error) {
+						calls++
+						if cfg.Proxy != lease.URL || !strings.Contains(cfg.Proxy, "CFM."+lease.Binding.ResinAccount+":") {
+							t.Error("saved Grok route changed")
+						}
+						return mail, &grokSavedFlowStub{}, nil
+					}, nil, nil)
+					engine.SetProxyRouting(routing)
+					cfg := grokConfigFixture()
+					cfg["proxy"] = "direct"
+					err = engine.RetryRegistration(cfg, job.ID)
+					get = engine.getJob
+					snapshot = engine.Snapshot
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				deadline := time.Now().Add(3 * time.Second)
+				for snapshot()["running"] == true && time.Now().Before(deadline) {
+					time.Sleep(time.Millisecond)
+				}
+				if snapshot()["running"] == true {
+					t.Fatal("retry did not finish")
+				}
+				saved, _ := get(job.ID)
+				if missing {
+					if calls != 0 || mail.prepared.Load() != 0 || saved.Error != "proxy: binding_unavailable" {
+						t.Fatal("missing binding allowed upstream work", saved.Error)
+					}
+				} else {
+					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil || saved.ProxyBinding.ResinAccount != lease.Binding.ResinAccount {
+						t.Fatal("saved registration lost route or mailbox", saved.Error)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestResinTaskJournalIdentityAndSafeLogs(t *testing.T) {
+	routing := resinRoutingFixture()
+	job := RegistrationJob{ID: "task-specific-id"}
+	get := func(string) (RegistrationJob, error) { return job, nil }
+	change := func(_ string, f func(*RegistrationJob)) error { f(&job); return nil }
+	selection := "group:shared"
+	release, err := routing.acquire(context.Background(), job.ID, "grok", &selection, get, change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if job.ProxyBinding == nil || job.ProxyBinding.ResinAccount == "" {
+		t.Fatal("identity was not journaled")
+	}
+	original := selection
+	encoded, _ := json.Marshal(job)
+	if strings.Contains(string(encoded), "fixture-secret") || !strings.Contains(string(encoded), "注册代理身份已固定") {
+		t.Fatal("unsafe or missing task identity log")
+	}
+	// A new engine/manager must reuse the journal even if user selected direct.
+	routing = resinRoutingFixture()
+	selection = "direct"
+	release, err = routing.acquire(context.Background(), job.ID, "grok", &selection, get, change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if selection != original {
+		t.Fatal("retry changed identity")
+	}
+	encoded, _ = json.Marshal(job)
+	if strings.Contains(string(encoded), "fixture-secret") || !strings.Contains(string(encoded), "复用任务原代理身份") {
+		t.Fatal("unsafe or missing retry log")
 	}
 }

@@ -10,6 +10,7 @@
       </span>
     </div>
     <p class="proxy-node-summary-card__url">{{ maskedUrl || emptyText }}</p>
+    <p v-if="node.proxy_type === 'resin'" class="proxy-node-summary-card__meta">Resin · 任务粘性出口</p>
     <p class="proxy-node-summary-card__meta">图片并发 {{ imageLimit > 0 ? imageLimit : '不限' }}</p>
   </article>
 </template>
@@ -19,7 +20,7 @@ import { computed } from 'vue'
 import type { ProxyNode } from '@/api/proxy'
 
 const props = withDefaults(defineProps<{
-  node: Pick<ProxyNode, 'id' | 'name' | 'url' | 'enabled' | 'image_concurrency_limit'>
+  node: Pick<ProxyNode, 'id' | 'name' | 'url' | 'enabled' | 'image_concurrency_limit' | 'proxy_type'>
   emptyText?: string
 }>(), {
   emptyText: '未设置',

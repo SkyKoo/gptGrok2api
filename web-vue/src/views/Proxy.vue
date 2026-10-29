@@ -325,6 +325,10 @@
                         />
                       </label>
                       <label class="text-xs">
+                        <span class="ui-field-label">代理类型</span>
+                        <GroupedSelectMenu :model-value="node.proxy_type || 'standard'" :groups="[{ options: [{ value: 'standard', label: '普通代理' }, { value: 'resin', label: 'Resin（任务粘性出口）' }] }]" block @update:model-value="node.proxy_type = $event === 'resin' ? 'resin' : 'standard'" />
+                      </label>
+                      <label v-if="node.proxy_type !== 'resin'" class="text-xs">
                         <span class="ui-field-label">代理 URL</span>
                         <Input
                           :model-value="node.url"
@@ -355,6 +359,7 @@
                         <Checkbox v-model="node.enabled">启用</Checkbox>
                       </div>
                     </div>
+                    <ResinProxyFields v-if="node.proxy_type === 'resin'" v-model="node.url" />
                     <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
                       <label class="min-w-[12rem] flex-1 text-xs">
                         <span class="ui-field-label">备注</span>
@@ -424,6 +429,7 @@ import {
   useProxyGroupRuntime,
 } from '@/views/proxy/proxyGroupRuntime'
 import ProxyAccountBinding from '@/views/proxy/ProxyAccountBinding.vue'
+import ResinProxyFields from '@/views/proxy/ResinProxyFields.vue'
 import ProxyGroupRow from '@/views/proxy/ProxyGroupRow.vue'
 
 defineOptions({ name: 'Proxy' })

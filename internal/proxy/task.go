@@ -19,17 +19,20 @@ const blockedProxyURL = "blocked://proxy-binding-unavailable"
 // Binding is account/task metadata, separate from the browser profile. Group
 // and default-pool bindings contain references, never proxy credentials.
 type Binding struct {
-	BlockedUntil time.Time `json:"blocked_until,omitempty"`
-	Reference    string    `json:"reference"`
-	GroupID      string    `json:"group_id,omitempty"`
-	NodeID       string    `json:"node_id,omitempty"`
-	EndpointHash string    `json:"endpoint_hash,omitempty"`
-	Platform     string    `json:"platform"`
-	Purpose      string    `json:"purpose"`
-	BoundAt      string    `json:"bound_at"`
+	ResinPlatform string    `json:"resin_platform,omitempty"`
+	ResinAccount  string    `json:"resin_account,omitempty"`
+	BlockedUntil  time.Time `json:"blocked_until,omitempty"`
+	Reference     string    `json:"reference"`
+	GroupID       string    `json:"group_id,omitempty"`
+	NodeID        string    `json:"node_id,omitempty"`
+	EndpointHash  string    `json:"endpoint_hash,omitempty"`
+	Platform      string    `json:"platform"`
+	Purpose       string    `json:"purpose"`
+	BoundAt       string    `json:"bound_at"`
 }
 
 type taskNode struct {
+	proxyType       string
 	url             string
 	enabled         bool
 	limit, inFlight int
@@ -64,6 +67,9 @@ func NodeReference(group, node string) string {
 	return "node:" + url.PathEscape(group) + "/" + url.PathEscape(node)
 }
 func (b Binding) Label() string {
+	if b.ResinAccount != "" {
+		return b.GroupID + "/" + b.NodeID + " Resin " + b.ResinPlatform + " / " + b.ResinAccount
+	}
 	if b.GroupID != "" {
 		return b.GroupID + "/" + b.NodeID
 	}
@@ -110,13 +116,17 @@ func (m *Manager) ConfigureTaskGroups(groups []GroupConfig) {
 		}
 		for _, cfg := range group.Nodes {
 			raw := normalizeURL(cfg.URL)
-			if !cfg.Enabled || cfg.ID == "" || !taskProxyCompatible(raw) {
+			kind := cfg.ProxyType
+			if kind == "" {
+				kind = "standard"
+			}
+			if !cfg.Enabled || cfg.ID == "" || !taskProxyCompatible(raw) || ValidateNodeType(kind, raw) != nil {
 				continue
 			}
 			ref := NodeReference(group.ID, cfg.ID)
 			n := m.taskNodes[ref]
-			if n == nil || n.url != raw {
-				n = &taskNode{url: raw, blocked: map[string]time.Time{}}
+			if n == nil || n.url != raw || n.proxyType != kind {
+				n = &taskNode{proxyType: kind, url: raw, blocked: map[string]time.Time{}}
 				m.taskNodes[ref] = n
 			}
 			n.enabled = probeAllowsRuntimeValidation(cfg.LastStatus, cfg.LastError)
@@ -152,7 +162,7 @@ func (m *Manager) signalTaskLocked() {
 
 // AcquireTask selects once. A saved binding takes precedence over current
 // settings, including when a failed task is explicitly resumed after restart.
-func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose string, saved *Binding) (*TaskLease, error) {
+func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose string, saved *Binding, taskIDs ...string) (*TaskLease, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -232,6 +242,20 @@ func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose 
 			if n.inFlight >= n.limit {
 				continue
 			}
+			if n.proxyType == "resin" {
+				if err := taskResinBinding(n.url, &b, taskIDs); err != nil {
+					m.mu.Unlock()
+					return nil, err
+				}
+			} else if b.ResinAccount != "" {
+				m.mu.Unlock()
+				return nil, ErrBindingUnavailable
+			}
+			taskURL, err := boundResinURL(n.url, b)
+			if err != nil {
+				m.mu.Unlock()
+				return nil, err
+			}
 			n.inFlight++
 			if isGroup {
 				m.taskCursors[group] = (index + 1) % len(refs)
@@ -241,7 +265,7 @@ func (m *Manager) AcquireTask(ctx context.Context, selection, platform, purpose 
 			b.EndpointHash = proxyHash(n.url)
 			b.GroupID, _ = url.PathUnescape(parts[0])
 			b.NodeID, _ = url.PathUnescape(parts[1])
-			lease := &TaskLease{URL: n.url, Binding: b, manager: m, node: n}
+			lease := &TaskLease{URL: taskURL, Binding: b, manager: m, node: n}
 			m.mu.Unlock()
 			return lease, nil
 		}
@@ -271,7 +295,7 @@ func (m *Manager) resolveBinding(b Binding) (string, error) {
 	switch {
 	case strings.HasPrefix(b.Reference, "node:"):
 		n := m.taskNodes[b.Reference]
-		if n == nil || !n.enabled {
+		if n == nil || !n.enabled || (b.ResinAccount != "" && n.proxyType != "resin") {
 			return "", ErrBindingUnavailable
 		}
 		raw = n.url
@@ -298,7 +322,7 @@ func (m *Manager) resolveBinding(b Binding) (string, error) {
 	if !taskProxyCompatible(raw) || (b.EndpointHash != "" && b.EndpointHash != proxyHash(raw)) {
 		return "", ErrBindingUnavailable
 	}
-	return raw, nil
+	return boundResinURL(raw, b)
 }
 
 // ResolveBound is checked by all request families before their legacy routing.

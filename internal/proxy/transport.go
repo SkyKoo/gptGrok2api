@@ -126,6 +126,7 @@ type GroupConfig struct {
 }
 
 type NodeConfig struct {
+	ProxyType             string
 	ID, Name, URL         string
 	Enabled               bool
 	TaskConcurrencyLimit  int
