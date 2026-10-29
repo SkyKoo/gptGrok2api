@@ -43,7 +43,7 @@ func TestBrowserNetworkDiagnosticsRejectSecretsAndLimitEntries(t *testing.T) {
 
 func TestWorkerNetworkEvidenceSurvivesTaskJournalWithoutSecrets(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 422, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"detail":{"stage":"turnstile","error":"turnstile_incomplete","diagnostic":{"network_failures":[{"host":"brunhild.challenges.cloudflare.com","kind":"proxy_tunnel_failed","status":0},{"host":"secret.invalid","kind":"http_error","status":403}]}}}`))}, nil
+		return &http.Response{StatusCode: 422, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"detail":{"stage":"turnstile","error":"turnstile_incomplete","diagnostic":{"upstream_method":"POST","upstream_path":"/_next/server-action","network_failures":[{"host":"brunhild.challenges.cloudflare.com","kind":"proxy_tunnel_failed","status":0},{"host":"secret.invalid","kind":"http_error","status":403}]}}}`))}, nil
 	})}
 	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
 	_, err := solver.workerPost(context.Background(), "/v1/session/signup", map[string]any{}, "signup")
@@ -51,7 +51,7 @@ func TestWorkerNetworkEvidenceSurvivesTaskJournalWithoutSecrets(t *testing.T) {
 	if !errors.As(err, &failure) || failure.Stage != "turnstile" || failure.HTTPStatus != 422 {
 		t.Fatalf("wrong phase/status: %v", err)
 	}
-	if !strings.Contains(safeFailure(err), "network_failures=brunhild.challenges.cloudflare.com|proxy_tunnel_failed|0") || strings.Contains(safeFailure(err), "secret") {
+	if !strings.Contains(safeFailure(err), "upstream_method=POST;upstream_path=/_next/server-action") || !strings.Contains(safeFailure(err), "network_failures=brunhild.challenges.cloudflare.com|proxy_tunnel_failed|0") || strings.Contains(safeFailure(err), "secret") {
 		t.Fatal(err)
 	}
 	j := compensationFixture(time.Now())
@@ -59,6 +59,17 @@ func TestWorkerNetworkEvidenceSurvivesTaskJournalWithoutSecrets(t *testing.T) {
 	planRegistrationCompensation(&j, err, time.Now())
 	if j.AutoRetry.State != "manual" {
 		t.Fatal("challenge error must not schedule another registration")
+	}
+}
+
+func TestBrowserWorkerPathSanitizerRejectsQueryAndExternalValues(t *testing.T) {
+	for _, value := range []string{"https://evil.test/x", "/x?secret=1", "/x#fragment", "/x\\\\bad"} {
+		if got := sanitizeBrowserWorkerPath(value); got != "" {
+			t.Fatalf("unsafe path accepted: %q", got)
+		}
+	}
+	if got := sanitizeBrowserWorkerPath("/_next/server-action"); got != "/_next/server-action" {
+		t.Fatalf("safe path rejected: %q", got)
 	}
 }
 

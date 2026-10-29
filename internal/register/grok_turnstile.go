@@ -151,6 +151,8 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 					Reason                 string                  `json:"reason"`
 					UpstreamCode           string                  `json:"upstream_code"`
 					UpstreamStatus         int                     `json:"upstream_status"`
+					UpstreamMethod         string                  `json:"upstream_method"`
+					UpstreamPath           string                  `json:"upstream_path"`
 					NetworkFailures        []browserNetworkFailure `json:"network_failures"`
 					TurnstileClicks        int                     `json:"turnstile_clicks"`
 					TurnstileFrames        int                     `json:"turnstile_frames"`
@@ -180,6 +182,12 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				if status := envelope.Detail.Diagnostic.UpstreamStatus; status >= 400 && status <= 599 {
 					failure.Operation += fmt.Sprintf(";upstream_status=%d", status)
 					failure.UpstreamStatus = status
+				}
+				if method := sanitizeBrowserWorkerMethod(envelope.Detail.Diagnostic.UpstreamMethod); method != "" {
+					failure.Operation += ";upstream_method=" + method
+				}
+				if path := sanitizeBrowserWorkerPath(envelope.Detail.Diagnostic.UpstreamPath); path != "" {
+					failure.Operation += ";upstream_path=" + path
 				}
 				if network := safeBrowserNetworkFailures(envelope.Detail.Diagnostic.NetworkFailures); network != "" {
 					failure.Operation += ";network_failures=" + network
@@ -276,6 +284,28 @@ func sanitizeBrowserWorkerUpstreamCode(value string) string {
 	default:
 		return ""
 	}
+}
+
+func sanitizeBrowserWorkerMethod(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "POST", "PUT", "PATCH":
+		return strings.ToUpper(strings.TrimSpace(value))
+	default:
+		return ""
+	}
+}
+
+func sanitizeBrowserWorkerPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 160 || !strings.HasPrefix(value, "/") {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f || r == '?' || r == '#' || r == '\\' {
+			return ""
+		}
+	}
+	return value
 }
 
 func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy string) (GrokBrowserContext, error) {
