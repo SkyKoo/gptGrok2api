@@ -214,7 +214,7 @@ func (s *ResourceSession) EnsureClaim(ctx context.Context, platform, jobID strin
 	if s.manager.store == nil || !s.manager.store.Enabled() {
 		return nil
 	}
-	return s.manager.store.EnsureClaim(ctx, platform, jobID, box)
+	return s.manager.store.EnsureRegistrationClaim(ctx, platform, jobID, box)
 }
 
 func (s *ResourceSession) Commit(ctx context.Context, platform, jobID, accountID string, box Mailbox) error {

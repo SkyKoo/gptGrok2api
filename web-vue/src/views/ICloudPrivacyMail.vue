@@ -25,7 +25,7 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱未禁用且没有其他占用时，才会自动删除上游邮箱。也可在此手动删除未占用邮箱，操作日志会保留。
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用邮箱，操作日志会保留。
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
@@ -112,14 +112,20 @@
                 <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailbox.openai_claimed ? '已占用' : '未占用' }}</MetaChip>
                 <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '未占用' }}</MetaChip>
               </div>
-              <div class="mt-3 flex justify-end gap-2">
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                <MetaChip size="xs" :tone="mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationDisabled(mailbox, 'openai') ? '已禁用注册' : '允许注册' }}</MetaChip>
+                <MetaChip size="xs" :tone="mailboxRegistrationDisabled(mailbox, 'grok') ? 'warning' : 'success'">Grok {{ mailboxRegistrationDisabled(mailbox, 'grok') ? '已禁用注册' : '允许注册' }}</MetaChip>
+              </div>
+              <div class="mt-3 flex flex-wrap justify-end gap-2">
                 <Button
+                  v-for="channel in registrationChannels"
+                  :key="channel.value"
                   size="xs"
                   variant="outline"
-                  :disabled="mailboxActionID === mailbox.id || mailbox.status === 'cleanup_pending' || mailbox.status === 'deleted'"
-                  @click="setMailboxStatus(mailbox)"
+                  :disabled="Boolean(mailboxActionID) || mailbox.status === 'cleanup_pending' || mailbox.status === 'deleted'"
+                  @click="setMailboxStatus(mailbox, channel.value)"
                 >
-                  {{ mailboxActionID === mailbox.id ? '处理中...' : mailbox.status === 'disabled' ? '启用邮箱' : '禁用邮箱' }}
+                  {{ mailboxRegistrationDisabled(mailbox, channel.value) ? '启用' : '禁用' }}{{ channel.label }}
                 </Button>
                 <Button
                   size="xs"
@@ -146,7 +152,7 @@
           <div v-if="events.length" class="max-h-80 space-y-2 overflow-auto">
             <div v-for="event in events" :key="event.id" class="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs">
               <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                <span class="font-medium text-foreground">{{ event.event_type || 'mailbox_event' }}</span>
+                <span class="font-medium text-foreground">{{ mailboxEventLabel(event) }}</span>
                 <MetaChip size="xs" :tone="event.platform === 'grok' ? 'info' : event.platform === 'openai' ? 'success' : 'muted'">{{ event.platform || '系统' }}</MetaChip>
                 <span class="text-muted-foreground">{{ formatDate(event.created_at) }}</span>
               </div>
@@ -164,6 +170,7 @@
 </template>
 
 <script setup lang="ts">
+import { mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
@@ -203,7 +210,9 @@ const mailboxStatusOptions = [
   { label: '全部状态', value: '' },
   { label: '可用', value: 'available' },
   { label: '使用中', value: 'active' },
-  { label: '已禁用', value: 'disabled' },
+  { label: '存在渠道禁用', value: 'disabled' },
+  { label: 'GPT 已禁用', value: 'disabled_openai' },
+  { label: 'Grok 已禁用', value: 'disabled_grok' },
   { label: '待清理', value: 'cleanup_pending' },
   { label: '已删除', value: 'deleted' },
 ]
@@ -277,7 +286,7 @@ const metrics = computed(() => [
   { label: '邮箱总数', value: counts.value.mailboxes || 0 },
   { label: '可用邮箱', value: counts.value.available || 0 },
   { label: '使用中', value: counts.value.active || 0 },
-  { label: '已禁用', value: counts.value.disabled || 0 },
+  { label: '有渠道禁用', value: counts.value.disabled || 0 },
   { label: '待清理', value: counts.value.cleanup_pending || 0 },
   { label: '操作事件', value: counts.value.events || 0 },
 ])
@@ -299,14 +308,22 @@ function mailboxStatusLabel(mailbox: ICloudMailbox) {
   return ({
     available: '可用',
     active: '使用中',
-    disabled: '已禁用',
+    disabled: '两渠道均禁用',
     cleanup_pending: '待清理',
     deleted: '已删除',
   } as Record<string, string>)[mailbox.status || ''] || mailbox.status || '未知'
 }
 
+function mailboxEventLabel(event: ICloudMailboxEvent) {
+  if (event.event_type === 'mailbox_disabled' || event.event_type === 'mailbox_enabled') {
+    const channel = event.platform === 'openai' ? 'GPT' : event.platform === 'grok' ? 'Grok' : 'GPT 和 Grok'
+    return `${event.event_type === 'mailbox_disabled' ? '禁用' : '启用'} ${channel} 注册`
+  }
+  return event.event_type || 'mailbox_event'
+}
+
 function mailboxLabel(mailbox: ICloudMailbox) {
-  if (mailbox.status === 'disabled') return '已禁用'
+  if (mailbox.status === 'disabled') return '两渠道均禁用'
   if (mailbox.status === 'cleanup_pending') return '待清理'
   if (mailbox.status === 'deleted') return '已删除'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return '两平台均占用'
@@ -343,17 +360,17 @@ async function loadCounts() {
   counts.value = (status as { counts?: Record<string, number> }).counts || {}
 }
 
-async function setMailboxStatus(mailbox: ICloudMailbox) {
+async function setMailboxStatus(mailbox: ICloudMailbox, platform: RegistrationChannel) {
   const id = String(mailbox.id || '')
   if (!id) return
-  const target = mailbox.status === 'disabled' ? 'available' : 'disabled'
+  const target = mailboxRegistrationDisabled(mailbox, platform) ? 'available' : 'disabled'
   mailboxActionID.value = id
   notice.value = ''
   pageError.value = ''
   try {
-    const result = await icloudApi.updateMailboxStatus(id, target)
+    const result = await icloudApi.updateMailboxStatus(id, target, platform)
     if (!result.mailbox) throw new Error('邮箱状态更新失败')
-    notice.value = `${result.mailbox.email || id} 已${target === 'disabled' ? '禁用' : '启用'}。`
+    notice.value = `${result.mailbox.email || id} 已${target === 'disabled' ? '禁用' : '启用'} ${platform === 'openai' ? 'GPT' : 'Grok'} 注册。`
     await Promise.all([loadCounts(), loadMailboxes(), loadEvents()])
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '邮箱状态更新失败')

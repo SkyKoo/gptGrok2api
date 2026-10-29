@@ -42,6 +42,15 @@ func (s *Store) prepareDelete(ctx context.Context, id, actor string) (Mailbox, e
 	if box.Status == "deleted" {
 		return box, nil
 	}
+	if actor == "account_cleanup" {
+		var blocked bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mailbox_registration_blocks WHERE mailbox_id=$1)`, id).Scan(&blocked); err != nil {
+			return box, err
+		}
+		if box.Status == "disabled" || blocked {
+			return box, ErrMailboxRegistrationDisabled
+		}
+	}
 	var occupied bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active'))`, id).Scan(&occupied); err != nil {
 		return box, err

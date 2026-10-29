@@ -221,7 +221,10 @@ func (s *Server) cleanupMailboxRegistry(ctx context.Context, accounts []map[stri
 					continue
 				}
 				_, deleteErr := s.mailboxManager.DeleteAsset(cleanupCtx, asset.ID, "account_cleanup")
-				if errors.Is(deleteErr, mailboxstore.ErrMailboxInUse) || errors.Is(deleteErr, mailboxstore.ErrMailboxBusy) {
+				if errors.Is(deleteErr, mailboxstore.ErrMailboxRegistrationDisabled) {
+					result.Message = "已释放平台占用；邮箱设置了渠道禁用，已保留上游邮箱"
+					summary.Retained++
+				} else if errors.Is(deleteErr, mailboxstore.ErrMailboxInUse) || errors.Is(deleteErr, mailboxstore.ErrMailboxBusy) {
 					result.Message = "已释放平台占用；邮箱已被其他任务占用，已保留上游邮箱"
 					summary.Retained++
 				} else if deleteErr != nil {

@@ -59,12 +59,14 @@ type Claim struct {
 
 type MailboxView struct {
 	Mailbox
-	OpenAIClaimed bool       `json:"openai_claimed"`
-	GrokClaimed   bool       `json:"grok_claimed"`
-	Claims        []Claim    `json:"claims,omitempty"`
-	Capabilities  any        `json:"capabilities,omitempty"`
-	Metadata      any        `json:"metadata,omitempty"`
-	LastSyncAt    *time.Time `json:"last_sync_at,omitempty"`
+	OpenAIDisabled bool       `json:"openai_disabled"`
+	GrokDisabled   bool       `json:"grok_disabled"`
+	OpenAIClaimed  bool       `json:"openai_claimed"`
+	GrokClaimed    bool       `json:"grok_claimed"`
+	Claims         []Claim    `json:"claims,omitempty"`
+	Capabilities   any        `json:"capabilities,omitempty"`
+	Metadata       any        `json:"metadata,omitempty"`
+	LastSyncAt     *time.Time `json:"last_sync_at,omitempty"`
 }
 
 type Event struct {
@@ -89,12 +91,14 @@ type Store struct {
 }
 
 var (
-	ErrMailboxNotFound         = errors.New("mailbox not found")
-	ErrInvalidMailboxStatus    = errors.New("mailbox status must be available or disabled")
-	ErrMailboxStateImmutable   = errors.New("mailbox is pending cleanup or deleted")
-	ErrMailboxInUse            = errors.New("邮箱仍被平台占用，请先删除关联账号或结束注册任务")
-	ErrMailboxBusy             = errors.New("邮箱正在执行删除，请稍后刷新状态")
-	ErrProviderMailboxNotFound = errors.New("upstream mailbox not found")
+	ErrMailboxNotFound             = errors.New("mailbox not found")
+	ErrMailboxRegistrationDisabled = errors.New("邮箱已禁用该渠道注册")
+	ErrInvalidMailboxPlatform      = errors.New("mailbox platform must be openai or grok")
+	ErrInvalidMailboxStatus        = errors.New("mailbox status must be available or disabled")
+	ErrMailboxStateImmutable       = errors.New("mailbox is pending cleanup or deleted")
+	ErrMailboxInUse                = errors.New("邮箱仍被平台占用，请先删除关联账号或结束注册任务")
+	ErrMailboxBusy                 = errors.New("邮箱正在执行删除，请稍后刷新状态")
+	ErrProviderMailboxNotFound     = errors.New("upstream mailbox not found")
 )
 
 // MailboxListFilter controls the mailbox asset list shown in the admin UI.
@@ -179,6 +183,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE UNIQUE INDEX IF NOT EXISTS mailboxes_email_ci_idx ON mailboxes (lower(email))`,
 		`CREATE INDEX IF NOT EXISTS mailboxes_source_idx ON mailboxes (source_id, created_at ASC)`,
 		`CREATE INDEX IF NOT EXISTS mailboxes_status_idx ON mailboxes (status, updated_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mailbox_registration_blocks (
+			mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+			platform text NOT NULL CHECK (platform IN ('openai','grok')),
+			PRIMARY KEY (mailbox_id, platform)
+		)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_claims (
 			id text PRIMARY KEY,
 			mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
@@ -240,7 +249,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply mailbox schema: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_schema_migrations(version) VALUES (1) ON CONFLICT (version) DO NOTHING`); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_schema_migrations(version) VALUES (1),(2) ON CONFLICT (version) DO NOTHING`); err != nil {
 		return fmt.Errorf("record mailbox schema: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -382,6 +391,9 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 	if existing, ok, err := s.claimForJob(ctx, platform, jobID); err != nil {
 		return Mailbox{}, err
 	} else if ok {
+		if err := s.checkRegistrationAllowed(ctx, s.db, existing.ID, platform); err != nil {
+			return Mailbox{}, err
+		}
 		if prepare != nil {
 			if err := prepare(ctx, existing); err != nil {
 				return Mailbox{}, err
@@ -403,6 +415,7 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 		FROM mailboxes m
 		WHERE m.status IN ('available','active')
 		AND ($1='' OR m.source_id=$1)
+		AND NOT EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform=$2)
 		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$2 AND c.status IN ('reserved','active'))
 		ORDER BY m.created_at ASC, m.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, sourceID, platform)
 	if scanErr := row.Scan(&candidate.ID, &candidate.SourceID, &candidate.SourceType, &candidate.SourceAccountID, &candidate.SourceMailboxID, &candidate.Email, &candidate.Status, &candidate.LastError, &candidate.CreatedAt, &candidate.UpdatedAt); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
@@ -455,6 +468,10 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 		tx.Rollback()
 		return Mailbox{}, ErrMailboxStateImmutable
 	}
+	if err := s.checkRegistrationAllowed(ctx, tx, item.ID, platform); err != nil {
+		tx.Rollback()
+		return Mailbox{}, err
+	}
 	claimID := newID("clm")
 	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, item.ID, platform, jobID); err != nil {
 		tx.Rollback()
@@ -488,6 +505,16 @@ func (s *Store) claimForJob(ctx context.Context, platform, jobID string) (Mailbo
 // EnsureClaim adopts a mailbox already present in a registration journal or
 // account record. It is idempotent and never creates an upstream alias.
 func (s *Store) EnsureClaim(ctx context.Context, platform, jobID string, item Mailbox) error {
+	return s.ensureClaim(ctx, platform, jobID, item, false)
+}
+
+// EnsureRegistrationClaim checks registration policy while holding the asset
+// lock. Historical account reconciliation uses EnsureClaim without this gate.
+func (s *Store) EnsureRegistrationClaim(ctx context.Context, platform, jobID string, item Mailbox) error {
+	return s.ensureClaim(ctx, platform, jobID, item, true)
+}
+
+func (s *Store) ensureClaim(ctx context.Context, platform, jobID string, item Mailbox, registration bool) error {
 	if !s.Enabled() {
 		return nil
 	}
@@ -507,6 +534,12 @@ func (s *Store) EnsureClaim(ctx context.Context, platform, jobID string, item Ma
 	if item.Status == "cleanup_pending" || item.Status == "deleted" {
 		tx.Rollback()
 		return ErrMailboxStateImmutable
+	}
+	if registration {
+		if err := s.checkRegistrationAllowed(ctx, tx, item.ID, platform); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	var claimID string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM mailbox_claims WHERE mailbox_id=$1 AND platform=$2 AND status IN ('reserved','active') LIMIT 1`, item.ID, platform).Scan(&claimID)
@@ -744,69 +777,9 @@ func (s *Store) MarkCleanup(ctx context.Context, item Mailbox, success bool, mes
 // Disabled assets remain in the registry and in the upstream provider, but
 // Reserve deliberately skips them. Enabling an asset restores the derived
 // status from its active claims.
+// SetStatus keeps the legacy API: no platform means change both channels.
 func (s *Store) SetStatus(ctx context.Context, mailboxID, requested string) (Mailbox, error) {
-	if !s.Enabled() {
-		return Mailbox{}, errors.New("mailbox database is not configured")
-	}
-	mailboxID = strings.TrimSpace(mailboxID)
-	requested = strings.ToLower(strings.TrimSpace(requested))
-	if mailboxID == "" {
-		return Mailbox{}, ErrMailboxNotFound
-	}
-	if requested != "disabled" && requested != "available" {
-		return Mailbox{}, ErrInvalidMailboxStatus
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Mailbox{}, err
-	}
-	defer tx.Rollback()
-	var current Mailbox
-	err = tx.QueryRowContext(ctx, `SELECT id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at
-		FROM mailboxes WHERE id=$1 FOR UPDATE`, mailboxID).Scan(
-		&current.ID, &current.SourceID, &current.SourceType, &current.SourceAccountID, &current.SourceMailboxID,
-		&current.Email, &current.Status, &current.LastError, &current.CreatedAt, &current.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Mailbox{}, ErrMailboxNotFound
-	}
-	if err != nil {
-		return Mailbox{}, err
-	}
-	if current.Status == "cleanup_pending" || current.Status == "deleted" {
-		return Mailbox{}, ErrMailboxStateImmutable
-	}
-	finalStatus := requested
-	if requested == "available" {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')`, mailboxID).Scan(&active); err != nil {
-			return Mailbox{}, err
-		}
-		if active > 0 {
-			finalStatus = "active"
-		}
-	}
-	var updated Mailbox
-	if err := tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=$1,updated_at=now() WHERE id=$2
-		RETURNING id,source_id,source_type,source_account_id,source_mailbox_id,email,status,last_error,created_at,updated_at`, finalStatus, mailboxID).Scan(
-		&updated.ID, &updated.SourceID, &updated.SourceType, &updated.SourceAccountID, &updated.SourceMailboxID,
-		&updated.Email, &updated.Status, &updated.LastError, &updated.CreatedAt, &updated.UpdatedAt); err != nil {
-		return Mailbox{}, err
-	}
-	eventType := "mailbox_enabled"
-	if requested == "disabled" {
-		eventType = "mailbox_disabled"
-	}
-	if err := s.writeEventTx(ctx, tx, Event{
-		MailboxID: updated.ID, EventType: eventType, SourceType: updated.SourceType,
-		Actor: "admin", Result: updated.Status,
-		Metadata: map[string]any{"previous_status": current.Status, "requested_status": requested},
-	}); err != nil {
-		return Mailbox{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return Mailbox{}, err
-	}
-	return updated, nil
+	return s.SetPlatformStatus(ctx, mailboxID, "", requested)
 }
 
 func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxListFilter) ([]MailboxView, int, error) {
@@ -830,7 +803,14 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 		conditions = append(conditions, "(lower(m.email) LIKE "+placeholder+" OR lower(m.source_type) LIKE "+placeholder+" OR lower(m.source_account_id) LIKE "+placeholder+")")
 	}
 	if status := strings.TrimSpace(strings.ToLower(filter.Status)); status != "" {
-		conditions = append(conditions, "m.status="+addArg(status))
+		switch status {
+		case "disabled":
+			conditions = append(conditions, "(m.status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id))")
+		case "disabled_openai", "disabled_grok":
+			conditions = append(conditions, "(m.status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform="+addArg(strings.TrimPrefix(status, "disabled_"))+"))")
+		default:
+			conditions = append(conditions, "m.status="+addArg(status))
+		}
 	}
 	if sourceID := strings.TrimSpace(filter.SourceID); sourceID != "" {
 		conditions = append(conditions, "m.source_id="+addArg(sourceID))
@@ -849,6 +829,8 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	limitPlaceholder := addArg(pageSize)
 	offsetPlaceholder := addArg((page - 1) * pageSize)
 	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at,m.last_sync_at,
+		(m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='openai')),
+		(m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='grok')),
 		COALESCE(bool_or(c.platform='openai' AND c.status IN ('reserved','active')),false), COALESCE(bool_or(c.platform='grok' AND c.status IN ('reserved','active')),false)
 		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder, args...)
 	if err != nil {
@@ -858,7 +840,7 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	views := []MailboxView{}
 	for rows.Next() {
 		var view MailboxView
-		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
+		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
 			return nil, 0, err
 		}
 		views = append(views, view)
@@ -1044,7 +1026,7 @@ func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
 		"mailboxes":       "SELECT count(*) FROM mailboxes",
 		"available":       "SELECT count(*) FROM mailboxes WHERE status='available'",
 		"active":          "SELECT count(*) FROM mailboxes WHERE status='active'",
-		"disabled":        "SELECT count(*) FROM mailboxes WHERE status='disabled'",
+		"disabled":        "SELECT count(*) FROM mailboxes m WHERE status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id)",
 		"cleanup_pending": "SELECT count(*) FROM mailboxes WHERE status='cleanup_pending'",
 		"events":          "SELECT count(*) FROM mailbox_events",
 	} {

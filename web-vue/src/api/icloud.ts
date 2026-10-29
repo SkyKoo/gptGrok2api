@@ -56,6 +56,8 @@ export type ICloudMailbox = {
   api_active?: boolean
   icloud_active?: boolean
   receive_count?: number
+  openai_disabled?: boolean
+  grok_disabled?: boolean
   openai_claimed?: boolean
   grok_claimed?: boolean
   account_id?: string
@@ -229,8 +231,8 @@ export const icloudApi = {
   listAccounts: () => apiClient.get<never, { accounts?: ICloudAccount[] }>(path('accounts'), requestConfig),
   listMailboxes: (params: { page?: number; page_size?: number; search?: string; account_id?: string; status?: string; source_id?: string; platform?: string } = {}) =>
     apiClient.get<never, ICloudMailboxList>(path('mailboxes'), { ...requestConfig, params }),
-  updateMailboxStatus: (id: string, status: 'available' | 'disabled') =>
-    apiClient.post<{ status: 'available' | 'disabled' }, { success?: boolean; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}/status`), { status }, requestConfig),
+  updateMailboxStatus: (id: string, status: 'available' | 'disabled', platform?: 'openai' | 'grok') =>
+    apiClient.post<{ status: 'available' | 'disabled'; platform?: 'openai' | 'grok' }, { success?: boolean; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}/status`), { status, platform }, requestConfig),
   deleteMailbox: (id: string) =>
     apiClient.delete<never, { success?: boolean; status?: string; mailbox?: ICloudMailbox }>(path(`mailboxes/${encodeURIComponent(id)}`), requestConfig),
   reconcile: () => apiClient.post<never, { success?: boolean; aliases?: number; openai_claims?: number; grok_claims?: number; released_claims?: number; missing?: string[]; errors?: string[] }>(path('reconcile'), {}, requestConfig),

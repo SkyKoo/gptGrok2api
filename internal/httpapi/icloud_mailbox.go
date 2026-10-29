@@ -243,6 +243,7 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 			"source_account_id": view.SourceAccountID, "source_mailbox_id": view.SourceMailboxID,
 			"status": status, "api_active": true, "icloud_active": true,
 			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed,
+			"openai_disabled": view.OpenAIDisabled, "grok_disabled": view.GrokDisabled,
 			"last_error": view.LastError, "created_at": view.CreatedAt, "updated_at": view.UpdatedAt,
 		})
 	}
@@ -295,12 +296,13 @@ func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var request struct {
-			Status string `json:"status"`
+			Status   string `json:"status"`
+			Platform string `json:"platform"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
 		}
-		updated, err = s.mailboxStore.SetStatus(r.Context(), mailboxID, request.Status)
+		updated, err = s.mailboxStore.SetPlatformStatus(r.Context(), mailboxID, request.Platform, request.Status)
 	} else {
 		writeError(w, http.StatusNotFound, "mailbox action not found", "not_found")
 		return
@@ -312,7 +314,7 @@ func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
 			status, code, message = http.StatusNotFound, "mailbox_not_found", "邮箱资产不存在"
 		case errors.Is(err, mailboxstore.ErrMailboxInUse), errors.Is(err, mailboxstore.ErrMailboxBusy):
 			status, code, message = http.StatusConflict, "mailbox_in_use", err.Error()
-		case errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
+		case errors.Is(err, mailboxstore.ErrInvalidMailboxPlatform), errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
 			status, code, message = http.StatusBadRequest, "invalid_request_error", err.Error()
 		case updated.Status == "cleanup_pending":
 			status, code, message = http.StatusBadGateway, "mailbox_provider_error", "上游删除未完成，邮箱已保留为待清理，可查看日志并重试"
