@@ -76,5 +76,25 @@ class XaiTurnstileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.diagnostic["turnstile_ready"], False)
 
 
+class XaiRefusalSemanticsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recorded_upstream_refusal_stops_before_code_polling(self):
+        upstream = {"reason":"signup_unavailable", "code":"email_signup_unavailable", "status":400}
+        with patch.object(xai_flow, "_page_diagnostic", new=AsyncMock(return_value={"upstream_status":400})):
+            with self.assertRaises(xai_flow.XaiBrowserFlowError) as raised:
+                await xai_flow._wait_for_email_verification(FakeTurnstilePage(), upstream=upstream)
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(raised.exception.stage,"send_code")
+        self.assertEqual(str(raised.exception),"signup_unavailable")
+
+    async def test_page_diagnostic_includes_only_passive_network_evidence(self):
+        from network_diagnostics import NetworkDiagnostics
+        from types import SimpleNamespace
+        page=FakeTurnstilePage()
+        page._cfm_network_diagnostics=NetworkDiagnostics()
+        page._cfm_network_diagnostics.failed(SimpleNamespace(url='https://brunhild.challenges.cloudflare.com/private?secret=1', failure='net::ERR_TUNNEL_CONNECTION_FAILED'))
+        result=await xai_flow._page_diagnostic(page,body='')
+        self.assertEqual(result['network_failures'][0]['kind'],'proxy_tunnel_failed')
+        self.assertNotIn('secret',str(result))
+
 if __name__ == "__main__":
     unittest.main()

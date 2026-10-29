@@ -13,7 +13,7 @@
       <Input v-model="fields.token" type="password" :disabled="disabled" block autocomplete="new-password" @update:model-value="update" />
     </label>
     <p class="text-xs text-muted-foreground md:col-span-3">
-      已启用任务粘性出口：Account 自动生成，整个注册任务及重试复用同一身份，成功后保存到账号。节点失效或租约过期仍可能更换出口；请在 Resin 设置足够的租约时长。
+      已启用任务身份绑定：Account 自动生成，整个注册任务及重试复用同一身份，成功后保存到账号。Resin 在节点失效时仍可能切换出口；延长租约不能阻止故障切换。
     </p>
   </div>
 </template>

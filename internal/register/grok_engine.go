@@ -383,6 +383,10 @@ func (e *GrokEngine) failJob(id string, err error) {
 	_ = e.change(id, func(job *RegistrationJob) {
 		e.ProxyRouting.recordFailure(job, err)
 		job.Error = safeFailure(err)
+		var failure *Failure
+		if errors.As(err, &failure) && failure.UpstreamStage == "turnstile" {
+			job.Stage = "turnstile"
+		}
 		if errors.Is(err, context.Canceled) {
 			job.Status = "cancelled"
 		} else {
@@ -398,6 +402,9 @@ func (e *GrokEngine) failJob(id string, err error) {
 			}
 		}
 		planRegistrationCompensation(job, err, time.Now())
+		if savedRegistrationMailbox(*job) {
+			job.AutoRetry = grokRegistrationCompensation(*job)
+		}
 		action := job.Stage
 		if index := strings.Index(job.Error, ":"); index > 0 {
 			action = strings.TrimSpace(job.Error[:index])
@@ -692,6 +699,26 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 	}
 }
 
+// Grok has a manual retry endpoint, but no automatic compensation runner.
+// Normalize legacy "waiting" records for display without rewriting stored data.
+func grokRegistrationCompensation(job RegistrationJob) *RegistrationCompensation {
+	if !savedRegistrationMailbox(job) {
+		return nil
+	}
+	state := RegistrationCompensation{State: "manual", Reason: "grok_manual_retry"}
+	if job.AutoRetry != nil {
+		state = *job.AutoRetry
+	}
+	if state.State == "waiting" || state.State == "running" || state.State == "" {
+		state.State, state.Reason = "manual", "grok_manual_retry"
+	}
+	state.NextAttemptAt = ""
+	if reason := registrationReviewReason(job.Error); reason != "" {
+		state.State, state.Reason = "manual", reason
+	}
+	return &state
+}
+
 func (e *GrokEngine) Snapshot() map[string]any { return e.SnapshotPage(1) }
 
 func (e *GrokEngine) SnapshotPage(page int) map[string]any {
@@ -726,7 +753,7 @@ func (e *GrokEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[job.ID]
-		jobs = append(jobs, map[string]any{"id": job.ID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": nil})
+		jobs = append(jobs, map[string]any{"id": job.ID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": compensationSummary(grokRegistrationCompensation(job))})
 	}
 	for _, job := range e.jobs {
 		logs = append(logs, job.Logs...)

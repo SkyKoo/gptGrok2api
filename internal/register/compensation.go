@@ -39,8 +39,24 @@ var legacyRetryAfter = regexp.MustCompile(`retry_after=("[^"\r\n]*")`)
 
 // Recognize the fixed diagnostics emitted by the registration journal.
 // Unknown errors, challenge/identity failures and cancellations require review.
+func registrationReviewReason(message string) string {
+	for _, item := range []struct{ marker, reason string }{
+		{"email_signup_unavailable", "upstream_signup_refused"},
+		{"worker_error=signup_unavailable", "upstream_signup_refused"},
+		{"worker_error=email_already_registered", "email_already_registered"},
+		{"worker_error=email_invalid", "email_invalid"},
+		{"turnstile_incomplete", "human_verification_required"},
+		{"worker_error=cloudflare_challenge", "human_verification_required"},
+	} {
+		if strings.Contains(message, item.marker) {
+			return item.reason
+		}
+	}
+	return ""
+}
+
 func transientRegistrationFailure(message string) bool {
-	if strings.Contains(message, "turnstile_incomplete") || strings.Contains(message, "email_signup_unavailable") {
+	if registrationReviewReason(message) != "" {
 		return false
 	}
 	if message == "task_timeout" {
@@ -104,6 +120,10 @@ func planRegistrationCompensation(j *RegistrationJob, err error, now time.Time) 
 	state := j.AutoRetry
 	state.NextAttemptAt = ""
 	state.State, state.Reason = "manual", "failure_requires_review"
+	if reason := registrationReviewReason(j.Error); reason != "" {
+		state.Reason = reason
+		return
+	}
 	if errors.Is(err, context.Canceled) || j.Error == "task_cancelled" {
 		state.Reason = "cancelled"
 		return

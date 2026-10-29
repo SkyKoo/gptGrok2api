@@ -17,6 +17,9 @@ from urllib.parse import urlparse
 
 import cloakbrowser
 
+from signup_errors import REVIEW_REASONS
+from network_diagnostics import NetworkDiagnostics
+
 from common.browser import browser_context_kwargs, browser_kwargs
 from turnstile.solve import _click_turnstile_checkbox
 
@@ -137,6 +140,9 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
         context = await browser.new_context(**browser_context_kwargs(profile))
         page = await context.new_page()
         await page.add_init_script(_TURNSTILE_CAPTURE_INIT_JS)
+        page._cfm_network_diagnostics = NetworkDiagnostics()
+        page.on("requestfailed", page._cfm_network_diagnostics.failed)
+        page.on("response", page._cfm_network_diagnostics.response)
         response = await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
         response_status = int(response.status) if response is not None else 0
         session_id = f"xai-{uuid.uuid4().hex}"
@@ -268,6 +274,9 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
         "reason": reason,
         "visible_controls": controls,
     }
+    network = getattr(page, "_cfm_network_diagnostics", None)
+    if isinstance(network, NetworkDiagnostics):
+        diagnostic["network_failures"] = network.snapshot()
     if isinstance(upstream, dict):
         if upstream.get("status"):
             diagnostic["upstream_status"] = int(upstream["status"])
@@ -358,7 +367,7 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45, upstream:
     while time.monotonic() < deadline:
         if isinstance(upstream, dict) and upstream.get("reason"):
             diagnostic = await _page_diagnostic(page, upstream=upstream)
-            raise XaiBrowserFlowError(str(upstream["reason"]), stage="send_code", retryable=True, diagnostic=diagnostic)
+            raise XaiBrowserFlowError(str(upstream["reason"]), stage="send_code", retryable=upstream["reason"] not in REVIEW_REASONS, diagnostic=diagnostic)
         last = await _body_text(page)
         if await _first_visible(page, ('input[autocomplete="one-time-code"]', 'input[name="code"]', 'input[name="verificationCode"]', 'input[name="verification_code"]', 'input[inputmode="numeric"]')):
             return
@@ -367,11 +376,11 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45, upstream:
         reason = _classify_email_stage_error(last)
         if reason:
             diagnostic = await _page_diagnostic(page, body=last, upstream=upstream)
-            raise XaiBrowserFlowError(reason, stage="send_code", retryable=True, diagnostic=diagnostic)
+            raise XaiBrowserFlowError(reason, stage="send_code", retryable=reason not in REVIEW_REASONS, diagnostic=diagnostic)
         await _pause(page, 300)
     diagnostic = await _page_diagnostic(page, body=last, upstream=upstream)
     reason = _page_issue(diagnostic) or "verification_page_missing"
-    raise XaiBrowserFlowError(reason, stage="send_code", retryable=True, diagnostic=diagnostic)
+    raise XaiBrowserFlowError(reason, stage="send_code", retryable=reason not in REVIEW_REASONS, diagnostic=diagnostic)
 
 
 def _classify_email_stage_error(text: str) -> str | None:
@@ -575,7 +584,7 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
         "turnstile_callback_seen": bool(last_state.get("callback_seen")),
         "turnstile_token_present": bool(last_state.get("token_present")),
     })
-    raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=True, diagnostic=diagnostic)
+    raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=False, diagnostic=diagnostic)
 
 
 async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:

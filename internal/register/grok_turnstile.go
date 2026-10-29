@@ -148,22 +148,26 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				Stage      string `json:"stage"`
 				Error      string `json:"error"`
 				Diagnostic struct {
-					Reason         string `json:"reason"`
-					UpstreamCode   string `json:"upstream_code"`
-					UpstreamStatus int    `json:"upstream_status"`
-					TurnstileClicks        int  `json:"turnstile_clicks"`
-					TurnstileFrames        int  `json:"turnstile_frames"`
-					TurnstileVisibleFrames int  `json:"turnstile_visible_frames"`
-					TurnstileWidgets       int  `json:"turnstile_widgets"`
-					TurnstileReady         bool `json:"turnstile_ready"`
-					TurnstileCallbackSeen  bool `json:"turnstile_callback_seen"`
-					TurnstileTokenPresent  bool `json:"turnstile_token_present"`
+					Reason                 string                  `json:"reason"`
+					UpstreamCode           string                  `json:"upstream_code"`
+					UpstreamStatus         int                     `json:"upstream_status"`
+					NetworkFailures        []browserNetworkFailure `json:"network_failures"`
+					TurnstileClicks        int                     `json:"turnstile_clicks"`
+					TurnstileFrames        int                     `json:"turnstile_frames"`
+					TurnstileVisibleFrames int                     `json:"turnstile_visible_frames"`
+					TurnstileWidgets       int                     `json:"turnstile_widgets"`
+					TurnstileReady         bool                    `json:"turnstile_ready"`
+					TurnstileCallbackSeen  bool                    `json:"turnstile_callback_seen"`
+					TurnstileTokenPresent  bool                    `json:"turnstile_token_present"`
 				} `json:"diagnostic"`
 			} `json:"detail"`
 		}
 		if json.Unmarshal(body, &envelope) == nil {
 			if workerStage := sanitizeBrowserWorkerStage(envelope.Detail.Stage); workerStage != "" {
 				failure.UpstreamStage = workerStage
+				if workerStage == "turnstile" {
+					failure.Stage = workerStage
+				}
 			}
 			if workerReason := sanitizeBrowserWorkerReason(envelope.Detail.Error); workerReason != "" {
 				failure.Operation = "worker_error=" + workerReason
@@ -175,6 +179,10 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				}
 				if status := envelope.Detail.Diagnostic.UpstreamStatus; status >= 400 && status <= 599 {
 					failure.Operation += fmt.Sprintf(";upstream_status=%d", status)
+					failure.UpstreamStatus = status
+				}
+				if network := safeBrowserNetworkFailures(envelope.Detail.Diagnostic.NetworkFailures); network != "" {
+					failure.Operation += ";network_failures=" + network
 				}
 				if workerReason == "turnstile_incomplete" {
 					diagnostic := envelope.Detail.Diagnostic
@@ -200,6 +208,36 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 	return body, nil
 }
 
+type browserNetworkFailure struct {
+	Host   string `json:"host"`
+	Kind   string `json:"kind"`
+	Status int    `json:"status"`
+}
+
+func safeBrowserNetworkFailures(events []browserNetworkFailure) string {
+	var out []string
+	for _, event := range events {
+		switch event.Host {
+		case "accounts.x.ai", "auth.x.ai", "challenges.cloudflare.com", "brunhild.challenges.cloudflare.com":
+		default:
+			continue
+		}
+		switch event.Kind {
+		case "proxy_tunnel_failed", "proxy_connection_failed", "proxy_auth_failed", "network_timeout", "dns_failed", "connection_reset", "connection_closed", "tls_failed", "network_failed", "http_error":
+		default:
+			continue
+		}
+		if event.Status != 0 && (event.Status < 400 || event.Status > 599) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%d", event.Host, event.Kind, event.Status))
+		if len(out) == 8 {
+			break
+		}
+	}
+	return strings.Join(out, ",")
+}
+
 func sanitizeBrowserWorkerStage(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
@@ -213,7 +251,7 @@ func sanitizeBrowserWorkerStage(value string) string {
 func sanitizeBrowserWorkerReason(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	switch value {
-	case "signup_rate_limited", "email_already_registered", "signup_unavailable", "verification_page_missing", "cloudflare_challenge", "proxy_connection_failed", "email_input_missing", "email_submit_button_missing", "verification_code_input_missing", "verification_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
+	case "signup_rate_limited", "email_already_registered", "email_invalid", "signup_unavailable", "verification_page_missing", "cloudflare_challenge", "proxy_connection_failed", "email_input_missing", "email_submit_button_missing", "verification_code_input_missing", "verification_submit_button_missing", "verification_code_invalid", "profile_form_missing", "turnstile_incomplete", "account_page_missing", "signup_profile_field_missing", "signup_submit_button_missing":
 		return value
 	default:
 		return "unclassified"

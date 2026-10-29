@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 import cloakbrowser
 
 from common.browser import browser_context_kwargs, browser_kwargs
+from signup_errors import signup_error_status
 from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
     XaiBrowserFlowError,
@@ -223,7 +224,7 @@ async def session_close(req: SessionCloseRequest, authorization: str | None = He
 
 
 def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
-    status = 504 if exc.retryable else 422
+    status = signup_error_status(str(exc), exc.retryable)
     # Return only bounded page metadata. Never return page HTML, cookies,
     # challenge tokens, form values or mailbox content to the caller.
     diagnostic = exc.diagnostic if isinstance(exc.diagnostic, dict) else {}
@@ -239,6 +240,7 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
             "upstream_status",
             "upstream_code",
             "visible_controls",
+            "network_failures",
             "turnstile_clicks",
             "turnstile_frames",
             "turnstile_visible_frames",

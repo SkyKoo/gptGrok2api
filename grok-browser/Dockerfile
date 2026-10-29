@@ -11,6 +11,7 @@ COPY grok-browser/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY grok-browser/server.py ./server.py
 COPY grok-browser/xai_flow.py ./xai_flow.py
+COPY grok-browser/signup_errors.py grok-browser/network_diagnostics.py ./
 COPY grok-browser/common ./common
 COPY grok-browser/turnstile ./turnstile
 COPY grok-browser/run-docker.sh ./run-docker.sh
