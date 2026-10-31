@@ -390,8 +390,27 @@ async def _click_submit(page: Any, names: tuple[str, ...]) -> bool:
     button = await _first_visible(page, ('button[type="submit"]', 'input[type="submit"]'))
     if button is None:
         return False
-    await button.click(timeout=5_000, force=True)
+    try:
+        await button.click(timeout=5_000)
+    except Exception:
+        # Keep the fallback for unusual xAI markup, but prefer a normal
+        # user-like click whenever the submit control is visible.
+        await button.click(timeout=5_000, force=True)
     return True
+
+
+async def _fill_email_like_user(field: Any, email: str) -> None:
+    value = str(email or "").strip()
+    try:
+        await field.click(timeout=5_000)
+        await field.fill("")
+        press_sequentially = getattr(field, "press_sequentially", None)
+        if callable(press_sequentially):
+            await press_sequentially(value, delay=35)
+            return
+    except Exception:
+        pass
+    await field.fill(value)
 
 
 async def _fill_first(page: Any, selectors: tuple[str, ...], value: str) -> bool:
@@ -511,7 +530,10 @@ async def send_email(session_id: str, email: str) -> dict:
         page.on("request", capture.request)
         page.on("response", capture.response)
         try:
-            await field.fill(str(email).strip())
+            await _fill_email_like_user(field, email)
+            # Give React/Castle time to consume the same input and focus
+            # events that a real Chrome user produces before submitting.
+            await _pause(page, 900)
             capture.arm()
             if not await _click_submit(page, ("Sign up", "Continue", "注册", "继续")):
                 diagnostic = await _page_diagnostic(page)

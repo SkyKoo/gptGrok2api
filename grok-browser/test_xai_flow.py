@@ -110,6 +110,28 @@ class FakeTurnstilePage:
         raise RuntimeError("locator not available in unit fake")
 
 
+class FakeEmailField:
+    def __init__(self):
+        self.events = []
+
+    async def click(self, **kwargs):
+        self.events.append(("click", kwargs))
+
+    async def fill(self, value):
+        self.events.append(("fill", value))
+
+    async def press_sequentially(self, value, delay=0):
+        self.events.append(("type", value, delay))
+
+
+class XaiEmailTypingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_email_is_typed_after_focus(self):
+        field = FakeEmailField()
+        await xai_flow._fill_email_like_user(field, "person@example.test")
+        self.assertEqual([event[0] for event in field.events], ["click", "fill", "type"])
+        self.assertEqual(field.events[-1][1:], ("person@example.test", 35))
+
+
 class XaiTurnstileTests(unittest.IsolatedAsyncioTestCase):
     async def test_reads_token_from_captured_turnstile_callback(self):
         page = FakeTurnstilePage(
