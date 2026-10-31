@@ -4,12 +4,52 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.modules.setdefault("cloakbrowser", types.ModuleType("cloakbrowser"))
 
 import xai_flow
+
+
+
+
+class NativeBrowserContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_uses_native_context_even_with_old_protocol_profile(self):
+        page = SimpleNamespace(
+            url="https://accounts.x.ai/sign-up",
+            add_init_script=AsyncMock(),
+            on=Mock(),
+            goto=AsyncMock(return_value=SimpleNamespace(status=200)),
+        )
+        context = SimpleNamespace(new_page=AsyncMock(return_value=page), close=AsyncMock())
+        browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+        profile = {
+            "user_agent": "Mozilla/5.0 Chrome/131.0.0.0 Safari/537.36",
+            "navigator_language": "zh-CN",
+            "timezone_iana": "UTC",
+            "inner_width": 1680, "inner_height": 963, "device_pixel_ratio": 2,
+        }
+        with (
+            patch.object(xai_flow.cloakbrowser, "launch_async", AsyncMock(return_value=browser), create=True) as launch,
+            patch.object(xai_flow, "cleanup_expired_sessions", AsyncMock()),
+            patch.object(xai_flow, "_user_agent", AsyncMock(return_value="engine-UA")),
+            patch.object(xai_flow, "cookie_snapshot", AsyncMock(return_value=[])),
+            patch.object(xai_flow, "_page_diagnostic", AsyncMock(return_value={})),
+            patch.object(xai_flow, "_sessions", {}),
+        ):
+            result = await xai_flow.start_session(signup_url=page.url, proxy="http://proxy.example:8080", profile=profile)
+            try:
+                browser.new_context.assert_awaited_once_with(no_viewport=True)
+                self.assertEqual(launch.await_args.kwargs["locale"], "en-US")
+                self.assertEqual(launch.await_args.kwargs["timezone"], "UTC")
+                self.assertEqual(launch.await_args.kwargs["proxy"], "http://proxy.example:8080")
+                page.add_init_script.assert_awaited_once_with(xai_flow._TURNSTILE_CAPTURE_INIT_JS)
+                self.assertEqual(result["user_agent"], "engine-UA")
+            finally:
+                await xai_flow.close_session(result["session_id"])
+            context.close.assert_awaited_once()
+            browser.close.assert_awaited_once()
 
 
 class XaiEmailErrorTests(unittest.TestCase):

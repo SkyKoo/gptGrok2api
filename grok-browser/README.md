@@ -12,11 +12,13 @@ worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 C
 
 每个 Grok 注册任务都有自己的浏览器环境记录；它不会复用 GPT 的 Cookie、登录会话或页面状态，但会使用相同的 profile 数据结构保持浏览器身份字段一致。CFM 会把该任务的非敏感字段（UA、语言、时区、窗口尺寸和 DPR）传给 worker，worker 只应用经过筛选的字段，不接收账号密码、Cookie 或验证码。
 
-正式 Compose 配置中，app 和 worker 都加入 `cfm-warp` 网络。这样 worker 与 app 使用同一个代理出口，避免 worker 因无法解析代理服务名而直连 xAI。独立调试 worker 时，也可以通过 `GROK_BROWSER_LOCALE` 和 `GROK_BROWSER_TIMEZONE` 覆盖默认值；正式注册仍以任务 profile 为准。
+正式 Compose 配置中，app 和 worker 都加入 `cfm-warp` 网络。这样 worker 与 app 使用同一个代理出口，避免 worker 因无法解析代理服务名而直连 xAI。语言统一在启动层设置为 en-US；时区优先使用任务 profile，缺省时可通过 `GROK_BROWSER_TIMEZONE` 设置。
 
 页面未进入验证码或注册表单时，worker 只返回脱敏诊断：当前页面 URL（去掉查询参数）、标题、HTTP 状态、是否检测到 Cloudflare 挑战或代理连接失败，以及稳定的 `reason`。不会把页面 HTML、Cookie、挑战值或邮箱内容写入日志。
 
-原生注册页面使用已安装 Chromium 自身的 User-Agent，避免把 Go 协议客户端的 Chrome 131 UA 覆盖到更新的浏览器上，造成 UA 与 Client Hints 版本冲突。旧协议调用仍可使用保存的 UA；原生注册仍保留任务的窗口尺寸、DPR、语言和时区。此一致性修复不保证上游接受注册。
+原生注册页面使用已安装 Chromium 自身的 User-Agent，避免把 Go 协议客户端的 Chrome 131 UA 覆盖到更新的浏览器上，造成 UA 与 Client Hints 版本冲突。旧协议调用仍可使用保存的 UA；原生注册通过独立的 `native_browser_context_kwargs()` 使用 `no_viewport=True`，不在上下文层覆盖 UA、locale、视口或 DPR；启动层仍设置 en-US 语言并应用任务时区和代理。协议调用的 profile 行为由原 helper 保持。
+
+2026-10-31 本地官方诊断页对照：同一 CloakBrowser 155 进程中，默认上下文手工通过，只增加 `locale="en-US"` 后报 600010。该结果支持取消上下文层的重复语言覆盖，但不说明英语本身不可用，也不证明所有浏览器版本均受影响。原生窗口配置沿用已通过的对照组合；完整页面脚本及最终注册仍须单独验证。
 
 Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 widget ID 时直接调用无参 `getResponse()`，指定 ID 失效时再尝试默认 widget。也检查开放 Shadow DOM 中的响应字段，并通过 Playwright frame tree 补全封闭 Shadow DOM 内 iframe 的数量。诊断只包含数量和布尔值，不包含 token。回调捕获持续到页面关闭，避免人工收码超过两分钟后漏掉新 widget。单次复选框探测受剩余等待时间限制；最终提交仍要求页面已经生成真实 token。
 

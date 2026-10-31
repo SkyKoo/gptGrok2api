@@ -20,7 +20,7 @@ import cloakbrowser
 from signup_errors import REVIEW_REASONS
 from network_diagnostics import NetworkDiagnostics
 
-from common.browser import browser_context_kwargs, browser_kwargs
+from common.browser import browser_kwargs, native_browser_context_kwargs
 from turnstile.solve import _click_turnstile_checkbox
 
 _ALLOWED_HOSTS = {"accounts.x.ai", "auth.x.ai", "auth.grokusercontent.com", "grok.com", "www.grok.com"}
@@ -138,7 +138,7 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
     )
     context = None
     try:
-        context = await browser.new_context(**browser_context_kwargs(profile, native_user_agent=True))
+        context = await browser.new_context(**native_browser_context_kwargs())
         page = await context.new_page()
         await page.add_init_script(_TURNSTILE_CAPTURE_INIT_JS)
         page._cfm_network_diagnostics = NetworkDiagnostics()

@@ -42,7 +42,7 @@ class BrowserArgumentLayerTests(unittest.TestCase):
         self.assertEqual(context["device_scale_factor"], 2.0)
         self.assertEqual(context["locale"], "en-US")
 
-    def test_native_signup_preserves_engine_user_agent(self):
+    def test_native_user_agent_option_preserves_other_profile_settings(self):
         context = browser_context_kwargs(self.profile, native_user_agent=True)
         self.assertNotIn("user_agent", context)
         self.assertEqual(context["viewport"], {"width": 1440, "height": 900})

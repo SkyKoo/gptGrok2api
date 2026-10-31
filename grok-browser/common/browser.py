@@ -128,6 +128,17 @@ def browser_kwargs(
     return kw
 
 
+def native_browser_context_kwargs() -> dict:
+    """Keep native signup on the browser's launch-time environment.
+
+    Do not reapply a protocol profile's locale, UA or display emulation to the
+    native page. In the local same-process diagnostic, a locale-only context
+    override failed while the default context passed. Keep the real window
+    size as well; callers using protocol profiles retain the separate helper.
+    """
+    return {"no_viewport": True}
+
+
 def browser_context_kwargs(profile: dict = None, *, native_user_agent: bool = False) -> dict:
     """Build Playwright BrowserContext options from a saved browser profile.
 
