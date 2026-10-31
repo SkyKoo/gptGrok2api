@@ -99,7 +99,7 @@ class FakeTurnstilePage:
         self.token = token
 
     async def evaluate(self, script, *args):
-        if "return window.__cfmGrokTurnstileToken" in script:
+        if script == xai_flow._TURNSTILE_RESPONSE_JS:
             return self.token
         return self.state
 

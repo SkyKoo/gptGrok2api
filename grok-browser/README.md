@@ -17,3 +17,7 @@ worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 C
 页面未进入验证码或注册表单时，worker 只返回脱敏诊断：当前页面 URL（去掉查询参数）、标题、HTTP 状态、是否检测到 Cloudflare 挑战或代理连接失败，以及稳定的 `reason`。不会把页面 HTML、Cookie、挑战值或邮箱内容写入日志。
 
 原生注册页面使用已安装 Chromium 自身的 User-Agent，避免把 Go 协议客户端的 Chrome 131 UA 覆盖到更新的浏览器上，造成 UA 与 Client Hints 版本冲突。旧协议调用仍可使用保存的 UA；原生注册仍保留任务的窗口尺寸、DPR、语言和时区。此一致性修复不保证上游接受注册。
+
+Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 widget ID 时直接调用无参 `getResponse()`，指定 ID 失效时再尝试默认 widget。也检查开放 Shadow DOM 中的响应字段，并通过 Playwright frame tree 补全封闭 Shadow DOM 内 iframe 的数量。诊断只包含数量和布尔值，不包含 token。回调捕获持续到页面关闭，避免人工收码超过两分钟后漏掉新 widget。单次复选框探测受剩余等待时间限制；最终提交仍要求页面已经生成真实 token。
+
+本地回归：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s grok-browser -p 'test_*.py'`。JavaScript 回归需要 Node.js；没有 Node.js 时会显示跳过，不能视作全部验证完成。离线用例只验证读取和诊断逻辑，实际注册是否成功仍须通过真实页面验证。

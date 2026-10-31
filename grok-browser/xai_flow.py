@@ -50,15 +50,16 @@ _TURNSTILE_CAPTURE_INIT_JS = r"""
         if (typeof callback === 'function') return callback(token);
       };
       const widgetId = original(container, next);
-      window.__cfmGrokTurnstileWidgetId = String(widgetId || '');
+      window.__cfmGrokTurnstileWidgetId = String(widgetId ?? '');
       return widgetId;
     };
     wrapped.__cfmWrapped = true;
     try { api.render = wrapped; } catch (_) {}
   };
   install();
-  const timer = setInterval(install, 100);
-  setTimeout(() => clearInterval(timer), 120000);
+  // The page/context owns this timer. Keep capturing while the user waits
+  // for email verification; closing the context releases the timer.
+  setInterval(install, 100);
 })();
 """
 
@@ -606,38 +607,54 @@ async def verify_email(session_id: str, email: str, code: str) -> dict:
         return {"ok": True, "url": current.page.url, "cookies": await cookie_snapshot(current.page), "user_agent": await _user_agent(current.page)}
 
 
-_TURNSTILE_STATE_JS = r"""
-() => {
+_TURNSTILE_DOM_HELPERS_JS = r"""
+  const roots = [document];
+  for (let i = 0; i < roots.length; i++) {
+    for (const element of roots[i].querySelectorAll('*')) {
+      if (element.shadowRoot) roots.push(element.shadowRoot);
+    }
+  }
+  const queryAll = (selector) => roots.flatMap((root) => Array.from(root.querySelectorAll(selector)));
+  const readToken = () => {
+    const id = String(window.__cfmGrokTurnstileWidgetId ?? '');
+    let response = '';
+    const api = window.turnstile;
+    if (typeof api?.getResponse === 'function') {
+      try { response = String((id ? api.getResponse(id) : api.getResponse()) || ''); } catch (_) {}
+      if (!response && id) {
+        try { response = String(api.getResponse() || ''); } catch (_) {}
+      }
+    }
+    return response || String(window.__cfmGrokTurnstileToken || '') || queryAll(
+      'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+    ).map((element) => String(element.value || '')).find(Boolean) || '';
+  };
+"""
+
+_TURNSTILE_RESPONSE_JS = "() => {" + _TURNSTILE_DOM_HELPERS_JS + "return readToken(); }"
+
+_TURNSTILE_STATE_JS = "() => {" + _TURNSTILE_DOM_HELPERS_JS + r"""
   const visible = (element) => {
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   };
-  let apiResponse = '';
-  const widgetId = String(window.__cfmGrokTurnstileWidgetId || '');
-  try {
-    if (window.turnstile?.getResponse) {
-      apiResponse = String(window.turnstile.getResponse(widgetId) || '');
-      if (!apiResponse && !widgetId) apiResponse = String(window.turnstile.getResponse() || '');
-    }
-  } catch (_) {}
-  const responses = Array.from(document.querySelectorAll(
-    'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-  )).map((element) => String(element.value || '')).filter(Boolean);
-  const frames = Array.from(document.querySelectorAll('iframe')).filter((element) =>
-    String(element.src || '').includes('challenges.cloudflare.com')
-  );
-  const token = String(window.__cfmGrokTurnstileToken || apiResponse || responses[0] || '');
+  const frames = queryAll('iframe').filter((element) => {
+    try {
+      const host = new URL(element.src).hostname;
+      return host === 'challenges.cloudflare.com' || host.endsWith('.challenges.cloudflare.com');
+    } catch (_) { return false; }
+  });
   return {
-    token_present: Boolean(token),
+    token_present: Boolean(readToken()),
     callback_seen: Boolean(window.__cfmGrokTurnstileCallbackSeen),
-    widget_id_present: Boolean(widgetId),
-    widget_count: document.querySelectorAll('[data-sitekey], .cf-turnstile, [data-cfm-grok-turnstile]').length,
+    widget_id_present: Boolean(String(window.__cfmGrokTurnstileWidgetId ?? '')),
+    widget_count: queryAll('[data-sitekey], .cf-turnstile, [data-cfm-grok-turnstile]').length,
     iframe_count: frames.length,
     visible_iframe_count: frames.filter(visible).length,
-    visible_response_input_count: Array.from(document.querySelectorAll(
+    visible_response_input_count: queryAll(
       'input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
-    )).filter(visible).length,
+    ).filter(visible).length,
     ready: Boolean(window.turnstile?.render && window.turnstile?.getResponse),
   };
 }
@@ -647,9 +664,26 @@ _TURNSTILE_STATE_JS = r"""
 async def _turnstile_state(page: Any) -> dict:
     try:
         state = await page.evaluate(_TURNSTILE_STATE_JS)
-        return state if isinstance(state, dict) else {}
     except Exception:
-        return {}
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    # Playwright's frame tree also includes frames in closed shadow roots.
+    frames, visible_frames = 0, 0
+    for frame in getattr(page, "frames", ()):
+        try:
+            host = (urlparse(str(frame.url or "")).hostname or "").lower()
+            if host != "challenges.cloudflare.com" and not host.endswith(".challenges.cloudflare.com"):
+                continue
+            frames += 1
+            element = await frame.frame_element()
+            if await element.is_visible():
+                visible_frames += 1
+        except Exception:
+            continue
+    state["iframe_count"] = max(int(state.get("iframe_count") or 0), frames)
+    state["visible_iframe_count"] = max(int(state.get("visible_iframe_count") or 0), visible_frames)
+    return state
 
 
 async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
@@ -662,22 +696,24 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
             # Read the value only after the bounded state probe confirms that a
             # token exists. The token is never included in diagnostics/logs.
             try:
-                token = await page.evaluate("""() => {
-                  let response = '';
-                  const id = String(window.__cfmGrokTurnstileWidgetId || '');
-                  try {
-                    response = String(window.turnstile?.getResponse?.(id) || '');
-                    if (!response && !id) response = String(window.turnstile?.getResponse?.() || '');
-                  } catch (_) {}
-                  return window.__cfmGrokTurnstileToken || response || document.querySelector('[name=cf-turnstile-response]')?.value || '';
-                }""")
+                token = await page.evaluate(_TURNSTILE_RESPONSE_JS)
             except Exception:
                 token = ""
             if token:
                 return str(token)
-        if clicks < 4 and await _click_turnstile_checkbox(page, attempts=12):
-            clicks += 1
-        await _pause(page, 500)
+        remaining = deadline - time.monotonic()
+        if clicks < 4 and remaining > 0:
+            try:
+                clicked = await asyncio.wait_for(
+                    _click_turnstile_checkbox(page, attempts=1), timeout=min(3.0, remaining)
+                )
+            except asyncio.TimeoutError:
+                clicked = False
+            if clicked:
+                clicks += 1
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            await _pause(page, min(500, int(remaining * 1000)))
     diagnostic = await _page_diagnostic(page)
     diagnostic.update({
         "reason": diagnostic.get("reason") or "turnstile_incomplete",
