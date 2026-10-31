@@ -27,3 +27,5 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 原生注册仅在挑战 iframe 内出现可见复选框时点击该控件；处于 `Verifying` 状态时继续等待，不按 iframe 固定偏移盲点。Cloudflare 的 PAT 401 和部分挑战子域名探测失败不能单独作为根因，参见[官方排障说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)。
 
 当原生挑战把复选框放在封闭 Shadow DOM 中，普通选择器不可见时，通过 Chromium CDP 只读定位真实复选框、检查可见性并换算 frame 坐标后点击；找不到控件时继续等待，不退回固定偏移点击。该逻辑不会创建 widget 或生成响应值。
+
+部署使用已通过本地端到端验证的 `cloakbrowser==0.6.4`。新版内核需要通过只读许可文件提供授权，免费许可仅允许单会话；供应方可能更新当前内核，因此发布后仍须检查实际版本。

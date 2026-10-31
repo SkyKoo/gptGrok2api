@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 pydantic
-cloakbrowser
+cloakbrowser==0.6.4
