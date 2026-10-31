@@ -250,6 +250,11 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
             "turnstile_ready",
             "turnstile_callback_seen",
             "turnstile_token_present",
+            "trusted_destination",
+            "grok_landing",
+            "account_page",
+            "sso_cookie_present",
+            "signup_form_present",
         )
         if key in diagnostic
     }

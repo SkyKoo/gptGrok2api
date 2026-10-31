@@ -14,6 +14,100 @@ import xai_flow
 
 
 
+class SignupSuccessTests(unittest.IsolatedAsyncioTestCase):
+    def page(self, url="https://grok.com/", cookies=None):
+        if cookies is None:
+            cookies = [{"name": "sso", "value": "test-session", "domain": ".grok.com", "path": "/"}]
+        return SimpleNamespace(url=url, context=SimpleNamespace(cookies=AsyncMock(return_value=cookies)))
+
+    async def wait(self, page, body="Sign Out"):
+        with (
+            patch.object(xai_flow, "_body_text", AsyncMock(return_value=body)),
+            patch.object(xai_flow, "_pause", AsyncMock()),
+            patch.object(xai_flow, "_page_diagnostic", AsyncMock(return_value={})),
+            patch.object(xai_flow, "time", SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 2]))),
+        ):
+            return await xai_flow._wait_for_success(page, timeout_s=1)
+
+    async def test_authenticated_grok_landing_and_onboarding_are_accepted(self):
+        for host in ("grok.com", "www.grok.com"):
+            for name in ("sso", "sso-rw"):
+                with self.subTest(host=host, cookie=name):
+                    page = self.page("https://" + host + "/", [{"name": name, "value": "test-session", "domain": ".grok.com"}])
+                    await self.wait(page, "Name Age Continue Sign Out")
+                    page.context.cookies.assert_awaited_once_with([page.url])
+
+    async def test_legacy_account_destinations_remain_supported_with_sso(self):
+        for url, body in (("https://accounts.x.ai/account", "Settings"), ("https://accounts.x.ai/", "Manage your account")):
+            with self.subTest(url=url):
+                await self.wait(self.page(url, [{"name": "sso", "value": "test-session", "domain": ".x.ai"}]), body)
+
+    async def test_public_landing_sign_out_or_welcome_without_sso_is_rejected(self):
+        for body in ("Ask Grok", "Sign Out", "Welcome"):
+            with self.subTest(body=body):
+                with self.assertRaises(xai_flow.XaiBrowserFlowError) as error:
+                    await self.wait(self.page(cookies=[]), body)
+                self.assertEqual(str(error.exception), "account_page_missing")
+                self.assertFalse(error.exception.diagnostic["sso_cookie_present"])
+                self.assertTrue(error.exception.diagnostic["grok_landing"])
+
+    async def test_untrusted_destination_cannot_pass_with_account_text_and_cookie(self):
+        for url in ("https://grok.com.evil.invalid/account", "https://evil.invalid/account", "http://grok.com/"):
+            with self.subTest(url=url):
+                page = self.page(url)
+                with self.assertRaises(xai_flow.XaiBrowserFlowError):
+                    await self.wait(page, "Welcome Sign Out")
+                page.context.cookies.assert_not_awaited()
+
+    async def test_wrong_domain_empty_and_non_session_cookies_are_rejected(self):
+        cases = [
+            {"name": "sso", "value": "test-session", "domain": ".x.ai"},
+            {"name": "sso", "value": "test-session", "domain": ".grok.com.evil.invalid"},
+            {"name": "sso", "value": "test-session", "domain": ".com"},
+            {"name": "sso", "value": "test-session", "domain": ""},
+            {"name": "sso", "value": "  ", "domain": ".grok.com"},
+            {"name": "cf_clearance", "value": "test-session", "domain": ".grok.com"},
+        ]
+        for cookie in cases:
+            with self.subTest(cookie=cookie):
+                with self.assertRaises(xai_flow.XaiBrowserFlowError) as error:
+                    await self.wait(self.page(cookies=[cookie]))
+                self.assertNotIn("test-session", str(error.exception.diagnostic))
+
+    async def test_cookie_does_not_complete_pending_signup_form(self):
+        with self.assertRaises(xai_flow.XaiBrowserFlowError):
+            await self.wait(self.page(), "Welcome Complete your sign up")
+
+    async def test_waits_for_cookie_after_redirect(self):
+        page = self.page()
+        page.context.cookies.side_effect = [[], [{"name": "sso", "value": "test-session", "domain": ".grok.com"}]]
+        with (
+            patch.object(xai_flow, "_body_text", AsyncMock(return_value="Sign Out")),
+            patch.object(xai_flow, "_pause", AsyncMock()) as pause,
+            patch.object(xai_flow, "time", SimpleNamespace(monotonic=Mock(side_effect=[0, 0, 0.5]))),
+        ):
+            await xai_flow._wait_for_success(page, timeout_s=1)
+        pause.assert_awaited_once()
+
+    async def test_signup_returns_credentials_after_grok_redirect(self):
+        page = self.page()
+        session = SimpleNamespace(page=page, lock=asyncio.Lock())
+        with (
+            patch.object(xai_flow, "_session", AsyncMock(return_value=session)),
+            patch.object(xai_flow, "_fill_first", AsyncMock(return_value=True)),
+            patch.object(xai_flow, "_set_native_input_value", AsyncMock()),
+            patch.object(xai_flow, "_pause", AsyncMock()),
+            patch.object(xai_flow, "_native_turnstile_token", AsyncMock(return_value="test-token")),
+            patch.object(xai_flow, "_click_submit", AsyncMock(return_value=True)),
+            patch.object(xai_flow, "_body_text", AsyncMock(return_value="Name Age Continue Sign Out")),
+            patch.object(xai_flow, "_user_agent", AsyncMock(return_value="test-UA")),
+        ):
+            result = await xai_flow.signup("test", email="person@example.invalid", password="test-password", code="test-code", given_name="Test", family_name="Person")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sso"], "test-session")
+        self.assertEqual(result["redirect_url"], "https://grok.com/")
+
+
 class NativeBrowserContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_uses_native_context_even_with_old_protocol_profile(self):
         page = SimpleNamespace(

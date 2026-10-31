@@ -728,21 +728,55 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
     raise XaiBrowserFlowError("turnstile_incomplete", stage="turnstile", retryable=False, diagnostic=diagnostic)
 
 
+async def _signup_success_state(page: Any, body: str) -> dict[str, bool]:
+    url = str(page.url or "")
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    trusted = parsed.scheme == "https" and host in _ALLOWED_HOSTS
+    grok_landing = trusted and host in {"grok.com", "www.grok.com"} and parsed.path in {"", "/"}
+    account_page = trusted and (
+        (parsed.path.startswith("/account") and "/sign-" not in parsed.path)
+        or bool(re.search(r"管理您的账户|欢迎|Manage your account|Welcome", body, re.I))
+    )
+    signup_form = bool(re.search(r"完成注册|Complete your sign up", body, re.I))
+    sso_present = False
+    if trusted:
+        # Scope cookies to this URL: a cookie left on another auth domain does
+        # not establish a session on the destination page. Never log values.
+        cookies = await page.context.cookies([url])
+        for item in cookies:
+            domain = str(item.get("domain") or "").lower().lstrip(".")
+            if not domain or not any(domain == suffix or domain.endswith("." + suffix) for suffix in _COOKIE_SUFFIXES):
+                continue
+            if host != domain and not host.endswith("." + domain):
+                continue
+            if item.get("name") in {"sso", "sso-rw"} and str(item.get("value") or "").strip():
+                sso_present = True
+                break
+    return {
+        "trusted_destination": trusted,
+        "grok_landing": grok_landing,
+        "account_page": account_page and not signup_form,
+        "sso_cookie_present": sso_present,
+        "signup_form_present": signup_form,
+    }
+
+
 async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
     deadline = time.monotonic() + timeout_s
     last = ""
+    state: dict[str, bool] = {}
     while time.monotonic() < deadline:
-        parsed = urlparse(str(page.url or ""))
         last = await _body_text(page)
-        if parsed.path.startswith("/account") and "/sign-" not in parsed.path:
-            return
-        if re.search(r"管理您的账户|欢迎|Manage your account|Welcome", last, re.I) and not re.search(r"完成注册|Complete your sign up", last, re.I):
+        state = await _signup_success_state(page, last)
+        if state["sso_cookie_present"] and not state["signup_form_present"] and (state["grok_landing"] or state["account_page"]):
             return
         reason = _classify_email_stage_error(last)
         if reason:
             raise XaiBrowserFlowError(reason, stage="signup")
         await _pause(page, 500)
     diagnostic = await _page_diagnostic(page, body=last)
+    diagnostic.update(state)
     reason = _page_issue(diagnostic) or "account_page_missing"
     raise XaiBrowserFlowError(reason, stage="signup", retryable=True, diagnostic=diagnostic)
 
