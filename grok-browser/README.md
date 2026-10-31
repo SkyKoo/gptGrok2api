@@ -21,3 +21,5 @@ worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 C
 Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 widget ID 时直接调用无参 `getResponse()`，指定 ID 失效时再尝试默认 widget。也检查开放 Shadow DOM 中的响应字段，并通过 Playwright frame tree 补全封闭 Shadow DOM 内 iframe 的数量。诊断只包含数量和布尔值，不包含 token。回调捕获持续到页面关闭，避免人工收码超过两分钟后漏掉新 widget。单次复选框探测受剩余等待时间限制；最终提交仍要求页面已经生成真实 token。
 
 本地回归：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s grok-browser -p 'test_*.py'`。JavaScript 回归需要 Node.js；没有 Node.js 时会显示跳过，不能视作全部验证完成。离线用例只验证读取和诊断逻辑，实际注册是否成功仍须通过真实页面验证。
+
+原生注册仅在挑战 iframe 内出现可见复选框时点击该控件；处于 `Verifying` 状态时继续等待，不按 iframe 固定偏移盲点。Cloudflare 的 PAT 401 和部分挑战子域名探测失败不能单独作为根因，参见[官方排障说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)。

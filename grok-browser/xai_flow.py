@@ -705,7 +705,7 @@ async def _native_turnstile_token(page: Any, timeout_s: int = 90) -> str:
         if clicks < 4 and remaining > 0:
             try:
                 clicked = await asyncio.wait_for(
-                    _click_turnstile_checkbox(page, attempts=1), timeout=min(3.0, remaining)
+                    _click_turnstile_checkbox(page, attempts=1, require_checkbox=True), timeout=min(3.0, remaining)
                 )
             except asyncio.TimeoutError:
                 clicked = False

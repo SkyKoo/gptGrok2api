@@ -84,6 +84,23 @@ class TurnstileFrameAndDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["visible_iframe_count"], 2)
         frames[-1].frame_element.assert_not_awaited()
 
+    async def test_native_probe_does_not_click_spinner_or_untrusted_frame(self):
+        control = SimpleNamespace(is_visible=AsyncMock(return_value=False))
+        frame = SimpleNamespace(url="https://challenges.cloudflare.com/widget", locator=lambda _: SimpleNamespace(first=control))
+        untrusted = SimpleNamespace(url="https://challenges.cloudflare.com.attacker.invalid/widget", locator=lambda _: self.fail("untrusted frame"))
+        page = SimpleNamespace(frames=[untrusted, frame], mouse=SimpleNamespace(click=AsyncMock()))
+        with patch("turnstile.solve.asyncio.sleep", new=AsyncMock()):
+            clicked = await xai_flow._click_turnstile_checkbox(page, attempts=1, require_checkbox=True)
+        self.assertFalse(clicked)
+        page.mouse.click.assert_not_awaited()
+
+    async def test_native_probe_clicks_visible_checkbox_center(self):
+        control = SimpleNamespace(is_visible=AsyncMock(return_value=True), bounding_box=AsyncMock(return_value={"x": 10, "y": 20, "width": 24, "height": 24}))
+        frame = SimpleNamespace(url="https://challenges.cloudflare.com/widget", locator=lambda _: SimpleNamespace(first=control))
+        page = SimpleNamespace(frames=[frame], mouse=SimpleNamespace(click=AsyncMock()))
+        self.assertTrue(await xai_flow._click_turnstile_checkbox(page, attempts=1, require_checkbox=True))
+        page.mouse.click.assert_awaited_once_with(22, 32)
+
     async def test_slow_checkbox_probe_respects_remaining_wait_budget(self):
         async def slow_click(*args, **kwargs):
             await asyncio.sleep(10)

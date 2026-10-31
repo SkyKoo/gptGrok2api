@@ -7,6 +7,7 @@ official widget, and returns the short-lived token with the issuing context.
 import asyncio
 import logging
 import time
+from urllib.parse import urlsplit
 
 import cloakbrowser
 
@@ -84,13 +85,33 @@ async def _human_click_iframe(page, fr) -> bool:
     return True
 
 
-async def _click_turnstile_checkbox(page, attempts: int = 25) -> bool:
+async def _click_turnstile_checkbox(page, attempts: int = 25, *, require_checkbox: bool = False) -> bool:
     """Click the checkbox inside the cross-origin Cloudflare iframe.
 
     Prefers a humanized page-level mouse click on the iframe's box; falls back to
     a frame-level selector click (not humanized) if the box can't be resolved.
     """
     for _ in range(attempts):
+        if require_checkbox:
+            # A verifying spinner is not an interactive checkbox. Native signup
+            # waits for a real control instead of clicking an iframe by offset.
+            for fr in page.frames:
+                host = (urlsplit(fr.url or "").hostname or "").lower()
+                if host != "challenges.cloudflare.com" and not host.endswith(".challenges.cloudflare.com"):
+                    continue
+                for selector in ('input[type="checkbox"]', '[role="checkbox"]'):
+                    try:
+                        control = fr.locator(selector).first
+                        if not await control.is_visible():
+                            continue
+                        box = await control.bounding_box()
+                        if box and box["width"] > 0 and box["height"] > 0:
+                            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                            return True
+                    except Exception:
+                        continue
+            await asyncio.sleep(1)
+            continue
         # Some Chromium builds expose the challenge frame before its frame URL
         # is populated. Locate the iframe first, then fall back to frame URLs.
         try:
