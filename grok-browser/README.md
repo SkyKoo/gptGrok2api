@@ -23,3 +23,5 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 本地回归：`PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s grok-browser -p 'test_*.py'`。JavaScript 回归需要 Node.js；没有 Node.js 时会显示跳过，不能视作全部验证完成。离线用例只验证读取和诊断逻辑，实际注册是否成功仍须通过真实页面验证。
 
 原生注册仅在挑战 iframe 内出现可见复选框时点击该控件；处于 `Verifying` 状态时继续等待，不按 iframe 固定偏移盲点。Cloudflare 的 PAT 401 和部分挑战子域名探测失败不能单独作为根因，参见[官方排障说明](https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/)。
+
+当原生挑战把复选框放在封闭 Shadow DOM 中，普通选择器不可见时，通过 Chromium CDP 只读定位真实复选框、检查可见性并换算 frame 坐标后点击；找不到控件时继续等待，不退回固定偏移点击。该逻辑不会创建 widget 或生成响应值。

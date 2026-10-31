@@ -85,6 +85,53 @@ async def _human_click_iframe(page, fr) -> bool:
     return True
 
 
+async def _closed_shadow_checkbox_box(page, frame):
+    """Read a visible checkbox box through Chromium's closed-shadow DOM tree."""
+    session = None
+    try:
+        session = await page.context.new_cdp_session(frame)
+        await session.send("DOM.enable")
+        await session.send("CSS.enable")
+        root = (await session.send("DOM.getDocument", {"depth": -1, "pierce": True}))["root"]
+        nodes = [root]
+        visited = 0
+        while nodes and visited < 10000:
+            node = nodes.pop()
+            visited += 1
+            attributes = node.get("attributes", [])
+            attrs = dict(zip(attributes[::2], attributes[1::2]))
+            if node.get("nodeName") == "INPUT" and attrs.get("type") == "checkbox" and "disabled" not in attrs:
+                styles = await session.send("CSS.getComputedStyleForNode", {"nodeId": node["nodeId"]})
+                style = {item["name"]: item["value"] for item in styles["computedStyle"]}
+                if style.get("display") == "none" or style.get("visibility") in ("hidden", "collapse"):
+                    continue
+                model = await session.send("DOM.getBoxModel", {"backendNodeId": node["backendNodeId"]})
+                quad = model["model"]["border"]
+                left, right = min(quad[::2]), max(quad[::2])
+                top, bottom = min(quad[1::2]), max(quad[1::2])
+                if right <= left or bottom <= top:
+                    continue
+                owner = await frame.frame_element()
+                outer = await owner.bounding_box()
+                viewport = await frame.evaluate("() => ({width: innerWidth, height: innerHeight})")
+                if not outer or viewport["width"] <= 0 or viewport["height"] <= 0:
+                    continue
+                sx, sy = outer["width"] / viewport["width"], outer["height"] / viewport["height"]
+                return {"x": outer["x"] + left * sx, "y": outer["y"] + top * sy,
+                        "width": (right - left) * sx, "height": (bottom - top) * sy}
+            nodes.extend(node.get("children", []))
+            nodes.extend(node.get("shadowRoots", []))
+        return None
+    except Exception:
+        return None
+    finally:
+        if session is not None:
+            try:
+                await session.detach()
+            except Exception:
+                pass
+
+
 async def _click_turnstile_checkbox(page, attempts: int = 25, *, require_checkbox: bool = False) -> bool:
     """Click the checkbox inside the cross-origin Cloudflare iframe.
 
@@ -110,6 +157,10 @@ async def _click_turnstile_checkbox(page, attempts: int = 25, *, require_checkbo
                             return True
                     except Exception:
                         continue
+                box = await _closed_shadow_checkbox_box(page, fr)
+                if box:
+                    await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                    return True
             await asyncio.sleep(1)
             continue
         # Some Chromium builds expose the challenge frame before its frame URL

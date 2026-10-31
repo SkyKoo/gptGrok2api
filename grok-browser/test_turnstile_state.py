@@ -101,6 +101,24 @@ class TurnstileFrameAndDeadlineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await xai_flow._click_turnstile_checkbox(page, attempts=1, require_checkbox=True))
         page.mouse.click.assert_awaited_once_with(22, 32)
 
+    async def test_closed_shadow_checkbox_box_is_mapped_into_page_coordinates(self):
+        from turnstile.solve import _closed_shadow_checkbox_box
+        node = {"nodeName": "INPUT", "nodeId": 2, "backendNodeId": 3, "attributes": ["type", "checkbox"]}
+        session = SimpleNamespace(send=AsyncMock(side_effect=[{}, {}, {"root": {"shadowRoots": [{"children": [node]}]}}, {"computedStyle": [{"name": "visibility", "value": "visible"}]}, {"model": {"border": [9, 20, 33, 20, 33, 44, 9, 44]}}]), detach=AsyncMock())
+        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)))
+        owner = SimpleNamespace(bounding_box=AsyncMock(return_value={"x": 100, "y": 200, "width": 600, "height": 120}))
+        frame = SimpleNamespace(frame_element=AsyncMock(return_value=owner), evaluate=AsyncMock(return_value={"width": 300, "height": 60}))
+        self.assertEqual(await _closed_shadow_checkbox_box(page, frame), {"x": 118, "y": 240, "width": 48, "height": 48})
+        session.detach.assert_awaited_once()
+
+    async def test_closed_shadow_hidden_checkbox_is_not_clicked(self):
+        from turnstile.solve import _closed_shadow_checkbox_box
+        node = {"nodeName": "INPUT", "nodeId": 2, "attributes": ["type", "checkbox"]}
+        session = SimpleNamespace(send=AsyncMock(side_effect=[{}, {}, {"root": {"children": [node]}}, {"computedStyle": [{"name": "display", "value": "none"}]}]), detach=AsyncMock())
+        page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=AsyncMock(return_value=session)))
+        self.assertIsNone(await _closed_shadow_checkbox_box(page, object()))
+        session.detach.assert_awaited_once()
+
     async def test_slow_checkbox_probe_respects_remaining_wait_budget(self):
         async def slow_click(*args, **kwargs):
             await asyncio.sleep(10)
