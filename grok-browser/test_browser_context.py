@@ -42,6 +42,15 @@ class BrowserArgumentLayerTests(unittest.TestCase):
         self.assertEqual(context["device_scale_factor"], 2.0)
         self.assertEqual(context["locale"], "en-US")
 
+    def test_native_signup_preserves_engine_user_agent(self):
+        context = browser_context_kwargs(self.profile, native_user_agent=True)
+        self.assertNotIn("user_agent", context)
+        self.assertEqual(context["viewport"], {"width": 1440, "height": 900})
+        self.assertEqual(context["device_scale_factor"], 2.0)
+        self.assertEqual(context["locale"], "en-US")
+        # Protocol callers retain the saved UA for compatibility.
+        self.assertEqual(browser_context_kwargs(self.profile)["user_agent"], self.profile["user_agent"])
+
     def test_invalid_context_values_are_dropped(self):
         context = browser_context_kwargs(
             {

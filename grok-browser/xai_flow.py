@@ -137,7 +137,7 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
     )
     context = None
     try:
-        context = await browser.new_context(**browser_context_kwargs(profile))
+        context = await browser.new_context(**browser_context_kwargs(profile, native_user_agent=True))
         page = await context.new_page()
         await page.add_init_script(_TURNSTILE_CAPTURE_INIT_JS)
         page._cfm_network_diagnostics = NetworkDiagnostics()

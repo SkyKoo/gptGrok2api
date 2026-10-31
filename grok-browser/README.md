@@ -15,3 +15,5 @@ worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 C
 正式 Compose 配置中，app 和 worker 都加入 `cfm-warp` 网络。这样 worker 与 app 使用同一个代理出口，避免 worker 因无法解析代理服务名而直连 xAI。独立调试 worker 时，也可以通过 `GROK_BROWSER_LOCALE` 和 `GROK_BROWSER_TIMEZONE` 覆盖默认值；正式注册仍以任务 profile 为准。
 
 页面未进入验证码或注册表单时，worker 只返回脱敏诊断：当前页面 URL（去掉查询参数）、标题、HTTP 状态、是否检测到 Cloudflare 挑战或代理连接失败，以及稳定的 `reason`。不会把页面 HTML、Cookie、挑战值或邮箱内容写入日志。
+
+原生注册页面使用已安装 Chromium 自身的 User-Agent，避免把 Go 协议客户端的 Chrome 131 UA 覆盖到更新的浏览器上，造成 UA 与 Client Hints 版本冲突。旧协议调用仍可使用保存的 UA；原生注册仍保留任务的窗口尺寸、DPR、语言和时区。此一致性修复不保证上游接受注册。

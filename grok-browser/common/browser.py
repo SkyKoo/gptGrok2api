@@ -128,7 +128,7 @@ def browser_kwargs(
     return kw
 
 
-def browser_context_kwargs(profile: dict = None) -> dict:
+def browser_context_kwargs(profile: dict = None, *, native_user_agent: bool = False) -> dict:
     """Build Playwright BrowserContext options from a saved browser profile.
 
     CloakBrowser's ``launch_async`` starts the browser process and forwards
@@ -144,7 +144,9 @@ def browser_context_kwargs(profile: dict = None) -> dict:
     context: dict = {"locale": GROK_BROWSER_LANGUAGE}
 
     user_agent = str(saved_profile.get("user_agent") or "").strip()
-    if 32 <= len(user_agent) <= 512:
+    # Native signup uses the installed browser identity. A protocol UA can
+    # advertise an older engine than Chromium reports through Client Hints.
+    if not native_user_agent and 32 <= len(user_agent) <= 512:
         context["user_agent"] = user_agent
 
     def bounded_int(name: str, low: int, high: int) -> int | None:
