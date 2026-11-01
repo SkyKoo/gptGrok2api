@@ -47,6 +47,19 @@ export type GrokQuotaWindow = {
   source?: 0 | 1 | 2
 }
 
+export type GrokMediaQuotaCategory = 'image' | 'imagePro' | 'imageEdit' | 'video' | 'video720p'
+export type GrokMediaQuotaSnapshot = {
+  status: 'success' | 'failed'
+  checked_at: string
+  error?: string
+  quotas: Partial<Record<GrokMediaQuotaCategory, {
+    available?: boolean
+    remaining?: number
+    window_seconds?: number
+    next_available_at?: string
+  }>>
+}
+
 export type GrokQuota = Partial<Record<GrokQuotaMode, GrokQuotaWindow>>
 
 export type GrokAccountsSummary = {
@@ -90,6 +103,7 @@ export type GrokAccount = {
   pool?: string
   runtime_status?: GrokRuntimeStatus | null
   quota?: GrokQuota | null
+  media_quota?: GrokMediaQuotaSnapshot | null
   use_count?: number
   fail_count?: number
   last_used_at?: string | number | null
@@ -193,6 +207,7 @@ export type GrokAccountsRuntimeResponse = {
     id: string
     ok: boolean
     refresh_status?: 'success' | 'failed' | string
+    media_quota?: GrokMediaQuotaSnapshot
     error?: string
   }>
   error?: string

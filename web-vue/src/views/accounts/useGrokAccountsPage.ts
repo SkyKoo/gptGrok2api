@@ -340,7 +340,11 @@ export function useGrokAccountsPage() {
       const fail = Number(result.summary?.fail || 0)
       const detail = String(result.error || result.results?.find((item) => item.error)?.error || '').trim()
       if (fail > 0) toast.warning(`刷新完成：成功 ${ok}，失败 ${fail}${detail ? `；${detail}` : ''}`)
-      else toast.success(`已刷新 ${ok} 个 Grok 账号`)
+      else {
+        const mediaFailed = result.results?.filter(item => item.media_quota?.status === 'failed').length || 0
+        if (mediaFailed) toast.warning(`文字额度已刷新；${mediaFailed} 个账号的媒体额度查询失败，已标记为未知`)
+        else toast.success(`已刷新 ${ok} 个 Grok 账号的文字和媒体额度`)
+      }
       await loadData({ silentErrorToast: true })
       return fail === 0
     } catch (error) {

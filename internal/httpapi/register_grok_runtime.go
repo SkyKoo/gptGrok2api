@@ -51,15 +51,14 @@ func (s *Server) refreshRegisteredGrokRuntime(w http.ResponseWriter, r *http.Req
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 			defer cancel()
-			quotas, refreshErr := s.grokQuota.RefreshToken(ctx, token, item)
+			quotas, media, refreshErr := s.refreshGrokAccountQuotas(ctx, token, item)
 			if refreshErr != nil {
 				s.recordGrokCredentialFailure(token, refreshErr)
 				_, _ = s.registerStore.UpdateRuntime(id, nil, nil, "", safeRefreshError(refreshErr))
-				results <- result{id: id, item: map[string]any{"id": id, "ok": false, "refresh_status": "failed", "error": safeRefreshError(refreshErr)}}
+				results <- result{id: id, item: map[string]any{"id": id, "ok": false, "refresh_status": "failed", "error": safeRefreshError(refreshErr), "media_quota": media}}
 				return
 			}
-			s.persistRuntimeToken(token, quotas, "active", "")
-			results <- result{id: id, item: map[string]any{"id": id, "ok": true, "refresh_status": "success", "error": "", "quota": quotaMap(quotas)}}
+			results <- result{id: id, item: map[string]any{"id": id, "ok": true, "refresh_status": "success", "error": "", "quota": quotaMap(quotas), "media_quota": media}}
 		}()
 	}
 	wg.Wait()

@@ -82,8 +82,16 @@ func (s *Server) refreshGrokRuntimeTokens(parent context.Context, tokens []strin
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(parent, 90*time.Second)
 			defer cancel()
-			quotas, err := s.grokQuota.RefreshToken(ctx, token, map[string]any{"sso": token})
-			item := map[string]any{"token": maskRuntimeToken(token), "token_id": runtimeTokenID(token), "ok": err == nil}
+			fields := map[string]any{"sso": token}
+			rows, _ := s.grokRuntimeStore.AccountList()
+			for _, row := range rows {
+				if firstNonEmpty(stringValue(row["access_token"]), stringValue(row["sso"]), stringValue(row["token"])) == token {
+					fields = row
+					break
+				}
+			}
+			quotas, media, err := s.refreshGrokAccountQuotas(ctx, token, fields)
+			item := map[string]any{"token": maskRuntimeToken(token), "token_id": runtimeTokenID(token), "ok": err == nil, "media_quota": media}
 			if err != nil {
 				s.recordGrokCredentialFailure(token, err)
 				item["error"] = safeRefreshError(err)
@@ -93,7 +101,6 @@ func (s *Server) refreshGrokRuntimeTokens(parent context.Context, tokens []strin
 			} else {
 				item["status"] = "active"
 				item["quota"] = quotaMap(quotas)
-				s.persistRuntimeToken(token, quotas, "active", "")
 			}
 			mu.Lock()
 			results = append(results, item)
@@ -193,7 +200,7 @@ func (s *Server) grokRuntimeTokens(w http.ResponseWriter) {
 				quota[mode] = map[string]any{"remaining": intValue(value["remaining"]), "total": intValue(value["total"])}
 			}
 		}
-		tokens = append(tokens, map[string]any{"token": maskRuntimeToken(token), "token_id": runtimeTokenID(token), "pool": firstNonEmpty(stringValue(account["pool"]), "basic"), "status": status, "quota": quota, "use_count": intValue(account["use_count"]), "fail_count": intValue(account["fail_count"]), "last_used_at": account["last_used_at"], "tags": account["tags"]})
+		tokens = append(tokens, map[string]any{"token": maskRuntimeToken(token), "token_id": runtimeTokenID(token), "pool": firstNonEmpty(stringValue(account["pool"]), "basic"), "status": status, "quota": quota, "media_quota": account["media_quota"], "use_count": intValue(account["use_count"]), "fail_count": intValue(account["fail_count"]), "last_used_at": account["last_used_at"], "tags": account["tags"]})
 	}
 	writeJSON(w, 200, map[string]any{"tokens": tokens})
 }

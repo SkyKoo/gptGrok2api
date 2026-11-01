@@ -54,6 +54,10 @@
     </div>
 
     <KeyValueList :items="grokAccountDetailItems(item)" :columns="2" />
+    <div class="mt-4 border-t border-border pt-3">
+      <h4 class="mb-2 text-xs font-medium text-muted-foreground">SSO 媒体额度</h4>
+      <GrokMediaQuota :item="item" />
+    </div>
 
     <GrokAccountActionButtons
       class="mt-auto"
@@ -84,6 +88,7 @@
 </template>
 
 <script setup lang="ts">
+import GrokMediaQuota from './GrokMediaQuota.vue'
 import { computed } from 'vue'
 import { Checkbox, KeyValueList, StatusPill } from 'nanocat-ui'
 

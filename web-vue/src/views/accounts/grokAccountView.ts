@@ -432,6 +432,7 @@ export function grokAccountRowSignature(item: GrokAccount): string {
     item.pool,
     item.runtime_status,
     JSON.stringify(item.quota || {}),
+    JSON.stringify(item.media_quota || {}),
     item.use_count || 0,
     item.fail_count || 0,
     item.last_used_at,

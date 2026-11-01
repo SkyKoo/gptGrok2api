@@ -410,7 +410,7 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			quotas, quotaErr := s.grokQuota.RefreshToken(ctx, job.token, job.item)
+			_, _, quotaErr := s.refreshGrokAccountQuotas(ctx, job.token, job.item)
 			cancel()
 			resultMu.Lock()
 			defer resultMu.Unlock()
@@ -424,7 +424,6 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 				return
 			}
 			result["quota_refreshed"] = intValue(result["quota_refreshed"]) + 1
-			s.persistRuntimeToken(job.token, quotas, "active", "")
 		}()
 	}
 	wg.Wait()

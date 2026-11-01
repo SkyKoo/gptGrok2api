@@ -350,7 +350,7 @@
       />
 
       <TableShell v-else-if="grokViewMode === 'list'">
-        <table class="min-w-[1700px] w-full table-fixed text-left text-sm">
+        <table class="min-w-[1940px] w-full table-fixed text-left text-sm">
           <thead class="text-xs font-medium text-muted-foreground">
             <tr>
               <th class="w-12 py-3 pr-4">
@@ -364,6 +364,7 @@
               <th class="w-[5.5rem] py-3 pr-5">注册状态</th>
               <th class="w-[8rem] py-3 pr-5">SSO 状态</th>
               <th class="w-[11rem] py-3 pr-5" title="自动、快速、专家、重度和控制台是文字模型额度，不代表生图或视频剩余次数">SSO 文字额度</th>
+              <th class="w-[15rem] py-3 pr-5" title="分别查询图片与视频额度；未知不表示额度为零">SSO 媒体额度</th>
               <th class="w-[8.5rem] py-3 pr-5">OAuth 状态</th>
               <th class="w-[13rem] py-3 pr-5">OAuth 剩余 / 重置</th>
               <th class="w-[7rem] py-3 pr-5">恢复时间</th>
@@ -374,7 +375,7 @@
           </thead>
           <tbody class="text-sm text-foreground">
             <tr v-if="!grokLoading && grokAccounts.length === 0">
-              <td colspan="12" class="py-6">
+              <td colspan="13" class="py-6">
                 <EmptyState
                   plain
                   title="暂无 Grok 账号"

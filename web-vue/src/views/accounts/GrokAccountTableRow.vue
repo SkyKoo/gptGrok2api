@@ -47,6 +47,7 @@
     <td class="max-w-[18rem] py-4 pr-5 align-middle font-mono text-xs text-muted-foreground">
       <span class="whitespace-normal leading-5">{{ grokQuotaText(item) }}</span>
     </td>
+    <td class="py-4 pr-5 align-middle"><GrokMediaQuota :item="item" /></td>
     <td class="py-4 pr-5 align-middle">
       <StatusPill
         :label="grokOAuthShortStatusText(item)"
@@ -141,6 +142,7 @@
 </template>
 
 <script setup lang="ts">
+import GrokMediaQuota from './GrokMediaQuota.vue'
 import { computed } from 'vue'
 import { Checkbox, StatusPill } from 'nanocat-ui'
 
