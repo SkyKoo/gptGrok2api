@@ -363,7 +363,7 @@
               <th class="w-[5.5rem] py-3 pr-5">账号类型</th>
               <th class="w-[5.5rem] py-3 pr-5">注册状态</th>
               <th class="w-[8rem] py-3 pr-5">SSO 状态</th>
-              <th class="w-[11rem] py-3 pr-5">SSO 剩余额度</th>
+              <th class="w-[11rem] py-3 pr-5" title="自动、快速、专家、重度和控制台是文字模型额度，不代表生图或视频剩余次数">SSO 文字额度</th>
               <th class="w-[8.5rem] py-3 pr-5">OAuth 状态</th>
               <th class="w-[13rem] py-3 pr-5">OAuth 剩余 / 重置</th>
               <th class="w-[7rem] py-3 pr-5">恢复时间</th>

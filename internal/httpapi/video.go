@@ -16,6 +16,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
 type videoJob struct {
@@ -161,6 +162,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "invalid_post", "message": "video create-post returned no post id"})
 		return
 	}
+	diagnostics := provider.NewVideoDiagnostics(0, "", cookieUserID(lease.Account) != "")
 	videoURL := ""
 	assetID := ""
 	extendPostID := parentID
@@ -177,13 +179,21 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_failed", "message": requestErr.Error()})
 			return
 		}
+		diagnostics = provider.NewVideoDiagnostics(response.StatusCode, response.Header.Get("Content-Type"), cookieUserID(lease.Account) != "")
 		scanner := bufio.NewScanner(response.Body)
 		scanner.Buffer(make([]byte, 4096), 8<<20)
 		segmentPostID := ""
 		segmentAssetID := ""
 		segmentURL := ""
 		for scanner.Scan() {
-			kind, events := protocol.ParseSSELine(scanner.Text())
+			line := scanner.Text()
+			diagnostics.Observe(line)
+			if streamErr := diagnostics.Failure(); streamErr != nil {
+				_ = response.Body.Close()
+				s.failVideoUpstream(job, lease, "upstream_stream_error", streamErr)
+				return
+			}
+			kind, events := protocol.ParseSSELine(line)
 			if kind == "done" {
 				break
 			}
@@ -210,15 +220,17 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		}
 		_ = response.Body.Close()
 		if scanner.Err() != nil {
-			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "stream_failed", "message": scanner.Err().Error()})
+			s.failVideoUpstream(job, lease, "stream_failed", diagnostics.Err("stream_read_failed"))
 			return
 		}
-		if segmentURL != "" {
-			videoURL = segmentURL
+		if diagnostics.VideoEvents == 0 || (diagnostics.MaxProgress > 0 && diagnostics.MaxProgress < 100) {
+			s.failVideoUpstream(job, lease, "incomplete_video", diagnostics.Err("incomplete_video"))
+			return
 		}
-		if segmentAssetID != "" {
-			assetID = segmentAssetID
-		}
+		// The final segment must supply its own result. Never report an earlier
+		// shorter segment as a successful extension of the requested duration.
+		videoURL = segmentURL
+		assetID = segmentAssetID
 		if segmentPostID != "" {
 			extendPostID = segmentPostID
 		}
@@ -227,16 +239,20 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	if videoURL == "" && assetID != "" {
 		videoURL = protocol.ResolveAssetReference(assetID, "", "")
 	}
-	if videoURL == "" {
+	if videoURL == "" && diagnostics != nil && diagnostics.VideoEvents > 0 {
 		videoURL = protocol.ResolveGeneratedVideoReference(cookieUserID(lease.Account), extendPostID)
 	}
 	if videoURL == "" {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_video", "message": "video generation returned no final video URL"})
+		reason := "no_video_result"
+		if diagnostics != nil && diagnostics.PostIDPresent && !diagnostics.UserIDPresent {
+			reason = "user_id_missing"
+		}
+		s.failVideoUpstream(job, lease, "no_video", diagnostics.Err(reason))
 		return
 	}
 	raw, mimeType, err := s.mediaProvider.Fetch(context.Background(), lease.Account, videoURL)
 	if err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "download_failed", "message": err.Error()})
+		s.failVideoUpstream(job, lease, "download_failed", err)
 		return
 	}
 	if err := os.MkdirAll(s.cfg.VideoDataDir, 0o755); err != nil {
@@ -260,6 +276,14 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	s.videoMu.Unlock()
 	s.setVideoStatus(job, "completed", 100, nil)
 	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
+}
+
+// Feed body-level SSE failures back through the same status classifier used
+// for HTTP failures; video quota limits must not invalidate the whole account.
+func (s *Server) failVideoUpstream(job *videoJob, lease *accounts.Lease, code string, err error) {
+	status := upstreamStatus(err)
+	s.grokAccountPool.FeedbackIntent(lease, status, err)
+	s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": err.Error(), "upstream_status": status})
 }
 
 func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {

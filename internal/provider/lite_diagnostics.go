@@ -64,6 +64,13 @@ func (d *liteDiagnostics) observe(line string) {
 			nodes = append(nodes, response)
 		}
 	}
+	for _, node := range append([]map[string]any(nil), nodes...) {
+		for _, key := range []string{"streamingVideoGenerationResponse", "streamingImageGenerationResponse"} {
+			if stream, ok := node[key].(map[string]any); ok {
+				nodes = append(nodes, stream)
+			}
+		}
+	}
 	for _, node := range nodes {
 		if v, ok := node["token"].(string); ok && v != "" {
 			d.TextEvents++

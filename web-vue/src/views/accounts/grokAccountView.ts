@@ -402,7 +402,7 @@ export function grokAccountDetailItems(item: GrokAccount) {
     { label: '注册状态', value: grokAccountStatusText(item) },
     { label: '运行状态', value: grokRuntimeStatusText(item) },
     { label: 'OAuth 状态', value: grokOAuthShortStatusText(item) },
-    { label: '额度', value: grokQuotaText(item) },
+    { label: 'SSO 文字额度', value: grokQuotaText(item) },
     { label: 'OAuth 额度', value: grokOAuthQuotaText(item) },
     { label: 'OAuth 恢复', value: grokOAuthRecoveryStatusText(item) || '-' },
     { label: '成功 / 失败', value: grokUsageText(item) },
