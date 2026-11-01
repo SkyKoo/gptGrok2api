@@ -97,6 +97,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	s.videoMu.Unlock()
 	s.monitor.start(job.ID, "/v1/videos", modelName, prompt)
 	var references []string
+	s.ensureGrokMediaQuotas(r.Context())
 	inputReferences := multipartFiles(r, "input_reference[]", "input_reference")
 	if len(inputReferences) > 7 {
 		inputReferences = inputReferences[:7]
@@ -143,8 +144,15 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, refs []string) {
 	s.setVideoStatus(job, "in_progress", 1, nil)
+	// All entry points, including queued legacy jobs, use the high-quality route.
+	resolution = "720p"
+	s.ensureGrokMediaQuotas(context.Background())
 	segments, _ := protocol.VideoSegmentLengths(seconds)
-	lease, err := s.grokAccountPool.ReserveIntent(context.Background(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments)})
+	units := 0
+	for _, length := range segments {
+		units += (length + 5) / 6
+	}
+	lease, err := s.grokAccountPool.ReserveIntent(context.Background(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units})
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
 		return

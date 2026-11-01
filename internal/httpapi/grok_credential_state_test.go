@@ -32,6 +32,7 @@ func TestGrokVerificationBlocksEveryRequestKindAndRequiresExplicitRecovery(t *te
 	if _, _, err = s.syncRegisteredGrokRuntimeAccount(item, "test-grok-state"); err != nil {
 		t.Fatal(err)
 	}
+	_, _, _ = s.grokRuntimeStore.UpdateAccount("test-grok-state", map[string]any{"media_quota": testGrokMediaSnapshot()})
 	id := stringValue(item["id"])
 	verify := func() {
 		t.Helper()

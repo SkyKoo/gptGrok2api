@@ -514,6 +514,7 @@ func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 	if !runtimeAvailable {
 		runtimeError = "Grok runtime quota endpoint is not configured"
 	}
+	s.attachGrokMediaRuntime(items[start:end])
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": runtimeAvailable, "runtime_error": runtimeError, "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
 }
 

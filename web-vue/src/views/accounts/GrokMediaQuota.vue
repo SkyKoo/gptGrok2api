@@ -7,7 +7,7 @@
       </div>
       <p v-if="entry.reset" class="mt-0.5 text-[11px] text-muted-foreground">恢复 {{ entry.reset }}</p>
     </div>
-    <p v-if="!item.media_quota || item.media_quota.status !== 'success'" class="text-[11px] text-muted-foreground">{{ grokMediaQuotaNote(item) }}</p>
+    <p class="text-[11px] text-muted-foreground">{{ grokMediaQuotaNote(item) }}</p>
     <p v-if="grokMediaQuotaCheckedAt(item)" class="text-[11px] text-muted-foreground">查询 {{ grokMediaQuotaCheckedAt(item) }}</p>
   </div>
 </template>

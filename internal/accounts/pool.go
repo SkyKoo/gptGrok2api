@@ -39,6 +39,7 @@ type Lease struct {
 func (l *Lease) Intent() Intent { return l.intent }
 
 type Pool struct {
+	grokMedia        bool
 	repository       *store.Store
 	onInvalid        func(Account)
 	mu               sync.Mutex
@@ -72,6 +73,8 @@ func New(repository *store.Store) *Pool {
 		wake:      make(chan struct{}),
 	}
 }
+
+func NewGrok(repository *store.Store) *Pool { p := New(repository); p.grokMedia = true; return p }
 
 func (p *Pool) Reserve(ctx context.Context, pools []string, excluded map[string]bool) (*Lease, error) {
 	return p.ReserveMatching(ctx, pools, excluded, nil)
@@ -128,7 +131,7 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 			if intent.Kind != "" {
 				inflight = p.capabilityActive[Identity(account)]
 			}
-			if maxInflight > 0 && inflight >= maxInflight {
+			if (p.grokMedia && isMediaIntent(intent) && inflight > 0) || (maxInflight > 0 && inflight >= maxInflight) {
 				capacityBlocked = true
 				continue
 			}
@@ -142,6 +145,9 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 			wake := p.wake
 			p.mu.Unlock()
 			if !capacityBlocked {
+				if p.grokMedia && isMediaIntent(intent) {
+					return nil, fmt.Errorf("Grok 媒体额度不足、未确认或等待结算刷新: %w", ErrUnavailable)
+				}
 				return nil, ErrUnavailable
 			}
 			select {

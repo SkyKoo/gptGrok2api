@@ -17,19 +17,24 @@ type Intent struct {
 	Model         string
 	Uploads       int
 	VideoSegments int
+	ImageCount    int
+	VideoUnits    int
 }
 
 func (i Intent) Costs() map[string]int {
 	c := map[string]int{"reason": 1}
+	if strings.HasPrefix(i.Model, "grok-imagine-") {
+		c = map[string]int{}
+	}
 	if i.Kind == "image" {
-		c["image_gen"] = 1
+		c["image_gen"] = max(1, i.ImageCount)
 	}
 	if i.Kind == "video" {
 		segments := i.VideoSegments
 		if segments < 1 {
 			segments = 1
 		}
-		c["video_gen"] = segments
+		c["video_gen"] = max(segments, i.VideoUnits)
 	}
 	if i.Uploads > 0 {
 		c["file_upload"] = i.Uploads
@@ -144,6 +149,17 @@ func (p *Pool) availableForIntent(a Account, pools []string, now time.Time, i In
 		return false
 	}
 	q := accountQuotas(a)
+	if p.grokMedia && isMediaIntent(i) {
+		if !grokMediaReady(a.Fields, now) {
+			return false
+		}
+		q = GrokMediaQuotas(a.Fields)
+		for feature := range i.Costs() {
+			if (feature == "image_gen" || feature == "video_gen") && q[feature].Remaining == nil {
+				return false
+			}
+		}
+	}
 	pending := pendingQuotas(a.Fields["quota_pending"])
 	blocks, _ := a.Fields["capability_cooldowns"].(map[string]any)
 	for k, cost := range i.Costs() {
@@ -180,7 +196,14 @@ func (p *Pool) reserveQuotaLocked(l *Lease) error {
 	for k, n := range l.intent.Costs() {
 		pending[k] += n
 	}
-	fields, _, err := p.repository.UpdateAccount(a.Token, map[string]any{"cfm_account_id": Identity(a), "quota_pending": pending, "quota_last_used_at": time.Now().UTC().Format(time.RFC3339)})
+	updates := map[string]any{"cfm_account_id": Identity(a), "quota_pending": pending, "quota_last_used_at": time.Now().UTC().Format(time.RFC3339)}
+	if p.grokMedia && isMediaIntent(l.intent) {
+		// Persist the uncertainty before sending. A crash must not reopen a positive
+		// stale balance; normal completion shortens this conservative recovery hold.
+		updates["media_quota_refresh_needed"] = true
+		updates["media_quota_not_before"] = time.Now().Add(GrokMediaMaxAge).UTC().Format(time.RFC3339Nano)
+	}
+	fields, _, err := p.repository.UpdateAccount(a.Token, updates)
 	if err == nil {
 		l.Account.Fields = fields
 	}
@@ -216,7 +239,19 @@ func (p *Pool) finishQuotaLocked(l *Lease) {
 	}
 	// Pending estimates remain durable until a fresh snapshot with no in-flight
 	// requests reconciles them. Restart never invents refunded quota.
-	_, _ = p.repository.UpdateAccountRuntime(a.Token, map[string]any{"quota_pending": pending, "quota_refresh_needed": true})
+	updates := map[string]any{"quota_pending": pending, "quota_refresh_needed": true}
+	if p.grokMedia {
+		delete(updates, "quota_refresh_needed")
+		if isMediaIntent(l.intent) && !l.used["image_gen"] && !l.used["video_gen"] {
+			updates["media_quota_refresh_needed"] = false
+			updates["media_quota_not_before"] = nil
+		}
+	}
+	if p.grokMedia && (l.used["image_gen"] || l.used["video_gen"]) {
+		updates["media_quota_refresh_needed"] = true
+		updates["media_quota_not_before"] = time.Now().Add(GrokMediaSettleDelay).UTC().Format(time.RFC3339Nano)
+	}
+	_, _ = p.repository.UpdateAccountRuntime(a.Token, updates)
 }
 
 // RefreshCapabilities gates only this account while fetching. No pool lock is
@@ -321,6 +356,13 @@ func (p *Pool) FeedbackIntent(l *Lease, status int, err error) {
 	}
 	if strings.HasPrefix(feature, "model:") && strings.Contains(text, "video") && (strings.Contains(text, "limit") || strings.Contains(text, "quota")) {
 		feature = "video_gen"
+	}
+	if p.grokMedia && isMediaIntent(l.intent) && strings.HasPrefix(feature, "model:") {
+		if l.intent.Kind == "video" {
+			feature = "video_gen"
+		} else {
+			feature = "image_gen"
+		}
 	}
 	duration := retryAfterDuration(err)
 	if duration <= 0 {

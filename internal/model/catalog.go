@@ -43,9 +43,7 @@ func Catalog() []Spec {
 		{"grok-4.20-expert", "Grok 4.20 Expert", "xai", created, Chat, true},
 		{"grok-4.20-heavy", "Grok 4.20 Heavy", "xai", created, Chat, true},
 		{"grok-4.3-beta", "Grok 4.3 Beta", "xai", created, Chat, true},
-		{"grok-imagine-image-lite", "Grok Imagine Image Lite", "xai", created, Image, true},
 		{"gpt-image-2", "GPT Image 2", "openai-compatible", created, Image, true},
-		{"grok-imagine-image", "Grok Imagine Image", "xai", created, Image, true},
 		{"grok-imagine-image-pro", "Grok Imagine Image Pro", "xai", created, Image, true},
 		{"grok-imagine-image-edit", "Grok Imagine Image Edit", "xai", created, ImageEdit, true},
 		{"grok-imagine-video", "Grok Imagine Video", "xai", created, Video, true},
@@ -66,7 +64,16 @@ func Catalog() []Spec {
 	return items
 }
 
+// CanonicalID keeps old clients on the supported high-quality image route.
+func CanonicalID(id string) string {
+	switch id {
+	case "grok-imagine-image", "grok-imagine-image-lite":
+		return "grok-imagine-image-pro"
+	}
+	return id
+}
 func Find(items []Spec, id string) (Spec, bool) {
+	id = CanonicalID(id)
 	for _, item := range items {
 		if item.Enabled && item.ID == id {
 			return item, true

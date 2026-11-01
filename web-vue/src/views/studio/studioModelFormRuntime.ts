@@ -37,8 +37,9 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     const catalogModels = hasReferences ? imageEditModels.value : imageModels.value
     const fallbackModels = hasReferences
       ? ['gpt-image-2', 'grok-imagine-image-edit']
-      : [DEFAULT_IMAGE_MODEL, 'grok-imagine-image']
+      : [DEFAULT_IMAGE_MODEL, 'grok-imagine-image-pro']
     return uniqueStrings([...catalogModels, ...fallbackModels])
+      .filter(model => !['grok-imagine-image', 'grok-imagine-image-lite'].includes(model))
       .filter(model => hasReferences
         ? !model.startsWith('grok-') || model === 'grok-imagine-image-edit'
         : model !== 'grok-imagine-image-edit')

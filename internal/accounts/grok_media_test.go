@@ -1,0 +1,185 @@
+package accounts
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+
+	"github.com/auucoder/gptgrok2api-go/internal/store"
+	"sync"
+	"testing"
+	"time"
+)
+
+func grokSnapshot(image, video int) map[string]any {
+	return map[string]any{"status": "success", "checked_at": time.Now().UTC().Format(time.RFC3339Nano), "quotas": map[string]any{
+		"imagePro":  map[string]any{"available": true, "remaining": image, "next_available_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		"video720p": map[string]any{"available": true, "remaining": video, "next_available_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}}
+}
+func TestGrokMediaUnknownStaleAndFailedDoNotBorrowTextQuota(t *testing.T) {
+	for _, scenario := range []string{"missing", "stale", "failed", "unknown", "zero", "disabled"} {
+		t.Run(scenario, func(t *testing.T) {
+			_, s := quotaPool(t, 100, 100, "正常")
+			snapshot := grokSnapshot(2, 2)
+			fields := map[string]any{"media_quota": snapshot}
+			switch scenario {
+			case "missing":
+				fields["media_quota"] = nil
+			case "stale":
+				snapshot["checked_at"] = time.Now().Add(-6 * time.Minute).Format(time.RFC3339)
+			case "failed":
+				snapshot["status"] = "failed"
+			case "unknown":
+				snapshot["quotas"] = map[string]any{"imagePro": map[string]any{"available": true}}
+			case "zero":
+				fields["media_quota"] = grokSnapshot(0, 0)
+			case "disabled":
+				fields["enabled"] = false
+			}
+			_, _, _ = s.UpdateAccount("token", fields)
+			p := NewGrok(s)
+			if _, err := reserveIntent(p, Intent{Kind: "image", Model: "grok-imagine-image-pro"}); !errors.Is(err, ErrUnavailable) {
+				t.Fatalf("media should be unavailable: %v", err)
+			}
+			if scenario != "disabled" {
+				l, err := p.Reserve(context.Background(), []string{"basic"}, nil)
+				if err != nil {
+					t.Fatalf("media blocked text: %v", err)
+				}
+				p.Release(l)
+			}
+		})
+	}
+}
+func TestGrokSharedReservationSurvivesReleaseRestartAndRefresh(t *testing.T) {
+	_, s := quotaPool(t, 100, 100, "正常")
+	_, _, _ = s.UpdateAccount("token", map[string]any{"media_quota": grokSnapshot(1, 1)})
+	p := NewGrok(s)
+	var mu sync.Mutex
+	var leases []*Lease
+	var wg sync.WaitGroup
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			model := "grok-imagine-image-pro"
+			if i%2 == 1 {
+				model = "grok-imagine-image-edit"
+			}
+			l, err := reserveIntent(p, Intent{Kind: "image", Model: model})
+			if err == nil {
+				mu.Lock()
+				leases = append(leases, l)
+				mu.Unlock()
+			} else if !errors.Is(err, ErrUnavailable) {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if len(leases) != 1 {
+		t.Fatalf("last shared credit reserved %d times", len(leases))
+	}
+	l := leases[0]
+	called := false
+	fetch := func(Account) (map[string]any, error) {
+		called = true
+		return map[string]any{"media_quota": grokSnapshot(0, 1)}, nil
+	}
+	if err := p.RefreshGrokMedia(l.Account, fetch); !errors.Is(err, ErrRefreshDeferred) || called {
+		t.Fatal("refresh ran during generation")
+	}
+	p.MarkSent(l, "image_gen")
+	p.Release(l)
+	p = NewGrok(s)
+	if _, err := reserveIntent(p, Intent{Kind: "image", Model: "grok-imagine-image-edit"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("restart refunded pending balance")
+	}
+	if err := p.RefreshGrokMedia(l.Account, fetch); !errors.Is(err, ErrRefreshDeferred) || called {
+		t.Fatal("refresh skipped settlement delay")
+	}
+	_, _, _ = s.UpdateAccount("token", map[string]any{"media_quota_not_before": time.Now().Add(-time.Second).Format(time.RFC3339Nano)})
+	if err := p.RefreshGrokMedia(l.Account, fetch); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reserveIntent(p, Intent{Kind: "image", Model: "grok-imagine-image-pro"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("exhausted image admitted")
+	}
+	video, err := reserveIntent(p, Intent{Kind: "video", Model: "grok-imagine-video"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Release(video)
+	rows, _, _ := s.AccountSnapshot()
+	if IsAbnormal(rows[0]) || len(pendingQuotas(rows[0]["quota_pending"])) > 0 && pendingQuotas(rows[0]["quota_pending"])["image_gen"] != 0 {
+		t.Fatal("refresh corrupted state")
+	}
+}
+func TestGrokMediaRefreshFailureKeepsReservationsAndBlocksOnlyMedia(t *testing.T) {
+	_, s := quotaPool(t, 100, 100, "正常")
+	_, _, _ = s.UpdateAccount("token", map[string]any{"media_quota": grokSnapshot(4, 1), "quota_pending": map[string]int{"image_gen": 1}})
+	p := NewGrok(s)
+	rows, _, _ := s.AccountSnapshot()
+	a := Account{Token: "token", Fields: rows[0]}
+	err := p.RefreshGrokMedia(a, func(Account) (map[string]any, error) {
+		return map[string]any{"media_quota": map[string]any{"status": "failed", "quotas": map[string]any{}}}, errors.New("HTTP 403")
+	})
+	if err == nil {
+		t.Fatal("expected failed query")
+	}
+	rows, _, _ = s.AccountSnapshot()
+	if pendingQuotas(rows[0]["quota_pending"])["image_gen"] != 1 || IsAbnormal(rows[0]) {
+		t.Fatal("media failure refunded/invalidated account")
+	}
+	if _, err := reserveIntent(p, Intent{Kind: "video", Model: "grok-imagine-video"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("stale media balance used")
+	}
+}
+func TestGrokMediaDueAndCosts(t *testing.T) {
+	now := time.Now()
+	row := map[string]any{"media_quota": grokSnapshot(4, 1)}
+	if GrokMediaRefreshDue(row, now) {
+		t.Fatal("fresh idle account queried")
+	}
+	row["media_quota_refresh_needed"] = true
+	row["media_quota_not_before"] = now.Add(time.Minute).Format(time.RFC3339Nano)
+	if GrokMediaRefreshDue(row, now) {
+		t.Fatal("settlement not respected")
+	}
+	delete(row, "media_quota_not_before")
+	if !GrokMediaRefreshDue(row, now) {
+		t.Fatal("used account not refreshed")
+	}
+	row["media_quota_last_attempt_at"] = now.Format(time.RFC3339Nano)
+	if GrokMediaRefreshDue(row, now) {
+		t.Fatal("failed refresh retry loop")
+	}
+	if c := (Intent{Kind: "image", Model: "grok-imagine-image-pro", ImageCount: 3}).Costs(); c["image_gen"] != 3 || c["reason"] != 0 {
+		t.Fatalf("image costs=%v", c)
+	}
+	if c := (Intent{Kind: "video", Model: "grok-imagine-video", VideoSegments: 2, VideoUnits: 3}).Costs(); c["video_gen"] != 3 {
+		t.Fatalf("video costs=%v", c)
+	}
+}
+
+func TestGrokCrashBeforeReleaseCannotReuseUnsettledPositiveBalance(t *testing.T) {
+	_, s := quotaPool(t, 100, 100, "正常")
+	_, _, _ = s.UpdateAccount("token", map[string]any{"media_quota": grokSnapshot(4, 2)})
+	p := NewGrok(s)
+	l, err := reserveIntent(p, Intent{Kind: "image", Model: "grok-imagine-image-pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened := store.New(s.AccountsPath(), s.AuthKeysPath(), filepath.Join(filepath.Dir(s.AccountsPath()), "config.json"))
+	restarted := NewGrok(reopened)
+	if _, err := reserveIntent(restarted, Intent{Kind: "image", Model: "grok-imagine-image-edit"}); !errors.Is(err, ErrUnavailable) {
+		t.Fatal("restart reused balance before settlement")
+	}
+	// An attempt stopped before any media request can safely return its reservation.
+	p.Release(l)
+	l, err = reserveIntent(p, Intent{Kind: "image", Model: "grok-imagine-image-edit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Release(l)
+}

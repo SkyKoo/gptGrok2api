@@ -1,11 +1,12 @@
 // Keep endpoint selection and model selection consistent, including saved selections.
 export function resolveStudioImageModel(current: string, hasReferences: boolean, available: string[]) {
+  if (['grok-imagine-image', 'grok-imagine-image-lite'].includes(current)) current = 'grok-imagine-image-pro'
   const candidates = available.filter(model => hasReferences
     ? !model.startsWith('grok-') || model === 'grok-imagine-image-edit'
     : model !== 'grok-imagine-image-edit')
   if (candidates.includes(current)) return current
   const preferred = current.startsWith('grok-')
-    ? (hasReferences ? 'grok-imagine-image-edit' : 'grok-imagine-image')
+    ? (hasReferences ? 'grok-imagine-image-edit' : 'grok-imagine-image-pro')
     : 'gpt-image-2'
   return candidates.includes(preferred) ? preferred : candidates[0] || ''
 }
@@ -34,7 +35,7 @@ export function buildVideoForm(prompt: string, options: StudioVideoOptions, file
   form.set('prompt', prompt)
   form.set('seconds', String(options.seconds))
   form.set('size', options.size)
-  form.set('resolution_name', options.resolution)
+  form.set('resolution_name', '720p')
   files.forEach(file => form.append('input_reference', file))
   return form
 }

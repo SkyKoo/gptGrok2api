@@ -43,7 +43,7 @@ func TestVideoSSEFailureIsReportedAndUpdatesScheduling(t *testing.T) {
 			defer upstream.Close()
 			s := New(adminTestConfig(t.TempDir()))
 			s.mediaProvider = provider.NewMedia(upstream.Client(), upstream.URL+"/chat", upstream.URL+"/post", upstream.URL, upstream.URL, s.cfg.RequestTimeout)
-			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"access_token": "test-token", "enabled": true, "status": "active"}})
+			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "test-token", "enabled": true, "status": "active"}})
 			if err != nil {
 				t.Fatal(err)
 			}

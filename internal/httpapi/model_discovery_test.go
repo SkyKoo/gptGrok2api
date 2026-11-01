@@ -65,13 +65,13 @@ func TestModelCatalogSeparatesImageGenerationAndEditModels(t *testing.T) {
 		}
 		return false
 	}
-	if !contains(payload.ImageModels, "grok-imagine-image") || contains(payload.ImageModels, "grok-imagine-image-edit") {
+	if !contains(payload.ImageModels, "grok-imagine-image-pro") || contains(payload.ImageModels, "grok-imagine-image-edit") {
 		t.Fatalf("generation models are not separated: %#v", payload.ImageModels)
 	}
 	if !contains(payload.ImageEditModels, "grok-imagine-image-edit") || !contains(payload.ImageEditModels, "gpt-image-2") {
 		t.Fatalf("edit models are incomplete: %#v", payload.ImageEditModels)
 	}
-	if contains(payload.ImageEditModels, "grok-imagine-image") || !contains(payload.VideoModels, "grok-imagine-video") {
+	if contains(payload.ImageEditModels, "grok-imagine-image-pro") || !contains(payload.VideoModels, "grok-imagine-video") {
 		t.Fatalf("catalog capability lists are incorrect: edits=%#v videos=%#v", payload.ImageEditModels, payload.VideoModels)
 	}
 }

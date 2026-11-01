@@ -58,6 +58,12 @@ func TestGrokMediaQuotaRefreshPersistsAndClearsStaleDataIndependently(t *testing
 	if media["status"] != "success" || len(media["quotas"].(map[string]any)) != 2 {
 		t.Fatalf("media missing: %#v", media)
 	}
+	// Runtime reservation/settlement state must be visible without leaking credentials.
+	_, _, _ = s.grokRuntimeStore.UpdateAccount("test-media-secret", map[string]any{"media_quota_refresh_needed": true, "quota_pending": map[string]int{"image_gen": 1}})
+	item = list()
+	if item["media_quota_refresh_needed"] != true || intValue(mapValue(item["media_quota_pending"])["image_gen"]) != 1 {
+		t.Fatal("media reservation state missing")
+	}
 	// A later media denial cannot retain the old 4/1 counters or disable text.
 	denied.Store(true)
 	refresh()

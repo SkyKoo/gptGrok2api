@@ -60,6 +60,7 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	cfg.RequestTimeout = 3 * time.Second
 	server := New(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
+		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "video-token",
 		"source_type":   "grok_protocol",
 		"pool":          "basic",
@@ -72,7 +73,11 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	server.videoJobs[job.ID] = job
 	server.videoMu.Unlock()
 
-	server.runVideoJob(job, "animate this", "16:9", "720p", 6, "custom", nil)
+	server.runVideoJob(job, "animate this", "16:9", "480p", 6, "custom", nil)
+	config := mapValue(mapValue(mapValue(mapValue(sawVideoPayload["responseMetadata"])["modelConfigOverride"])["modelMap"])["videoGenModelConfig"])
+	if config["resolutionName"] != "720p" {
+		t.Fatalf("legacy resolution not upgraded: %v", config)
+	}
 
 	server.videoMu.RLock()
 	status, path, videoURL := job.Status, job.ContentPath, job.VideoURL
@@ -166,6 +171,7 @@ func TestVideosAPICompletesAndServesContent(t *testing.T) {
 	cfg.RequestTimeout = 3 * time.Second
 	server := New(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
+		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "video-api-token",
 		"source_type":   "grok_protocol",
 		"pool":          "basic",

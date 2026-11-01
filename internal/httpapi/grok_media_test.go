@@ -64,6 +64,7 @@ func TestGrokImageEditRunsUploadPostAndStreamingGeneration(t *testing.T) {
 	server := New(cfg)
 	server.mediaProvider = provider.NewMedia(upstream.Client(), cfg.MediaChatURL, cfg.MediaPostURL, cfg.AssetUploadURL, cfg.AssetsBaseURL, cfg.RequestTimeout)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
+		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "image-edit-token",
 		"source_type":   "grok_protocol",
 		"pool":          "basic",

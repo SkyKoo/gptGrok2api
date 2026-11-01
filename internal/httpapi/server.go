@@ -160,7 +160,7 @@ func New(cfg config.Config) *Server {
 		requestClient:      requestClient,
 		accountPool:        accounts.New(repository),
 		grokRuntimeStore:   grokRuntimeStore,
-		grokAccountPool:    accounts.New(grokRuntimeStore),
+		grokAccountPool:    accounts.NewGrok(grokRuntimeStore),
 		grokRuntimePath:    grokRuntimePath,
 		chatProvider:       provider.NewGrokChat(cfg.GrokChatURL, requestClient, cfg.RequestTimeout),
 		consoleProvider:    provider.NewConsoleChat(cfg.ConsoleURL, requestClient),
@@ -237,6 +237,7 @@ func New(cfg config.Config) *Server {
 		go server.grokProbeScheduler()
 		go server.openAISurvivalScheduler()
 		go server.capabilityScheduler()
+		go server.grokMediaQuotaScheduler()
 		go server.registrationScheduler()
 	}
 	return server

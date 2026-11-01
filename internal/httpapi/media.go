@@ -113,6 +113,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is not an image model", "invalid_request_error")
 		return
 	}
+	request.Model = spec.ID
 	if !isOpenAIImageModel(request.Model) {
 		if _, ok := protocol.AspectRatio(request.Size); !ok {
 			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
@@ -138,7 +139,8 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
 	accountStarted := time.Now()
-	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: request.Model})
+	s.ensureGrokMediaQuotas(r.Context())
+	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: request.Model, ImageCount: request.N})
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
 		return
@@ -148,13 +150,8 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 	generationStarted := time.Now()
 	s.grokAccountPool.MarkSent(lease, "image_gen")
-	var images []provider.ImageResult
-	if request.Model == "grok-imagine-image-lite" {
-		images, err = s.mediaProvider.GenerateLite(r.Context(), lease.Account, request.Prompt, "fast", request.N)
-	} else {
-		aspect, _ := protocol.AspectRatio(request.Size)
-		images, err = s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, request.N, true, request.Model == "grok-imagine-image-pro", s.cfg.ImagineWSURL)
-	}
+	aspect, _ := protocol.AspectRatio(request.Size)
+	images, err := s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, request.N, true, true, s.cfg.ImagineWSURL)
 	if err != nil {
 		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
@@ -800,7 +797,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		n = 1
 	}
-	if n > 2 {
+	if n < 1 || n > 2 {
 		writeError(w, http.StatusBadRequest, "n must be between 1 and 2", "invalid_request_error")
 		return
 	}
@@ -845,7 +842,8 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordInputImages(r, inputs)
-	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: modelName, Uploads: len(inputs)})
+	s.ensureGrokMediaQuotas(r.Context())
+	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: modelName, Uploads: len(inputs), ImageCount: n})
 	if err != nil {
 		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
 		return
@@ -880,7 +878,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.grokAccountPool.MarkSent(lease, "image_gen")
-	response, err := s.mediaProvider.StreamChat(r.Context(), lease.Account, protocol.BuildImageEditPayload(prompt, refs, parentID))
+	payload := protocol.BuildImageEditPayload(prompt, refs, parentID)
+	payload["imageGenerationCount"] = n
+	response, err := s.mediaProvider.StreamChat(r.Context(), lease.Account, payload)
 	if err != nil {
 		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")

@@ -104,6 +104,8 @@ export type GrokAccount = {
   runtime_status?: GrokRuntimeStatus | null
   quota?: GrokQuota | null
   media_quota?: GrokMediaQuotaSnapshot | null
+  media_quota_refresh_needed?: boolean
+  media_quota_pending?: { image_gen?: number; video_gen?: number }
   use_count?: number
   fail_count?: number
   last_used_at?: string | number | null
