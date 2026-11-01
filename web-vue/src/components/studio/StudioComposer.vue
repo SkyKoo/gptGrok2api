@@ -140,7 +140,10 @@
                   </div>
                   <div class="studio-size-section">
                     <div class="studio-size-label">质量</div>
-                    <div class="studio-choice-grid is-quality">
+                    <p v-if="imageForm.model.startsWith('grok-imagine-image')" class="studio-size-current">
+                      {{ imageForm.model === 'grok-imagine-image-edit' ? '图片编辑（共用 Pro 额度）' : 'Pro（固定）' }}
+                    </p>
+                    <div v-else class="studio-choice-grid is-quality">
                       <Button
                         v-for="option in IMAGE_QUALITY_OPTIONS"
                         :key="option.value"
