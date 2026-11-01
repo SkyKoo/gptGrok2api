@@ -11,23 +11,31 @@ import (
 // growing without bound. A file is only eligible after the full retention
 // period has elapsed, so newly generated files are never removed mid-request.
 func (s *Server) imageRetentionScheduler() {
-	cleanup := func() {
-		s.cleanupExpiredImageTasks()
-		removed, bytes := s.cleanupExpiredImages()
-		if removed > 0 {
-			log.Printf("image retention cleanup removed %d files (%d bytes)", removed, bytes)
-		}
-	}
-	cleanup()
 	interval := s.cfg.ImageCleanupInterval
 	if interval <= 0 {
 		interval = time.Hour
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for range ticker.C {
-		cleanup()
+	for {
+		delay := interval
+		if !s.cleanupImagesOutsideMaintenance() {
+			delay = time.Second
+		}
+		time.Sleep(delay)
 	}
+}
+
+// Startup must preserve the frozen backup manifest until deployment verification
+// completes. Poll while maintenance is present, then resume the original policy.
+func (s *Server) cleanupImagesOutsideMaintenance() bool {
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+		return false
+	}
+	s.cleanupExpiredImageTasks()
+	removed, bytes := s.cleanupExpiredImages()
+	if removed > 0 {
+		log.Printf("image retention cleanup removed %d files (%d bytes)", removed, bytes)
+	}
+	return true
 }
 
 func (s *Server) cleanupExpiredImages() (int, int64) {
