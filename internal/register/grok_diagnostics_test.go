@@ -92,3 +92,32 @@ func TestGrokSnapshotExposesManualReviewInsteadOfHidingRetryState(t *testing.T) 
 		}
 	}
 }
+
+func TestEmailEntryEvidenceReachesJournalWithoutMailboxFalsePositive(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 504, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"detail":{"stage":"send_code","error":"email_input_missing","diagnostic":{"reason":"","email_entry":{"clicks":0,"elapsed_ms":30020,"last_click_error":"timeout","states":[{"state":{"document_state":"interactive","handler_ready":false}}]},"page_scripts":{"pending_scripts":5,"failed_scripts":1,"oldest_pending_ms":31000}}}}`))}, nil
+	})}
+	solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+	_, err := solver.workerPost(context.Background(), "/v1/session/send-email", map[string]any{}, "send_code")
+	var failure *Failure
+	if !errors.As(err, &failure) || failure.HTTPStatus != 504 || failure.Stage != "send_code" {
+		t.Fatalf("wrong phase/status: %v", err)
+	}
+	text := safeFailure(err)
+	for _, want := range []string{"entry_clicks=0", "entry_elapsed_ms=30020", "entry_click_error=timeout", "document_state=interactive", "entry_handler_ready=false", "pending_scripts=5", "oldest_script_ms=31000"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s: %s", want, text)
+		}
+	}
+	if strings.Contains(text, "email_already_registered") {
+		t.Fatal(text)
+	}
+}
+
+func TestEmailEntryDiagnosticsRejectUnboundedOrSecretValues(t *testing.T) {
+	entry := &browserEmailEntry{Clicks: -1, ElapsedMS: 99999999, LastClickError: "password=SECRET"}
+	got := safeBrowserEmailEntry(entry, &browserPageScripts{Pending: 99999999, Failed: -1, OldestPendingMS: 99999999})
+	if got != "" {
+		t.Fatalf("unsafe evidence retained: %s", got)
+	}
+}

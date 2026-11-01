@@ -243,6 +243,8 @@ def _native_error(exc: XaiBrowserFlowError) -> HTTPException:
             "upstream_path",
             "visible_controls",
             "network_failures",
+            "page_scripts",
+            "email_entry",
             "turnstile_clicks",
             "turnstile_frames",
             "turnstile_visible_frames",

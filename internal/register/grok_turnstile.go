@@ -154,6 +154,8 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 					UpstreamMethod         string                  `json:"upstream_method"`
 					UpstreamPath           string                  `json:"upstream_path"`
 					NetworkFailures        []browserNetworkFailure `json:"network_failures"`
+					EmailEntry             *browserEmailEntry      `json:"email_entry"`
+					PageScripts            *browserPageScripts     `json:"page_scripts"`
 					TurnstileClicks        int                     `json:"turnstile_clicks"`
 					TurnstileFrames        int                     `json:"turnstile_frames"`
 					TurnstileVisibleFrames int                     `json:"turnstile_visible_frames"`
@@ -192,6 +194,9 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 				if network := safeBrowserNetworkFailures(envelope.Detail.Diagnostic.NetworkFailures); network != "" {
 					failure.Operation += ";network_failures=" + network
 				}
+				if workerReason == "email_input_missing" {
+					failure.Operation += safeBrowserEmailEntry(envelope.Detail.Diagnostic.EmailEntry, envelope.Detail.Diagnostic.PageScripts)
+				}
 				if workerReason == "turnstile_incomplete" {
 					diagnostic := envelope.Detail.Diagnostic
 					if diagnostic.TurnstileClicks >= 0 && diagnostic.TurnstileClicks <= 10 {
@@ -214,6 +219,56 @@ func (s *HTTPGrokBrowserSolver) workerPost(ctx context.Context, path string, pay
 		return nil, failure
 	}
 	return body, nil
+}
+
+// Only bounded counters and allow-listed state names enter the task journal.
+// Page URLs, event handlers and raw click exceptions stay out of diagnostics.
+type browserEmailEntry struct {
+	Clicks         int    `json:"clicks"`
+	ElapsedMS      int    `json:"elapsed_ms"`
+	LastClickError string `json:"last_click_error"`
+	States         []struct {
+		State struct {
+			DocumentState string `json:"document_state"`
+			HandlerReady  bool   `json:"handler_ready"`
+		} `json:"state"`
+	} `json:"states"`
+}
+
+type browserPageScripts struct {
+	Pending         int `json:"pending_scripts"`
+	Failed          int `json:"failed_scripts"`
+	OldestPendingMS int `json:"oldest_pending_ms"`
+}
+
+func safeBrowserEmailEntry(entry *browserEmailEntry, scripts *browserPageScripts) string {
+	var result string
+	appendCount := func(name string, value, limit int) {
+		if value >= 0 && value <= limit {
+			result += fmt.Sprintf(";%s=%d", name, value)
+		}
+	}
+	if entry != nil {
+		appendCount("entry_clicks", entry.Clicks, 100)
+		appendCount("entry_elapsed_ms", entry.ElapsedMS, 180000)
+		if entry.LastClickError == "timeout" || entry.LastClickError == "interaction_error" {
+			result += ";entry_click_error=" + entry.LastClickError
+		}
+		if len(entry.States) > 0 && len(entry.States) <= 8 {
+			state := entry.States[len(entry.States)-1].State
+			switch state.DocumentState {
+			case "loading", "interactive", "complete":
+				result += ";document_state=" + state.DocumentState
+			}
+			result += fmt.Sprintf(";entry_handler_ready=%t", state.HandlerReady)
+		}
+	}
+	if scripts != nil {
+		appendCount("pending_scripts", scripts.Pending, 256)
+		appendCount("failed_scripts", scripts.Failed, 10000)
+		appendCount("oldest_script_ms", scripts.OldestPendingMS, 1200000)
+	}
+	return result
 }
 
 type browserNetworkFailure struct {

@@ -1,4 +1,5 @@
 """Passive, bounded network evidence without URLs, headers, bodies or secrets."""
+import time
 from collections import deque
 from urllib.parse import urlparse
 
@@ -20,8 +21,40 @@ _ERRORS = {
 class NetworkDiagnostics:
     def __init__(self):
         self._events = deque(maxlen=8)
+        self._scripts = {}
+        self._script_completed = 0
+        self._script_failed = 0
+        self._script_slowest_ms = 0
+
+    def started(self, request):
+        # Only first-party scripts matter for the signup page's event binding.
+        # Store request identity/timing, never paths, query strings or headers.
+        try:
+            host = (urlparse(str(request.url)).hostname or "").lower()
+            if host in {"accounts.x.ai", "auth.x.ai"} and request.resource_type == "script" and len(self._scripts) < 256:
+                self._scripts[id(request)] = time.monotonic()
+        except Exception:
+            return
+
+    def finished(self, request):
+        started = self._scripts.pop(id(request), None)
+        if started is not None:
+            self._script_completed += 1
+            self._script_slowest_ms = max(self._script_slowest_ms, int((time.monotonic() - started) * 1000))
+
+    def loading_snapshot(self):
+        now = time.monotonic()
+        return {
+            "pending_scripts": len(self._scripts),
+            "oldest_pending_ms": max((int((now - start) * 1000) for start in self._scripts.values()), default=0),
+            "completed_scripts": self._script_completed,
+            "failed_scripts": self._script_failed,
+            "slowest_script_ms": self._script_slowest_ms,
+        }
 
     def failed(self, request):
+        if self._scripts.pop(id(request), None) is not None:
+            self._script_failed += 1
         try:
             host = (urlparse(str(request.url)).hostname or "").lower()
             if host not in _TARGETS:

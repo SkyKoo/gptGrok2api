@@ -11,6 +11,7 @@ import json
 import re
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -142,6 +143,8 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
         page = await context.new_page()
         await page.add_init_script(_TURNSTILE_CAPTURE_INIT_JS)
         page._cfm_network_diagnostics = NetworkDiagnostics()
+        page.on("request", page._cfm_network_diagnostics.started)
+        page.on("requestfinished", page._cfm_network_diagnostics.finished)
         page.on("requestfailed", page._cfm_network_diagnostics.failed)
         page.on("response", page._cfm_network_diagnostics.response)
         response = await page.goto(target, wait_until="domcontentloaded", timeout=max(30_000, min(180_000, int(timeout_s) * 1000)))
@@ -327,6 +330,10 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
     network = getattr(page, "_cfm_network_diagnostics", None)
     if isinstance(network, NetworkDiagnostics):
         diagnostic["network_failures"] = network.snapshot()
+        diagnostic["page_scripts"] = network.loading_snapshot()
+    entry = getattr(page, "_cfm_email_entry", None)
+    if isinstance(entry, dict):
+        diagnostic["email_entry"] = dict(entry)
     if isinstance(upstream, dict):
         if upstream.get("status"):
             diagnostic["upstream_status"] = int(upstream["status"])
@@ -336,7 +343,7 @@ async def _page_diagnostic(page: Any, *, body: str | None = None, response_statu
             diagnostic["upstream_method"] = str(upstream["method"])
         if upstream.get("path"):
             diagnostic["upstream_path"] = str(upstream["path"])
-        if upstream.get("reason") and not diagnostic["reason"]:
+        if upstream.get("reason"):
             diagnostic["reason"] = str(upstream["reason"])
     return diagnostic
 
@@ -446,7 +453,7 @@ async def _wait_for_email_verification(page: Any, timeout_s: int = 45, upstream:
             return
         if re.search(r"验证您的邮箱|验证码|Verify your email|verification code", last, re.I):
             return
-        reason = _classify_email_stage_error(last)
+        reason = await _submitted_email_error(page) or _classify_email_stage_error(last)
         if reason:
             diagnostic = await _page_diagnostic(page, body=last, upstream=upstream)
             raise XaiBrowserFlowError(reason, stage="send_code", retryable=reason not in REVIEW_REASONS, diagnostic=diagnostic)
@@ -470,8 +477,6 @@ def _classify_email_stage_error(text: str) -> str | None:
         return None
     if re.search(r"请求过于频繁|too many|rate limit|rate limited|try again later", normalized, re.I):
         return "signup_rate_limited"
-    if re.search(r"already.*email|email.*already|已存在|已注册|已经注册", normalized, re.I):
-        return "email_already_registered"
     if re.search(
         r"无法注册|signup.*unavailable|sign[- ]?up.*(?:isn['’]t|is not|not)\s+available|"
         r"(?:email|e-mail).*sign[- ]?up.*(?:isn['’]t|is not|not)\s+available|"
@@ -480,6 +485,110 @@ def _classify_email_stage_error(text: str) -> str | None:
         re.I,
     ):
         return "signup_unavailable"
+    return None
+
+
+_EMAIL_INPUTS = ('input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]')
+
+# xAI renders the entry button before React attaches its handler. Checking
+# visibility/actionability alone accepts clicks which the page silently drops.
+_EMAIL_ENTRY_STATE_JS = """element => {
+  let handler = false;
+  for (let node = element; node && node !== document; node = node.parentElement) {
+    if (typeof node.onclick === 'function') handler = true;
+    for (const key of Object.keys(node)) {
+      if (!key.startsWith('__reactProps')) continue;
+      const props = node[key];
+      if (typeof props?.onClick === 'function') handler = true;
+    }
+  }
+  return {document_state: document.readyState, handler_ready: handler,
+    disabled: !!element.disabled || element.getAttribute('aria-disabled') === 'true'};
+}"""
+
+
+async def _wait_for_email_form(page: Any, timeout_s: float = 30) -> Any:
+    """Wait for a live entry handler and verify the resulting email form.
+
+    This helper never fills or submits a mailbox and never force-clicks an
+    obscured entry. A click is only progress; the visible input is success.
+    """
+    started = time.monotonic()
+    deadline = started + timeout_s
+    samples: deque = deque(maxlen=8)
+    progress = {"click_attempts": 0, "clicks": 0, "last_click_error": "", "form_visible": False}
+    page._cfm_email_entry = progress
+    next_consent = started
+    while time.monotonic() < deadline:
+        field = await _first_visible(page, _EMAIL_INPUTS)
+        if field is not None:
+            progress.update(form_visible=True, elapsed_ms=int((time.monotonic() - started) * 1000))
+            return field
+        # Consent may arrive after DOMContentLoaded; retry its normal dismissal
+        # while still on the entry page, rather than clicking through its overlay.
+        if time.monotonic() >= next_consent:
+            await _dismiss_entry_consent(page, deadline)
+            next_consent = time.monotonic() + 2
+        button = await _first_visible(page, ('button:has-text("Sign up with email")', 'button:has-text("使用邮箱注册")', '[role="button"]:has-text("Sign up with email")'))
+        if button is not None:
+            try:
+                state = await button.evaluate(_EMAIL_ENTRY_STATE_JS, timeout=max(1, min(1000, int((deadline - time.monotonic()) * 1000))))
+                if not samples or state != samples[-1]["state"]:
+                    samples.append({"elapsed_ms": int((time.monotonic() - started) * 1000), "state": state})
+                progress["states"] = list(samples)
+                remaining = deadline - time.monotonic()
+                if state.get("handler_ready") and not state.get("disabled") and remaining > 0:
+                    progress["click_attempts"] += 1
+                    await button.click(timeout=max(1, min(1500, int(remaining * 1000))))
+                    progress["clicks"] += 1
+            except Exception as exc:
+                # Exception messages can contain URLs or page content.
+                progress["last_click_error"] = "timeout" if type(exc).__name__ == "TimeoutError" else "interaction_error"
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            await _pause(page, min(400, max(1, int(remaining * 1000))))
+    field = await _first_visible(page, _EMAIL_INPUTS)
+    progress.update(form_visible=field is not None, elapsed_ms=int((time.monotonic() - started) * 1000))
+    if field is not None:
+        return field
+    diagnostic = await _page_diagnostic(page)
+    raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
+
+
+async def _dismiss_entry_consent(page: Any, deadline: float) -> None:
+    for name in ("Reject all", "Accept all", "全部拒绝", "接受全部"):
+        if time.monotonic() >= deadline:
+            return
+        try:
+            button = page.get_by_role("button", name=name, exact=True).first
+            if await button.is_visible():
+                await button.click(timeout=max(1, min(1000, int((deadline - time.monotonic()) * 1000))))
+                return
+        except Exception:
+            continue
+
+
+async def _submitted_email_error(page: Any) -> str | None:
+    """Read duplicate-mailbox errors only from the submitted form's feedback."""
+    try:
+        text = await page.evaluate(r"""() => {
+          const visible = e => e && e.getBoundingClientRect().width > 0 && getComputedStyle(e).visibility !== 'hidden';
+          const email = [...document.querySelectorAll('input[type="email"], input[name="email"], input[autocomplete="email"]')].find(visible);
+          if (!email) return '';
+          const nodes = [...(email.form || email.parentElement).querySelectorAll('[role="alert"], [aria-live="assertive"]')];
+          if (email.getAttribute('aria-invalid') === 'true') {
+            for (const id of (email.getAttribute('aria-describedby') || '').split(/\s+/)) {
+              if (id) nodes.push(document.getElementById(id));
+            }
+          }
+          return nodes.filter(visible).slice(0, 8).map(e => e.innerText || '').join(' ').slice(0, 2000);
+        }""")
+    except Exception:
+        return None
+    # Keep nouns and rejection adjacent. "Sign up with email ... Already have
+    # an account?" is navigation copy, not an error, even inside a live region.
+    if re.search(r"\b(?:e-?mail(?: address)?|account)\s+(?:(?:is|has)\s+)?already\s+(?:registered|exists|in use|been (?:registered|used)|used|taken)\b|(?:电子)?邮箱(?:地址)?(?:已存在|已注册|已经注册|已被注册)", str(text or ""), re.I):
+        return "email_already_registered"
     return None
 
 
@@ -516,16 +625,8 @@ async def send_email(session_id: str, email: str) -> dict:
                 except Exception:
                     pass
             return {"ok": True, "url": page.url, "cookies": await cookie_snapshot(page), "user_agent": await _user_agent(page)}
-        deadline = time.monotonic() + 30
-        while field is None and time.monotonic() < deadline:
-            if await _click_any(page, ("Sign up with email", "使用邮箱注册")):
-                await _pause(page, 700)
-            field = await _first_visible(page, ('input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]'))
-            if field is None:
-                await _pause(page, 400)
         if field is None:
-            diagnostic = await _page_diagnostic(page)
-            raise XaiBrowserFlowError("email_input_missing", stage="send_code", retryable=True, diagnostic=diagnostic)
+            field = await _wait_for_email_form(page)
         upstream: dict = {}
         capture = _EmailSubmitCapture(upstream)
         page.on("request", capture.request)
@@ -771,7 +872,7 @@ async def _wait_for_success(page: Any, timeout_s: int = 75) -> None:
         state = await _signup_success_state(page, last)
         if state["sso_cookie_present"] and not state["signup_form_present"] and (state["grok_landing"] or state["account_page"]):
             return
-        reason = _classify_email_stage_error(last)
+        reason = await _submitted_email_error(page) or _classify_email_stage_error(last)
         if reason:
             raise XaiBrowserFlowError(reason, stage="signup")
         await _pause(page, 500)
