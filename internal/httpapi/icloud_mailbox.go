@@ -244,6 +244,7 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 			"status": status, "api_active": true, "icloud_active": true,
 			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed,
 			"openai_disabled": view.OpenAIDisabled, "grok_disabled": view.GrokDisabled,
+			"openai_retired": view.OpenAIRetired, "grok_retired": view.GrokRetired,
 			"last_error": view.LastError, "created_at": view.CreatedAt, "updated_at": view.UpdatedAt,
 		})
 	}
@@ -312,6 +313,8 @@ func (s *Server) iCloudMailboxAction(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, mailboxstore.ErrMailboxNotFound):
 			status, code, message = http.StatusNotFound, "mailbox_not_found", "邮箱资产不存在"
+		case errors.Is(err, mailboxstore.ErrMailboxRegistrationRetired):
+			status, code, message = http.StatusConflict, "mailbox_registration_retired", err.Error()
 		case errors.Is(err, mailboxstore.ErrMailboxInUse), errors.Is(err, mailboxstore.ErrMailboxBusy):
 			status, code, message = http.StatusConflict, "mailbox_in_use", err.Error()
 		case errors.Is(err, mailboxstore.ErrInvalidMailboxPlatform), errors.Is(err, mailboxstore.ErrInvalidMailboxStatus), errors.Is(err, mailboxstore.ErrMailboxStateImmutable):

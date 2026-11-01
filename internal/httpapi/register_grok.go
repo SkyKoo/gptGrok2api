@@ -105,6 +105,7 @@ func (s *Server) verifyRegisteredGrokAccount(ctx context.Context, id string, acc
 		}
 		return err
 	}
+	s.restoreVerifiedGrokCredential(token)
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
 	_, _ = s.registerStore.UpdateRuntime(stringValue(stored["id"]), map[string]any{
 		"present":   true,

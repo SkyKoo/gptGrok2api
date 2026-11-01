@@ -363,7 +363,7 @@
               <th class="w-[5.5rem] py-3 pr-5">账号类型</th>
               <th class="w-[5.5rem] py-3 pr-5">注册状态</th>
               <th class="w-[8rem] py-3 pr-5">SSO 状态</th>
-              <th class="w-[11rem] py-3 pr-5">SSO 额度 A / F / E / H / C</th>
+              <th class="w-[11rem] py-3 pr-5">SSO 剩余额度</th>
               <th class="w-[8.5rem] py-3 pr-5">OAuth 状态</th>
               <th class="w-[13rem] py-3 pr-5">OAuth 剩余 / 重置</th>
               <th class="w-[7rem] py-3 pr-5">恢复时间</th>
@@ -1479,11 +1479,11 @@ const grokBatchMenuItems = computed(() => [
 ])
 
 const grokQuotaMetricLabels: Record<GrokQuotaMode, string> = {
-  auto: 'Auto 余额',
-  fast: 'Fast 余额',
-  expert: 'Expert 余额',
-  heavy: 'Heavy 余额',
-  console: 'Console 余额',
+  auto: '自动余额',
+  fast: '快速余额',
+  expert: '专家余额',
+  heavy: '重度余额',
+  console: '控制台余额',
 }
 
 function safeMetricNumber(value: unknown): number {

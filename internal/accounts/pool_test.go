@@ -157,7 +157,7 @@ func TestPoolAbnormalNeverUsesCachedQuotaOrSurvival(t *testing.T) {
 			if _, _, e := repository.UpdateAccount("token", marker); e != nil {
 				t.Fatal(e)
 			}
-			for _, intent := range []Intent{{}, {Kind: "chat"}, {Kind: "image"}} {
+			for _, intent := range []Intent{{}, {Kind: "chat"}, {Kind: "image"}, {Kind: "video"}} {
 				l, e := reserveIntent(p, intent)
 				if !errors.Is(e, ErrUnavailable) {
 					p.Release(l)

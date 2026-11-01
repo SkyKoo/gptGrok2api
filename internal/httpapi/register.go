@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
+	"github.com/auucoder/gptgrok2api-go/internal/store"
 )
 
 func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
@@ -418,11 +419,8 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 				errorItems, _ := result["errors"].([]any)
 				errorItems = append(errorItems, map[string]any{"id": stringValue(job.item["id"]), "stage": "quota", "error": safeRefreshError(quotaErr)})
 				result["errors"] = errorItems
-				status := "unknown"
-				if errors.Is(quotaErr, provider.ErrGrokInvalidCredentials) {
-					status = "invalid"
-				}
-				_, _, _ = s.store.UpdateAccount(job.token, map[string]any{"status": status, "last_refresh_error": safeRefreshError(quotaErr), "last_refresh_error_at": time.Now().UTC().Format(time.RFC3339)})
+				s.recordGrokCredentialFailure(job.token, quotaErr)
+				_, _ = s.grokRuntimeStore.UpdateAccountRuntime(job.token, map[string]any{"last_refresh_error": safeRefreshError(quotaErr), "last_refresh_error_at": time.Now().UTC().Format(time.RFC3339)})
 				return
 			}
 			result["quota_refreshed"] = intValue(result["quota_refreshed"]) + 1
@@ -614,6 +612,9 @@ func (s *Server) syncRegisteredGrokRuntimeAccountLocked(item map[string]any, tok
 	if token == "" {
 		return 0, 0, errors.New("registered Grok account missing SSO")
 	}
+	if accounts.IsAbnormal(item) || !boolValue(item["enabled"], true) || stringValue(item["status"]) == "disabled" {
+		return 0, 0, errors.New("Grok account requires successful verification before runtime sync")
+	}
 	fields := map[string]any{
 		"access_token": token,
 		"source_type":  "grok_protocol",
@@ -649,8 +650,20 @@ func (s *Server) syncRegisteredGrokRuntimeAccountLocked(item map[string]any, tok
 	} {
 		updates[key] = nil
 	}
-	if _, _, err := s.grokRuntimeStore.UpdateAccount(token, updates); err != nil {
-		return 0, 0, err
+	if _, _, err := s.grokRuntimeStore.UpdateAccountIf(token, updates, func(current map[string]any) bool {
+		return !accounts.IsAbnormal(current) && boolValue(current["enabled"], true) && stringValue(current["status"]) != "disabled"
+	}); err != nil {
+		if !errors.Is(err, store.ErrAccountChanged) {
+			return 0, 0, err
+		}
+		// Routing/profile synchronization remains available for disabled or
+		// abnormal accounts, but it must never change their eligibility.
+		metadata := cloneMap(fields)
+		delete(metadata, "status")
+		delete(metadata, "enabled")
+		if _, _, err := s.grokRuntimeStore.UpdateAccount(token, metadata); err != nil {
+			return 0, 0, err
+		}
 	}
 	// Remove legacy copies created before Grok had its own runtime store. GPT
 	// account management must never see or validate a Grok SSO token.

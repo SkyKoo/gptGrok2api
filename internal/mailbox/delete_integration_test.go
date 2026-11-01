@@ -89,19 +89,9 @@ func TestMailboxReleaseAndDeleteLifecycle(t *testing.T) {
 	if _, err := s.Delete(ctx, b.ID, "admin", remove); !errors.Is(err, ErrMailboxInUse) {
 		t.Fatal(err)
 	}
-	// The freed platform may reuse the same asset without creating a new alias.
-	reused, err := s.Reserve(ctx, "openai", "new-job", b.SourceID, func(context.Context) (Mailbox, error) {
-		t.Error("created an unnecessary alias")
-		return Mailbox{}, errors.New("unexpected")
-	}, nil)
-	if err != nil || reused.ID != b.ID {
-		t.Fatalf("reuse=%+v err=%v", reused, err)
-	}
-	if _, err := s.Delete(ctx, b.ID, "admin", remove); !errors.Is(err, ErrMailboxInUse) {
-		t.Fatal(err)
-	}
-	if err := s.Release(ctx, "openai", "new-job", b, "test"); err != nil {
-		t.Fatal(err)
+	// Releasing a deleted account preserves platform use; it cannot register again.
+	if err := s.EnsureRegistrationClaim(ctx, "openai", "new-job", b); !errors.Is(err, ErrMailboxRegistrationRetired) {
+		t.Fatalf("deleted platform reused: %v", err)
 	}
 	if _, err := s.SetStatus(ctx, b.ID, "disabled"); err != nil {
 		t.Fatal(err)

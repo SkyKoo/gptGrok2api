@@ -111,6 +111,7 @@
               </div>
             </template>
 
+            <span v-else-if="mode === 'video'" class="text-xs text-muted-foreground">Grok Imagine Video · 6 秒 · 720p · 竖屏</span>
             <template v-else-if="mode === 'image'">
               <div ref="settingsAnchorRef" class="chat-settings-anchor">
                 <StudioToolbarSelectButton
@@ -336,7 +337,7 @@ const modeValue = computed({
   get: () => props.mode,
   set: (value: string | string[]) => {
     const next = String(Array.isArray(value) ? value[0] : value || props.mode)
-    if (next === 'chat' || next === 'search' || next === 'image') {
+    if (next === 'chat' || next === 'search' || next === 'image' || next === 'video') {
       closeFloatingMenus()
       emit('update:mode', next)
     }
@@ -432,6 +433,7 @@ const imagePlaceholder = computed(() => props.references.length ? '描述你想�
 const chatPlaceholder = computed(() => props.references.length ? '描述你想让模型识别或分析的图片' : '输入消息，Enter 发送，Shift+Enter 换行')
 const placeholderText = computed(() => {
   if (props.mode === 'image') return imagePlaceholder.value
+  if (props.mode === 'video') return '描述你想生成的视频，也可以添加参考图'
   if (props.mode === 'search') return '输入搜索问题，Enter 搜索，Shift+Enter 换行'
   return chatPlaceholder.value
 })

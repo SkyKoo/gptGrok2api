@@ -59,6 +59,8 @@ type Claim struct {
 
 type MailboxView struct {
 	Mailbox
+	OpenAIRetired  bool       `json:"openai_retired"`
+	GrokRetired    bool       `json:"grok_retired"`
 	OpenAIDisabled bool       `json:"openai_disabled"`
 	GrokDisabled   bool       `json:"grok_disabled"`
 	OpenAIClaimed  bool       `json:"openai_claimed"`
@@ -91,6 +93,7 @@ type Store struct {
 }
 
 var (
+	ErrMailboxRegistrationRetired  = errors.New("邮箱已使用该平台注册且账号已删除，不可再次注册，请同步清理上游邮箱")
 	ErrMailboxNotFound             = errors.New("mailbox not found")
 	ErrMailboxRegistrationDisabled = errors.New("邮箱已禁用该渠道注册")
 	ErrInvalidMailboxPlatform      = errors.New("mailbox platform must be openai or grok")
@@ -223,6 +226,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at timestamptz NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS mailbox_events_mailbox_idx ON mailbox_events (mailbox_id, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS mailbox_registration_retirements (
+            mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+            platform text NOT NULL CHECK (platform IN ('openai','grok')),
+            retired_at timestamptz NOT NULL DEFAULT now(),
+            PRIMARY KEY (mailbox_id, platform)
+        )`,
+		// Only account-deletion events prove historical use; ordinary failed
+		// reservation releases must remain eligible for registration retries.
+		`INSERT INTO mailbox_registration_retirements(mailbox_id,platform,retired_at)
+         SELECT mailbox_id,platform,min(created_at) FROM mailbox_events
+         WHERE event_type='account_claim_released' AND platform IN ('openai','grok')
+         GROUP BY mailbox_id,platform ON CONFLICT DO NOTHING`,
 		`CREATE INDEX IF NOT EXISTS mailbox_events_created_idx ON mailbox_events (created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_sources (
 			id text PRIMARY KEY,
@@ -249,7 +264,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply mailbox schema: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_schema_migrations(version) VALUES (1),(2) ON CONFLICT (version) DO NOTHING`); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_schema_migrations(version) VALUES (1),(2),(3) ON CONFLICT (version) DO NOTHING`); err != nil {
 		return fmt.Errorf("record mailbox schema: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -415,6 +430,7 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 		FROM mailboxes m
 		WHERE m.status IN ('available','active')
 		AND ($1='' OR m.source_id=$1)
+		AND NOT EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform=$2)
 		AND NOT EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform=$2)
 		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$2 AND c.status IN ('reserved','active'))
 		ORDER BY m.created_at ASC, m.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, sourceID, platform)
@@ -727,6 +743,11 @@ func (s *Store) releaseAccountClaims(ctx context.Context, platform, accountID, e
 		if err != nil {
 			return nil, err
 		}
+		// Persist retirement in the same locked transaction as claim release.
+		// Manual enable and upstream reconciliation cannot erase prior use.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_registration_retirements(mailbox_id,platform) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, platform); err != nil {
+			return nil, err
+		}
 		item, err := scanMailbox(tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE
 			WHEN status IN ('disabled','cleanup_pending','deleted') THEN status
 			WHEN EXISTS (SELECT 1 FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')) THEN 'active'
@@ -804,6 +825,10 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	}
 	if status := strings.TrimSpace(strings.ToLower(filter.Status)); status != "" {
 		switch status {
+		case "retired":
+			conditions = append(conditions, "(m.status<>'deleted' AND EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id))")
+		case "retired_openai", "retired_grok":
+			conditions = append(conditions, "(m.status<>'deleted' AND EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform="+addArg(strings.TrimPrefix(status, "retired_"))+"))")
 		case "disabled":
 			conditions = append(conditions, "(m.status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id))")
 		case "disabled_openai", "disabled_grok":
@@ -831,6 +856,8 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	rows, err := s.db.QueryContext(ctx, `SELECT m.id,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at,m.last_sync_at,
 		(m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='openai')),
 		(m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='grok')),
+		EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='openai'),
+        EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='grok'),
 		COALESCE(bool_or(c.platform='openai' AND c.status IN ('reserved','active')),false), COALESCE(bool_or(c.platform='grok' AND c.status IN ('reserved','active')),false)
 		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder, args...)
 	if err != nil {
@@ -840,7 +867,7 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	views := []MailboxView{}
 	for rows.Next() {
 		var view MailboxView
-		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
+		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIRetired, &view.GrokRetired, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
 			return nil, 0, err
 		}
 		views = append(views, view)
@@ -1028,6 +1055,7 @@ func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
 		"active":          "SELECT count(*) FROM mailboxes WHERE status='active'",
 		"disabled":        "SELECT count(*) FROM mailboxes m WHERE status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id)",
 		"cleanup_pending": "SELECT count(*) FROM mailboxes WHERE status='cleanup_pending'",
+		"retired":         "SELECT count(*) FROM mailboxes m WHERE status <> 'deleted' AND EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id)",
 		"events":          "SELECT count(*) FROM mailbox_events",
 	} {
 		var count int

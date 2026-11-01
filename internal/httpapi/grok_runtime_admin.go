@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
@@ -84,6 +85,7 @@ func (s *Server) refreshGrokRuntimeTokens(parent context.Context, tokens []strin
 			quotas, err := s.grokQuota.RefreshToken(ctx, token, map[string]any{"sso": token})
 			item := map[string]any{"token": maskRuntimeToken(token), "token_id": runtimeTokenID(token), "ok": err == nil}
 			if err != nil {
+				s.recordGrokCredentialFailure(token, err)
 				item["error"] = safeRefreshError(err)
 				if errors.Is(err, provider.ErrGrokInvalidCredentials) {
 					item["status"] = "invalid"
@@ -122,7 +124,15 @@ func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.Qu
 		fields[mode+"_quota"] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
 	}
 	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{fields})
-	_, _, _ = s.grokRuntimeStore.UpdateAccount(token, fields)
+	// Quota refresh is not explicit revalidation. Preserve manual disable and
+	// durable abnormal markers even if an older in-flight refresh succeeds.
+	quotaFields := cloneMap(fields)
+	delete(quotaFields, "enabled")
+	delete(quotaFields, "status")
+	_, _, _ = s.grokRuntimeStore.UpdateAccount(token, quotaFields)
+	_, _ = s.grokRuntimeStore.UpdateAccountRuntimeIf(token, map[string]any{"status": status}, func(current map[string]any) bool {
+		return !accounts.IsAbnormal(current) && boolValue(current["enabled"], true) && stringValue(current["status"]) != "disabled"
+	})
 	items, err := s.registerStore.ExportAccounts(nil)
 	if err != nil {
 		return
@@ -132,8 +142,12 @@ func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.Qu
 		if strings.TrimSpace(itemToken) != strings.TrimSpace(token) {
 			continue
 		}
-		runtime := map[string]any{"present": true, "status": status, "quota": quotaMap(quotas), "synced_at": time.Now().UTC().Format(time.RFC3339)}
-		_, _ = s.registerStore.UpdateRuntime(stringValue(item["id"]), runtime, nil, status, errorText)
+		savedStatus := status
+		if accounts.IsAbnormal(item) || !boolValue(item["enabled"], true) || stringValue(item["status"]) == "disabled" {
+			savedStatus = stringValue(item["status"])
+		}
+		runtime := map[string]any{"present": true, "status": savedStatus, "quota": quotaMap(quotas), "synced_at": time.Now().UTC().Format(time.RFC3339)}
+		_, _ = s.registerStore.UpdateRuntime(stringValue(item["id"]), runtime, nil, savedStatus, errorText)
 	}
 }
 

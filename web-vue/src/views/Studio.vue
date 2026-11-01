@@ -459,7 +459,7 @@ function stopStreaming() {
 
 async function appendFiles(files: File[]) {
   const added = await referenceRuntime.append(files)
-  if (added && composeMode.value !== 'chat') composerRuntime.activateImageMode()
+  if (added && composeMode.value !== 'chat' && composeMode.value !== 'video') composerRuntime.activateImageMode()
 }
 
 function cleanAssetText(value: unknown) {

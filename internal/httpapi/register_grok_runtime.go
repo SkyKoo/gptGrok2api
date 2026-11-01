@@ -53,6 +53,7 @@ func (s *Server) refreshRegisteredGrokRuntime(w http.ResponseWriter, r *http.Req
 			defer cancel()
 			quotas, refreshErr := s.grokQuota.RefreshToken(ctx, token, item)
 			if refreshErr != nil {
+				s.recordGrokCredentialFailure(token, refreshErr)
 				_, _ = s.registerStore.UpdateRuntime(id, nil, nil, "", safeRefreshError(refreshErr))
 				results <- result{id: id, item: map[string]any{"id": id, "ok": false, "refresh_status": "failed", "error": safeRefreshError(refreshErr)}}
 				return
@@ -120,6 +121,7 @@ func (s *Server) verifyRegisteredGrokRuntime(w http.ResponseWriter, r *http.Requ
 				status = "invalid"
 			}
 			if status == "invalid" {
+				s.recordGrokCredentialFailure(token, probeErr)
 				invalid++
 			} else {
 				unknown++
@@ -128,6 +130,7 @@ func (s *Server) verifyRegisteredGrokRuntime(w http.ResponseWriter, r *http.Requ
 			results = append(results, map[string]any{"id": id, "status": status, "error": safeRefreshError(probeErr)})
 			continue
 		}
+		s.restoreVerifiedGrokCredential(token)
 		valid++
 		quotaValue := map[string]any{"remaining": quota.Remaining, "total": quota.Total}
 		_, _ = s.registerStore.UpdateRuntime(id, nil, map[string]any{"status": "valid", "quota": quotaValue, "checked_at": time.Now().UTC().Format(time.RFC3339)}, "", "")

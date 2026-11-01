@@ -8,6 +8,8 @@
       @close="emit('close')"
     />
     <ModalBody density="compact" class="space-y-4">
+      <GrokOAuthCandidates :items="candidates" :loading="loading" :busy="busy || Boolean(device)" :error="candidateError" @authorize="startDeviceAuthorization" />
+      <p class="text-xs text-muted-foreground">使用手动设备码完成授权；自动协议授权尚未开放。已有 OAuth 凭据可继续导入和测试。</p>
       <div class="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" :disabled="busy || loading" @click="loadAccounts">
           {{ loading ? '刷新中...' : '刷新' }}
@@ -18,12 +20,10 @@
         <Button size="sm" variant="outline" :disabled="busy" @click="showImport = !showImport">
           导入凭据
         </Button>
-        <Button size="sm" variant="outline" :disabled="busy || protocolRunning" @click="startDeviceAuthorization">
+        <Button size="sm" variant="outline" :disabled="busy || protocolRunning" @click="startDeviceAuthorization()">
           手动设备码
         </Button>
-        <Button size="sm" variant="primary" :disabled="busy || protocolRunning" @click="startProtocolAuthorization">
-          {{ protocolRunning ? '协议连接中...' : '一键协议连接' }}
-        </Button>
+
       </div>
 
       <SurfaceBox v-if="protocolJob" tone="muted" density="compact" class="space-y-2">
@@ -44,6 +44,8 @@
       </SurfaceBox>
 
       <SurfaceBox v-if="device" tone="muted" density="compact" class="space-y-3">
+        <p v-if="deviceTarget" class="text-sm text-foreground">正在授权：{{ deviceTarget.email }}。请在 xAI 页面确认登录的是此邮箱。</p>
+        <p class="text-xs text-muted-foreground">完成后点击“检查授权”。仅当返回凭据的邮箱与账号邮箱一致时，列表才显示该账号已授权。</p>
         <div class="flex flex-wrap items-center justify-between gap-2">
           <span class="font-mono text-sm text-foreground">{{ device.user_code }}</span>
           <div class="flex flex-wrap gap-2">
@@ -157,9 +159,11 @@ import { Button } from 'nanocat-ui'
 import {
   grokOAuthAccountsApi,
   type GrokOAuthAccount,
+  type GrokOAuthCandidate,
   type GrokOAuthDeviceSession,
   type GrokOAuthProtocolJob,
 } from '@/api/grokOAuthAccounts'
+import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
@@ -178,6 +182,9 @@ const emit = defineEmits<{
   (e: 'changed'): void
 }>()
 const accounts = ref<GrokOAuthAccount[]>([])
+const candidates = ref<GrokOAuthCandidate[]>([])
+const candidateError = ref('')
+const deviceTarget = ref<GrokOAuthCandidate | null>(null)
 const availableModels = ref<string[]>([])
 const loading = ref(false)
 const busy = ref(false)
@@ -266,7 +273,10 @@ const protocolDeliveryItems = computed(() => Object.entries(protocolJob.value?.d
 async function loadAccounts() {
   loading.value = true
   try {
-    const result = await grokOAuthAccountsApi.list()
+    const [result] = await Promise.all([
+      grokOAuthAccountsApi.list(),
+      grokOAuthAccountsApi.candidates().then(result => { candidates.value = result.items || []; candidateError.value = '' }).catch(() => { candidateError.value = 'Grok 待授权账号加载失败，请刷新重试' }),
+    ])
     accounts.value = result.items || []
     availableModels.value = result.available_models || []
     const modelIds = modelTestOptions.value.map((option) => option.value)
@@ -368,10 +378,12 @@ function testResultStatusLabel(status: OAuthAccountTestStatus) {
   return '等待'
 }
 
-async function startDeviceAuthorization() {
+async function startDeviceAuthorization(candidate?: GrokOAuthCandidate) {
+  if (device.value) { toast.info('请先完成当前设备码授权'); return }
   busy.value = true
   try {
     device.value = await grokOAuthAccountsApi.startDevice()
+    deviceTarget.value = candidate || null
     window.open(device.value.verification_uri_complete, '_blank', 'noopener,noreferrer')
   } catch (error) {
     toast.error(error instanceof Error ? error.message : '无法创建设备授权')
@@ -433,7 +445,10 @@ async function pollDeviceAuthorization() {
     const result = await grokOAuthAccountsApi.pollDevice(device.value.id)
     if (result.status === 'authorized') {
       device.value = null
-      toast.success('Grok Build OAuth 账号已连接')
+      if (deviceTarget.value && result.account.email?.trim().toLowerCase() !== deviceTarget.value.email.trim().toLowerCase()) {
+        toast.warning('OAuth 凭据已保存，但返回邮箱与所选账号不一致或缺失；未将所选账号标记为已授权。')
+      } else { toast.success('xAI OAuth 凭据已保存') }
+      deviceTarget.value = null
       await loadAccounts()
       emit('changed')
       return

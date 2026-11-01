@@ -14,13 +14,16 @@ type policyQuerier interface {
 // Policy is independent of upstream sync and account claim lifecycle.
 func (s *Store) checkRegistrationAllowed(ctx context.Context, q policyQuerier, id, platform string) error {
 	var status string
-	var blocked bool
-	err := q.QueryRowContext(ctx, `SELECT status,EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform=$2) FROM mailboxes m WHERE id=$1`, id, platform).Scan(&status, &blocked)
+	var blocked, retired bool
+	err := q.QueryRowContext(ctx, `SELECT status,EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform=$2) ,EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform=$2) FROM mailboxes m WHERE id=$1`, id, platform).Scan(&status, &blocked, &retired)
 	if err != nil {
 		return err
 	}
 	if status == "deleted" || status == "cleanup_pending" {
 		return ErrMailboxStateImmutable
+	}
+	if retired {
+		return ErrMailboxRegistrationRetired
 	}
 	if status == "disabled" || blocked {
 		return ErrMailboxRegistrationDisabled
@@ -53,6 +56,15 @@ func (s *Store) SetPlatformStatus(ctx context.Context, id, platform, requested s
 	}
 	if current.Status == "cleanup_pending" || current.Status == "deleted" {
 		return Mailbox{}, ErrMailboxStateImmutable
+	}
+	if requested == "available" {
+		var retired bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM mailbox_registration_retirements WHERE mailbox_id=$1 AND ($2='' OR platform=$2))`, id, platform).Scan(&retired); err != nil {
+			return Mailbox{}, err
+		}
+		if retired {
+			return Mailbox{}, ErrMailboxRegistrationRetired
+		}
 	}
 	if current.Status == "disabled" {
 		// Preserve the other channel when enabling one channel of a legacy asset.

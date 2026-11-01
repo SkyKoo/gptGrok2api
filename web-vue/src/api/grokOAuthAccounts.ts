@@ -1,5 +1,16 @@
 import apiClient from '@/api/client'
 
+export type GrokOAuthCandidate = {
+  id: string
+  email: string
+  login_status: string
+  oauth_status: 'pending' | 'authorized' | 'failed' | 'requires_renewal'
+  oauth_account_id: string
+  has_access_token: boolean
+  has_refresh_token: boolean
+  updated_at?: string
+}
+
 export type GrokOAuthAccountStatus = 'active' | 'disabled' | 'expired' | 'invalid'
 export type GrokOAuthProbeStatus = 'valid' | 'limited' | 'invalid' | 'unknown'
 
@@ -143,6 +154,9 @@ export type GrokOAuthAccountTestResponse = {
 const BASE_PATH = '/api/grok/oauth'
 
 export const grokOAuthAccountsApi = {
+  candidates() {
+    return apiClient.get<never, { items: GrokOAuthCandidate[]; total: number }>(`${BASE_PATH}/candidates`)
+  },
   list(keyword = '', status = 'all') {
     return apiClient.get<never, GrokOAuthAccountsResponse>(`${BASE_PATH}/accounts`, {
       params: { keyword, status },

@@ -58,6 +58,8 @@ export type ICloudMailbox = {
   receive_count?: number
   openai_disabled?: boolean
   grok_disabled?: boolean
+  openai_retired?: boolean
+  grok_retired?: boolean
   openai_claimed?: boolean
   grok_claimed?: boolean
   account_id?: string

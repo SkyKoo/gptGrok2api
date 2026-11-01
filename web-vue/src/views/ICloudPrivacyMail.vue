@@ -113,8 +113,8 @@
                 <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '未占用' }}</MetaChip>
               </div>
               <div class="mt-2 flex flex-wrap gap-1.5">
-                <MetaChip size="xs" :tone="mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationDisabled(mailbox, 'openai') ? '已禁用注册' : '允许注册' }}</MetaChip>
-                <MetaChip size="xs" :tone="mailboxRegistrationDisabled(mailbox, 'grok') ? 'warning' : 'success'">Grok {{ mailboxRegistrationDisabled(mailbox, 'grok') ? '已禁用注册' : '允许注册' }}</MetaChip>
+                <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'openai') || mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationLabel(mailbox, 'openai') }}</MetaChip>
+                <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'grok') || mailboxRegistrationDisabled(mailbox, 'grok') ? 'warning' : 'success'">Grok {{ mailboxRegistrationLabel(mailbox, 'grok') }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap justify-end gap-2">
                 <Button
@@ -122,7 +122,7 @@
                   :key="channel.value"
                   size="xs"
                   variant="outline"
-                  :disabled="Boolean(mailboxActionID) || mailbox.status === 'cleanup_pending' || mailbox.status === 'deleted'"
+                  :disabled="Boolean(mailboxActionID) || mailboxRegistrationRetired(mailbox, channel.value) || mailbox.status === 'cleanup_pending' || mailbox.status === 'deleted'"
                   @click="setMailboxStatus(mailbox, channel.value)"
                 >
                   {{ mailboxRegistrationDisabled(mailbox, channel.value) ? '启用' : '禁用' }}{{ channel.label }}
@@ -170,7 +170,7 @@
 </template>
 
 <script setup lang="ts">
-import { mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
+import { mailboxRegistrationLabel, mailboxRegistrationRetired, mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
@@ -213,6 +213,9 @@ const mailboxStatusOptions = [
   { label: '存在渠道禁用', value: 'disabled' },
   { label: 'GPT 已禁用', value: 'disabled_openai' },
   { label: 'Grok 已禁用', value: 'disabled_grok' },
+  { label: '已使用，待清理', value: 'retired' },
+  { label: 'GPT 已使用，待清理', value: 'retired_openai' },
+  { label: 'Grok 已使用，待清理', value: 'retired_grok' },
   { label: '待清理', value: 'cleanup_pending' },
   { label: '已删除', value: 'deleted' },
 ]
@@ -287,6 +290,7 @@ const metrics = computed(() => [
   { label: '可用邮箱', value: counts.value.available || 0 },
   { label: '使用中', value: counts.value.active || 0 },
   { label: '有渠道禁用', value: counts.value.disabled || 0 },
+  { label: '已使用', value: counts.value.retired || 0 },
   { label: '待清理', value: counts.value.cleanup_pending || 0 },
   { label: '操作事件', value: counts.value.events || 0 },
 ])
@@ -328,6 +332,7 @@ function mailboxLabel(mailbox: ICloudMailbox) {
   if (mailbox.status === 'deleted') return '已删除'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return '两平台均占用'
   if (mailbox.openai_claimed || mailbox.grok_claimed) return '部分占用'
+  if (mailbox.openai_retired || mailbox.grok_retired) return '已使用，待清理'
   return '可用'
 }
 
@@ -337,6 +342,7 @@ function mailboxTone(mailbox: ICloudMailbox): 'success' | 'info' | 'warning' | '
   if (mailbox.status === 'deleted') return 'danger'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return 'warning'
   if (mailbox.openai_claimed || mailbox.grok_claimed) return 'info'
+  if (mailbox.openai_retired || mailbox.grok_retired) return 'warning'
   return 'success'
 }
 
@@ -362,7 +368,7 @@ async function loadCounts() {
 
 async function setMailboxStatus(mailbox: ICloudMailbox, platform: RegistrationChannel) {
   const id = String(mailbox.id || '')
-  if (!id) return
+  if (!id || mailboxRegistrationRetired(mailbox, platform)) return
   const target = mailboxRegistrationDisabled(mailbox, platform) ? 'available' : 'disabled'
   mailboxActionID.value = id
   notice.value = ''

@@ -83,6 +83,8 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/grok/oauth/")
 	switch {
+	case path == "candidates" && r.Method == http.MethodGet:
+		s.grokOAuthCandidates(w, r)
 	case path == "accounts" && r.Method == http.MethodGet:
 		items, err := s.oauthStore.PublicList()
 		if err != nil {
@@ -124,12 +126,13 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, result)
 	case path == "device/poll" && r.Method == http.MethodPost:
 		var request struct {
-			ID string `json:"id"`
+			ID        string `json:"id"`
+			SessionID string `json:"session_id"`
 		}
 		if !decodeJSON(w, r, &request) {
 			return
 		}
-		result, err := s.deviceOAuth.Poll(r.Context(), request.ID)
+		result, err := s.deviceOAuth.Poll(r.Context(), firstNonEmpty(request.SessionID, request.ID))
 		if err != nil {
 			lower := strings.ToLower(err.Error())
 			if strings.Contains(lower, "expired") || strings.Contains(lower, "does not exist") {

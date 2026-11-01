@@ -205,7 +205,7 @@ func (s *Server) cleanupMailboxRegistry(ctx context.Context, accounts []map[stri
 			summary.Retained++
 		} else {
 			summary.Released++
-			result.Status, result.Message = "released", "已释放平台占用，保留上游邮箱"
+			result.Status, result.Message = "released", "已释放平台占用，该平台已使用不可再注册；保留上游邮箱待清理"
 			for _, asset := range assets {
 				// Disabled assets are retained even when the source opts into cleanup.
 				if asset.Status != "available" {

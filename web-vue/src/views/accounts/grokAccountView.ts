@@ -352,11 +352,11 @@ export function formatGrokAccountDate(value: unknown): string {
 type GrokQuotaMode = 'auto' | 'fast' | 'expert' | 'heavy' | 'console'
 
 const GROK_QUOTA_MODE_LABELS: Record<GrokQuotaMode, string> = {
-  auto: 'A',
-  fast: 'F',
-  expert: 'E',
-  heavy: 'H',
-  console: 'C',
+  auto: '自动',
+  fast: '快速',
+  expert: '专家',
+  heavy: '重度',
+  console: '控制台',
 }
 
 function quotaRemaining(value: unknown): number | null {
