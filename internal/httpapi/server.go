@@ -943,6 +943,7 @@ func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAPI(w, r) {
 		return
 	}
+	s.ensureGrokWebCatalog(r.Context())
 	data := make([]map[string]any, 0, len(s.modelSpecs()))
 	for _, item := range s.modelSpecs() {
 		if item.Enabled {
@@ -956,6 +957,7 @@ func (s *Server) getModel(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAPI(w, r) {
 		return
 	}
+	s.ensureGrokWebCatalog(r.Context())
 	id := strings.TrimPrefix(r.URL.Path, "/v1/models/")
 	item, ok := model.Find(s.modelSpecs(), id)
 	if !ok {
@@ -1013,6 +1015,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
 	}
+	if route.GrokWeb {
+		request.Model = model.GrokWebID(route.Mode)
+	}
 	if route.Console {
 		s.consoleChatCompletions(w, r, request)
 		return
@@ -1049,6 +1054,9 @@ func (s *Server) chatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
+	if route.GrokWeb {
+		request.Model = model.GrokWebID(route.Mode)
+	}
 	message := protocol.ExtractMessage(request.Messages)
 	if strings.TrimSpace(message) == "" {
 		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
@@ -1063,7 +1071,7 @@ func (s *Server) completeChat(w http.ResponseWriter, r *http.Request, request pr
 	var text, thinking string
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := pool.Reserve(r.Context(), route.PoolCandidates, excluded)
+		lease, err := s.reserveWebChat(r.Context(), route, excluded)
 		if err != nil {
 			lastErr = err
 			break
@@ -1190,6 +1198,9 @@ func (s *Server) streamToolChat(w http.ResponseWriter, r *http.Request, request 
 }
 
 func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request protocol.ChatRequest, route model.ChatRoute) {
+	if route.GrokWeb {
+		request.Model = model.GrokWebID(route.Mode)
+	}
 	message := protocol.ExtractMessage(request.Messages)
 	if strings.TrimSpace(message) == "" {
 		writeError(w, http.StatusBadRequest, "messages contain no text", "invalid_request_error")
@@ -1206,7 +1217,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, request prot
 	emitted := false
 	var lastErr error
 	for attempt := 0; attempt <= s.cfg.ChatMaxRetries; attempt++ {
-		lease, err := pool.Reserve(r.Context(), route.PoolCandidates, excluded)
+		lease, err := s.reserveWebChat(r.Context(), route, excluded)
 		if err != nil {
 			lastErr = err
 			break

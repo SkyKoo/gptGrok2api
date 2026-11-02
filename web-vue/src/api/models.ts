@@ -2,6 +2,7 @@ import apiClient from './client'
 
 export interface OpenAIModel {
   id: string
+  name?: string
   object?: string
   created?: number
   owned_by?: string
@@ -21,6 +22,9 @@ export interface ModelCatalogResponse {
   image_edit_models?: string[]
   video_models?: string[]
   all_models?: string[]
+  models?: OpenAIModel[]
+  model_aliases?: Record<string, string>
+  grok_web_modes?: Record<string, { mode_id: string; verified_accounts: number; available_accounts: number }>
   source?: {
     chat?: string
     image?: string

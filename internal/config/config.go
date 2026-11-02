@@ -36,6 +36,7 @@ type Config struct {
 	CodexOAuthClientID      string
 	CodexOAuthRedirectURI   string
 	CodexOAuthScope         string
+	GrokModesURL            string
 	GrokChatURL             string
 	GrokRateLimitsURL       string
 	XAICLIBaseURL           string
@@ -185,6 +186,7 @@ func Load(root string) (Config, error) {
 		CodexOAuthRedirectURI:   env("GO_CODEX_OAUTH_REDIRECT_URI", "http://localhost:1455/auth/callback"),
 		CodexOAuthScope:         env("GO_CODEX_OAUTH_SCOPE", "openid email profile offline_access"),
 		GrokChatURL:             env("GO_GROK_CHAT_URL", "https://grok.com/rest/app-chat/conversations/new"),
+		GrokModesURL:            env("GO_GROK_MODES_URL", "https://grok.com/rest/modes"),
 		GrokRateLimitsURL:       env("GO_GROK_RATE_LIMITS_URL", "https://grok.com/rest/rate-limits"),
 		XAICLIBaseURL:           strings.TrimRight(env("GO_XAI_CLI_BASE_URL", "https://cli-chat-proxy.grok.com/v1"), "/"),
 		XAICLITokenURL:          env("GO_XAI_CLI_TOKEN_URL", "https://auth.x.ai/oauth2/token"),

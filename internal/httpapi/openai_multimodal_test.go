@@ -63,7 +63,7 @@ func multimodalTestServer(t *testing.T, conversation http.HandlerFunc) (*Server,
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	cfg := chatTestConfig(t.TempDir(), upstream.URL+"/wrong-grok-route")
+	cfg := chatTestConfig(t, t.TempDir(), upstream.URL+"/wrong-grok-route")
 	cfg.OpenAIBaseURL = upstream.URL
 	cfg.RequestTimeout = 5 * time.Second
 	server := New(cfg)

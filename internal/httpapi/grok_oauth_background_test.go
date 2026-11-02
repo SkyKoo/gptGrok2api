@@ -303,4 +303,13 @@ func TestGrokOAuthWaitingCancelsBeforeAnyDeviceGrant(t *testing.T) {
 	if released.Load() != 1 || grants.Load() != 0 || admissions.Load() != 1 {
 		t.Fatalf("cancellation leaked/replayed: releases=%d grants=%d admissions=%d", released.Load(), grants.Load(), admissions.Load())
 	}
+	// The release HTTP request precedes the handler's final persistent update.
+	// Wait for that update before TempDir cleanup can remove its data directory.
+	for time.Now().Before(deadline) {
+		if _, running := s.grokOAuthRuns.Load("waiting"); !running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("cancelled OAuth handler did not finish its persistent cleanup")
 }

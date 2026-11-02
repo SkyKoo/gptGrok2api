@@ -27,10 +27,14 @@ func (s *Server) openAIAccountIDs() []string {
 func (s *Server) modelSpecs() []model.Spec {
 	specs := []model.Spec{}
 	for _, m := range s.catalog {
+		if _, ok := model.ResolveGrokWebMode(m.ID); ok {
+			continue
+		}
 		if m.OwnedBy != "openai" || m.Capability&model.Chat == 0 {
 			specs = append(specs, m)
 		}
 	}
+	specs = append(s.grokWebSpecs(), specs...)
 	return append(s.discovery.Specs(s.openAIAccountIDs()), specs...)
 }
 func (s *Server) resolveChatModel(id string) (model.ChatRoute, bool) {

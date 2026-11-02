@@ -12,7 +12,13 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 )
 
-func chatTestConfig(root, upstream string) config.Config {
+func chatTestConfig(t *testing.T, root, upstream string) config.Config {
+	t.Helper()
+	modes := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"modes":[{"id":"fast","title":"快速","availability":{"available":{}}},{"id":"auto","title":"自动","availability":{"available":{}}},{"id":"expert","title":"专家","description":"深度思考 · Grok 4.7","availability":{"available":{}}},{"id":"heavy","title":"重型","availability":{"available":{}}}]}`)
+	}))
+	t.Cleanup(modes.Close)
 	return config.Config{
 		RootDir: root, DataDir: filepath.Join(root, "data"),
 		StaticDir:    filepath.Join(root, "web_dist"),
@@ -20,7 +26,7 @@ func chatTestConfig(root, upstream string) config.Config {
 		AccountsPath: filepath.Join(root, "data", "accounts.json"),
 		AuthKeysPath: filepath.Join(root, "data", "auth_keys.json"),
 		APIKey:       "api-secret", AdminKey: "admin-secret",
-		GrokChatURL: upstream, ChatMaxRetries: 2,
+		GrokChatURL: upstream, GrokModesURL: modes.URL, ChatMaxRetries: 2,
 		ChatRetryCodes: map[int]bool{401: true, 429: true, 500: true, 502: true, 503: true},
 	}
 }
@@ -38,7 +44,7 @@ func TestChatCompletionJSONAndSSE(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	cfg := chatTestConfig(root, upstream.URL)
+	cfg := chatTestConfig(t, root, upstream.URL)
 	server := New(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"chat-token"}, nil); err != nil {
 		t.Fatal(err)
@@ -77,7 +83,7 @@ func TestChatRetriesAnotherAccount(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	server := New(chatTestConfig(root, upstream.URL))
+	server := New(chatTestConfig(t, root, upstream.URL))
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"first", "second"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +119,7 @@ func TestConsoleChatAndResponses(t *testing.T) {
 	defer upstream.Close()
 
 	root := t.TempDir()
-	cfg := chatTestConfig(root, upstream.URL)
+	cfg := chatTestConfig(t, root, upstream.URL)
 	cfg.ConsoleURL = upstream.URL
 	server := New(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"console-token"}, nil); err != nil {
@@ -163,7 +169,7 @@ func TestConsoleThinkingAliasesUseConsoleEndpoint(t *testing.T) {
 	}))
 	defer upstream.Close()
 	root := t.TempDir()
-	cfg := chatTestConfig(root, upstream.URL)
+	cfg := chatTestConfig(t, root, upstream.URL)
 	cfg.ConsoleURL = upstream.URL
 	server := New(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"console-alias-token"}, nil); err != nil {
@@ -197,7 +203,7 @@ func TestAllCatalogGrokChatModelsReachWebChatEndpoint(t *testing.T) {
 	}))
 	defer upstream.Close()
 	root := t.TempDir()
-	server := New(chatTestConfig(root, upstream.URL))
+	server := New(chatTestConfig(t, root, upstream.URL))
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{
 		{"access_token": "chat-model-matrix-super-token", "pool": "super"},
 		{"access_token": "chat-model-matrix-heavy-token", "pool": "heavy"},
@@ -231,7 +237,7 @@ func TestChatToolCallsJSONAndStream(t *testing.T) {
 	}))
 	defer upstream.Close()
 	root := t.TempDir()
-	server := New(chatTestConfig(root, upstream.URL))
+	server := New(chatTestConfig(t, root, upstream.URL))
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts([]string{"tool-token"}, nil); err != nil {
 		t.Fatal(err)
 	}

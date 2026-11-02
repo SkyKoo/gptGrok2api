@@ -21,7 +21,7 @@ export type StudioModelFormRuntimeInput = {
 }
 
 export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
-  const { chatModels, imageModels, imageEditModels, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
+  const { chatModels, chatModelLabels, modelAliases, imageModels, imageEditModels, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
   const imageForm = reactive<StudioImageForm>({
@@ -49,6 +49,11 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     if (imageForm.model === 'grok-imagine-image-edit') imageForm.n = Math.min(2, imageForm.n)
   }, { immediate: true, flush: 'sync' })
 
+  watch(modelAliases, (aliases) => {
+    const canonical = aliases[chatModel.value]
+    if (canonical) chatModel.value = canonical
+  }, { immediate: true })
+
   watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
   watch(chatReasoningEffort, (effort) => setStringPreference(preferenceKeys.studioChatReasoningEffort, effort || ''))
   watch(() => imageForm.model, (model) => {
@@ -61,6 +66,7 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     modelCatalogLoading: isLoading,
     chatModel,
     chatModelOptions,
+    chatModelLabels,
     chatReasoningEffort,
     imageForm,
     imageModelOptions,

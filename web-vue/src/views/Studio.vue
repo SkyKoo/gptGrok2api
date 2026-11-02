@@ -101,6 +101,7 @@
         v-model:chat-reasoning-effort="chatReasoningEffort"
         :image-form="imageForm"
         :chat-model-options="chatModelOptions"
+        :chat-model-labels="modelFormRuntime.chatModelLabels.value"
         :image-model-options="imageModelOptions"
         :references="referenceRuntime.references.value"
         :is-sending="isSending"

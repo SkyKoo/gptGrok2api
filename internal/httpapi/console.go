@@ -257,6 +257,9 @@ func (s *Server) responses(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "model not found", "invalid_request_error")
 		return
 	}
+	if route.GrokWeb {
+		request.Model = model.GrokWebID(route.Mode)
+	}
 	if route.OpenAI || route.Image {
 		if route.Image {
 			writeOpenAIInputError(w, &protocol.InputError{Param: "model", Message: "image generation models are not supported by this Responses adapter; use the images API"})

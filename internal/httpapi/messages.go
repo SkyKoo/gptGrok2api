@@ -65,15 +65,23 @@ func (s *Server) messages(w http.ResponseWriter, r *http.Request) {
 		s.consoleChatCompletions(w, r, chat)
 		return
 	}
+	route, routeOK := s.resolveChatModel(request.Model)
+	if !routeOK {
+		writeError(w, 404, "model not found", "invalid_request_error")
+		return
+	}
+	if route.GrokWeb {
+		chat.Model = model.GrokWebID(route.Mode)
+	}
 	if request.Stream {
 		recorder := &responseCapture{header: make(http.Header)}
-		s.completeChat(recorder, r, chat, model.ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}})
-		s.writeAnthropicStream(w, recorder, request.Model)
+		s.completeChat(recorder, r, chat, route)
+		s.writeAnthropicStream(w, recorder, chat.Model)
 		return
 	}
 	recorder := &responseCapture{header: make(http.Header)}
-	s.completeChat(recorder, r, chat, model.ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}})
-	s.writeAnthropicResponse(w, recorder, request.Model)
+	s.completeChat(recorder, r, chat, route)
+	s.writeAnthropicResponse(w, recorder, chat.Model)
 }
 
 func (s *Server) writeAnthropicResponse(w http.ResponseWriter, recorder *responseCapture, modelName string) {

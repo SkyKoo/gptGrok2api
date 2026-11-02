@@ -88,6 +88,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
+	s.ensureGrokWebCatalog(r.Context())
 	chat, images, edits, videos := []string{}, []string{}, []string{}, []string{}
 	all := []string{}
 	public := []map[string]any{}
@@ -115,7 +116,9 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		"image_edit_models": edits, "video_models": videos, "models": public,
 		"discovery":              s.discovery.Summary(s.openAIAccountIDs()),
 		"all_models":             all,
-		"source":                 map[string]string{"chat": "go", "image": "go", "grok": "unavailable"},
+		"grok_web_modes":         s.grokWebSummary(),
+		"model_aliases":          grokWebAliasIDs(),
+		"source":                 map[string]string{"chat": "go", "image": "go", "grok": "grok_web_modes"},
 		"openai_models_endpoint": "/v1/models",
 	})
 }

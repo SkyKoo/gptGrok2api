@@ -134,6 +134,22 @@ curl -fsS http://127.0.0.1:3000/health
 
 服务器反向代理可以叠加 `deploy/docker-compose.server.yml`，它把服务绑定到 `127.0.0.1:8000`。该覆盖文件要求外部网络 `deploy_sub2api-network`；反向代理需要转发 `/`、`/v1`、`/api`、`/images`、`/files` 和 `/v1/files`，并支持 SSE、multipart 和长请求。
 
+## 对话画图与 OAuth 的使用范围
+
+2026-11-02 确认：对话画图暂时只接入 Web 端能力。GPT 对话和图片使用 ChatGPT Web，Grok 对话、图片和视频使用 Grok Web / SSO；模型列表按各自 Web 目录与账号权限展示。对话画图当前未接入 Codex OAuth 推理通道，也暂不新增 xAI OAuth 推理通道。
+
+CFM 保留 Codex OAuth 和 xAI OAuth 的授权、凭据管理及 CPA 同步能力；两类 OAuth 的后续模型使用与调用验证统一通过 CPA 进行。`grok-4.5` 等 OAuth 模型是否可用，在 CPA 中验证，不据此加入 Web 模型列表。CPA 接收凭据与实际模型调用成功分别验收。
+
+## Grok Web 对话模型目录
+
+Grok 网页端通过 `POST /rest/modes` 提供模式、中文名称、描述和账号权限。CFM 使用稳定的 `grok-web-auto`、`grok-web-fast`、`grok-web-expert`、`grok-web-heavy` ID；请求向上游发送对应的 `modeId`，页面和 `/v1/models` 的 `name` 显示官方描述，不把模式固定标成某个版本。2026-11-02 读取的公开目录中，Expert / Heavy 描述为 Grok 4.7；这只是当时的官方描述，不等于每个账号都具备使用权限，也不能证明 Web 可指定 `grok-4.5`。OAuth / CLI 的模型验证属于另一条通道。
+
+服务使用各账号现有 Cookie 和调用出口读取目录，不生成内容。目录缓存6小时；后台沿用启动2分钟后、每15秒扫描的节奏，每轮最多刷新2个账号。首次读取模型列表可补查1个账号；请求所需模式没有已确认可用账号时，最多补查2个到期账号。单次目录请求超时12秒，不跟随重定向、不自动重试；失败退避15分钟。缓存过期时不再显示其版本说明，也不凭旧权限发起调用。可用 `GO_GROK_MODES_URL` 指定测试目录接口。
+
+账号只有在官方 `availability.available` 明确存在、目录仍新鲜且未被禁用或判为凭据异常时才可调度；`requiresUpgrade`、`unavailable`、`comingSoon` 和未知权限均排除。已知耗尽且未到重置时间的对应模式额度也会排除，Fast 余额不能代替 Expert 余额；目录权限查询不返回精确余量，文字额度仍以既有额度查询及实际请求反馈为准。目录401同步标记凭据异常；403、429及网络错误不会被误判为凭据失效。目录接口成功不代表已经完成真实模型生成测试。
+
+旧 `grok-4.20-*` 及 `grok-4.3-fast` 名称保留为 Web 模式兼容别名，但不再出现在聊天模型列表中；响应返回规范的 `grok-web-*` ID，不承诺固定旧版本。页面保存的旧选择会迁移到对应模式。缺少当前官方目录依据的 `grok-4.3-beta` 不再提供。Console 模型和 xAI OAuth 测试保持各自通道。
+
 ## xAI OAuth 额度与 CPA 同步
 
 在“OAuth 接入”中，后台授权、手动设备码或凭据导入成功后，会查询一次 xAI CLI 的 `/billing`，不以发送模型请求来查询余额。已有授权可逐账号点击“刷新额度”；若 Access Token 已过期且存在 Refresh Token，会先刷新凭据再读取额度。仅刷新列表不会向上游查询余额。

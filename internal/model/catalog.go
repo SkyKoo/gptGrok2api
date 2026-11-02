@@ -34,15 +34,10 @@ func (s Spec) Public() map[string]any {
 func Catalog() []Spec {
 	created := time.Now().Unix()
 	items := []Spec{
-		{"grok-4.20-0309-non-reasoning", "Grok 4.20 0309 Non-Reasoning", "xai", created, Chat, true},
-		{"grok-4.20-0309", "Grok 4.20 0309", "xai", created, Chat, true},
-		{"grok-4.20-0309-reasoning", "Grok 4.20 0309 Reasoning", "xai", created, Chat, true},
-		{"grok-4.20-fast", "Grok 4.20 Fast", "xai", created, Chat, true},
-		{"grok-4.3-fast", "Grok 4.3 Fast", "xai", created, Chat, true},
-		{"grok-4.20-auto", "Grok 4.20 Auto", "xai", created, Chat, true},
-		{"grok-4.20-expert", "Grok 4.20 Expert", "xai", created, Chat, true},
-		{"grok-4.20-heavy", "Grok 4.20 Heavy", "xai", created, Chat, true},
-		{"grok-4.3-beta", "Grok 4.3 Beta", "xai", created, Chat, true},
+		{"grok-web-auto", "Grok Web · 自动", "xai", created, Chat, true},
+		{"grok-web-fast", "Grok Web · 快速", "xai", created, Chat, true},
+		{"grok-web-expert", "Grok Web · 专家", "xai", created, Chat, true},
+		{"grok-web-heavy", "Grok Web · 重型", "xai", created, Chat, true},
 		{"gpt-image-2", "GPT Image 2", "openai-compatible", created, Image, true},
 		{"grok-imagine-image-pro", "Grok Imagine Image Pro", "xai", created, Image, true},
 		{"grok-imagine-image-edit", "Grok Imagine Image Edit", "xai", created, ImageEdit, true},
@@ -66,6 +61,9 @@ func Catalog() []Spec {
 
 // CanonicalID keeps old clients on the supported high-quality image route.
 func CanonicalID(id string) string {
+	if mode, ok := ResolveGrokWebMode(id); ok {
+		return GrokWebID(mode)
+	}
 	switch id {
 	case "grok-imagine-image", "grok-imagine-image-lite":
 		return "grok-imagine-image-pro"

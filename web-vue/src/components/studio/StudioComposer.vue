@@ -279,6 +279,7 @@ const props = defineProps<{
   chatReasoningEffort: string
   imageForm: StudioImageForm
   chatModelOptions: string[]
+  chatModelLabels?: Record<string, string>
   imageModelOptions: string[]
   references: StudioReference[]
   isSending: boolean
@@ -356,7 +357,7 @@ const imageModelValue = computed({
 })
 
 const chatModelSelectOptions = computed(() => props.chatModelOptions.map((model) => ({
-  label: model === 'auto' ? '自动模型' : model,
+  label: model === 'auto' ? '自动模型' : (props.chatModelLabels?.[model] || model),
   value: model,
 })))
 
@@ -405,7 +406,7 @@ const selectedReasoningEffortLabel = computed(() => {
   return chatReasoningEffortOptions.find((option) => option.value === current)?.label || current
 })
 const chatSettingsLabel = computed(() => {
-  const model = compactModelLabel(props.chatModel)
+  const model = props.chatModelLabels?.[props.chatModel] || compactModelLabel(props.chatModel)
   const reasoning = selectedReasoningEffortLabel.value
   return reasoning === '默认' ? model : `${model} ${reasoning}`
 })

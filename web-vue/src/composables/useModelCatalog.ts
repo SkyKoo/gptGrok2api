@@ -55,6 +55,7 @@ function catalogFromOpenAIModels(response: ModelListResponse): ModelCatalogRespo
     image_edit_models: ids.filter(model => isImageModelId(model) && (!model.startsWith('grok-') || model.includes('edit'))),
     video_models: ids.filter(model => model.toLowerCase().includes('video')),
     all_models: ids,
+    models: response.data,
     source: {
       chat: 'openai_models_endpoint',
       image: 'openai_models_endpoint',
@@ -68,6 +69,9 @@ export function useModelCatalog(resolveSettings: SettingsResolver) {
     const fromCatalog = normalizeList(sharedCatalog.value?.chat_models)
     return fromCatalog
   })
+
+  const chatModelLabels = computed(() => Object.fromEntries((sharedCatalog.value?.models || []).filter(item => item.id.startsWith('grok-web-') && item.name).map(item => [item.id, item.name!])))
+  const modelAliases = computed(() => sharedCatalog.value?.model_aliases || {})
 
   const imageModels = computed(() => {
     const fromCatalog = normalizeList(sharedCatalog.value?.image_models)
@@ -119,6 +123,8 @@ export function useModelCatalog(resolveSettings: SettingsResolver) {
   return {
     catalog: sharedCatalog,
     chatModels,
+    chatModelLabels,
+    modelAliases,
     imageModels,
     imageEditModels,
     videoModels,

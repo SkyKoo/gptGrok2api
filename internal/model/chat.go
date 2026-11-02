@@ -6,6 +6,7 @@ type ChatRoute struct {
 	Provider       string
 	Mode           string
 	PoolCandidates []string
+	GrokWeb        bool
 	Console        bool
 	OpenAI         bool
 	Image          bool
@@ -32,28 +33,9 @@ func ResolveChat(id string) (ChatRoute, bool) {
 		// "-console" suffix. Keep them on the same native console path as
 		// the suffixed variants instead of silently rejecting them.
 		return ChatRoute{Mode: "console", PoolCandidates: []string{"basic"}, Console: true}, true
-	case "grok-4.20-0309-non-reasoning", "grok-4.20-fast", "grok-4.3-fast":
-		return ChatRoute{Mode: "fast", PoolCandidates: []string{"basic", "super", "heavy"}}, true
-	case "grok-4.20-0309-non-reasoning-super":
-		return ChatRoute{Mode: "fast", PoolCandidates: []string{"super", "heavy"}}, true
-	case "grok-4.20-0309-non-reasoning-heavy":
-		return ChatRoute{Mode: "fast", PoolCandidates: []string{"heavy"}}, true
-	case "grok-4.20-0309", "grok-4.20-auto":
-		return ChatRoute{Mode: "auto", PoolCandidates: []string{"super", "heavy"}}, true
-	case "grok-4.20-0309-super":
-		return ChatRoute{Mode: "auto", PoolCandidates: []string{"super", "heavy"}}, true
-	case "grok-4.20-0309-heavy", "grok-4.20-heavy":
-		return ChatRoute{Mode: "heavy", PoolCandidates: []string{"heavy"}}, true
-	case "grok-4.20-0309-reasoning", "grok-4.20-expert":
-		return ChatRoute{Mode: "expert", PoolCandidates: []string{"super", "heavy"}}, true
-	case "grok-4.20-0309-reasoning-super":
-		return ChatRoute{Mode: "expert", PoolCandidates: []string{"super", "heavy"}}, true
-	case "grok-4.20-0309-reasoning-heavy":
-		return ChatRoute{Mode: "expert", PoolCandidates: []string{"heavy"}}, true
-	case "grok-4.20-multi-agent-0309":
-		return ChatRoute{Mode: "heavy", PoolCandidates: []string{"heavy"}}, true
-	case "grok-4.3-beta":
-		return ChatRoute{Mode: "grok-420-computer-use-sa", PoolCandidates: []string{"super", "heavy"}}, true
+	}
+	if mode, ok := ResolveGrokWebMode(id); ok {
+		return ChatRoute{Mode: mode, PoolCandidates: []string{"basic", "super", "heavy"}, GrokWeb: true}, true
 	}
 	return ChatRoute{}, false
 }
