@@ -50,3 +50,7 @@ test('superseded attempt points to a child and no longer advertises waiting', as
   assert.doesNotMatch(registrationJobStatusText('registration_pending', waiting, 'child-id'), /等待自动/)
   assert.equal(registrationCompensationText({...waiting,state:'superseded'}, false, now), '')
 })
+
+test('uncertain final signup explains why registration is not replayed', () => {
+  assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, false, now), /最终注册提交.*核对账号.*不自动重复注册/)
+})

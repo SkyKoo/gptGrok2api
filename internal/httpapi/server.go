@@ -85,6 +85,8 @@ type Server struct {
 	monitor            *runtimeMonitor
 	logMu              sync.Mutex
 	videoMu            sync.RWMutex
+	videoResultMu      sync.Mutex
+	videoFingerprints  map[string]videoResultRecord
 	videoJobs          map[string]*videoJob
 	imageTaskMu        sync.RWMutex
 	imageTasks         map[string]*imageTaskState

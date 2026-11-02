@@ -18,6 +18,7 @@ func TestVideoDiagnosticsClassifySSEErrorsWithoutLeakingBody(t *testing.T) {
 		{`data: {"error":{"code":"RESOURCE_EXHAUSTED","message":"video rate limit reached","token":"SECRET"}}`, 429},
 		{`data: {"result":{"response":{"error":{"code":"UNAUTHENTICATED","cookie":"SECRET"}}}}`, 401},
 		{`data: {"result":{"response":{"streamingVideoGenerationResponse":{"error":{"code":"PERMISSION_DENIED","message":"SECRET"}}}}}`, 403},
+		{`data: {"result":{"response":{"streamingVideoGenerationResponse":{"rejectionReason":"VIDEO_AGE_VERIFICATION_REQUIRED","videoUrl":"https://secret.example/SECRET"}}}}`, 422},
 		{`data: {"result":{"response":{"streamingVideoGenerationResponse":{"moderated":true,"videoUrl":"https://secret.example/SECRET"}}}}`, 422},
 	} {
 		d := NewVideoDiagnostics(200, "text/event-stream", false)

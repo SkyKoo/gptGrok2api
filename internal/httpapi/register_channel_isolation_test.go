@@ -239,3 +239,96 @@ func TestRegistrationCompensationIgnoresViewedDefaultTarget(t *testing.T) {
 		t.Fatal("Grok selection prevented OpenAI compensation")
 	}
 }
+
+func TestGrokTimerUsesLatestSavedChannelParameters(t *testing.T) {
+	s := scheduleServer(t)
+	post := func(path, body string) {
+		t.Helper()
+		res := adminRequest(s.Handler(), http.MethodPost, path, strings.NewReader(body))
+		if res.Code != 200 {
+			t.Fatal(res.Body.String())
+		}
+	}
+	post("/api/register?target=grok", `{"total":1,"threads":1,"proxy":"http://initial.example.test:8080"}`)
+	// 即使旧客户端额外传注册参数，定时 API 也只接受开关与间隔。
+	post("/api/register/schedule?target=grok", `{"enabled":true,"interval_minutes":1,"total":99,"threads":99,"proxy":"http://ignored.example.test:8080"}`)
+	before := s.registrationScheduleSnapshot("grok")
+	post("/api/register?target=grok", `{"total":3,"threads":2,"proxy":"direct"}`)
+	post("/api/register?target=openai", `{"total":7,"threads":1,"proxy":"http://openai.example.test:8080"}`)
+	if s.registrationScheduleSnapshot("grok") != before {
+		t.Fatal("autosave changed timer")
+	}
+	configs := make(chan registerruntime.GrokConfig, 4)
+	s.grokRegister = registerruntime.NewGrokEngine(filepath.Join(t.TempDir(), "jobs.json"), func(c registerruntime.GrokConfig) (registerruntime.MailSource, registerruntime.GrokRegistrationFlow, error) {
+		configs <- c
+		return nil, nil, &registerruntime.Failure{Stage: "test", Code: "fixture"}
+	}, nil, nil)
+	due, err := time.Parse(time.RFC3339Nano, before.NextRunAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runRegistrationSchedule(due.Add(-time.Second))
+	if len(configs) != 0 {
+		t.Fatal("timer ran early")
+	}
+	s.runRegistrationSchedule(due)
+	isolationWait(t, s, "grok", false)
+	if len(configs) != 3 || s.registrationScheduleSnapshot("grok").LastResult != "started" {
+		t.Fatal("wrong batch count", len(configs))
+	}
+	close(configs)
+	for c := range configs {
+		if c.Total != 3 || c.Threads != 2 || c.Proxy != "direct" || c.HME.AccountID != "test" {
+			t.Fatalf("wrong saved config: total=%d threads=%d proxy=%s", c.Total, c.Threads, c.Proxy)
+		}
+	}
+	if s.freeRegister.Snapshot()["jobs_total"] != 0 {
+		t.Fatal("Grok timer started OpenAI")
+	}
+}
+
+func TestGrokCompensationRunsWithTimerDisabledAndRespectsMaintenance(t *testing.T) {
+	s := scheduleServer(t)
+	now := time.Now()
+	profile := registerruntime.NewBrowserProfile()
+	job := registerruntime.RegistrationJob{ID: "pending-grok", Status: "registration_pending", Error: "task_timeout", Mailbox: registerruntime.Mailbox{Email: "grok@example.test", AccountID: "test"}, MailboxAPIBase: "https://mail.example.test", BrowserProfile: &profile, AutoRetry: &registerruntime.RegistrationCompensation{State: "waiting", NextAttemptAt: now.UTC().Format(time.RFC3339Nano)}}
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	raw, err := json.Marshal([]registerruntime.RegistrationJob{job})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	s.grokRegister = registerruntime.NewGrokEngine(path, func(c registerruntime.GrokConfig) (registerruntime.MailSource, registerruntime.GrokRegistrationFlow, error) {
+		calls.Add(1)
+		if c.Proxy != "direct" {
+			t.Error("wrong channel proxy")
+		}
+		return nil, nil, &registerruntime.Failure{Stage: "mail", Code: "network_error"}
+	}, nil, nil)
+	res := adminRequest(s.Handler(), http.MethodPost, "/api/register?target=grok", strings.NewReader(`{"proxy":"direct"}`))
+	if res.Code != 200 {
+		t.Fatal(res.Body.String())
+	}
+	if s.registrationScheduleSnapshot("grok").Enabled {
+		t.Fatal("timer unexpectedly enabled")
+	}
+	marker := filepath.Join(s.cfg.DataDir, "cfm-maintenance")
+	if err := os.WriteFile(marker, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.runRegistrationSchedule(now)
+	if calls.Load() != 0 {
+		t.Fatal("compensation ignored maintenance")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	s.runRegistrationSchedule(now)
+	isolationWait(t, s, "grok", false)
+	if calls.Load() != 1 {
+		t.Fatal("disabled timer blocked compensation")
+	}
+}

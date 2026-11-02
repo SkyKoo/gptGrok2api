@@ -23,6 +23,14 @@
           <Icon :icon="message.role === 'user' ? 'lucide:user' : 'lucide:bot'" class="h-4 w-4" />
         </div>
 
+        <span
+          v-if="message.role === 'assistant' && message.mode === 'chat' && message.model"
+          class="min-w-0 truncate text-xs text-muted-foreground"
+          :title="`这条回复请求时选择的模型：${message.model}`"
+        >
+          {{ message.model }}
+        </span>
+
         <div class="chat-message-actions">
           <Button
             v-for="action in actionsForMessage(message)"

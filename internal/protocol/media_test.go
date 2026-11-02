@@ -80,3 +80,19 @@ func TestImagineImageSizeResolutionMapping(t *testing.T) {
 		})
 	}
 }
+
+func TestVideoEventPreservesAssociationAndRejection(t *testing.T) {
+	events := ParseMediaData([]byte(`{"result":{"response":{"streamingVideoGenerationResponse":{"videoId":"video","videoPostId":"post","parentPostId":"parent","sideBySideIndex":1,"rejectionReason":"VIDEO_IP","progress":100}}}}`))
+	if len(events) != 1 {
+		t.Fatal(events)
+	}
+	e := events[0]
+	if e.VideoID != "video" || e.PostID != "post" || e.ParentPostID != "parent" || e.SideBySideIndex != 1 || e.RejectionReason != "VIDEO_IP" {
+		t.Fatalf("lost correlation fields: %+v", e)
+	}
+	for _, payload := range []map[string]any{BuildVideoPayload("new prompt", "parent", "9:16", "720p", 6, "custom", nil), BuildVideoExtendPayload("new prompt", "parent", "result", "9:16", "720p", 5, "custom", 10)} {
+		if payload["enableSideBySide"] != false {
+			t.Fatal("single-result API enabled multiple candidates")
+		}
+	}
+}

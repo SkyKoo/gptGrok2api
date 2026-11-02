@@ -90,11 +90,22 @@ func (c *OpenAIChat) Stream(ctx context.Context, account accounts.Account, reque
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return readOpenAIHTTPError(response, "/backend-api/conversation")
 	}
-	return scanOpenAIChat(response.Body, onEvent, func(v any) { notifyUpstreamModel(ctx, v) })
+	inputMessageIDs := map[string]bool{}
+	for _, raw := range payload["messages"].([]any) {
+		message, _ := raw.(map[string]any)
+		if id := stringValue(message["id"]); id != "" {
+			inputMessageIDs[id] = true
+		}
+	}
+	return scanOpenAIChatWithInputMessages(response.Body, onEvent, inputMessageIDs, func(v any) { notifyUpstreamModel(ctx, v) })
 }
 
 func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error, observers ...func(any)) error {
-	state := openAIChatState{}
+	return scanOpenAIChatWithInputMessages(reader, onEvent, nil, observers...)
+}
+
+func scanOpenAIChatWithInputMessages(reader io.Reader, onEvent func(OpenAIChatEvent) error, inputMessageIDs map[string]bool, observers ...func(any)) error {
+	state := openAIChatState{inputMessageIDs: inputMessageIDs}
 	ended, hasText := false, false
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 8<<20)
@@ -119,12 +130,14 @@ func scanOpenAIChat(reader io.Reader, onEvent func(OpenAIChatEvent) error, obser
 		if err := json.Unmarshal([]byte(line), &value); err != nil {
 			return fmt.Errorf("invalid ChatGPT stream event: %w", err)
 		}
-		for _, observe := range observers {
-			observe(value)
-		}
 		event, eventErr := state.event(value)
 		if eventErr != nil {
 			return eventErr
+		}
+		if !state.inputMessage {
+			for _, observe := range observers {
+				observe(value)
+			}
 		}
 		hasText = hasText || event.Text != ""
 		if event.Text != "" {
@@ -206,9 +219,11 @@ func openAIChatPayloadWithImages(request protocol.ChatRequest, images []OpenAICh
 }
 
 type openAIChatState struct {
-	text   string
-	path   string
-	hidden bool
+	text            string
+	path            string
+	hidden          bool
+	inputMessageIDs map[string]bool
+	inputMessage    bool
 }
 
 func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
@@ -241,9 +256,11 @@ func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
 			if !ok {
 				continue
 			}
+			// Web 会回显请求里的历史消息；按本次发送的 ID 排除，不能仅凭 assistant 角色认定是新回复。
+			s.inputMessage = s.inputMessageIDs[stringValue(message["id"])]
 			author, _ := message["author"].(map[string]any)
 			role, channel := stringValue(author["role"]), stringValue(message["channel"])
-			s.hidden = (role != "" && role != "assistant") || (channel != "" && channel != "final")
+			s.hidden = s.inputMessage || (role != "" && role != "assistant") || (channel != "" && channel != "final")
 			if message["status"] == "finished_successfully" && !s.hidden {
 				event.Done = true
 			}
@@ -254,7 +271,7 @@ func (s *openAIChatState) event(value any) (OpenAIChatEvent, error) {
 			event.Text = delta
 			s.text += delta
 		}
-		if object["is_complete"] == true || object["finished_successfully"] == true {
+		if !s.inputMessage && (object["is_complete"] == true || object["finished_successfully"] == true) {
 			event.Done = true
 		}
 	}

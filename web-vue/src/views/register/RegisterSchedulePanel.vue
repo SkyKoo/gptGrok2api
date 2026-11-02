@@ -1,7 +1,7 @@
 <template>
   <form v-if="schedule" class="register-schedule" aria-label="定时启动注册" @submit.prevent="save">
     <Checkbox class="schedule-toggle" :model-value="enabled" :disabled="saving" @update:model-value="enabled = Boolean($event)">
-      定时启动
+      {{ target === 'grok' ? 'Grok' : 'OpenAI' }} 定时启动
     </Checkbox>
     <div class="schedule-controls">
       <label class="schedule-field">
@@ -25,8 +25,8 @@
         <p v-if="Number.isFinite(nextRunAt)">下次触发：{{ nextRun }}</p>
       </template>
     </div>
-    <p>沿用当前批次的注册总数、线程数和邮箱配置；启用后等待一个完整间隔再启动，关闭页面后仍会定时触发。</p>
-    <p>已有注册任务或服务维护时跳过本次。关闭定时不停止当前批次；手动“停止”不关闭定时。</p>
+    <p>每次触发读取 {{ target === 'grok' ? 'Grok' : 'OpenAI' }} 渠道最新保存的注册参数（数量、线程、代理和邮箱来源），定时器只负责启动。启用后等待一个完整间隔；关闭页面后仍会执行。</p>
+    <p>本渠道已有注册任务或服务维护时跳过本次。关闭定时不停止当前批次；手动“停止”不关闭定时。</p>
     <p v-if="!valid" class="schedule-error" role="alert">请输入 1～10080 的整数分钟。</p>
     <p v-if="error" class="schedule-error" role="alert">{{ error }}</p>
     <p v-if="lastResult" :class="{ 'schedule-error': schedule.last_result === 'failed' || schedule.last_error.startsWith('storage:') }">{{ lastResult }}</p>

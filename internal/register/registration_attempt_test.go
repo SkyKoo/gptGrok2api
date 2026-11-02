@@ -163,6 +163,9 @@ func TestCompensationJournalFailureDoesNotCreateChildOrStartNetwork(t *testing.T
 		t.Run(platform, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "jobs.json")
 			p := compensationFixture(time.Now())
+			if platform == "grok" {
+				p.Mailbox.AccountID = "hme-account"
+			}
 			writeCompensationJobs(t, path, p)
 			var calls atomic.Int32
 			cfg := freeTestConfig()

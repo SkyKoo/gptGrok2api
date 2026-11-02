@@ -15,7 +15,8 @@ export function registrationCompensationText(state: RegistrationCompensation | n
   if (state.state === 'manual') {
     const reasons: Record<string, string> = {
       cancelled: '已停止自动补偿，可手动重试。',
-      grok_manual_retry: 'Grok 当前需要手动重试；请先检查错误原因，原邮箱会保留。',
+      registration_result_uncertain: '已进入最终注册提交阶段，结果尚未确认；请先核对账号是否已创建，不自动重复注册。',
+      grok_manual_retry: '旧版 Grok 待处理记录；后台将重新检查是否符合自动补偿条件，原邮箱会保留。',
       upstream_signup_refused: '上游拒绝本次邮箱注册，不自动补偿；请先核实上游可用性和账号资格。',
       human_verification_required: '安全验证未完成，不自动补偿；请先人工核查页面和网络。',
       email_already_registered: '上游提示邮箱已注册，请核对已有账号。',

@@ -151,3 +151,90 @@ data: [DONE]
 		t.Fatalf("output=%q err=%v", output.String(), err)
 	}
 }
+
+func TestOpenAIChatExcludesInputMessageEchoes(t *testing.T) {
+	for _, variant := range []string{"new_reply", "history_only", "truncated_history"} {
+		t.Run(variant, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/":
+					fmt.Fprint(w, `<html data-build="test"></html>`)
+				case "/backend-api/sentinel/chat-requirements/prepare":
+					fmt.Fprint(w, `{"prepare_token":"test"}`)
+				case "/backend-api/sentinel/chat-requirements/finalize":
+					fmt.Fprint(w, `{"token":"test"}`)
+				case "/backend-api/conversation":
+					var payload map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Error(err)
+						return
+					}
+					if payload["model"] != "gpt-6" {
+						t.Errorf("selected model changed: %v", payload["model"])
+					}
+					messages := payload["messages"].([]any)
+					if len(messages) != 4 {
+						t.Errorf("conversation context removed: %d messages", len(messages))
+						return
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					emit := func(value any) { raw, _ := json.Marshal(value); fmt.Fprintf(w, "data: %s\n\n", raw) }
+					for index, raw := range messages {
+						message := raw.(map[string]any)
+						message["status"] = "finished_successfully"
+						message["metadata"] = map[string]any{"model_slug": "old-grok-history"}
+						envelope := map[string]any{"message": message}
+						if index%2 == 0 {
+							emit(envelope)
+						} else {
+							emit(map[string]any{"p": "", "v": envelope})
+						}
+						emit(map[string]any{"p": "/message/content/parts/0", "o": "append", "v": " echoed history delta"})
+					}
+					if variant == "new_reply" {
+						message := map[string]any{"id": "new-output", "author": map[string]any{"role": "assistant"}, "channel": "final", "content": map[string]any{"parts": []any{"fresh answer"}}, "metadata": map[string]any{"model_slug": "gpt-6"}}
+						emit(map[string]any{"message": message})
+						emit(map[string]any{"p": "/message/content/parts/0", "o": "append", "v": " only"})
+						message["content"] = map[string]any{"parts": []any{"fresh answer only"}}
+						message["status"] = "finished_successfully"
+						emit(map[string]any{"message": message})
+						// A delayed input snapshot must not alter content, completion or model metadata.
+						emit(map[string]any{"message": messages[1], "is_complete": true})
+					}
+					if variant != "truncated_history" {
+						fmt.Fprint(w, "data: [DONE]\n\n")
+					}
+				default:
+					t.Errorf("unexpected upstream endpoint: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer upstream.Close()
+			chat := NewOpenAIChat(NewOpenAIImage(upstream.URL, upstream.Client(), nil, 5*time.Second))
+			request := protocol.ChatRequest{Model: "gpt-6", Messages: []protocol.Message{
+				{Role: "user", Content: "earlier question"},
+				{Role: "assistant", Content: "我是 Grok 4.5"},
+				{Role: "assistant", Content: "上游没有返回内容。"},
+				{Role: "user", Content: "current question"},
+			}}
+			var models []string
+			ctx := WithModelObserver(context.Background(), func(model string) { models = append(models, model) })
+			text, _, err := chat.Complete(ctx, accounts.Account{Token: "fixture"}, request)
+			if variant == "new_reply" {
+				if err != nil || text != "fresh answer only" {
+					t.Fatalf("history polluted reply: text=%q err=%v", text, err)
+				}
+				if len(models) == 0 {
+					t.Fatal("new output model was not observed")
+				}
+				for _, model := range models {
+					if model != "gpt-6" {
+						t.Fatalf("input history polluted model metadata: %v", models)
+					}
+				}
+			} else if err == nil || text != "" || len(models) != 0 {
+				t.Fatalf("history-only stream accepted as output: text=%q err=%v models=%v", text, err, models)
+			}
+		})
+	}
+}

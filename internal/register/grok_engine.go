@@ -67,7 +67,6 @@ func NewGrokEngine(path string, factory GrokFactory, importer ImportAccount, ver
 			job := &e.jobs[i]
 			if job.Status == "running" || job.Status == "queued" {
 				job.Status = "interrupted"
-				job.Stage = "interrupted"
 				job.Error = "process_restarted_no_automatic_registration_retry"
 				if job.Mailbox.Email != "" && len(job.Account) == 0 {
 					job.Status = "registration_pending"
@@ -78,7 +77,10 @@ func NewGrokEngine(path string, factory GrokFactory, importer ImportAccount, ver
 						job.Status = "import_pending"
 					}
 				}
-				recoverRegistrationCompensation(job, time.Now())
+				recoverGrokRegistrationCompensation(job, time.Now())
+				if job.AutoRetry != nil && job.AutoRetry.State == "waiting" {
+					job.Error = "process_restarted_compensation_delayed"
+				}
 				job.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				changed = true
 			}
@@ -248,6 +250,9 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 		return e.progress(id, stage, flow)
 	})
 	if err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
 		e.failJob(id, err)
 		return
 	}
@@ -407,9 +412,11 @@ func (e *GrokEngine) failJob(id string, err error) {
 				job.Status = "import_pending"
 			}
 		}
-		planRegistrationCompensation(job, err, time.Now())
-		if savedRegistrationMailbox(*job) {
-			job.AutoRetry = grokRegistrationCompensation(*job)
+		if errors.Is(err, context.Canceled) && e.closing && job.AutoRetry != nil && job.AutoRetry.State == "running" {
+			// 服务重启保留已登记的重试期限，用户主动停止仍转人工处理。
+			recoverGrokRegistrationCompensation(job, time.Now())
+		} else {
+			planGrokRegistrationCompensation(job, err, time.Now())
 		}
 		action := job.Stage
 		if index := strings.Index(job.Error, ":"); index > 0 {
@@ -570,95 +577,69 @@ func (e *GrokEngine) RetrySavedResult(id string) error {
 	return nil
 }
 
-// RetryRegistration reuses the mailbox already recorded for a failed Grok
-// task, but starts a fresh browser environment for the new attempt. It never
-// acquires another alias or creates a second mailbox.
+// RetryRegistration 复用失败任务的邮箱与已保存环境，新建子任务并保留重试预算。
 func (e *GrokEngine) RetryRegistration(raw map[string]any, id string) error {
 	cfg, err := ParseGrokConfig(raw)
 	if err != nil {
 		return err
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.loadError != nil {
-		e.mu.Unlock()
 		return e.loadError
 	}
 	if e.closing {
-		e.mu.Unlock()
 		return fail("task", "shutting_down")
 	}
 	if e.runCancel != nil || len(e.active) > 0 {
-		e.mu.Unlock()
 		return fail("task", "already_running")
 	}
-	parent, index := RegistrationJob{}, -1
-	for i, candidate := range e.jobs {
-		if candidate.ID == id && candidate.Status == "registration_pending" {
-			parent, index = cloneJob(candidate), i
-			break
+	for i, job := range e.jobs {
+		if job.ID == id && job.Status == "registration_pending" {
+			return e.startGrokCompensationLocked(i, cfg, false, time.Now())
 		}
 	}
-	if index < 0 {
-		e.mu.Unlock()
-		return fail("task", "no_saved_mailbox")
-	}
-	for i, other := range e.jobs {
-		if i != index && strings.EqualFold(other.Mailbox.Email, parent.Mailbox.Email) && (other.Verified || other.Imported || len(other.Account) > 0) {
-			e.mu.Unlock()
-			return fail("task", "mailbox_already_has_saved_account")
-		}
-	}
-	job, err := newRegistrationAttempt(parent, time.Now())
-	if err != nil {
-		e.mu.Unlock()
-		return err
-	}
-	// A new browser session belongs to this attempt, while the parent retains its profile.
-	job.BrowserProfile = nil
-	job.AutoRetry = nil
-	appendRegistrationLog(&job, "manual_compensation", "复用已创建邮箱，开始手动补偿注册；原任务 "+parent.ID, "info")
-	before := e.jobs[index]
-	e.jobs[index] = registrationParentWithChild(parent, job)
-	e.jobs = append(e.jobs, job)
-	if err := e.saveLocked(); err != nil {
-		e.jobs = e.jobs[:len(e.jobs)-1]
-		e.jobs[index] = before
-		e.loadError = err
-		e.mu.Unlock()
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	e.active[job.ID] = &activeRegistration{cancel: cancel, done: make(chan struct{})}
-	e.mu.Unlock()
-	go e.runSavedRegistration(ctx, job.ID, job, cfg)
-	return nil
+	return fail("task", "no_saved_mailbox")
 }
 
 func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job RegistrationJob, cfg GrokConfig) {
 	defer e.finishTask(id)
+	var runErr error
 	defer func() {
 		if recover() != nil {
-			e.failJob(id, fail("task", "internal_error"))
+			runErr = fail("task", "internal_error")
+		}
+		if runErr != nil {
+			// 停止时底层可能返回 read_error；以取消信号为准，避免再次排入自动重试。
+			if ctx.Err() != nil {
+				runErr = ctx.Err()
+			}
+			e.failJob(id, runErr)
 		}
 	}()
 	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "grok", &cfg.Proxy, e.getJob, e.change)
 	if err != nil {
-		e.failJob(id, err)
+		runErr = err
 		return
 	}
 	defer releaseProxy()
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
-		e.failJob(id, err)
+		runErr = err
 		return
 	}
 	defer mail.Close()
 	defer flow.Close()
-	if err := prepareSavedGrokMailbox(ctx, mailboxClaimJobID(job), job.Mailbox, mail); err != nil {
-		e.failJob(id, err)
+	if provider, ok := flow.(RegistrationProfileProvider); ok && cfg.BrowserProfile == nil {
+		profile := provider.BrowserProfile()
+		if runErr = e.change(id, func(j *RegistrationJob) { j.BrowserProfile = &profile }); runErr != nil {
+			return
+		}
+	}
+	if runErr = prepareSavedGrokMailbox(ctx, mailboxClaimJobID(job), job.Mailbox, mail); runErr != nil {
 		return
 	}
-	e.registerSaved(ctx, id, job, cfg, mail, flow)
+	runErr = e.registerSaved(ctx, id, job, cfg, mail, flow)
 }
 
 func prepareSavedGrokMailbox(ctx context.Context, jobID string, box Mailbox, mail MailSource) error {
@@ -674,19 +655,17 @@ func prepareSavedGrokMailbox(ctx context.Context, jobID string, box Mailbox, mai
 	return preparer.Prepare(ctx, box)
 }
 
-func (e *GrokEngine) registerSaved(ctx context.Context, id string, job RegistrationJob, cfg GrokConfig, mail MailSource, flow GrokRegistrationFlow) {
+func (e *GrokEngine) registerSaved(ctx context.Context, id string, job RegistrationJob, cfg GrokConfig, mail MailSource, flow GrokRegistrationFlow) error {
 	account, err := flow.Register(ctx, job.Mailbox, cfg, func(waitCtx context.Context, after time.Time) (string, error) {
 		return waitGrokCode(mail, waitCtx, job.Mailbox, after)
 	}, func(stage string) error {
 		return e.progress(id, stage, flow)
 	})
 	if err != nil {
-		e.failJob(id, err)
-		return
+		return err
 	}
 	if stringValue(account["sso"]) == "" {
-		e.failJob(id, fail("sso", "missing_sso"))
-		return
+		return fail("sso", "missing_sso")
 	}
 	account["registration_job_id"] = id
 	account["registration_mailbox"] = map[string]any{
@@ -705,39 +684,33 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 		current.Account = account
 		current.Stage = "import"
 		current.Status = "import_pending"
+		finishRegistrationCompensation(current, "saved_result")
 	}); err != nil {
-		e.failJob(id, err)
-		return
+		return err
 	}
 	if committer, ok := mail.(interface {
 		Commit(context.Context, string, Mailbox) error
 	}); ok {
 		if err := committer.Commit(ctx, id, job.Mailbox); err != nil {
-			e.failJob(id, err)
-			return
+			return err
 		}
 	}
-	if err := e.importAndVerify(ctx, id); err != nil {
-		e.failJob(id, err)
-	}
+	return e.importAndVerify(ctx, id)
 }
 
-// Grok has a manual retry endpoint, but no automatic compensation runner.
-// Normalize legacy "waiting" records for display without rewriting stored data.
+// 保留真实等待/运行状态；历史明确拒绝仍显示人工处理。
 func grokRegistrationCompensation(job RegistrationJob) *RegistrationCompensation {
-	if !savedRegistrationMailbox(job) {
+	if job.AutoRetry == nil && !savedRegistrationMailbox(job) {
 		return nil
 	}
-	state := RegistrationCompensation{State: "manual", Reason: "grok_manual_retry"}
+	state := RegistrationCompensation{State: "manual", Reason: "failure_requires_review"}
 	if job.AutoRetry != nil {
 		state = *job.AutoRetry
 	}
-	if state.State == "waiting" || state.State == "running" || state.State == "" {
-		state.State, state.Reason = "manual", "grok_manual_retry"
-	}
-	state.NextAttemptAt = ""
-	if reason := registrationReviewReason(job.Error); reason != "" {
-		state.State, state.Reason = "manual", reason
+	if savedRegistrationMailbox(job) {
+		if reason := registrationReviewReason(job.Error); reason != "" {
+			state.State, state.Reason, state.NextAttemptAt = "manual", reason, ""
+		}
 	}
 	return &state
 }

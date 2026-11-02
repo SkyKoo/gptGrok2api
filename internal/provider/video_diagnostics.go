@@ -3,6 +3,7 @@ package provider
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 )
@@ -13,6 +14,7 @@ type VideoDiagnostics struct {
 	core          *liteDiagnostics
 	VideoEvents   int  `json:"video_events"`
 	Moderated     bool `json:"moderated"`
+	Rejected      bool `json:"rejected"`
 	URLPresent    bool `json:"url_present"`
 	PostIDPresent bool `json:"post_id_present"`
 	MaxProgress   int  `json:"max_progress"`
@@ -33,6 +35,11 @@ func (d *VideoDiagnostics) Observe(line string) {
 		}
 		d.VideoEvents++
 		d.Moderated = d.Moderated || event.Moderated
+		switch strings.ToUpper(strings.TrimSpace(event.RejectionReason)) {
+		case "", "NONE", "UNSPECIFIED", "REJECTION_REASON_UNSPECIFIED":
+		default:
+			d.Rejected = true
+		}
 		d.URLPresent = d.URLPresent || event.URL != ""
 		d.PostIDPresent = d.PostIDPresent || event.PostID != "" || event.ImageID != ""
 		if event.Progress > d.MaxProgress {
@@ -42,7 +49,7 @@ func (d *VideoDiagnostics) Observe(line string) {
 }
 
 func (d *VideoDiagnostics) Failure() error {
-	if d.core.Failure != "" || d.Moderated {
+	if d.core.Failure != "" || d.Moderated || d.Rejected {
 		return d.Err("upstream_error")
 	}
 	return nil
@@ -53,6 +60,8 @@ func (d *VideoDiagnostics) Err(reason string) error {
 		reason = d.core.Failure
 	} else if d.Moderated {
 		reason = "moderated"
+	} else if d.Rejected {
+		reason = "rejected"
 	}
 	status := 502
 	label := "Grok 视频未返回可用结果"
@@ -69,6 +78,9 @@ func (d *VideoDiagnostics) Err(reason string) error {
 	case "moderated":
 		status = 422
 		label = "Grok 视频被上游内容审核拦截"
+	case "rejected":
+		status = 422
+		label = "Grok 上游拒绝本次视频生成"
 	case "stream_read_failed":
 		label = "Grok 视频响应流中断，生成结果未知"
 	case "user_id_missing":

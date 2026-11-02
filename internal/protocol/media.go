@@ -117,7 +117,7 @@ func BuildVideoPayload(prompt, parentPostID, aspectRatio, resolution string, sec
 		"temporary":        true,
 		"modelName":        "imagine-video-gen",
 		"message":          strings.TrimSpace(prompt) + " " + mode,
-		"enableSideBySide": true,
+		"enableSideBySide": false,
 		"responseMetadata": map[string]any{
 			"experiments":         []any{},
 			"modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}},
@@ -134,7 +134,7 @@ func BuildVideoExtendPayload(prompt, parentPostID, extendPostID, aspectRatio, re
 		"temporary":        true,
 		"modelName":        "imagine-video-gen",
 		"message":          strings.TrimSpace(prompt) + " --mode=" + mode,
-		"enableSideBySide": true,
+		"enableSideBySide": false,
 		"responseMetadata": map[string]any{
 			"experiments": []any{},
 			"modelConfigOverride": map[string]any{"modelMap": map[string]any{
@@ -217,15 +217,20 @@ func BuildImageEditPayload(prompt string, refs []string, parentPostID string) ma
 }
 
 type MediaEvent struct {
-	Kind      string
-	URL       string
-	Blob      string
-	AssetID   string
-	ImageID   string
-	Progress  int
-	Index     int
-	PostID    string
-	Moderated bool
+	Kind            string
+	URL             string
+	Blob            string
+	AssetID         string
+	ImageID         string
+	Progress        int
+	Index           int
+	PostID          string
+	Moderated       bool
+	VideoID         string
+	VideoPrompt     string
+	ParentPostID    string
+	RejectionReason string
+	SideBySideIndex int
 }
 
 func ParseMediaData(raw []byte) []MediaEvent {
@@ -246,14 +251,19 @@ func parseMediaObject(object map[string]any) []MediaEvent {
 	for _, key := range []string{"streamingImageGenerationResponse", "streamingVideoGenerationResponse"} {
 		if stream, ok := response[key].(map[string]any); ok {
 			events = append(events, MediaEvent{
-				Kind:      map[string]string{"streamingImageGenerationResponse": "image", "streamingVideoGenerationResponse": "video"}[key],
-				URL:       stringField(stream, "imageUrl", "videoUrl", "url"),
-				AssetID:   stringField(stream, "assetId"),
-				ImageID:   stringField(stream, "imageId", "videoId", "videoPostId"),
-				PostID:    stringField(stream, "videoPostId", "videoId"),
-				Progress:  intField(stream, "progress"),
-				Index:     intField(stream, "imageIndex"),
-				Moderated: boolField(stream, "moderated"),
+				Kind:            map[string]string{"streamingImageGenerationResponse": "image", "streamingVideoGenerationResponse": "video"}[key],
+				URL:             stringField(stream, "imageUrl", "videoUrl", "url"),
+				AssetID:         stringField(stream, "assetId"),
+				ImageID:         stringField(stream, "imageId", "videoId", "videoPostId"),
+				PostID:          stringField(stream, "videoPostId"),
+				Progress:        intField(stream, "progress"),
+				Index:           intField(stream, "imageIndex"),
+				Moderated:       boolField(stream, "moderated"),
+				VideoID:         stringField(stream, "videoId"),
+				VideoPrompt:     stringField(stream, "videoPrompt"),
+				ParentPostID:    stringField(stream, "parentPostId"),
+				RejectionReason: stringField(stream, "rejectionReason"),
+				SideBySideIndex: intField(stream, "sideBySideIndex"),
 			})
 		}
 	}

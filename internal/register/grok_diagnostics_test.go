@@ -73,7 +73,7 @@ func TestBrowserWorkerPathSanitizerRejectsQueryAndExternalValues(t *testing.T) {
 	}
 }
 
-func TestGrokSnapshotExposesManualReviewInsteadOfHidingRetryState(t *testing.T) {
+func TestGrokSnapshotPreservesWaitingExceptExplicitRefusals(t *testing.T) {
 	for _, errorText := range []string{"task_timeout", "send_code: browser_worker_rejected (HTTP 504) operation=worker_error=signup_unavailable"} {
 		job := compensationFixture(time.Now())
 		job.Error = errorText
@@ -81,8 +81,12 @@ func TestGrokSnapshotExposesManualReviewInsteadOfHidingRetryState(t *testing.T) 
 		snapshot := engine.Snapshot()
 		jobs := snapshot["jobs"].([]any)
 		retry := jobs[0].(map[string]any)["auto_retry"].(map[string]any)
-		if retry["state"] != "manual" || retry["next_attempt_at"] != "" {
-			t.Fatalf("misleading Grok schedule: %+v", retry)
+		if errorText == "task_timeout" {
+			if retry["state"] != "waiting" || retry["next_attempt_at"] == "" {
+				t.Fatalf("hidden Grok schedule: %+v", retry)
+			}
+		} else if retry["state"] != "manual" || retry["next_attempt_at"] != "" {
+			t.Fatalf("refusal scheduled: %+v", retry)
 		}
 		if engine.jobs[0].AutoRetry.State != "waiting" {
 			t.Fatal("snapshot modified stored task")

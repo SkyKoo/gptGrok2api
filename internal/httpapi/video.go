@@ -3,13 +3,12 @@ package httpapi
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,10 +43,12 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxVideoReferences*maxVideoReferenceBytes+(1<<20))
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid multipart form", "invalid_request_error")
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	modelName := strings.TrimSpace(r.FormValue("model"))
 	if modelName == "" {
 		modelName = "grok-imagine-video"
@@ -91,58 +92,25 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model is not a video model", "invalid_request_error")
 		return
 	}
+	inputs, err := videoReferenceInputs(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(seconds), Size: size, Quality: "standard"}
 	s.videoMu.Lock()
 	s.videoJobs[job.ID] = job
 	s.videoMu.Unlock()
 	s.monitor.start(job.ID, "/v1/videos", modelName, prompt)
-	var references []string
-	s.ensureGrokMediaQuotas(r.Context())
-	inputReferences := multipartFiles(r, "input_reference[]", "input_reference")
-	if len(inputReferences) > 7 {
-		inputReferences = inputReferences[:7]
-	}
-	for _, header := range inputReferences {
-		file, err := header.Open()
-		if err != nil {
-			continue
-		}
-		raw, readErr := io.ReadAll(io.LimitReader(file, 16<<20))
-		_ = file.Close()
-		if readErr != nil || len(raw) == 0 {
-			continue
-		}
-		mimeType := header.Header.Get("Content-Type")
-		if mimeType == "" {
-			mimeType = "image/jpeg"
-		}
-		lease, reserveErr := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: modelName, Uploads: 1})
-		if reserveErr != nil {
-			continue
-		}
-		s.grokAccountPool.MarkSent(lease, "file_upload")
-		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, header.Filename, mimeType, base64.StdEncoding.EncodeToString(raw))
-		if uploadErr == nil {
-			s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
-		} else {
-			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(uploadErr), uploadErr)
-		}
-		s.grokAccountPool.Release(lease)
-		if uploadErr == nil {
-			if ref := protocol.ResolveAssetReference(fileID, fileURI, cookieUserID(lease.Account)); ref != "" {
-				references = append(references, ref)
-			}
-		}
-	}
 	// Serialize a submission snapshot; the worker immediately mutates job.
 	s.videoMu.RLock()
 	initial := *job
 	s.videoMu.RUnlock()
-	go s.runVideoJob(job, prompt, aspect, resolution, seconds, preset, references)
+	go s.runVideoJob(job, prompt, aspect, resolution, seconds, preset, inputs)
 	writeJSON(w, http.StatusOK, initial)
 }
 
-func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, refs []string) {
+func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput) {
 	s.setVideoStatus(job, "in_progress", 1, nil)
 	// All entry points, including queued legacy jobs, use the high-quality route.
 	resolution = "720p"
@@ -152,12 +120,35 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	for _, length := range segments {
 		units += (length + 5) / 6
 	}
-	lease, err := s.grokAccountPool.ReserveIntent(context.Background(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units})
+	lease, err := s.grokAccountPool.ReserveIntent(context.Background(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units, Uploads: len(inputs)})
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
 		return
 	}
 	defer s.grokAccountPool.Release(lease)
+	requestHash := videoRequestFingerprint(job.Model, prompt, aspect, resolution, seconds, preset, inputs)
+	s.monitor.enrich(job.ID, map[string]any{
+		"account_email": stringValue(lease.Account.Fields["email"]),
+		"account_id":    stringValue(lease.Account.Fields["account_id"]),
+		"metrics":       map[string]any{"video_request_sha256": requestHash, "video_reference_count": len(inputs)},
+	})
+	refs := make([]string, 0, len(inputs))
+	for index, input := range inputs {
+		s.grokAccountPool.MarkSent(lease, "file_upload")
+		fileID, fileURI, uploadErr := s.mediaProvider.Upload(context.Background(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
+		if uploadErr != nil {
+			// Upload failures must not expose signed URLs or silently become text-to-video.
+			err := &protocol.UpstreamError{Status: upstreamStatus(uploadErr), Message: fmt.Sprintf("第 %d 张视频参考图上传失败（file_upload）；已停止生成，请稍后重新提交", index+1)}
+			s.failVideoUpstream(job, lease, "reference_upload_failed", err)
+			return
+		}
+		ref := videoReferenceURL(fileID, fileURI, cookieUserID(lease.Account))
+		if ref == "" {
+			s.failVideoUpstream(job, lease, "invalid_reference", &protocol.UpstreamError{Status: 502, Message: fmt.Sprintf("第 %d 张视频参考图未返回有效资源标识；已停止生成", index+1)})
+			return
+		}
+		refs = append(refs, ref)
+	}
 	post, err := s.mediaProvider.CreatePost(context.Background(), lease.Account, protocol.VideoPostMediaType, "", prompt)
 	if err != nil {
 		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
@@ -178,6 +169,10 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	for index, segmentLength := range segments {
 		payload := protocol.BuildVideoPayload(prompt, parentID, aspect, resolution, segmentLength, preset, refs)
 		if index > 0 {
+			if extendPostID == "" {
+				s.failVideoUpstream(job, lease, "missing_extension_source", diagnostics.Err("missing_extension_source"))
+				return
+			}
 			payload = protocol.BuildVideoExtendPayload(prompt, parentID, extendPostID, aspect, resolution, segmentLength, preset, float64(elapsedSeconds)+1.0/24.0)
 		}
 		s.grokAccountPool.MarkSent(lease, "video_gen")
@@ -190,9 +185,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		diagnostics = provider.NewVideoDiagnostics(response.StatusCode, response.Header.Get("Content-Type"), cookieUserID(lease.Account) != "")
 		scanner := bufio.NewScanner(response.Body)
 		scanner.Buffer(make([]byte, 4096), 8<<20)
-		segmentPostID := ""
-		segmentAssetID := ""
-		segmentURL := ""
+		result := provider.NewVideoResult(parentID)
 		for scanner.Scan() {
 			line := scanner.Text()
 			diagnostics.Observe(line)
@@ -206,23 +199,14 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 				break
 			}
 			for _, event := range events {
-				if event.Progress > 0 {
-					scaled := int((float64(index) + float64(event.Progress)/100.0) / float64(len(segments)) * 100.0)
-					s.setVideoStatus(job, "in_progress", scaled, nil)
+				if err := result.Observe(event); err != nil {
+					_ = response.Body.Close()
+					s.failVideoUpstream(job, lease, "video_result_mismatch", err)
+					return
 				}
-				if event.Kind == "video" {
-					if event.URL != "" {
-						segmentURL = event.URL
-					}
-					if event.AssetID != "" {
-						segmentAssetID = event.AssetID
-					}
-					if event.PostID != "" {
-						segmentPostID = event.PostID
-					}
-					if segmentPostID == "" && event.ImageID != "" {
-						segmentPostID = event.ImageID
-					}
+				if result.Progress > 0 {
+					scaled := int((float64(index) + float64(result.Progress)/100.0) / float64(len(segments)) * 100.0)
+					s.setVideoStatus(job, "in_progress", scaled, nil)
 				}
 			}
 		}
@@ -231,23 +215,27 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 			s.failVideoUpstream(job, lease, "stream_failed", diagnostics.Err("stream_read_failed"))
 			return
 		}
-		if diagnostics.VideoEvents == 0 || (diagnostics.MaxProgress > 0 && diagnostics.MaxProgress < 100) {
+		if !result.Complete() {
 			s.failVideoUpstream(job, lease, "incomplete_video", diagnostics.Err("incomplete_video"))
 			return
 		}
 		// The final segment must supply its own result. Never report an earlier
 		// shorter segment as a successful extension of the requested duration.
-		videoURL = segmentURL
-		assetID = segmentAssetID
-		if segmentPostID != "" {
-			extendPostID = segmentPostID
-		}
+		videoURL = result.URL
+		assetID = result.AssetID
+		extendPostID = result.ResultPostID()
+		s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{
+			"video_parent_sha256":          fmt.Sprintf("%x", sha256.Sum256([]byte(parentID))),
+			"video_result_sha256":          fmt.Sprintf("%x", sha256.Sum256([]byte(result.PostID+"/"+result.VideoID))),
+			"video_parent_verified":        result.ParentVerified,
+			"video_upstream_prompt_sha256": result.UpstreamPromptHash,
+		}})
 		elapsedSeconds += segmentLength
 	}
 	if videoURL == "" && assetID != "" {
 		videoURL = protocol.ResolveAssetReference(assetID, "", "")
 	}
-	if videoURL == "" && diagnostics != nil && diagnostics.VideoEvents > 0 {
+	if videoURL == "" && extendPostID != "" {
 		videoURL = protocol.ResolveGeneratedVideoReference(cookieUserID(lease.Account), extendPostID)
 	}
 	if videoURL == "" {
@@ -263,18 +251,17 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		s.failVideoUpstream(job, lease, "download_failed", err)
 		return
 	}
-	if err := os.MkdirAll(s.cfg.VideoDataDir, 0o755); err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": err.Error()})
-		return
+	path, fingerprint, err := s.storeVideoResult(job.ID, requestHash, raw, mimeType)
+	if fingerprint != "" {
+		s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_media_sha256": fingerprint}})
 	}
-	fileID := strings.TrimPrefix(job.ID, "video_")
-	ext := ".mp4"
-	if strings.Contains(mimeType, "webm") {
-		ext = ".webm"
-	}
-	path := filepath.Join(s.cfg.VideoDataDir, fileID+ext)
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": err.Error()})
+	if err != nil {
+		code := "storage_failed"
+		if errors.Is(err, errRepeatedVideo) {
+			s.failVideoUpstream(job, lease, "repeated_video_result", &protocol.UpstreamError{Status: 502, Message: err.Error()})
+			return
+		}
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": err.Error()})
 		return
 	}
 	s.videoMu.Lock()
