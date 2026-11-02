@@ -154,6 +154,7 @@ func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
 	if err := c.HME.Validate(); err != nil {
 		return c, err
 	}
+	c.Proxy = registrationProxyForTarget(raw, "openai", c.Proxy)
 	return c, nil
 }
 

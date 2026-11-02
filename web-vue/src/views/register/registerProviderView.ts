@@ -1,3 +1,4 @@
+import { normalizeRegistrationTargetSettings, registrationTargetSettingsPayload } from '@/lib/registrationTargetSettings'
 import { registrationResinChannel, registrationProxyFailureText } from '@/lib/registrationProxy'
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
 import type { ProxyGroup } from '@/api/proxy'
@@ -477,6 +478,8 @@ export function normalizeProvider(provider: RegisterProvider): RegisterProvider 
 
 export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegisterConfig {
   const target = normalizeRegisterTarget(raw.target)
+  const targetSettings = normalizeRegistrationTargetSettings(raw)
+  raw = { ...raw, ...targetSettings[target], target_settings: targetSettings }
   const mail = {
     ...defaultRegisterConfig.mail,
     ...(raw.mail || {}),
@@ -572,12 +575,13 @@ export function providerTypeLabel(type: string) {
   return providerTypeOptions.find(item => item.value === type)?.label || type
 }
 
-export function registerProxyHint(mode: RegisterProxyMode) {
-  if (mode === 'direct') return '本次注册任务强制直连，不读取默认代理。'
-  if (mode === 'group') return 'GPT 和 Grok 共用代理组：任务启动时轮询可用节点，全程固定；补偿创建子任务并重新分配，成功后绑定到账号。无可用节点时停止。'
-  if (mode === 'resin') return '直接使用 Resin 渠道，无需创建代理组。Account 按任务自动生成，补偿子任务使用新身份，注册成功后保存到账号；新身份不保证节点不同。'
-  if (mode === 'custom') return '单次任务全程使用该地址，成功后账号继续使用；补偿子任务按当前配置选择出口。'
-  return '默认使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
+export function registerProxyHint(mode: RegisterProxyMode, target: RegisterTarget = 'openai') {
+  const account = target === 'grok' ? '注册成功后日常调用默认直连。' : '注册成功后账号继续使用该出口。'
+  if (mode === 'direct') return '本渠道注册任务强制直连，不读取默认代理。'
+  if (mode === 'group') return `本渠道按所选代理组轮询可用节点，单次任务全程固定；补偿按本渠道配置重新分配。${account}无可用节点时停止。`
+  if (mode === 'resin') return `本渠道使用独立的 Resin 配置，Account 按任务自动生成；补偿子任务使用新身份，新身份不保证节点不同。${account}`
+  if (mode === 'custom') return `本渠道单次任务全程使用该地址；补偿子任务按本渠道当前配置选择出口。${account}`
+  return '本渠道使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
 }
 
 export function registerProxyGroupOptions(groups: readonly ProxyGroup[], selectedId = '') {
@@ -723,6 +727,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
   const checkoutChannel = config.checkout?.channel === 'pix' ? 'pix' : 'upi'
   return {
     target,
+    target_settings: registrationTargetSettingsPayload(config),
     openai_free: { timeout_seconds: config.openai_free.timeout_seconds, auto_twofa: Boolean(config.openai_free.auto_twofa) },
     grok,
     checkout: {

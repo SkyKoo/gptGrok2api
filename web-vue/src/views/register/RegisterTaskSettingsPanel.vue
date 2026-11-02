@@ -11,7 +11,8 @@
       </fieldset>
     </FormSection>
 
-    <FormSection title="任务参数" density="roomy">
+    <FormSection :title="`${config.target === 'grok' ? 'Grok' : 'OpenAI'} 任务参数`" density="roomy">
+      <p class="register-proxy-hint">参数按渠道独立自动保存，切换渠道后恢复对应设置。</p>
       <div class="register-form-grid">
         <label class="register-field">
           <span class="register-label">任务模式</span>
@@ -57,7 +58,7 @@
           />
         </label>
 
-        <fieldset class="checkout-channel-segmented register-field--full" :disabled="config.enabled || !config.checkout.enabled">
+        <fieldset v-if="config.target === 'openai'" class="checkout-channel-segmented register-field--full" :disabled="config.enabled || !config.checkout.enabled">
           <legend class="register-label">提链渠道</legend>
           <SegmentedTabs
             :model-value="config.checkout.channel"

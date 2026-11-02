@@ -126,6 +126,9 @@ func TestMailboxReleaseAndDeleteLifecycle(t *testing.T) {
 	found := map[string]bool{}
 	for _, e := range events {
 		found[e.EventType] = true
+		if e.Email != b.Email {
+			t.Errorf("deleted mailbox event %s email=%q, want %q", e.EventType, e.Email, b.Email)
+		}
 	}
 	for _, kind := range []string{"account_claim_released", "mailbox_delete_requested", "provider_cleanup_succeeded"} {
 		if !found[kind] {

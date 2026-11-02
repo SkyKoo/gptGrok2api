@@ -331,7 +331,7 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游未配置，请手动输入邮箱验证码")
 		return
 	}
-	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
+	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.ConfigForTarget("openai"))
 	if err != nil {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游配置不可用，请手动输入邮箱验证码")
 		return

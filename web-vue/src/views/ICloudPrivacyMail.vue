@@ -156,7 +156,8 @@
                 <MetaChip size="xs" :tone="event.platform === 'grok' ? 'info' : event.platform === 'openai' ? 'success' : 'muted'">{{ event.platform || '系统' }}</MetaChip>
                 <span class="text-muted-foreground">{{ formatDate(event.created_at) }}</span>
               </div>
-              <p class="mt-1 break-all text-muted-foreground">邮箱 {{ event.mailbox_id || '-' }} · 结果 {{ event.result || '-' }}<span v-if="event.error"> · {{ event.error }}</span></p>
+              <p class="mt-1 break-all text-muted-foreground">邮箱 {{ event.email || '未知邮箱' }} · 结果 {{ event.result || '-' }}<span v-if="event.error"> · {{ event.error }}</span></p>
+              <p v-if="event.mailbox_id" class="mt-1 break-all text-[11px] text-muted-foreground">资产 ID：{{ event.mailbox_id }}</p>
             </div>
           </div>
           <p v-else class="text-xs text-muted-foreground">暂无操作日志。</p>

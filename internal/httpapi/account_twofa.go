@@ -378,7 +378,7 @@ func (s *Server) twoFAAutoCode(ctx context.Context, t *accountTwoFATask, account
 	if !ok || !strings.EqualFold(box.Email, t.Email) {
 		return
 	}
-	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
+	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.ConfigForTarget("openai"))
 	if err != nil {
 		return
 	}

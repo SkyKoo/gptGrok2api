@@ -110,7 +110,13 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) refreshRegistrationResinChannel() {
 	if s.proxyManager != nil {
-		s.proxyManager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, stringValue(s.registerStore.Get()["resin_proxy_url"]))
+		value := s.registerStore.Get()
+		profiles := mapValue(value["target_settings"])
+		for _, target := range []string{"openai", "grok"} {
+			s.proxyManager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel+":"+target, stringValue(mapValue(profiles[target])["resin_proxy_url"]))
+		}
+		legacy := mapValue(profiles[stringValue(value["legacy_resin_target"])])
+		s.proxyManager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel, stringValue(legacy["resin_proxy_url"]))
 	}
 }
 

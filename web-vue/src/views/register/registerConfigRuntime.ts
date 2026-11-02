@@ -1,4 +1,5 @@
 import { computed, ref, watch } from 'vue'
+import { switchRegistrationTarget } from '@/lib/registrationTargetSettings'
 import { getAuthToken } from '@/api/client'
 import { proxyApi, type ProxyGroup } from '@/api/proxy'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
@@ -74,7 +75,7 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   const providers = computed(() => config.value?.mail.providers || [])
   const proxyGroupOptions = computed(() => buildRegisterProxyGroupOptions(proxyGroups.value, selectedProxyGroupId.value))
   const proxyGroupGroups = computed(() => [{ options: proxyGroupOptions.value }])
-  const proxyHint = computed(() => buildRegisterProxyHint(proxyMode.value))
+  const proxyHint = computed(() => buildRegisterProxyHint(proxyMode.value, normalizeRegisterTarget(config.value?.target)))
   const configSnapshot = (value: LegacyRegisterConfig) => JSON.stringify(legacyRegisterPayload(value))
   const hasUnsavedChanges = computed(() => {
     const current = config.value
@@ -150,8 +151,8 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   function setTarget(value: string) {
     if (!config.value) return
     const target = normalizeRegisterTarget(value)
-    config.value.target = target
-    if (target === 'grok') config.value.mode = 'total'
+    switchRegistrationTarget(config.value, target)
+    syncProxyControlsFromValue(config.value.proxy)
     config.value.mail.providers = providers.value.map(provider => providerForRegisterTarget(provider, target))
   }
 
@@ -242,8 +243,12 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
 
   async function flushAutosave(): Promise<boolean> {
     clearAutosaveTimer()
-    if (savePromise) return savePromise
-    return persistConfig()
+    // 等待在途旧快照后继续保存最新渠道，避免切换期间启动使用旧参数。
+    while (savePromise || hasUnsavedChanges.value) {
+      if (!await (savePromise || persistConfig())) return false
+      clearAutosaveTimer()
+    }
+    return true
   }
 
   watch(

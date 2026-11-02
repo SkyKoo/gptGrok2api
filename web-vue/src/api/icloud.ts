@@ -108,6 +108,7 @@ export type ICloudMailboxList = {
 export type ICloudMailboxEvent = {
   id?: string
   mailbox_id?: string
+  email?: string
   claim_id?: string
   event_type?: string
   source_type?: string

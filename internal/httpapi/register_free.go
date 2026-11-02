@@ -210,7 +210,7 @@ func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Reques
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.freeRegister.RetryRegistration(s.registerStore.Get(), body.ID); err != nil {
+	if err := s.freeRegister.RetryRegistration(s.registerStore.ConfigForTarget("openai"), body.ID); err != nil {
 		registrationError(w, err)
 		return
 	}

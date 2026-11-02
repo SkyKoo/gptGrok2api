@@ -155,5 +155,6 @@ func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 	c.HME = free.HME
 	c.MailboxSourceID = free.MailboxSourceID
 	c.DeleteMailboxOnAccountDelete = free.DeleteMailboxOnAccountDelete
+	c.Proxy = registrationProxyForTarget(raw, "grok", c.Proxy)
 	return c, nil
 }

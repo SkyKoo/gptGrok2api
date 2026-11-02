@@ -74,6 +74,7 @@ type MailboxView struct {
 type Event struct {
 	ID              string    `json:"id"`
 	MailboxID       string    `json:"mailbox_id"`
+	Email           string    `json:"email"`
 	ClaimID         string    `json:"claim_id"`
 	EventType       string    `json:"event_type"`
 	SourceType      string    `json:"source_type"`
@@ -889,19 +890,20 @@ func (s *Store) Events(ctx context.Context, page, pageSize int, mailboxID, platf
 	args := []any{}
 	if mailboxID = strings.TrimSpace(mailboxID); mailboxID != "" {
 		args = append(args, mailboxID)
-		where = append(where, fmt.Sprintf("mailbox_id=$%d", len(args)))
+		where = append(where, fmt.Sprintf("e.mailbox_id=$%d", len(args)))
 	}
 	if platform = strings.TrimSpace(strings.ToLower(platform)); platform != "" {
 		args = append(args, platform)
-		where = append(where, fmt.Sprintf("platform=$%d", len(args)))
+		where = append(where, fmt.Sprintf("e.platform=$%d", len(args)))
 	}
 	whereSQL := strings.Join(where, " AND ")
 	var total int
-	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mailbox_events WHERE "+whereSQL, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM mailbox_events e WHERE "+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	args = append(args, pageSize, (page-1)*pageSize)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,mailbox_id,claim_id,event_type,source_type,platform,account_id,registration_job_id,actor,request_id,result,error,metadata,created_at FROM mailbox_events WHERE `+whereSQL+` ORDER BY created_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	// 软删除会保留邮箱资产，关联查询也能为历史日志补全邮箱地址。
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id,e.mailbox_id,m.email,e.claim_id,e.event_type,e.source_type,e.platform,e.account_id,e.registration_job_id,e.actor,e.request_id,e.result,e.error,e.metadata,e.created_at FROM mailbox_events e JOIN mailboxes m ON m.id=e.mailbox_id WHERE `+whereSQL+` ORDER BY e.created_at DESC LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -910,7 +912,7 @@ func (s *Store) Events(ctx context.Context, page, pageSize int, mailboxID, platf
 	for rows.Next() {
 		var event Event
 		var metadata []byte
-		if err := rows.Scan(&event.ID, &event.MailboxID, &event.ClaimID, &event.EventType, &event.SourceType, &event.Platform, &event.AccountID, &event.RegistrationJob, &event.Actor, &event.RequestID, &event.Result, &event.Error, &metadata, &event.CreatedAt); err != nil {
+		if err := rows.Scan(&event.ID, &event.MailboxID, &event.Email, &event.ClaimID, &event.EventType, &event.SourceType, &event.Platform, &event.AccountID, &event.RegistrationJob, &event.Actor, &event.RequestID, &event.Result, &event.Error, &metadata, &event.CreatedAt); err != nil {
 			return nil, 0, err
 		}
 		if len(metadata) > 0 {

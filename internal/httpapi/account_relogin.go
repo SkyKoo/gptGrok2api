@@ -275,7 +275,7 @@ func (s *Server) accountReloginProfile(account map[string]any) (*registerruntime
 }
 
 func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConfig, *mailboxResourceSource, *registerruntime.WebRegistrar, error) {
-	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.Get())
+	cfg, err := registerruntime.ParseFreeConfig(s.registerStore.ConfigForTarget("openai"))
 	if err != nil {
 		return cfg, nil, nil, err
 	}

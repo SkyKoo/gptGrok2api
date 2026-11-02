@@ -217,7 +217,7 @@ func (s *Server) retryGrokRegistrationTask(w http.ResponseWriter, r *http.Reques
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.grokRegister.RetryRegistration(s.registerStore.Get(), body.ID); err != nil {
+	if err := s.grokRegister.RetryRegistration(s.registerStore.ConfigForTarget("grok"), body.ID); err != nil {
 		registrationError(w, err)
 		return
 	}

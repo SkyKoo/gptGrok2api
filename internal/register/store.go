@@ -37,12 +37,7 @@ func (s *Store) Update(updates map[string]any) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current := s.getLocked()
-	for key, value := range updates {
-		if key == "logs" || key == "grok_oauth_logs" {
-			continue
-		}
-		current[key] = value
-	}
+	updateTargetSettings(current, updates)
 	if err := writeJSON0600(s.configPath, current); err != nil {
 		return nil, err
 	}
@@ -573,6 +568,7 @@ func (s *Store) getLocked() map[string]any {
 			}
 		}
 	}
+	normalizeTargetSettings(value)
 	return value
 }
 

@@ -212,7 +212,19 @@ export type CheckoutTask = {
   [key: string]: unknown
 }
 
+export type RegistrationTaskSettings = {
+  proxy: string
+  resin_proxy_url: string
+  total: number
+  threads: number
+  mode: string
+  target_quota: number
+  target_available: number
+  check_interval: number
+}
+
 export type LegacyRegisterConfig = {
+  target_settings?: Partial<Record<RegisterTarget, RegistrationTaskSettings>>
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
   openai_free: { timeout_seconds: number; auto_twofa?: boolean }
