@@ -67,12 +67,23 @@ func (s *Server) importRegisteredGrokAccount(ctx context.Context, id string, acc
 		return errors.New("grok registration store unavailable")
 	}
 	account = cloneMap(account)
+	// The task journal keeps the registration route. New accounts use direct
+	// access for daily calls; a rotating signup proxy is not a stable egress.
+	// AddAccount deduplicates before writing, so import recovery never replaces
+	// an existing account's explicitly selected daily route.
+	lease, err := s.proxyManager.AcquireTask(ctx, "direct", "grok", "account", nil)
+	if err != nil {
+		return err
+	}
+	lease.Release()
+	account["proxy"] = "direct"
+	account["proxy_binding"] = lease.Binding
 	account["registration_job_id"] = id
 	account["platform"] = "grok"
 	account["source_type"] = "grok_protocol"
 	account["enabled"] = false
 	account["status"] = "待验证"
-	_, _, err := s.registerStore.AddAccount(account)
+	_, _, err = s.registerStore.AddAccount(account)
 	return err
 }
 
