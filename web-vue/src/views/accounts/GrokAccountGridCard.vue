@@ -39,12 +39,6 @@
         :tone-class="`${grokProbeStatusClass(item)} border-border`"
         :title="grokProbeStatusTitle(item)"
       />
-      <StatusPill
-        v-if="item.recovery_status"
-        :label="grokRecoveryStatusText(item)"
-        :tone-class="`${grokRecoveryStatusClass(item)} border-border`"
-        :title="grokRecoveryStatusTitle(item)"
-      />
       <StatusPill :label="grokSyncStateText(item)" tone-class="border-muted bg-muted/20 text-muted-foreground" />
       <StatusPill
         :label="grokOAuthStatusText(item)"
@@ -107,9 +101,6 @@ import {
   grokProbeStatusClass,
   grokProbeStatusText,
   grokProbeStatusTitle,
-  grokRecoveryStatusClass,
-  grokRecoveryStatusText,
-  grokRecoveryStatusTitle,
   grokRefreshStatusTitle,
   grokRuntimeStatusClass,
   grokRuntimeStatusText,

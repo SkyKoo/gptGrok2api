@@ -334,6 +334,9 @@ func (p *Pool) FeedbackIntent(l *Lease, status int, err error) {
 		p.Feedback(l.Account, status, err)
 		return
 	}
+	if p.grokMedia {
+		_ = p.repository.RecordAccountUsage(l.Account.Token, false)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	a, e := p.currentAccountLocked(l.Account)

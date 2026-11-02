@@ -2,12 +2,16 @@ package provider
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -20,55 +24,211 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 )
 
-func TestImagineSocketProtocolWaitsForFinalBlob(t *testing.T) {
-	finalBytes := append([]byte{0xff, 0xd8, 0xff}, bytesOfSize(imagineFinalMinBytes+1024-3, 'f')...)
-	previewBytes := bytesOfSize(imagineMediumMinBytes+1024, 'p')
-	var received []map[string]any
-	server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
-		for len(received) < 2 {
-			message, err := readClientText(reader)
-			if err != nil {
-				t.Errorf("read client message: %v", err)
-				return
-			}
-			var object map[string]any
-			if err := json.Unmarshal([]byte(message), &object); err != nil {
-				t.Errorf("decode client message: %v", err)
-				return
-			}
-			received = append(received, object)
-		}
-		writeServerText(t, conn, `{"type":"json","current_status":"generating"}`)
-		writeServerText(t, conn, fmt.Sprintf(`{"type":"image","url":"/images/test-id.png","blob":%q}`, base64.StdEncoding.EncodeToString(previewBytes)))
-		writeServerText(t, conn, fmt.Sprintf(`{"type":"image","url":"/images/test-id.jpg","blob":%q}`, base64.StdEncoding.EncodeToString(finalBytes)))
-	})
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	socket := NewImagineSocket(wsURL, nil, 3*time.Second)
-	results, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "a red cat", "16:9", 1, true, false)
-	if err != nil {
+func imagineTestPNG(t *testing.T) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := png.Encode(&b, image.NewNRGBA(image.Rect(0, 0, 2, 2))); err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].MIME != "image/jpeg" {
-		t.Fatalf("unexpected final result: %#v", results)
+	return b.Bytes()
+}
+
+func readImagineRequest(t *testing.T, reader *bufio.Reader) (string, map[string]any) {
+	t.Helper()
+	var request map[string]any
+	for n := 0; n < 2; n++ {
+		text, err := readClientText(reader)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+			return "", nil
+		}
+		if err := json.Unmarshal([]byte(text), &request); err != nil {
+			t.Errorf("decode: %v", err)
+			return "", nil
+		}
 	}
-	decoded, err := base64.StdEncoding.DecodeString(results[0].Base64)
-	if err != nil || string(decoded) != string(finalBytes) {
-		t.Fatalf("preview blob was returned instead of final blob: err=%v size=%d", err, len(decoded))
+	input := request["item"].(map[string]any)["content"].([]any)[0].(map[string]any)
+	return input["requestId"].(string), input["properties"].(map[string]any)
+}
+
+func TestImagineSocketCompletionProtocol(t *testing.T) {
+	smallFinal := base64.StdEncoding.EncodeToString(imagineTestPNG(t))
+	largePreview := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("preview"), 50000))
+	cases := []struct {
+		name      string
+		count     int
+		events    []map[string]any
+		urls      []string
+		wantError bool
+	}{
+		{name: "large_preview_is_not_final", count: 1, wantError: true, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/preview.jpg", "blob": largePreview, "current_status": "generating", "percentage_complete": 40},
+		}},
+		{name: "progress_alone_does_not_complete", count: 1, wantError: true, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/final.jpg", "blob": largePreview, "percentage_complete": 100},
+		}},
+		{name: "metadata_does_not_promote_cached_preview", count: 1, wantError: true, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/preview.jpg", "blob": largePreview, "percentage_complete": 40},
+			{"type": "json", "order": 0, "current_status": "completed"},
+		}},
+		{name: "small_terminal_blob", count: 1, events: []map[string]any{
+			{"type": "image", "order": 0, "blob": largePreview, "percentage_complete": 40},
+			{"type": "image", "order": 0, "blob": smallFinal, "current_status": "completed"},
+		}},
+		{name: "final_blob_before_terminal_metadata", count: 1, events: []map[string]any{
+			{"type": "image", "order": 0, "blob": smallFinal, "percentage_complete": 100},
+			{"type": "json", "order": 0, "current_status": "completed"},
+		}},
+		{name: "blob_after_terminal_metadata", count: 1, events: []map[string]any{
+			{"type": "json", "order": 0, "current_status": "completed"},
+			{"type": "image", "order": 0, "blob": smallFinal},
+		}},
+		{name: "final_asset_overrides_large_preview", count: 1, urls: []string{"https://assets.grok.com/original.jpg"}, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/preview.jpg", "blob": largePreview, "percentage_complete": 40},
+			{"type": "json", "order": 0, "url": "/original.jpg", "current_status": "completed"},
+		}},
+		{name: "final_url_before_terminal_metadata", count: 1, urls: []string{"https://assets.grok.com/original.jpg"}, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/original.jpg", "blob": smallFinal, "percentage_complete": 100},
+			{"type": "json", "order": 0, "current_status": "completed"},
+		}},
+		{name: "interleaved_results_keep_order", count: 2, urls: []string{"https://assets.grok.com/a.jpg", "https://assets.grok.com/b.jpg"}, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "/a-preview.jpg", "blob": largePreview, "percentage_complete": 10},
+			{"type": "json", "order": 1, "url": "/b.jpg", "current_status": "completed"},
+			{"type": "json", "order": 0, "url": "/a.jpg", "current_status": "completed"},
+		}},
+		{name: "partial_count_is_failure", count: 2, wantError: true, events: []map[string]any{
+			{"type": "json", "order": 0, "url": "/a.jpg", "current_status": "completed"},
+		}},
+		{name: "foreign_and_unordered_events_are_ignored", count: 1, events: []map[string]any{
+			{"type": "error", "request_id": "another-request", "err_code": "rate_limit_exceeded"},
+			{"type": "json", "request_id": "another-request", "order": 0, "url": "/wrong.jpg", "current_status": "completed"},
+			{"type": "json", "url": "/wrong.jpg", "current_status": "completed"},
+			{"type": "image", "order": 0, "blob": smallFinal, "current_status": "completed"},
+		}},
+		{name: "invalid_final_bytes", count: 1, wantError: true, events: []map[string]any{
+			{"type": "image", "order": 0, "blob": largePreview, "current_status": "completed"},
+		}},
+		{name: "upstream_resolution_downgrade", count: 1, wantError: true, events: []map[string]any{
+			{"type": "json", "order": 0, "url": "/original.jpg", "resolution_name": "1k", "current_status": "completed"},
+		}},
+		{name: "untrusted_original_host", count: 1, wantError: true, events: []map[string]any{
+			{"type": "json", "order": 0, "url": "https://untrusted.example/image.jpg", "current_status": "completed"},
+		}},
+		{name: "per_image_failure", count: 1, wantError: true, events: []map[string]any{
+			{"type": "json", "order": 0, "current_status": "error", "err_message": "generation failed"},
+		}},
 	}
-	if len(received) != 2 || received[0]["type"] != "conversation.item.create" || received[1]["type"] != "conversation.item.create" {
-		t.Fatalf("unexpected request sequence: %#v", received)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			properties := make(chan map[string]any, 1)
+			server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+				id, props := readImagineRequest(t, reader)
+				properties <- props
+				for _, event := range tc.events {
+					if _, exists := event["request_id"]; !exists {
+						event["request_id"] = id
+					}
+					writeServerText(t, conn, mustJSON(event))
+				}
+			})
+			defer server.Close()
+			socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, time.Second)
+			results, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "a cat", "16:9", "2k", tc.count, true, true)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("incomplete/invalid image accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != tc.count {
+				t.Fatalf("count=%d", len(results))
+			}
+			for i, result := range results {
+				if !result.ImagineFinal {
+					t.Fatal("final image not marked for validation")
+				}
+				if len(tc.urls) > 0 {
+					if result.URL != tc.urls[i] || result.Base64 != "" {
+						t.Fatalf("preview selected: %+v", result)
+					}
+				} else if result.Base64 != smallFinal || result.MIME != "image/png" {
+					t.Fatal("small final bytes were replaced")
+				}
+			}
+			props := <-properties
+			if props["resolution_name"] != "2k" || props["num_generations"] != float64(tc.count) || props["aspect_ratio"] != "16:9" || props["enable_pro"] != true || props["skip_upsampler"] != true || props["enable_side_by_side"] != false {
+				t.Fatalf("incorrect quality parameters: %+v", props)
+			}
+		})
 	}
-	requestItem := received[1]["item"].(map[string]any)
-	content := requestItem["content"].([]any)
-	input := content[0].(map[string]any)
-	if input["text"] != "a red cat" || input["requestId"] == "" {
-		t.Fatalf("unexpected imagine request: %#v", input)
+}
+
+func TestImagineSocketCancellation(t *testing.T) {
+	received := make(chan struct{})
+	server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+		readImagineRequest(t, reader)
+		close(received)
+		_, _ = reader.ReadByte() // request cancellation must close the connection
+	})
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, 5*time.Second)
+	done := make(chan error, 1)
+	go func() {
+		_, err := socket.Generate(ctx, accounts.Account{}, "test", "1:1", "1k", 1, true, true)
+		done <- err
+	}()
+	<-received
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not unblock image stream")
 	}
-	properties := input["properties"].(map[string]any)
-	if properties["aspect_ratio"] != "16:9" || properties["enable_nsfw"] != true || properties["enable_pro"] != false {
-		t.Fatalf("unexpected imagine properties: %#v", properties)
+}
+
+func TestImagineSocketFragmentedTerminalFrame(t *testing.T) {
+	raw := imagineTestPNG(t)
+	server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+		id, _ := readImagineRequest(t, reader)
+		text := mustJSON(map[string]any{"type": "image", "order": 0, "request_id": id, "current_status": "completed", "blob": base64.StdEncoding.EncodeToString(raw)})
+		// Fragment into small unmasked frames, with an interleaved ping.
+		for offset := 0; offset < len(text); {
+			end := offset + 50
+			if end > len(text) {
+				end = len(text)
+			}
+			opcode := byte(0)
+			if offset == 0 {
+				opcode = 1
+			}
+			if end == len(text) {
+				opcode |= 0x80
+			}
+			if _, err := conn.Write(append([]byte{opcode, byte(end - offset)}, []byte(text[offset:end])...)); err != nil {
+				return
+			}
+			if offset == 0 {
+				_, _ = conn.Write([]byte{0x89, 0})
+				if _, err := readClientText(reader); err != nil {
+					return
+				}
+			}
+			offset = end
+		}
+	})
+	defer server.Close()
+	socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, time.Second)
+	results, err := socket.Generate(context.Background(), accounts.Account{}, "test", "1:1", "1k", 1, true, true)
+	if err != nil || len(results) != 1 || results[0].Base64 != base64.StdEncoding.EncodeToString(raw) {
+		t.Fatalf("fragment lost: %v", err)
 	}
 }
 
@@ -86,7 +246,7 @@ func TestImagineSocketRateLimitIsTypedAs429(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
 	socket := NewImagineSocket(wsURL, nil, 3*time.Second)
-	_, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "a red cat", "1:1", 1, true, false)
+	_, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "a red cat", "1:1", "1k", 1, true, false)
 	if err == nil {
 		t.Fatal("expected rate-limit error")
 	}
@@ -99,51 +259,13 @@ func TestImagineSocketRateLimitIsTypedAs429(t *testing.T) {
 	}
 }
 
-func TestImagineSocketProFlagReachesImagineProtocol(t *testing.T) {
-	finalBytes := bytesOfSize(imagineFinalMinBytes+1, 'p')
-	var request map[string]any
-	server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
-		for i := 0; i < 2; i++ {
-			message, err := readClientText(reader)
-			if err != nil {
-				t.Errorf("read client message: %v", err)
-				return
-			}
-			if i == 1 && json.Unmarshal([]byte(message), &request) != nil {
-				t.Errorf("decode imagine request")
-			}
-		}
-		writeServerText(t, conn, fmt.Sprintf(`{"type":"image","url":"/images/pro.png","blob":%q}`, base64.StdEncoding.EncodeToString(finalBytes)))
-	})
-	defer server.Close()
-	socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, 3*time.Second)
-	if _, err := socket.Generate(context.Background(), accounts.Account{Token: "pro-sso"}, "a cinematic cat", "1:1", 1, true, true); err != nil {
-		t.Fatal(err)
-	}
-	item := request["item"].(map[string]any)
-	content := item["content"].([]any)
-	input := content[0].(map[string]any)
-	properties := input["properties"].(map[string]any)
-	if properties["enable_pro"] != true {
-		t.Fatalf("pro flag was not sent: %#v", properties)
-	}
-}
-
 func TestDecodeImagineBlobAcceptsDataURL(t *testing.T) {
-	raw := []byte("image-bytes")
+	raw := imagineTestPNG(t)
 	encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(raw)
-	decoded, mime, ok := decodeImagineBlob(encoded, "")
+	decoded, mime, ok := decodeImagineBlob(encoded)
 	if !ok || mime != "image/png" || string(decoded) != string(raw) {
 		t.Fatalf("unexpected data URL decode: ok=%v mime=%q bytes=%q", ok, mime, decoded)
 	}
-}
-
-func bytesOfSize(size int, value byte) []byte {
-	result := make([]byte, size)
-	for index := range result {
-		result[index] = value
-	}
-	return result
 }
 
 func newImagineTestServer(t *testing.T, handler func(net.Conn, *bufio.Reader)) *httptest.Server {
@@ -249,7 +371,7 @@ func TestImagineSocketModerationTerminatesWithoutWaitingForEOF(t *testing.T) {
 			defer server.Close()
 			defer close(release)
 			socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, time.Second)
-			_, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "test prompt", "1:1", 1, true, true)
+			_, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "test prompt", "1:1", "1k", 1, true, true)
 			var upstream *protocol.UpstreamError
 			if !asUpstreamError(err, &upstream) || upstream.Status != http.StatusUnprocessableEntity {
 				t.Fatalf("explicit moderation should return 422 before server closes, got %v", err)

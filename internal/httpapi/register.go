@@ -497,11 +497,23 @@ func (s *Server) updateOpenAISurvival(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
-	items, allTotal, summary, err := s.registerStore.ListAccounts(r.URL.Query().Get("keyword"), r.URL.Query().Get("status"))
+	items, allTotal, baseSummary, err := s.registerStore.ListAccounts("", "")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
+	summary, err := s.attachGrokAccountRuntime(items, baseSummary)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取 Grok 调用池状态", "server_error")
+		return
+	}
+	filtered := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if grokAccountListMatches(item, r.URL.Query().Get("keyword"), r.URL.Query().Get("status")) {
+			filtered = append(filtered, item)
+		}
+	}
+	items = filtered
 	page := positiveInt(r.URL.Query().Get("page"), 1)
 	pageSize := positiveInt(r.URL.Query().Get("page_size"), 100)
 	if pageSize > 500 {
@@ -520,7 +532,6 @@ func (s *Server) listRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 	if !runtimeAvailable {
 		runtimeError = "Grok runtime quota endpoint is not configured"
 	}
-	s.attachGrokMediaRuntime(items[start:end])
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"count": len(items), "total": len(items), "all_total": allTotal, "page": page, "page_size": pageSize, "items": items[start:end], "summary": summary, "runtime_available": runtimeAvailable, "runtime_error": runtimeError, "probe_scheduler": s.registerStore.GrokProbeSchedulerStatus()})
 }
 
@@ -575,22 +586,30 @@ func (s *Server) syncRegisteredGrokAccounts(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	added, skipped := 0, 0
+	results := make([]map[string]any, 0, len(ids))
 	for _, item := range items {
 		token := strings.TrimSpace(stringValue(item["sso"]))
 		if token == "" {
+			results = append(results, map[string]any{"id": item["id"], "ok": false, "error": "账号未保存 SSO 登录态"})
 			continue
 		}
 		count, _, addErr := s.syncRegisteredGrokRuntimeAccount(item, token)
 		if addErr != nil {
+			results = append(results, map[string]any{"id": item["id"], "ok": false, "error": "同步失败，请检查账号是否异常或禁用并先验证登录态"})
 			continue
 		}
+		results = append(results, map[string]any{"id": item["id"], "ok": true, "sync_state": "synced"})
 		if count > 0 {
 			added += count
 		} else {
 			skipped++
 		}
 	}
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"ok": true, "sync_state": "synced", "added": added, "skipped": skipped, "verification_pending": len(items) - added - skipped})
+	syncState := "sync_failed"
+	if added+skipped == len(ids) {
+		syncState = "synced"
+	}
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"ok": added+skipped == len(ids), "sync_state": syncState, "added": added, "skipped": skipped, "verification_pending": len(ids) - added - skipped, "summary": map[string]int{"total": len(ids), "ok": added + skipped, "fail": len(ids) - added - skipped}, "results": results})
 }
 
 // syncRegisteredGrokRuntimeAccount keeps the shared request pool aware that
@@ -684,28 +703,26 @@ func (s *Server) authorizeRegisteredGrokAccounts(w http.ResponseWriter, r *http.
 	}
 	results := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		_, found, err := s.registerStore.Credentials(id)
+		task, reused, err := s.startGrokOAuth(id)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
-			return
-		}
-		if !found {
-			results = append(results, map[string]any{"id": id, "ok": false, "status": "failed", "error": "Grok 账号不存在"})
+			results = append(results, map[string]any{"id": id, "ok": false, "status": "failed", "error": grokOAuthMessages[grokOAuthErrorCode(err)]})
 			continue
 		}
-		_, _ = s.registerStore.SetOAuthAuthorization(id, "queued", "")
-		task := s.taskQueue.Submit("grok_oauth_authorize", map[string]any{"account_id": id})
-		results = append(results, map[string]any{"id": id, "ok": true, "status": "queued", "job_id": task.ID})
+		results = append(results, map[string]any{"id": id, "ok": true, "status": task.Status, "job_id": task.ID, "reused": reused})
 	}
-	queued, failed := 0, 0
+	queued, reused, failed := 0, 0, 0
 	for _, result := range results {
 		if result["ok"] == true {
-			queued++
+			if result["reused"] == true {
+				reused++
+			} else {
+				queued++
+			}
 		} else {
 			failed++
 		}
 	}
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"summary": map[string]int{"total": len(results), "queued": queued, "reused": 0, "skipped": 0, "failed": failed}, "results": results})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"summary": map[string]int{"total": len(results), "queued": queued, "reused": reused, "skipped": 0, "failed": failed}, "results": results})
 }
 
 func (s *Server) disableRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {

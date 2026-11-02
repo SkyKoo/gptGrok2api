@@ -66,6 +66,10 @@ func (m *Media) Upload(ctx context.Context, account accounts.Account, filename, 
 }
 
 func (m *Media) Fetch(ctx context.Context, account accounts.Account, filePath string) ([]byte, string, error) {
+	return m.fetch(ctx, account, filePath, 0)
+}
+
+func (m *Media) fetch(ctx context.Context, account accounts.Account, filePath string, maxBytes int64) ([]byte, string, error) {
 	if m.Proxy != nil {
 		ctx = proxyruntime.WithURL(ctx, m.Proxy.Resolve(account.Fields, true))
 	}
@@ -87,7 +91,14 @@ func (m *Media) Fetch(ctx context.Context, account accounts.Account, filePath st
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, "", readHTTPError(response)
 	}
-	raw, err := io.ReadAll(response.Body)
+	var reader io.Reader = response.Body
+	if maxBytes > 0 {
+		reader = io.LimitReader(reader, maxBytes+1)
+	}
+	raw, err := io.ReadAll(reader)
+	if maxBytes > 0 && int64(len(raw)) > maxBytes {
+		return nil, "", fmt.Errorf("image asset exceeds download size limit")
+	}
 	if err != nil {
 		return nil, "", err
 	}

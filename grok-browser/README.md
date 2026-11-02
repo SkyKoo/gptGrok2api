@@ -45,3 +45,11 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 邮箱注册入口在30秒总窗口内等待页面绑定点击事件，使用正常点击并以邮箱输入框实际出现作为成功条件；延迟出现的隐私弹窗会重新检查，不强制点击穿透。不会为了诊断重新加载页面、提交邮箱或发送验证码。若页面脚本未就绪或入口仍未打开，保留 `email_input_missing`，诊断附带有限的交互状态、点击次数/错误类别，以及第一方脚本的待加载数量和耗时；不保存脚本URL、查询参数、事件函数或输入值。
 
 整页导航和登录提示不再用于判断“邮箱已注册”；仅在提交后依据明确上游业务码或邮箱表单的错误反馈判断。`account:email-already-exists` 仍映射为409，注册不可用仍为422；入口等待超时仍为504，不能据此认定邮箱已使用。
+
+## 后台 xAI OAuth
+
+`POST /v1/oauth/authorize-device` 接收 CFM 后台发来的设备码、所选账号 SSO、预期邮箱和该账号日常出口，在新的隔离浏览器会话内访问 xAI 设备确认页并完成一次授权确认。接口沿用 Worker Bearer 认证和内部网络边界，正常流程不会打开用户浏览器。设备码的申请、Token 查询、邮箱核对和加密持久化由 Go app 负责。
+
+只接受 `https://accounts.x.ai/oauth2/device` 与本次 `user_code`，会话 Cookie 仅绑定 accounts.x.ai 和 auth.x.ai。跳转到登录、MFA 或人机验证页时返回 `manual_action_required`；不自动创建账号、输入密码或求解挑战。确认点击超时返回 `uncertain`，由 Go 查询同一设备授权结果，不重放确认。浏览器异常只返回固定错误码，不打印 Cookie、设备链接或页面内容。每个请求有时限，并关闭临时上下文。
+
+离线测试：`python3 grok-browser/test_oauth_device.py -v`（从仓库根执行）；使用模拟页面，无需真实 SSO。Go 的 `internal/oauth` 与 `internal/httpapi` 测试覆盖 Token 身份校验、队列去重、恢复、取消和秘密字段不泄漏。实际 xAI 登录态与授权页的端到端验收需单独授权真实测试账号。

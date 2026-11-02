@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,149 +40,178 @@ func NewImagineSocket(urlValue string, client *http.Client, timeout time.Duratio
 	return &ImagineSocket{URL: urlValue, Client: client, Timeout: timeout}
 }
 
-func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, prompt, aspectRatio string, count int, enableNSFW, enablePro bool) ([]ImageResult, error) {
+// Generate waits for terminal metadata. Blob size and file extension do not
+// distinguish a preview from a completed image in the Imagine protocol.
+func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, prompt, aspectRatio, resolution string, count int, enableNSFW, enablePro bool) ([]ImageResult, error) {
+	if count < 1 || count > 10 || (resolution != "1k" && resolution != "2k") {
+		return nil, fmt.Errorf("invalid Imagine count or resolution")
+	}
+	timeout := i.Timeout
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	conn, err := i.dial(ctx, account)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	if err := conn.writeText(mustJSON(protocol.BuildResetMessage())); err != nil {
 		return nil, err
 	}
 	requestID := randomUUID()
-	if err := conn.writeText(mustJSON(protocol.BuildImagineRequest(requestID, prompt, aspectRatio, enableNSFW, enablePro))); err != nil {
+	if err := conn.writeText(mustJSON(protocol.BuildImagineRequest(requestID, prompt, aspectRatio, resolution, count, enableNSFW, enablePro))); err != nil {
 		return nil, err
 	}
-	results := make([]ImageResult, 0, count)
-	byID := map[string]ImageResult{}
-	order := make([]string, 0, count)
-	deadline := time.Now().Add(i.Timeout)
-	for len(finalImageIDs(byID)) < count && time.Now().Before(deadline) {
+	states := make([]imagineImageState, count)
+	deadline, _ := ctx.Deadline()
+	for {
 		frame, err := conn.readText(ctx, deadline)
 		if err != nil {
-			return nil, err
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("Grok 图片流在取得全部最终原图前中断: %w", err)
 		}
-		if frame == "" {
+		var event imagineImageEvent
+		if json.Unmarshal([]byte(frame), &event) != nil {
 			continue
 		}
-		var object map[string]any
-		if json.Unmarshal([]byte(frame), &object) != nil {
+		// One socket owns one request. Out-of-band responses cannot complete it.
+		if event.RequestID != "" && event.RequestID != requestID {
 			continue
 		}
-		switch fmt.Sprint(object["type"]) {
-		case "error":
-			message := imagineFirstString(object["err_msg"], imagineFirstString(object["error"], "imagine websocket error"))
-			if isMediaModerationError(message) || isMediaModerationError(fmt.Sprint(object["err_code"])) {
+		if event.Type != "image" && event.Type != "json" && event.Type != "error" {
+			continue
+		}
+		if event.Moderated {
+			return nil, imagineModerationError()
+		}
+		if event.Type == "error" || event.Status == "error" {
+			message := imagineFirstString(event.ErrorMessage, imagineFirstString(event.ErrorMessageAlt, imagineFirstString(event.Error, "imagine websocket error")))
+			if isMediaModerationError(message) || isMediaModerationError(fmt.Sprint(event.ErrorCode)) {
 				return nil, imagineModerationError()
 			}
-			status := 502
-			if isImagineRateLimit(object["err_code"], message) {
-				status = 429
+			status := http.StatusBadGateway
+			if isImagineRateLimit(event.ErrorCode, message) {
+				status = http.StatusTooManyRequests
 			}
-			return nil, &protocol.UpstreamError{
-				Status:   status,
-				Message:  "imagine websocket error: " + message,
-				Body:     frame,
-				Endpoint: "/ws/imagine/listen",
+			return nil, &protocol.UpstreamError{Status: status, Message: "imagine websocket error: " + message, Endpoint: "/ws/imagine/listen"}
+		}
+		// The official client correlates all preview/metadata events by order.
+		// An absent order is not implicitly image zero, especially for n > 1.
+		if event.Order == nil || *event.Order < 0 || *event.Order >= count {
+			continue
+		}
+		state := &states[*event.Order]
+		if state.ready {
+			continue
+		}
+		if event.URL != "" && (event.Status == "completed" || state.completed || (event.Type == "image" && event.Percentage != nil && *event.Percentage >= 100)) {
+			state.url = event.URL
+		}
+		if event.Blob != "" && (event.Status == "completed" || state.completed || (event.Type == "image" && event.Percentage != nil && *event.Percentage >= 100)) {
+			state.finalBlob = event.Blob
+		}
+		if event.Resolution != "" {
+			state.resolution = strings.ToLower(event.Resolution)
+		}
+		if event.Status == "completed" {
+			state.completed = true
+		}
+		if !state.completed {
+			continue
+		}
+		if resolution == "2k" && state.resolution != "" && state.resolution != "2k" {
+			return nil, &protocol.UpstreamError{Status: http.StatusBadGateway, Message: "Grok 未按请求返回 2K 原图，请检查账号的 2K 权限；未自动重试或降级"}
+		}
+		if state.url != "" {
+			original, err := imagineOriginalURL(state.url)
+			if err != nil {
+				return nil, err
 			}
-		case "image":
-			urlValue, _ := object["url"].(string)
-			blob, _ := object["blob"].(string)
-			if blob == "" {
-				continue
-			}
-			raw, mime, ok := decodeImagineBlob(blob, urlValue)
+			// The completed asset is authoritative even if a stream blob exists.
+			state.result = ImageResult{URL: original, ImagineFinal: true}
+			state.ready = true
+		} else if state.finalBlob != "" {
+			// Only use explicitly finished bytes (100% or at/after completion).
+			// Never promote a previously cached preview when metadata completes.
+			raw, mime, ok := decodeImagineBlob(state.finalBlob)
 			if !ok {
-				continue
+				return nil, fmt.Errorf("Grok 最终图片内容无效或不完整")
 			}
-			id := imageIDFromURL(urlValue)
-			result := ImageResult{
-				URL:    absoluteAssetURL(urlValue),
-				Base64: base64.StdEncoding.EncodeToString(raw),
-				MIME:   mime,
-			}
-			if previous, exists := byID[id]; !exists {
-				order = append(order, id)
-				byID[id] = result
-			} else if betterImagineImage(previous, result, urlValue, len(raw)) {
-				byID[id] = result
-			}
-		case "json":
-			if fmt.Sprint(object["current_status"]) == "completed" && boolValue(object["moderated"]) {
-				// This is an explicit moderation terminal, not a preview to wait past.
-				return nil, imagineModerationError()
+			state.result = ImageResult{Base64: base64.StdEncoding.EncodeToString(raw), MIME: mime, ImagineFinal: true}
+			state.ready = true
+		}
+		results := make([]ImageResult, 0, count)
+		for _, state := range states {
+			if state.ready {
+				results = append(results, state.result)
 			}
 		}
-	}
-	for _, id := range order {
-		if result, ok := byID[id]; ok && isFinalImagineResult(result) {
-			results = append(results, result)
-		}
-		if len(results) >= count {
-			break
+		if len(results) == count {
+			return results, nil
 		}
 	}
-	if len(results) < count {
-		return nil, fmt.Errorf("imagine websocket returned no images")
-	}
-	return results, nil
 }
 
-const (
-	imagineMediumMinBytes = 30 << 10
-	imagineFinalMinBytes  = 100 << 10
-)
+type imagineImageEvent struct {
+	Type            string   `json:"type"`
+	RequestID       string   `json:"request_id"`
+	Order           *int     `json:"order"`
+	Status          string   `json:"current_status"`
+	URL             string   `json:"url"`
+	Blob            string   `json:"blob"`
+	Resolution      string   `json:"resolution_name"`
+	Percentage      *float64 `json:"percentage_complete"`
+	Moderated       bool     `json:"moderated"`
+	ErrorCode       any      `json:"err_code"`
+	ErrorMessage    string   `json:"err_msg"`
+	ErrorMessageAlt string   `json:"err_message"`
+	Error           any      `json:"error"`
+}
 
-func decodeImagineBlob(blob, urlValue string) ([]byte, string, bool) {
-	mime := ""
+type imagineImageState struct {
+	completed, ready           bool
+	url, resolution, finalBlob string
+	result                     ImageResult
+}
+
+func imagineOriginalURL(value string) (string, error) {
+	parsed, err := url.Parse(absoluteAssetURL(value))
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || (parsed.Hostname() != "assets.grok.com" && parsed.Hostname() != "grok.com") {
+		return "", fmt.Errorf("Grok 返回了无效的最终原图地址")
+	}
+	return parsed.String(), nil
+}
+
+func decodeImagineBlob(blob string) ([]byte, string, bool) {
 	encoded := strings.TrimSpace(blob)
 	if header, value, ok := strings.Cut(encoded, ","); ok && strings.Contains(strings.ToLower(header), "base64") {
 		encoded = strings.TrimSpace(value)
-		if parsed, _, ok := strings.Cut(strings.TrimPrefix(strings.ToLower(header), "data:"), ";"); ok {
-			mime = parsed
-		}
 	}
 	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(raw) == 0 {
+	if err != nil {
 		return nil, "", false
 	}
-	if mime == "" {
-		mime = mimeFromImagineURL(urlValue)
-	}
-	if mime == "" {
-		mime = "image/jpeg"
-	}
-	return raw, mime, true
+	mime, err := validatedImagineImageMIME(raw)
+	return raw, mime, err == nil
 }
 
-func mimeFromImagineURL(value string) string {
-	ext := strings.ToLower(filepath.Ext(value))
-	switch ext {
-	case ".png":
-		return "image/png"
-	case ".webp":
-		return "image/webp"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	default:
-		return ""
+func validatedImagineImageMIME(raw []byte) (string, error) {
+	mime, err := validatedImageMIME(raw)
+	if err != nil {
+		return "", &protocol.UpstreamError{Status: http.StatusBadGateway, Message: "Grok 最终原图无效、损坏或超出图片大小限制"}
 	}
-}
-
-func imagineImageFinal(urlValue string, rawSize int) bool {
-	if rawSize >= imagineFinalMinBytes {
-		return true
-	}
-	// Older Imagine responses used JPEG for the final frame and PNG for
-	// previews. Keep this compatibility rule only for a clearly identified
-	// JPEG; size remains the primary discriminator for current responses.
-	ext := strings.ToLower(filepath.Ext(urlValue))
-	return (ext == ".jpg" || ext == ".jpeg") && rawSize >= imagineMediumMinBytes
+	return mime, nil
 }
 
 func isImagineRateLimit(code any, message string) bool {
 	value := strings.ToLower(strings.TrimSpace(fmt.Sprint(code)))
-	if value == "rate_limit_exceeded" || value == "rate_limited" || value == "429" {
+	if value == "rate_limit_exceeded" || value == "rate_limited" || value == "429" || value == "usage_pool_exhausted" || value == "usage_limit_reached" || value == "concurrency_limit" {
 		return true
 	}
 	lower := strings.ToLower(message)
@@ -196,31 +224,6 @@ func imagineFirstString(value, fallback any) string {
 		return strings.TrimSpace(fmt.Sprint(fallback))
 	}
 	return text
-}
-
-func betterImagineImage(previous, candidate ImageResult, urlValue string, rawSize int) bool {
-	previousRaw, _, previousOK := decodeImagineBlob(previous.Base64, previous.URL)
-	previousSize := 0
-	if previousOK {
-		previousSize = len(previousRaw)
-	}
-	return imagineImageFinal(urlValue, rawSize) && !imagineImageFinal(previous.URL, previousSize) || rawSize > previousSize
-}
-
-func finalImageIDs(images map[string]ImageResult) []string {
-	result := make([]string, 0, len(images))
-	for id, image := range images {
-		raw, _, ok := decodeImagineBlob(image.Base64, image.URL)
-		if ok && imagineImageFinal(image.URL, len(raw)) {
-			result = append(result, id)
-		}
-	}
-	return result
-}
-
-func isFinalImagineResult(image ImageResult) bool {
-	raw, _, ok := decodeImagineBlob(image.Base64, image.URL)
-	return ok && imagineImageFinal(image.URL, len(raw))
 }
 
 func (i *ImagineSocket) dial(ctx context.Context, account accounts.Account) (*wsConn, error) {
@@ -255,6 +258,11 @@ func (i *ImagineSocket) dial(ctx context.Context, account accounts.Account) (*ws
 		}
 		network = tlsNetwork
 	}
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = network.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(ctx, func() { _ = network.Close() })
+	defer stop()
 	conn := &wsConn{conn: network, read: bufio.NewReader(network)}
 	keyBytes := make([]byte, 16)
 	if _, err := rand.Read(keyBytes); err != nil {
@@ -334,7 +342,12 @@ func (w *wsConn) readText(ctx context.Context, deadline time.Time) (string, erro
 	if err := w.conn.SetReadDeadline(deadline); err != nil {
 		return "", err
 	}
+	var message []byte
+	fragmented := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		header := make([]byte, 2)
 		if _, err := io.ReadFull(w.read, header); err != nil {
 			return "", err
@@ -389,10 +402,24 @@ func (w *wsConn) readText(ctx context.Context, deadline time.Time) (string, erro
 		if opcode != 0x1 && opcode != 0x0 {
 			continue
 		}
-		if !fin {
-			continue
+		if opcode == 0x1 {
+			if fragmented {
+				return "", fmt.Errorf("unexpected websocket text frame")
+			}
+			message = payload
+		} else {
+			if !fragmented {
+				return "", fmt.Errorf("unexpected websocket continuation")
+			}
+			if len(message)+len(payload) > 32<<20 {
+				return "", fmt.Errorf("websocket message too large")
+			}
+			message = append(message, payload...)
 		}
-		return string(payload), nil
+		fragmented = !fin
+		if fin {
+			return string(message), nil
+		}
 	}
 }
 
@@ -405,18 +432,6 @@ func randomUUID() string {
 	raw[8] = (raw[8] & 0x3f) | 0x80
 	encoded := hex.EncodeToString(raw)
 	return encoded[:8] + "-" + encoded[8:12] + "-" + encoded[12:16] + "-" + encoded[16:20] + "-" + encoded[20:]
-}
-
-func imageIDFromURL(value string) string {
-	if value == "" {
-		return randomUUID()
-	}
-	parts := strings.Split(strings.Trim(value, "/"), "/")
-	last := parts[len(parts)-1]
-	if dot := strings.IndexByte(last, '.'); dot > 0 {
-		last = last[:dot]
-	}
-	return last
 }
 
 func boolValue(value any) bool { typed, _ := value.(bool); return typed }

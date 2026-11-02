@@ -205,6 +205,9 @@
                       </Button>
                     </div>
                     <p class="studio-size-current">{{ selectedSizeDetailLabel }}</p>
+                    <p v-if="imageForm.model.startsWith('grok-imagine-image') && imageForm.model !== 'grok-imagine-image-edit'" class="studio-size-current">
+                      2K 需要账号支持，实际像素以上游最终原图为准。
+                    </p>
                   </div>
                 </div>
               </div>
@@ -389,7 +392,12 @@ const resolutionOptions = computed(() => {
   const values = new Set(sizePresets.value.map((preset) => preset.resolution))
   return order.filter((value) => values.has(value)).map((value) => ({ label: value === 'auto' ? '自动' : value, value }))
 })
-const selectedSizeDetailLabel = computed(() => formatImageSizeLabel(props.imageForm.size))
+const selectedSizeDetailLabel = computed(() => {
+  if (props.imageForm.model.startsWith('grok-imagine-image') && props.imageForm.model !== 'grok-imagine-image-edit') {
+    return `${selectedResolution.value === 'auto' ? '1K（默认）' : selectedResolution.value} · ${selectedRatio.value === 'auto' ? '1:1（默认）' : selectedRatio.value}`
+  }
+  return formatImageSizeLabel(props.imageForm.size)
+})
 const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat' || props.mode === 'video')
 const selectedChatModelLabel = computed(() => chatModelSelectOptions.value.find((option) => option.value === props.chatModel)?.label || props.chatModel || '自动模型')
 const selectedReasoningEffortLabel = computed(() => {
@@ -430,7 +438,7 @@ const chatSettingsMenuItems = computed<ComposerMenuItem[]>(() => [
 ])
 const imageSummaryLabel = computed(() => {
   const count = props.imageForm.n > 1 ? ` · ${props.imageForm.n} 张` : ''
-  return `${formatImageSizeLabel(props.imageForm.size)}${count}`
+  return `${selectedSizeDetailLabel.value}${count}`
 })
 const imagePlaceholder = computed(() => props.references.length ? '描述你想如何修改参考图' : '输入你想生成的画面，也可以粘贴或拖入参考图')
 const chatPlaceholder = computed(() => props.references.length ? '描述你想让模型识别或分析的图片' : '输入消息，Enter 发送，Shift+Enter 换行')

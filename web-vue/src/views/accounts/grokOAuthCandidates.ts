@@ -1,7 +1,7 @@
 import type { GrokOAuthCandidate } from '@/api/grokOAuthAccounts'
 
 export const xaiOAuthStatusLabels: Record<GrokOAuthCandidate['oauth_status'], string> = {
-  pending: '待授权', authorized: '已授权', failed: '授权失败', requires_renewal: '需重新授权',
+  pending: '待授权', queued: '排队中', running: '授权中', manual_action_required: '需处理', authorized: '已授权', failed: '授权失败', requires_renewal: '需重新授权',
 }
 export function filterGrokOAuthCandidates(items: GrokOAuthCandidate[], keyword: string, status: string) {
   const query = keyword.trim().toLowerCase()

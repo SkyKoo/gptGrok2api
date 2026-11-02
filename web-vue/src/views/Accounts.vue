@@ -258,7 +258,7 @@
         density="compact"
         wrap
       >
-        Grok 运行时数据暂不可用：{{ grokRuntimeError }}
+        Grok 调用池数据暂不可用：{{ grokRuntimeError }}
       </SurfaceBox>
 
       <div class="accounts-toolbar">
@@ -350,7 +350,7 @@
       />
 
       <TableShell v-else-if="grokViewMode === 'list'">
-        <table class="min-w-[1940px] w-full table-fixed text-left text-sm">
+        <table class="min-w-[1820px] w-full table-fixed text-left text-sm">
           <thead class="text-xs font-medium text-muted-foreground">
             <tr>
               <th class="w-12 py-3 pr-4">
@@ -366,16 +366,15 @@
               <th class="w-[11rem] py-3 pr-5" title="自动、快速、专家、重度和控制台是文字模型额度，不代表生图或视频剩余次数">SSO 文字额度</th>
               <th class="w-[15rem] py-3 pr-5" title="分别查询图片与视频额度；未知不表示额度为零">SSO 媒体额度</th>
               <th class="w-[8.5rem] py-3 pr-5">OAuth 状态</th>
-              <th class="w-[13rem] py-3 pr-5">OAuth 剩余 / 重置</th>
-              <th class="w-[7rem] py-3 pr-5">恢复时间</th>
-              <th class="w-[9rem] py-3 pr-5">成功 / 失败</th>
-              <th class="w-[8rem] py-3 pr-5">最近使用</th>
+              <th class="w-[10rem] py-3 pr-5" title="CFM 账号记录创建时间；导入账号为入库时间">创建时间</th>
+              <th class="w-[9rem] py-3 pr-5" title="已记录的上游请求结果，包含文字、图片、视频及参考图上传；重试分别计数，额度查询不计入，历史缺失数据不补算">调用成功 / 失败</th>
+              <th class="w-[10rem] py-3 pr-5" title="最近一次已记录的上游调用结果时间，成功和失败均记录">最近调用</th>
               <th class="w-[16rem] py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody class="text-sm text-foreground">
             <tr v-if="!grokLoading && grokAccounts.length === 0">
-              <td colspan="13" class="py-6">
+              <td colspan="12" class="py-6">
                 <EmptyState
                   plain
                   title="暂无 Grok 账号"
@@ -1472,7 +1471,7 @@ const grokExportMenuItems = computed(() => [
 
 const grokBatchMenuItems = computed(() => [
   { key: 'authorize', label: 'OAuth 授权' },
-  { key: 'sync', label: '加入运行池', disabled: !grokRuntimeAvailable.value },
+  { key: 'sync', label: '同步调用池', disabled: !grokRuntimeAvailable.value },
   { key: 'refresh', label: '刷新状态和额度', disabled: !grokRuntimeAvailable.value },
   { key: 'disable', label: '禁用选中', disabled: !grokRuntimeAvailable.value },
   { key: 'enable', label: '恢复选中', disabled: !grokRuntimeAvailable.value },
@@ -1509,14 +1508,14 @@ const grokMetricItems = computed(() => {
     valueClass?: string
   }> = [{
     key: 'registration-total',
-    label: '注册总数',
+    label: '账号总数',
     value: safeMetricNumber(summary.total ?? grokAccountAllTotal.value),
     meta: grokRuntimeAvailable.value
-      ? (syncedCount === null ? '运行时已就绪' : `已加入 ${syncedCount}`)
+      ? (syncedCount === null ? '调用池统计待获取' : `已加入调用池 ${syncedCount}`)
       : '运行状态未连接',
   }]
 
-  const runtimeTotal = safeMetricNumber(summary.runtime_total)
+  const runtimeTotal = optionalMetricNumber(summary.runtime_total)
   const oauthTotal = safeMetricNumber(summary.oauth_total)
   const oauthLinked = safeMetricNumber(summary.oauth_linked)
   items.push({
@@ -1543,19 +1542,19 @@ const grokMetricItems = computed(() => {
     items.push({ ...metric, value: metric.value })
   }
 
-  if (!grokRuntimeAvailable.value || runtimeTotal <= 0) {
+  if (!grokRuntimeAvailable.value || runtimeTotal === null || runtimeTotal <= 0) {
     items.push({
       key: 'runtime-connection',
-      label: 'Grok 运行时',
+      label: 'Grok 调用池',
       value: grokRuntimeAvailable.value ? '已连接' : '不可用',
-      meta: grokRuntimeAvailable.value ? '尚无已加入运行账号' : (grokRuntimeError.value || '请检查运行时状态'),
+      meta: grokRuntimeAvailable.value ? (runtimeTotal === null ? '调用池数量尚未获取' : '尚无已加入调用池的账号') : (grokRuntimeError.value || '请检查调用池状态'),
       valueClass: grokRuntimeAvailable.value ? 'text-emerald-600' : 'text-amber-600',
     })
     return items
   }
 
   const runtimeMetrics = [
-    { key: 'calls-total', label: '调用总数', value: optionalMetricNumber(summary.calls_total), valueClass: '' },
+    { key: 'calls-total', label: '已记录调用次数', value: optionalMetricNumber(summary.calls_total), valueClass: '' },
   ]
   for (const metric of runtimeMetrics) {
     if (metric.value === null) continue

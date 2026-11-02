@@ -21,6 +21,8 @@ type ImageResult struct {
 	URL    string
 	Base64 string
 	MIME   string
+	// ImagineFinal requires validated final bytes; a URL takes precedence over a stream blob.
+	ImagineFinal bool
 }
 
 func (m *Media) GenerateLite(ctx context.Context, account accounts.Account, prompt, mode string, count int) ([]ImageResult, error) {
@@ -78,10 +80,10 @@ func (m *Media) GenerateLite(ctx context.Context, account accounts.Account, prom
 	return results, nil
 }
 
-func (m *Media) GenerateImagine(ctx context.Context, account accounts.Account, prompt, aspectRatio string, count int, enableNSFW, enablePro bool, wsURL string) ([]ImageResult, error) {
+func (m *Media) GenerateImagine(ctx context.Context, account accounts.Account, prompt, aspectRatio, resolution string, count int, enableNSFW, enablePro bool, wsURL string) ([]ImageResult, error) {
 	socket := NewImagineSocket(wsURL, m.Client, m.RequestTimeout)
 	socket.Proxy = m.Proxy
-	return socket.Generate(ctx, account, prompt, aspectRatio, count, enableNSFW, enablePro)
+	return socket.Generate(ctx, account, prompt, aspectRatio, resolution, count, enableNSFW, enablePro)
 }
 
 func (m *Media) ResolveImage(ctx context.Context, account accounts.Account, image ImageResult, responseFormat, imageDir, publicBase string) (map[string]string, error) {
@@ -94,7 +96,7 @@ func (m *Media) ResolveImage(ctx context.Context, account accounts.Account, imag
 	}
 	var raw []byte
 	mime := strings.TrimSpace(image.MIME)
-	if image.Base64 != "" {
+	if image.Base64 != "" && !(image.ImagineFinal && image.URL != "") {
 		decoded, err := base64.StdEncoding.DecodeString(image.Base64)
 		if err == nil && len(decoded) > 0 {
 			raw = decoded
@@ -105,7 +107,18 @@ func (m *Media) ResolveImage(ctx context.Context, account accounts.Account, imag
 	}
 	if raw == nil {
 		var err error
-		raw, mime, err = m.Fetch(ctx, account, image.URL)
+		if image.ImagineFinal {
+			raw, mime, err = m.fetch(ctx, account, image.URL, 64<<20)
+		} else {
+			raw, mime, err = m.Fetch(ctx, account, image.URL)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if image.ImagineFinal {
+		var err error
+		mime, err = validatedImagineImageMIME(raw)
 		if err != nil {
 			return nil, err
 		}

@@ -115,7 +115,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Model = spec.ID
 	if !isOpenAIImageModel(request.Model) {
-		if _, ok := protocol.AspectRatio(request.Size); !ok {
+		if _, _, ok := protocol.ImagineImageSize(request.Size); !ok {
 			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
 			return
 		}
@@ -150,8 +150,8 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 	generationStarted := time.Now()
 	s.grokAccountPool.MarkSent(lease, "image_gen")
-	aspect, _ := protocol.AspectRatio(request.Size)
-	images, err := s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, request.N, true, true, s.cfg.ImagineWSURL)
+	aspect, resolution, _ := protocol.ImagineImageSize(request.Size)
+	images, err := s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, resolution, request.N, true, true, s.cfg.ImagineWSURL)
 	if err != nil {
 		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")

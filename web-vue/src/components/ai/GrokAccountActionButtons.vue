@@ -3,11 +3,12 @@
     <Button
       size="xs"
       variant="outline"
-      root-class="w-16 justify-center whitespace-nowrap"
+      root-class="min-w-24 justify-center whitespace-nowrap"
+      title="同步已保存的 SSO 登录态及配置，使账号可供文字、图片和视频请求调度；异常或禁用账号仍不会被选用"
       :disabled="busy || !item.has_sso || !runtimeAvailable || syncing"
       @click="emit('sync')"
     >
-      {{ syncing ? '加入中' : (item.sync_state === 'synced' ? '重加' : '加入') }}
+      {{ syncing ? '同步中' : (item.sync_state === 'synced' ? '同步调用池' : '加入调用池') }}
     </Button>
     <Button
       size="xs"

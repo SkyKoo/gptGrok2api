@@ -58,3 +58,25 @@ func TestResolveGeneratedVideoReference(t *testing.T) {
 		t.Fatal("incomplete generated video references must be empty")
 	}
 }
+
+func TestImagineImageSizeResolutionMapping(t *testing.T) {
+	cases := []struct {
+		size, aspect, resolution string
+		ok                       bool
+	}{
+		{"auto", "1:1", "1k", true}, {"1024x1024", "1:1", "1k", true},
+		{"1024x1792", "2:3", "1k", true}, {"1792x1024", "3:2", "1k", true},
+		{"720x1280", "9:16", "1k", true}, {"1280x720", "16:9", "1k", true},
+		{"2048x2048", "1:1", "2k", true}, {"2048x3072", "2:3", "2k", true},
+		{"3072x2048", "3:2", "2k", true}, {"1440x2560", "9:16", "2k", true},
+		{"2560x1440", "16:9", "2k", true}, {"3840x2160", "", "1k", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.size, func(t *testing.T) {
+			aspect, resolution, ok := ImagineImageSize(tc.size)
+			if aspect != tc.aspect || resolution != tc.resolution || ok != tc.ok {
+				t.Fatalf("got %q %q %v", aspect, resolution, ok)
+			}
+		})
+	}
+}

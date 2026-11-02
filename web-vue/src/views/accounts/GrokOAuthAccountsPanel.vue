@@ -8,8 +8,8 @@
       @close="emit('close')"
     />
     <ModalBody density="compact" class="space-y-4">
-      <GrokOAuthCandidates :items="candidates" :loading="loading" :busy="busy || Boolean(device)" :error="candidateError" @authorize="startDeviceAuthorization" />
-      <p class="text-xs text-muted-foreground">使用手动设备码完成授权；自动协议授权尚未开放。已有 OAuth 凭据可继续导入和测试。</p>
+      <GrokOAuthCandidates :items="candidates" :loading="loading" :busy="busy || Boolean(device) || protocolRunning" :error="candidateError" @authorize="startProtocolAuthorization" />
+      <p class="text-xs text-muted-foreground">点击账号的“后台授权”后，系统使用该账号登录态自动处理。若 xAI 要求额外验证，会显示具体原因；手动设备码作为备用入口。</p>
       <div class="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" :disabled="busy || loading" @click="loadAccounts">
           {{ loading ? '刷新中...' : '刷新' }}
@@ -26,9 +26,31 @@
 
       </div>
 
+      <section class="space-y-2" aria-label="OAuth 额度与有效期">
+        <h3 class="text-sm font-medium text-foreground">已授权凭据 · 额度与有效期</h3>
+        <p class="text-xs text-muted-foreground">这里只显示 OAuth 额度。SSO 图片和视频额度在账号管理中查看；未返回额度或周期时显示“尚未获取”。</p>
+        <p v-if="!accounts.length" class="py-3 text-xs text-muted-foreground">暂无 OAuth 凭据，完成授权后显示。</p>
+        <div v-else class="overflow-x-auto">
+          <table class="w-full min-w-[700px] text-left text-xs">
+            <thead class="text-muted-foreground"><tr>
+              <th class="py-2 pr-4">邮箱 / OAuth 账号 ID</th><th class="py-2 pr-4">状态</th>
+              <th class="py-2 pr-4">OAuth 剩余</th><th class="py-2 pr-4">额度重置时间</th>
+              <th class="py-2 pr-4">凭据到期时间</th>
+            </tr></thead>
+            <tbody><tr v-for="account in accounts" :key="account.id" class="border-t border-border">
+              <td class="max-w-[18rem] break-all py-3 pr-4"><p>{{ account.email || '未返回邮箱' }}</p><p class="mt-1 font-mono text-muted-foreground">{{ account.id }}</p></td>
+              <td class="py-3 pr-4">{{ grokOAuthShortStatusText(oauthView(account)) }}</td>
+              <td class="py-3 pr-4">{{ grokOAuthRemainingQuotaText(oauthView(account)) === '-' ? '尚未获取' : grokOAuthRemainingQuotaText(oauthView(account)) }}</td>
+              <td class="whitespace-nowrap py-3 pr-4">{{ grokOAuthQuotaResetText(oauthView(account)) === '-' ? '尚未获取' : grokOAuthQuotaResetText(oauthView(account)) }}</td>
+              <td class="whitespace-nowrap py-3 pr-4">{{ formatGrokAccountDate(account.expires_at) }}</td>
+            </tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <SurfaceBox v-if="protocolJob" tone="muted" density="compact" class="space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="text-sm font-medium text-foreground">协议授权 · {{ protocolStageLabel }}</span>
+          <span class="text-sm font-medium text-foreground">后台授权 · {{ protocolStageLabel }}</span>
           <StateBadge :tone="protocolJobTone" size="xs">{{ protocolStatusLabel }}</StateBadge>
         </div>
         <p class="text-xs text-muted-foreground">{{ protocolJob.message }}</p>
@@ -164,6 +186,13 @@ import {
   type GrokOAuthProtocolJob,
 } from '@/api/grokOAuthAccounts'
 import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
+import type { GrokAccount } from '@/api/grokAccounts'
+import { formatGrokAccountDate, grokOAuthQuotaResetText, grokOAuthRemainingQuotaText, grokOAuthShortStatusText } from './grokAccountView'
+
+function oauthView(account: GrokOAuthAccount): GrokAccount {
+  return { oauth: account } as GrokAccount
+}
+
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
@@ -245,22 +274,10 @@ const protocolStatusLabel = computed(() => ({
   running: '运行中',
   authorized: '已完成',
   failed: '失败',
+  manual_action_required: '需处理',
 }[protocolJob.value?.status || 'pending'] || protocolJob.value?.status || '等待'))
 const protocolStageLabel = computed(() => ({
-  queued: '排队',
-  bootstrap: '发现协议参数',
-  device_code: '创建设备码',
-  signin: '建立登录上下文',
-  castle: '生成 Castle token',
-  turnstile: '求解 Turnstile',
-  session: '创建账号会话',
-  consent: '读取授权主体',
-  approve: '确认 Allow',
-  token: '获取 OAuth token',
-  models: '探测模型',
-  delivery: '投递 OAuth 凭据',
-  completed: '完成',
-  failed: '失败',
+  queued: '排队', authorize: '授权处理中', completed: '完成', failed: '失败', attention: '需处理',
 }[protocolJob.value?.stage || 'queued'] || protocolJob.value?.stage || '排队'))
 const protocolDeliveryItems = computed(() => Object.entries(protocolJob.value?.delivery || {})
   .filter(([, result]) => result?.status === 'success' || result?.status === 'failed')
@@ -277,6 +294,12 @@ async function loadAccounts() {
       grokOAuthAccountsApi.list(),
       grokOAuthAccountsApi.candidates().then(result => { candidates.value = result.items || []; candidateError.value = '' }).catch(() => { candidateError.value = 'Grok 待授权账号加载失败，请刷新重试' }),
     ])
+    const active = candidates.value.find(item => item.oauth_job_id && ['queued', 'running'].includes(item.oauth_status))
+    if (active?.oauth_job_id && !protocolRunning.value) {
+      const resumed = await grokOAuthAccountsApi.getProtocolJob(active.oauth_job_id)
+      protocolJob.value = resumed.job
+      if (['pending', 'running'].includes(resumed.job.status)) scheduleProtocolPoll()
+    }
     accounts.value = result.items || []
     availableModels.value = result.available_models || []
     const modelIds = modelTestOptions.value.map((option) => option.value)
@@ -403,30 +426,35 @@ async function pollProtocolAuthorization() {
   try {
     const result = await grokOAuthAccountsApi.getProtocolJob(jobId)
     protocolJob.value = result.job
+    candidates.value = candidates.value.map(item => item.id === result.job.source_account_id
+      ? { ...item, oauth_status: result.job.status === 'pending' ? 'queued' : result.job.status }
+      : item)
     if (result.job.status === 'authorized') {
-      toast.success(`协议授权成功${result.job.models.length ? `：${result.job.models.join('、')}` : ''}`)
+      toast.success(`后台授权成功${result.job.models.length ? `：${result.job.models.join('、')}` : ''}`)
       await loadAccounts()
       emit('changed')
       return
     }
-    if (result.job.status === 'failed') {
-      toast.error(result.job.error || '协议授权失败')
+    if (['failed', 'manual_action_required'].includes(result.job.status)) {
+      toast.warning(result.job.error || '后台授权需要处理')
+      await loadAccounts()
       return
     }
     scheduleProtocolPoll()
   } catch (error) {
-    toast.error(errorMessage(error, '协议授权状态读取失败'))
+    toast.error(errorMessage(error, '后台授权状态读取失败'))
   }
 }
 
-async function startProtocolAuthorization() {
+async function startProtocolAuthorization(candidate: GrokOAuthCandidate) {
   busy.value = true
   try {
-    const result = await grokOAuthAccountsApi.startProtocol()
+    const result = await grokOAuthAccountsApi.startProtocol(candidate.id)
     protocolJob.value = result.job
+    await loadAccounts()
     scheduleProtocolPoll()
   } catch (error) {
-    toast.error(errorMessage(error, '无法启动协议授权'))
+    toast.error(errorMessage(error, '无法启动后台授权'))
   } finally {
     busy.value = false
   }

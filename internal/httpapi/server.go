@@ -75,6 +75,7 @@ type Server struct {
 	agentIdentityStore *agentidentity.Store
 	deviceOAuth        *oauth.DeviceService
 	taskQueue          tasks.QueueAPI
+	grokOAuthRuns      sync.Map
 	registerStore      *registerruntime.Store
 	registerRuntime    *registerruntime.Runtime
 	freeRegister       *registerruntime.FreeEngine
@@ -222,15 +223,7 @@ func New(cfg config.Config) *Server {
 	server.consoleProvider.SetProxyManager(proxyManager)
 	server.mediaProvider.SetProxyManager(proxyManager)
 	server.deviceOAuth = oauth.NewDeviceService(requestClient, cfg.OAuthDeviceURL, cfg.OAuthTokenURL, server.oauthStore)
-	server.taskQueue.Register("grok_oauth_authorize", func(task *tasks.Task) (map[string]any, error) {
-		accountID := stringValue(task.Payload["account_id"])
-		_, _ = server.registerStore.SetOAuthAuthorization(accountID, "manual_action_required", "")
-		return map[string]any{
-			"status":     "manual_action_required",
-			"message":    "请使用 /api/grok/oauth/device/start 完成 xAI Device Code 授权",
-			"account_id": task.Payload["account_id"],
-		}, nil
-	})
+	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
 	if cfg.Version != "test" {
 		server.taskQueue.Start(2)
 		go server.imageRetentionScheduler()

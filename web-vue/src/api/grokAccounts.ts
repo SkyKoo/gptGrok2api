@@ -109,6 +109,7 @@ export type GrokAccount = {
   use_count?: number
   fail_count?: number
   last_used_at?: string | number | null
+  usage_started_at?: string | null
   refresh_status?: 'success' | 'failed' | (string & {})
   refresh_at?: string | number | null
   refresh_error?: string

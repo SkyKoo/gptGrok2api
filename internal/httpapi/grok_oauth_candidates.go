@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -36,6 +37,12 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 			byEmail[email] = credential
 		}
 	}
+	activeJobs := map[string]map[string]any{}
+	for _, task := range s.taskQueue.List() {
+		if task.Kind == "grok_oauth_authorize" && (task.Status == "queued" || task.Status == "running") {
+			activeJobs[stringValue(task.Payload["account_id"])] = grokOAuthPublicJob(task)
+		}
+	}
 	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		email := strings.TrimSpace(stringValue(item["email"]))
@@ -49,6 +56,21 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 		} else if stringValue(mapValue(item["oauth_authorization"])["status"]) == "failed" {
 			state = "failed"
 		}
+		authorization := mapValue(item["oauth_authorization"])
+		jobID, message := "", ""
+		if job := activeJobs[stringValue(item["id"])]; job != nil {
+			state = stringValue(job["status"])
+			if state == "pending" {
+				state = "queued"
+			}
+			jobID = stringValue(job["id"])
+		} else if stringValue(authorization["status"]) == "manual_action_required" {
+			state = "manual_action_required"
+			message = grokOAuthMessages[grokOAuthErrorCode(errors.New(stringValue(authorization["error"])))]
+		} else if stringValue(authorization["status"]) == "failed" {
+			state = "failed"
+			message = grokOAuthMessages[grokOAuthErrorCode(errors.New(stringValue(authorization["error"])))]
+		}
 		loginStatus := stringValue(item["status"])
 		if value := byToken[strings.TrimSpace(stringValue(item["sso"]))]; value != "" {
 			loginStatus = value
@@ -56,6 +78,7 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 		result = append(result, map[string]any{
 			"id": stringValue(item["id"]), "email": email, "login_status": loginStatus,
 			"oauth_status": state, "oauth_account_id": credential.ID,
+			"oauth_job_id": jobID, "oauth_message": message,
 			"has_access_token": credential.AccessToken != "", "has_refresh_token": credential.RefreshToken != "",
 			"updated_at": item["updated_at"],
 		})

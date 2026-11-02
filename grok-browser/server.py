@@ -23,6 +23,7 @@ import cloakbrowser
 
 from common.browser import browser_context_kwargs, browser_kwargs
 from signup_errors import signup_error_status
+from oauth_device import authorize_device, validate_device_url
 from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
     XaiBrowserFlowError,
@@ -87,6 +88,34 @@ class MaterializeRequest(BaseModel):
     wrapper: str = Field(min_length=40, max_length=8192)
     proxy: str = Field(default="", max_length=2048)
     cookies: list[dict] = Field(default_factory=list, max_length=128)
+
+
+class OAuthDeviceRequest(BaseModel):
+    verification_uri_complete: str = Field(min_length=8, max_length=2048)
+    user_code: str = Field(min_length=8, max_length=9)
+    sso: str = Field(min_length=1, max_length=8192)
+    sso_rw: str = Field(default="", max_length=8192)
+    expected_email: str = Field(min_length=3, max_length=320)
+    proxy: str = Field(default="", max_length=2048)
+    timeout_s: int = Field(default=120, ge=30, le=120)
+
+
+@app.post("/v1/oauth/authorize-device")
+async def oauth_authorize_device(req: OAuthDeviceRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        validate_device_url(req.verification_uri_complete, req.user_code)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="oauth_verification_url_invalid")
+    # Bound queue waiting as well as execution. No request body or browser
+    # exception is logged, because both may include session credentials.
+    try:
+        async with asyncio.timeout(150):
+            async with _slots:
+                return await authorize_device(**req.model_dump(exclude={"proxy"}), proxy=_normalize_proxy(req.proxy))
+    except TimeoutError:
+        return {"status":"uncertain", "code":"oauth_worker_result_unknown"}
 
 
 def _authorized(authorization: str | None) -> bool:

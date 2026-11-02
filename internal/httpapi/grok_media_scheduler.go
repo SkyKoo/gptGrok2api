@@ -121,37 +121,3 @@ func (s *Server) grokMediaQuotaScheduler() {
 		}
 	}
 }
-
-// Merge only public media state into archive rows. Credentials remain local to
-// the join and never enter the response, even for older runtime imports without an ID.
-func (s *Server) attachGrokMediaRuntime(items []map[string]any) {
-	rows, _, err := s.grokRuntimeStore.AccountSnapshot()
-	if err != nil {
-		return
-	}
-	runtime := map[string]map[string]any{}
-	for _, row := range rows {
-		runtime[accountToken(row)] = row
-	}
-	archive, err := s.registerStore.ExportAccounts(nil)
-	if err != nil {
-		return
-	}
-	byID := map[string]map[string]any{}
-	for _, row := range archive {
-		token := firstNonEmpty(stringValue(row["sso"]), stringValue(row["access_token"]), stringValue(row["token"]))
-		if active := runtime[token]; active != nil {
-			byID[stringValue(row["id"])] = active
-		}
-	}
-	for _, item := range items {
-		if active := byID[stringValue(item["id"])]; active != nil {
-			if snapshot := active["media_quota"]; snapshot != nil {
-				item["media_quota"] = snapshot
-			}
-			item["media_quota_refresh_needed"] = active["media_quota_refresh_needed"] == true
-			pending := mapValue(active["quota_pending"])
-			item["media_quota_pending"] = map[string]int{"image_gen": intValue(pending["image_gen"]), "video_gen": intValue(pending["video_gen"])}
-		}
-	}
-}

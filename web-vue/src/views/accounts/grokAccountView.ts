@@ -1,5 +1,5 @@
 import type { GrokAccount } from '@/api/grokAccounts'
-import { PILL_TONE_CLASS } from '@/lib/pillTones'
+import { PILL_TONE_CLASS } from '../../lib/pillTones.ts'
 
 function cleanString(value: unknown): string {
   return String(value || '').trim()
@@ -10,7 +10,7 @@ function accountEventTimestamp(value: unknown): number | null {
   const text = cleanString(value)
   if (!text) return null
   const numeric = Number(text)
-  if (Number.isFinite(numeric) && numeric > 0) return numeric
+  if (Number.isFinite(numeric)) return numeric > 0 ? numeric : null
   const parsed = Date.parse(text)
   return Number.isFinite(parsed) ? parsed : null
 }
@@ -76,23 +76,6 @@ export function grokRecoveryStatusClass(item: GrokAccount): string {
   return PILL_TONE_CLASS.neutral
 }
 
-export function grokRecoveryTimeText(item: GrokAccount): string {
-  const oauthRecovery = item.oauth?.recovery
-  if (oauthRecovery) {
-    const oauthNextAttempt = formatGrokAccountDate(oauthRecovery.next_attempt_at)
-    if (oauthNextAttempt !== '-') return oauthNextAttempt
-    const oauthLastSuccess = formatGrokAccountDate(oauthRecovery.last_success_at)
-    if (oauthLastSuccess !== '-') return oauthLastSuccess
-    const oauthLastAttempt = formatGrokAccountDate(oauthRecovery.last_attempt_at)
-    if (oauthLastAttempt !== '-') return oauthLastAttempt
-  }
-  const nextAttempt = formatGrokAccountDate(item.recovery_next_attempt_at)
-  if (nextAttempt !== '-') return nextAttempt
-  const lastSuccess = formatGrokAccountDate(item.recovery_last_success_at)
-  if (lastSuccess !== '-') return lastSuccess
-  return formatGrokAccountDate(item.recovery_last_attempt_at)
-}
-
 export function grokRecoveryStatusTitle(item: GrokAccount): string {
   const label = grokRecoveryStatusText(item)
   if (!label) return ''
@@ -134,28 +117,26 @@ export function grokAccountStatusClass(item: GrokAccount): string {
 export function grokRuntimeStatusText(item: GrokAccount): string {
   const status = cleanString(item.runtime_status).toLowerCase()
   if (!status) return item.sync_state === 'synced' ? '待刷新' : '未加入'
-  if (status === 'active') return '正常'
+  if (status === 'active') return grokRefreshFailed(item) ? '刷新失败' : '正常'
   if (status === 'cooling' || status === 'rate_limited') return '限流'
   if (status === 'invalid' || status === 'expired') return '异常'
   if (status === 'disabled') return '禁用'
-  if (status === 'active' && grokRefreshFailed(item)) return '刷新失败'
   return cleanString(item.runtime_status)
 }
 
 export function grokRuntimeStatusClass(item: GrokAccount): string {
   const status = cleanString(item.runtime_status).toLowerCase()
-  if (status === 'active') return PILL_TONE_CLASS.success
+  if (status === 'active') return grokRefreshFailed(item) ? PILL_TONE_CLASS.warning : PILL_TONE_CLASS.success
   if (status === 'cooling' || status === 'rate_limited') return PILL_TONE_CLASS.warning
   if (status === 'invalid' || status === 'expired') return PILL_TONE_CLASS.danger
-  if (status === 'active' && grokRefreshFailed(item)) return PILL_TONE_CLASS.warning
   return PILL_TONE_CLASS.neutral
 }
 
 export function grokSyncStateText(item: GrokAccount): string {
-  if (item.sync_state === 'synced') return '已加入'
+  if (item.sync_state === 'synced') return '已加入调用池'
   if (item.sync_state === 'not_ready') return '登录态未就绪'
-  if (item.sync_state === 'not_synced') return '待加入'
-  if (item.sync_state === 'runtime_unavailable') return '运行时不可用'
+  if (item.sync_state === 'not_synced') return '未加入调用池'
+  if (item.sync_state === 'runtime_unavailable') return '调用池不可用'
   if (item.sync_state === 'sync_failed' || item.sync_state === 'failed') return '加入失败'
   return '状态未知'
 }
@@ -171,13 +152,15 @@ function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
   if (probeCode === 'personal-team-blocked' || probeCode.startsWith('personal-team-blocked:')) return 'no_quota'
   const status = cleanString(item.oauth.status).toLowerCase()
   if (status === 'expired') return 'expired'
+  const expiry = accountEventTimestamp(item.oauth.expires_at)
+  if (expiry !== null && (expiry < 10_000_000_000 ? expiry * 1000 : expiry) <= Date.now()) return 'expired'
   if (status === 'disabled' || status === 'invalid') return 'invalid'
   const probeStatus = cleanString(item.oauth?.probe?.status).toLowerCase()
   if (probeStatus === 'valid') return 'normal'
   if (probeStatus === 'limited') return 'limited'
   if (probeStatus === 'invalid') return 'invalid'
   if (probeStatus === 'unknown') return 'unknown'
-  return status === 'active' ? 'normal' : 'invalid'
+  return status === 'active' ? 'unknown' : 'invalid'
 }
 
 export function grokOAuthStatusText(item: GrokAccount): string {
@@ -248,6 +231,7 @@ export function grokOAuthRecoveryStatusTitle(item: GrokAccount): string {
 }
 
 function oauthQuotaPercentText(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '-'
   const number = Number(value)
   if (!Number.isFinite(number)) return '-'
   const bounded = Math.min(100, Math.max(0, number))
@@ -333,10 +317,11 @@ export function formatGrokAccountDate(value: unknown): string {
   const raw = cleanString(value)
   if (!raw) return '-'
   const numeric = Number(raw)
+  if (Number.isFinite(numeric) && numeric <= 0) return '-'
   const date = Number.isFinite(numeric) && numeric > 0
     ? new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000)
     : new Date(raw)
-  if (Number.isNaN(date.getTime())) return raw
+  if (Number.isNaN(date.getTime()) || date.getUTCFullYear() < 1971) return '-'
   const yyyy = date.getFullYear()
   const mm = String(date.getMonth() + 1).padStart(2, '0')
   const dd = String(date.getDate()).padStart(2, '0')
@@ -378,7 +363,7 @@ export function grokQuotaText(item: GrokAccount): string {
 }
 
 export function grokSuccessRate(item: GrokAccount): string {
-  if (item.sync_state !== 'synced') return '-'
+  if (item.sync_state !== 'synced' || item.use_count == null || item.fail_count == null) return '-'
   const success = Math.max(0, Number(item.use_count || 0))
   const failure = Math.max(0, Number(item.fail_count || 0))
   const total = success + failure
@@ -388,7 +373,13 @@ export function grokSuccessRate(item: GrokAccount): string {
 
 export function grokUsageText(item: GrokAccount): string {
   if (item.sync_state !== 'synced') return '- / -'
-  return `${Math.max(0, Number(item.use_count || 0))} / ${Math.max(0, Number(item.fail_count || 0))}`
+  if (item.use_count == null && item.fail_count == null) return '暂无记录'
+  return `${item.use_count ?? '-'} / ${item.fail_count ?? '-'}`
+}
+
+export function grokLastUsedText(item: GrokAccount): string {
+  const value = formatGrokAccountDate(item.last_used_at)
+  return value === '-' ? '暂无记录' : value
 }
 
 export function grokAccountDetailItems(item: GrokAccount) {
@@ -399,16 +390,13 @@ export function grokAccountDetailItems(item: GrokAccount) {
     { label: '运行状态', value: grokRuntimeStatusText(item) },
     { label: 'OAuth 状态', value: grokOAuthShortStatusText(item) },
     { label: 'SSO 文字额度', value: grokQuotaText(item) },
-    { label: 'OAuth 额度', value: grokOAuthQuotaText(item) },
-    { label: 'OAuth 恢复', value: grokOAuthRecoveryStatusText(item) || '-' },
     { label: '成功 / 失败', value: grokUsageText(item) },
     { label: '成功率', value: grokSuccessRate(item) },
-    { label: '最近使用', value: formatGrokAccountDate(item.last_used_at) },
+    { label: '创建时间（CFM 入库）', value: formatGrokAccountDate(item.created_at) },
+    { label: '最近调用', value: grokLastUsedText(item) },
     { label: '最近刷新', value: formatGrokAccountDate(item.refresh_at) },
     { label: '最近探测', value: formatGrokAccountDate(item.probe_at) },
     { label: '探测结果', value: grokProbeStatusText(item) || '-' },
-    { label: '恢复状态', value: grokRecoveryStatusText(item) || '-' },
-    { label: '恢复时间', value: grokRecoveryTimeText(item) },
     {
       label: '刷新结果',
       value: grokRefreshFailed(item)

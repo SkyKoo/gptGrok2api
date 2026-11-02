@@ -24,7 +24,7 @@ func BuildResetMessage() map[string]any {
 	}
 }
 
-func BuildImagineRequest(requestID, prompt, aspectRatio string, enableNSFW, enablePro bool) map[string]any {
+func BuildImagineRequest(requestID, prompt, aspectRatio, resolution string, count int, enableNSFW, enablePro bool) map[string]any {
 	return map[string]any{
 		"type":      "conversation.item.create",
 		"timestamp": time.Now().UnixMilli(),
@@ -36,11 +36,34 @@ func BuildImagineRequest(requestID, prompt, aspectRatio string, enableNSFW, enab
 				"type":      "input_text",
 				"properties": map[string]any{
 					"section_count": 0, "is_kids_mode": false, "enable_nsfw": enableNSFW,
-					"skip_upsampler": false, "enable_side_by_side": true, "is_initial": false,
+					"skip_upsampler": enablePro, "enable_side_by_side": false, "is_initial": false,
 					"aspect_ratio": aspectRatio, "enable_pro": enablePro,
+					"resolution_name": resolution, "num_generations": count,
 				},
 			}},
 		},
+	}
+}
+
+// ImagineImageSize maps API sizes to the SSO protocol's resolution tiers.
+// These are requested tiers/aspect ratios, not a promise of exact output pixels.
+func ImagineImageSize(size string) (aspect, resolution string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(size)) {
+	case "", "auto":
+		return "1:1", "1k", true
+	case "2048x2048":
+		return "1:1", "2k", true
+	case "2048x3072":
+		return "2:3", "2k", true
+	case "3072x2048":
+		return "3:2", "2k", true
+	case "1440x2560":
+		return "9:16", "2k", true
+	case "2560x1440":
+		return "16:9", "2k", true
+	default:
+		aspect, ok = AspectRatio(size)
+		return aspect, "1k", ok
 	}
 }
 

@@ -110,3 +110,50 @@ func TestGenerateLiteClassifiesRateLimitDiagnostics(t *testing.T) {
 		t.Fatalf("unexpected rate-limit diagnostics: status=%d message=%s", upstream.Status, upstream.Message)
 	}
 }
+
+func TestResolveImagineUsesOriginalAndNeverFallsBackToPreview(t *testing.T) {
+	raw := imagineTestPNG(t)
+	for _, kind := range []string{"valid", "html", "truncated", "denied"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != "/final.jpg" || !strings.Contains(r.Header.Get("Cookie"), "sso=test-token") {
+					t.Error("wrong asset request")
+				}
+				w.Header().Set("Content-Type", "image/jpeg") // deliberately wrong MIME
+				switch kind {
+				case "valid":
+					w.Write(raw)
+				case "html":
+					w.Write([]byte("<html>Storage error</html>"))
+				case "truncated":
+					w.Write(raw[:len(raw)/2])
+				case "denied":
+					w.WriteHeader(http.StatusForbidden)
+				}
+			}))
+			defer server.Close()
+			media := NewMedia(server.Client(), "", "", "", server.URL, time.Second)
+			dir := t.TempDir()
+			result, err := media.ResolveImage(context.Background(), accounts.Account{Token: "test-token"}, ImageResult{URL: "https://assets.grok.com/final.jpg", Base64: base64.StdEncoding.EncodeToString([]byte("preview")), MIME: "image/jpeg", ImagineFinal: true}, "url", dir, "")
+			if calls != 1 {
+				t.Fatalf("original fetch count=%d", calls)
+			}
+			files, _ := os.ReadDir(dir)
+			if kind != "valid" {
+				if err == nil || len(files) > 0 {
+					t.Fatal("bad original replaced by preview or persisted")
+				}
+				return
+			}
+			if err != nil || result["url"] == "" || len(files) != 1 {
+				t.Fatalf("missing original: %v", err)
+			}
+			saved, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
+			if err != nil || string(saved) != string(raw) || !strings.HasSuffix(files[0].Name(), ".png") {
+				t.Fatal("original was re-encoded or MIME trusted")
+			}
+		})
+	}
+}

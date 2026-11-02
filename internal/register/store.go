@@ -431,7 +431,10 @@ func (s *Store) SetOAuthAuthorization(id, status, errorText string) (bool, error
 		if value, ok := state["attempts"].(float64); ok {
 			attempts = int(value)
 		}
-		state["attempts"] = attempts + 1
+		if status == "queued" {
+			attempts++
+		}
+		state["attempts"] = attempts
 		item["oauth_authorization"] = state
 		item["updated_at"] = time.Now().UTC().Format(time.RFC3339)
 		items[index] = item

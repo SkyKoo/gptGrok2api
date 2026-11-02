@@ -159,7 +159,7 @@ export function useGrokAccountsPage() {
       const result = await grokAccountsApi.refreshSnapshot()
       if (!pageRuntime.canRun.value) return
       if (!result.ok) {
-        runtimeError.value = String(result.error || 'Grok 运行时数据刷新失败').trim()
+        runtimeError.value = String(result.error || 'Grok 调用池数据刷新失败').trim()
         return
       }
       if (result.refreshing) {
@@ -172,7 +172,7 @@ export function useGrokAccountsPage() {
         await loadData({ silentErrorToast: true, silentLoading: true })
       }
     } catch (error) {
-      if (pageRuntime.canRun.value) runtimeError.value = errorMessage(error, 'Grok 运行时数据刷新失败')
+      if (pageRuntime.canRun.value) runtimeError.value = errorMessage(error, 'Grok 调用池数据刷新失败')
     } finally {
       snapshotRefreshBusy.value = false
     }
@@ -259,25 +259,25 @@ export function useGrokAccountsPage() {
     const ids = uniqueIds(accountIds)
     if (!ids.length) return false
     const confirmed = await confirmDialog.ask({
-      title: '加入 Grok 运行池',
-      message: `即将把 ${ids.length} 个 Grok 注册账号加入内置 Grok 运行池，并按当前配置验证登录态。是否继续？`,
-      confirmText: '开始加入',
+      title: '同步 Grok 调用池',
+      message: `将 ${ids.length} 个账号已保存的 SSO 登录态和配置同步到调用池，供文字、图片、视频请求调度使用。已有账号会更新配置；异常或禁用状态会保留。此操作不会重新注册或执行登录验证。是否继续？`,
+      confirmText: '确认同步',
       cancelText: '取消',
     })
     if (!confirmed) return false
 
-    beginAction(ids, '正在加入 Grok 运行池...', syncingAccountId)
+    beginAction(ids, '正在同步 Grok 调用池...', syncingAccountId)
     try {
       const result = await grokAccountsApi.sync(ids)
       const ok = Number(result.summary?.ok || 0)
       const fail = Number(result.summary?.fail || 0)
       const detail = String(result.error || result.results?.find((item) => item.error)?.error || '').trim()
-      if (fail > 0) toast.warning(`加入完成：成功 ${ok}，失败 ${fail}${detail ? `；${detail}` : ''}`)
-      else toast.success(`已加入 ${ok} 个 Grok 账号`)
+      if (fail > 0) toast.warning(`同步完成：成功 ${ok}，失败 ${fail}${detail ? `；${detail}` : ''}`)
+      else toast.success(`已同步 ${ok} 个 Grok 账号`)
       await loadData({ silentErrorToast: true })
       return fail === 0
     } catch (error) {
-      toast.error(`加入失败：${errorMessage(error)}`)
+      toast.error(`同步失败：${errorMessage(error)}`)
       return false
     } finally {
       endAction(syncingAccountId)
@@ -322,12 +322,12 @@ export function useGrokAccountsPage() {
     const ids = uniqueIds(accountIds)
     if (!ids.length) return false
     if (!runtimeAvailable.value) {
-      toast.warning(runtimeError.value || 'Grok 运行时当前不可用')
+      toast.warning(runtimeError.value || 'Grok 调用池当前不可用')
       return false
     }
     const confirmed = await confirmDialog.ask({
       title: '刷新 Grok 状态和额度',
-      message: `即将通过 Grok 运行时刷新 ${ids.length} 个账号的运行状态和额度。是否继续？`,
+      message: `即将通过 Grok 调用池刷新 ${ids.length} 个账号的运行状态和额度。是否继续？`,
       confirmText: '开始刷新',
       cancelText: '取消',
     })
@@ -392,13 +392,13 @@ export function useGrokAccountsPage() {
     const ids = uniqueIds(accountIds)
     if (!ids.length) return false
     if (!runtimeAvailable.value) {
-      toast.warning(runtimeError.value || 'Grok 运行时当前不可用')
+      toast.warning(runtimeError.value || 'Grok 调用池当前不可用')
       return false
     }
     const action = disabled ? '禁用' : '恢复'
     const confirmed = await confirmDialog.ask({
       title: `${action} Grok 账号`,
-      message: `即将在 Grok 运行时中${action} ${ids.length} 个账号。${disabled ? '禁用后不会参与请求分配。' : '恢复后将重新参与请求分配。'}是否继续？`,
+      message: `即将在 Grok 调用池中${action} ${ids.length} 个账号。${disabled ? '禁用后不会参与请求分配。' : '恢复后将重新参与请求分配。'}是否继续？`,
       confirmText: action,
       cancelText: '取消',
     })
@@ -430,7 +430,7 @@ export function useGrokAccountsPage() {
     const localOnlyIds = ids.filter((id) => !syncedIds.includes(id))
     const confirmed = await confirmDialog.ask({
       title: ids.length === 1 ? '删除 Grok 账号' : '批量删除 Grok 账号',
-      message: `即将删除 ${ids.length} 个 Grok 账号，本地保存的密码和 SSO 登录态会一并移除${syncedIds.length ? '；已加入账号也会从 Grok 运行时删除' : ''}。此操作不可恢复，是否继续？`,
+      message: `即将删除 ${ids.length} 个 Grok 账号，本地保存的密码和 SSO 登录态会一并移除${syncedIds.length ? '；已加入账号也会从 Grok 调用池删除' : ''}。此操作不可恢复，是否继续？`,
       confirmText: '确认删除',
       cancelText: '取消',
     })
@@ -484,15 +484,15 @@ export function useGrokAccountsPage() {
       else await syncAccounts(readyIds)
     }
     if (action === 'refresh') {
-      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 运行池')
+      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 调用池')
       else await refreshRuntime(syncedIds)
     }
     if (action === 'disable') {
-      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 运行池')
+      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 调用池')
       else await setRuntimeDisabled(syncedIds, true)
     }
     if (action === 'enable') {
-      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 运行池')
+      if (!syncedIds.length) toast.warning('选中账号尚未加入 Grok 调用池')
       else await setRuntimeDisabled(syncedIds, false)
     }
     if (action === 'delete') await removeAccounts(ids)

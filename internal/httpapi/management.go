@@ -83,6 +83,8 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/grok/oauth/")
 	switch {
+	case strings.HasPrefix(path, "protocol/"):
+		s.grokOAuthBackgroundAPI(w, r, strings.TrimPrefix(path, "protocol/"))
 	case path == "candidates" && r.Method == http.MethodGet:
 		s.grokOAuthCandidates(w, r)
 	case path == "accounts" && r.Method == http.MethodGet:
@@ -259,34 +261,7 @@ func (s *Server) grokOAuthProtocolLegacy(w http.ResponseWriter, r *http.Request)
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/protocol/")
-	switch {
-	case path == "start" && r.Method == http.MethodPost:
-		var request struct {
-			AccountID string `json:"account_id"`
-		}
-		if !decodeJSON(w, r, &request) {
-			return
-		}
-		if strings.TrimSpace(request.AccountID) == "" {
-			writeError(w, http.StatusBadRequest, "account_id is required", "invalid_request_error")
-			return
-		}
-		task := s.taskQueue.Submit("grok_oauth_authorize", map[string]any{"account_id": request.AccountID})
-		writeJSON(w, http.StatusAccepted, map[string]any{"job": task, "job_id": task.ID})
-	case path == "status" && r.Method == http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string]any{"queue": map[string]any{"items": s.taskQueue.List(), "runtime": "go"}})
-	case strings.HasPrefix(path, "jobs/") && r.Method == http.MethodGet:
-		id := strings.TrimPrefix(path, "jobs/")
-		task, ok := s.taskQueue.Get(id)
-		if !ok {
-			writeError(w, http.StatusNotFound, "protocol job not found", "not_found")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"job": task})
-	default:
-		writeError(w, http.StatusNotFound, "protocol endpoint not found", "not_found")
-	}
+	s.grokOAuthBackgroundAPI(w, r, strings.TrimPrefix(r.URL.Path, "/protocol/"))
 }
 
 func (s *Server) taskAPI(w http.ResponseWriter, r *http.Request) {

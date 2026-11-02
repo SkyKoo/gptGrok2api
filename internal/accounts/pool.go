@@ -204,6 +204,9 @@ func (p *Pool) Feedback(account Account, status int, err error) {
 	if account.Token == "" {
 		return
 	}
+	if p.grokMedia {
+		_ = p.repository.RecordAccountUsage(account.Token, status >= 200 && status < 300 && err == nil)
+	}
 	p.mu.Lock()
 	if status >= 200 && status < 300 {
 		delete(p.cooldowns, account.Token)

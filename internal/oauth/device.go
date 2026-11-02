@@ -40,6 +40,8 @@ type deviceSession struct {
 	CompleteURL    string
 	Proxy          string
 	LastPollAtUnix int64
+	ExpectedEmail  string
+	BeforeSave     func() error
 }
 
 func NewDeviceService(client *http.Client, deviceURL, tokenURL string, store *Store) *DeviceService {
@@ -90,6 +92,29 @@ func (s *DeviceService) Start(ctx context.Context, proxy string) (map[string]any
 	return map[string]any{"id": session.ID, "user_code": userCode, "verification_uri": verification, "verification_uri_complete": complete, "expires_at": session.ExpiresAt, "interval": interval, "status": "pending"}, nil
 }
 
+// StartForAccount binds the grant to a selected account before it leaves the backend.
+func (s *DeviceService) StartForAccount(ctx context.Context, proxy, email string, beforeSave func() error) (map[string]any, error) {
+	if strings.TrimSpace(email) == "" {
+		return nil, errors.New("oauth_email_required")
+	}
+	result, err := s.Start(ctx, proxy)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	session := s.sessions[stringValue(result["id"])]
+	session.ExpectedEmail = strings.TrimSpace(email)
+	session.BeforeSave = beforeSave
+	s.mu.Unlock()
+	return result, nil
+}
+
+func (s *DeviceService) Discard(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, id)
+}
+
 func (s *DeviceService) Poll(ctx context.Context, id string) (map[string]any, error) {
 	s.mu.Lock()
 	s.pruneLocked()
@@ -113,7 +138,29 @@ func (s *DeviceService) Poll(ctx context.Context, id string) (map[string]any, er
 	}
 	accessToken := stringValue(payload["access_token"])
 	if status == http.StatusOK && accessToken != "" {
-		account := Account{Email: tokenEmail(accessToken), AccessToken: accessToken, RefreshToken: stringValue(payload["refresh_token"]), IDToken: stringValue(payload["id_token"]), ExpiresAt: time.Now().Unix() + int64(intValue(payload["expires_in"], 21600)), SourceType: "device_authorization"}
+		account := Account{Email: firstNonEmpty(tokenEmail(accessToken), tokenEmail(stringValue(payload["id_token"]))), AccessToken: accessToken, RefreshToken: stringValue(payload["refresh_token"]), IDToken: stringValue(payload["id_token"]), ExpiresAt: time.Now().Unix() + int64(intValue(payload["expires_in"], 21600)), SourceType: "device_authorization"}
+		if session.ExpectedEmail != "" {
+			// Tokens arrive from the configured TLS-protected token endpoint. Check
+			// all available email claims before importing, including ID-token fallback.
+			emails := []string{tokenEmail(accessToken), tokenEmail(account.IDToken)}
+			if account.Email == "" {
+				s.Discard(id)
+				return nil, errors.New("oauth_identity_missing")
+			}
+			for _, email := range emails {
+				if email != "" && !strings.EqualFold(email, session.ExpectedEmail) {
+					s.Discard(id)
+					return nil, errors.New("oauth_identity_mismatch")
+				}
+			}
+			account.SourceType = "background_device_authorization"
+		}
+		if session.BeforeSave != nil {
+			if err := session.BeforeSave(); err != nil {
+				s.Discard(id)
+				return nil, err
+			}
+		}
 		if s.store == nil {
 			return nil, errors.New("OAuth store is not configured")
 		}
@@ -168,10 +215,10 @@ func (s *DeviceService) postFormStatus(ctx context.Context, endpoint string, for
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", "grok-shell/0.2.93 (linux; x86_64)")
-	if proxy != "" {
-		req = req.WithContext(proxyruntime.WithURL(req.Context(), proxy))
-	}
-	response, err := s.client.Do(req)
+	req = req.WithContext(proxyruntime.WithURL(req.Context(), proxy))
+	client := *s.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -185,7 +232,7 @@ func (s *DeviceService) postFormStatus(ctx context.Context, endpoint string, for
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		if code := stringValue((*target)["error"]); code != "authorization_pending" && code != "slow_down" {
-			return response.StatusCode, fmt.Errorf("xAI OAuth returned HTTP %d: %s", response.StatusCode, firstNonEmpty(code, stringValue((*target)["error_description"]), "request failed"))
+			return response.StatusCode, fmt.Errorf("xAI OAuth returned HTTP %d", response.StatusCode)
 		}
 	}
 	return response.StatusCode, nil

@@ -4,7 +4,9 @@ export type GrokOAuthCandidate = {
   id: string
   email: string
   login_status: string
-  oauth_status: 'pending' | 'authorized' | 'failed' | 'requires_renewal'
+  oauth_status: 'pending' | 'queued' | 'running' | 'manual_action_required' | 'authorized' | 'failed' | 'requires_renewal'
+  oauth_job_id?: string
+  oauth_message?: string
   oauth_account_id: string
   has_access_token: boolean
   has_refresh_token: boolean
@@ -122,7 +124,7 @@ export type GrokOAuthDevicePollResult =
 
 export type GrokOAuthProtocolJob = {
   id: string
-  status: 'pending' | 'running' | 'authorized' | 'failed'
+  status: 'pending' | 'running' | 'authorized' | 'failed' | 'manual_action_required'
   stage: string
   message: string
   error: string
@@ -180,7 +182,7 @@ export const grokOAuthAccountsApi = {
     })
   },
 
-  startProtocol(accountId = '') {
+  startProtocol(accountId: string) {
     return apiClient.post<{ account_id: string }, { reused: boolean; job: GrokOAuthProtocolJob }>(
       `${BASE_PATH}/protocol/start`,
       { account_id: accountId },

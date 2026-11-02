@@ -54,62 +54,25 @@
         :tone-class="`${grokOAuthStatusClass(item)} border-border`"
         :title="grokOAuthStatusTitle(item)"
       />
-      <template v-if="item.oauth">
-        <p class="mt-1 max-w-[7.5rem] truncate font-mono text-[11px] text-muted-foreground">{{ item.oauth.probe?.model || item.oauth.models?.[0] || 'grok-4.5' }}</p>
-        <p v-if="item.oauth.probe?.at" class="mt-1 whitespace-nowrap text-[11px] text-muted-foreground">
-          {{ formatGrokAccountDate(item.oauth.probe.at) }}
-        </p>
-        <p
-          v-if="grokOAuthRecoveryStatusText(item)"
-          class="mt-1 text-[11px] font-medium"
-          :class="grokOAuthRecoveryStatusClass(item)"
-          :title="grokOAuthRecoveryStatusTitle(item)"
-        >
-          {{ grokOAuthRecoveryStatusText(item) }}
-        </p>
-      </template>
+    </td>
+    <td class="py-4 pr-5 align-middle text-xs text-muted-foreground" title="CFM 账号记录创建时间；导入账号为入库时间">
+      <p class="whitespace-nowrap">{{ formatGrokAccountDate(item.created_at) }}</p>
     </td>
     <td class="py-4 pr-5 align-middle">
-      <template v-if="item.oauth">
-        <div class="grid gap-1 font-mono text-xs tabular-nums">
-          <p class="grid grid-cols-[3.5rem_1fr] gap-2">
-            <span class="text-muted-foreground">剩余</span>
-            <span class="text-foreground">{{ grokOAuthRemainingQuotaText(item) }}</span>
-          </p>
-          <p class="grid grid-cols-[3.5rem_1fr] gap-2">
-            <span class="text-muted-foreground">重置</span>
-            <span class="whitespace-nowrap text-foreground">{{ grokOAuthQuotaResetText(item) }}</span>
-          </p>
-        </div>
-      </template>
-      <span v-else class="text-xs text-muted-foreground">-</span>
-    </td>
-    <td
-      class="py-4 pr-5 align-middle text-xs text-muted-foreground"
-      :title="grokOAuthRecoveryStatusTitle(item) || grokRecoveryStatusTitle(item)"
-    >
-      <p class="whitespace-nowrap">{{ grokRecoveryTimeText(item) }}</p>
-      <StatusPill
-        v-if="item.recovery_status"
-        class="mt-1"
-        :label="grokRecoveryStatusText(item)"
-        :tone-class="`${grokRecoveryStatusClass(item)} border-border`"
-      />
-    </td>
-    <td class="py-4 pr-5 align-middle">
-      <p class="font-mono text-sm tabular-nums">
+      <p v-if="item.sync_state === 'synced' && item.use_count == null && item.fail_count == null" class="text-xs text-muted-foreground">暂无记录</p>
+      <p v-else class="font-mono text-sm tabular-nums">
         <span :class="item.sync_state === 'synced' ? 'text-emerald-600' : 'text-muted-foreground'">
-          {{ item.sync_state === 'synced' ? (item.use_count || 0) : '-' }}
+          {{ item.sync_state === 'synced' ? (item.use_count ?? '-') : '-' }}
         </span>
         <span class="mx-1 text-muted-foreground/60">/</span>
         <span :class="item.sync_state === 'synced' ? 'text-rose-600' : 'text-muted-foreground'">
-          {{ item.sync_state === 'synced' ? (item.fail_count || 0) : '-' }}
+          {{ item.sync_state === 'synced' ? (item.fail_count ?? '-') : '-' }}
         </span>
       </p>
-      <p class="mt-1 text-xs text-muted-foreground">成功率 {{ grokSuccessRate(item) }}</p>
+      <p v-if="grokSuccessRate(item) !== '-'" class="mt-1 text-xs text-muted-foreground">成功率 {{ grokSuccessRate(item) }}</p>
     </td>
     <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
-      {{ formatGrokAccountDate(item.last_used_at) }}
+      {{ grokLastUsedText(item) }}
     </td>
     <td class="w-[16rem] py-4 text-right align-middle">
       <GrokAccountActionButtons
@@ -156,25 +119,17 @@ import {
   grokAccountStatusClass,
   grokAccountStatusText,
   grokQuotaText,
-  grokRecoveryStatusClass,
-  grokRecoveryStatusText,
-  grokRecoveryStatusTitle,
-  grokRecoveryTimeText,
   grokRefreshFailed,
   grokRefreshStatusTitle,
   grokOAuthStatusClass,
-  grokOAuthRemainingQuotaText,
-  grokOAuthRecoveryStatusClass,
-  grokOAuthRecoveryStatusText,
-  grokOAuthRecoveryStatusTitle,
   grokOAuthShortStatusText,
   grokOAuthStatusTitle,
-  grokOAuthQuotaResetText,
   grokProbeStatusClass,
   grokProbeStatusText,
   grokProbeStatusTitle,
   grokRuntimeStatusClass,
   grokRuntimeStatusText,
+  grokLastUsedText,
   grokSuccessRate,
   grokSyncStateText,
 } from './grokAccountView'
