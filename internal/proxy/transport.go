@@ -875,6 +875,30 @@ func NewTransport(base http.RoundTripper) *Transport {
 	return &Transport{base: base, cache: map[string]http.RoundTripper{"": base}}
 }
 
+// Clone keeps proxy routing behavior but starts with independent connection
+// pools. Closing its idle connections does not interrupt the original client.
+func (t *Transport) Clone() *Transport {
+	base := t.base
+	if transport, ok := base.(*http.Transport); ok {
+		base = transport.Clone()
+	}
+	return NewTransport(base)
+}
+
+func (t *Transport) CloseIdleConnections() {
+	t.mu.Lock()
+	transports := make([]http.RoundTripper, 0, len(t.cache))
+	for _, transport := range t.cache {
+		transports = append(transports, transport)
+	}
+	t.mu.Unlock()
+	for _, transport := range transports {
+		if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+			closer.CloseIdleConnections()
+		}
+	}
+}
+
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	proxyURL, selected := URLSelectionFromContext(req.Context())
 	if selected && proxyURL == "" {

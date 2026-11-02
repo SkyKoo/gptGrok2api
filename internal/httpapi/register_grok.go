@@ -100,14 +100,38 @@ func (s *Server) verifyRegisteredGrokAccount(ctx context.Context, id string, acc
 	}
 	quota, err := s.grokQuota.ProbeFast(ctx, token, stored)
 	if err != nil {
+		failure := grokRegistrationVerificationFailure(err)
+		probeStatus := "unknown"
 		if errors.Is(err, provider.ErrGrokInvalidCredentials) {
-			return err
+			probeStatus = "invalid"
+			s.recordGrokCredentialFailure(token, err)
 		}
-		return err
+		found, saveErr := s.registerStore.UpdateRuntime(stringValue(stored["id"]), nil, map[string]any{"status": probeStatus, "checked_at": time.Now().UTC().Format(time.RFC3339)}, "", failure.Error())
+		if saveErr != nil || !found {
+			return &registerruntime.Failure{Stage: "verify", Code: "verification_record_write_failed"}
+		}
+		return failure
 	}
 	s.restoreVerifiedGrokCredential(token)
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
-	_, _ = s.registerStore.UpdateRuntime(stringValue(stored["id"]), map[string]any{
+	found, saveErr := s.registerStore.UpdateRuntime(stringValue(stored["id"]), nil, map[string]any{"status": "valid", "checked_at": checkedAt}, "active", "")
+	if saveErr != nil || !found {
+		return &registerruntime.Failure{Stage: "verify", Code: "verification_record_write_failed"}
+	}
+	found, err = s.registerStore.UpdateAccountFields(stringValue(stored["id"]), map[string]any{
+		"enabled":               true,
+		"registration_verified": true,
+		"fast_quota":            map[string]any{"remaining": quota.Remaining, "total": quota.Total, "window_seconds": quota.WindowSeconds, "reset_at": quota.ResetAt},
+	})
+	if err != nil || !found {
+		return &registerruntime.Failure{Stage: "verify", Code: "account_enable_failed"}
+	}
+	_, _, err = s.syncRegisteredGrokRuntimeAccount(stored, token)
+	if err != nil {
+		return &registerruntime.Failure{Stage: "verify", Code: "runtime_sync_failed"}
+	}
+	// Report pool membership only after the runtime write succeeds.
+	found, saveErr = s.registerStore.UpdateRuntime(stringValue(stored["id"]), map[string]any{
 		"present":   true,
 		"status":    "active",
 		"synced_at": checkedAt,
@@ -115,16 +139,30 @@ func (s *Server) verifyRegisteredGrokAccount(ctx context.Context, id string, acc
 			"fast": map[string]any{"remaining": quota.Remaining, "total": quota.Total, "window_seconds": quota.WindowSeconds, "reset_at": quota.ResetAt},
 		},
 	}, map[string]any{"status": "valid", "checked_at": checkedAt}, "active", "")
-	_, err = s.registerStore.UpdateAccountFields(stringValue(stored["id"]), map[string]any{
-		"enabled":               true,
-		"registration_verified": true,
-		"fast_quota":            map[string]any{"remaining": quota.Remaining, "total": quota.Total, "window_seconds": quota.WindowSeconds, "reset_at": quota.ResetAt},
-	})
-	if err != nil {
-		return err
+	if saveErr != nil || !found {
+		return &registerruntime.Failure{Stage: "verify", Code: "verification_record_write_failed"}
 	}
-	_, _, err = s.syncRegisteredGrokRuntimeAccount(stored, token)
-	return err
+	return nil
+}
+
+func grokRegistrationVerificationFailure(err error) *registerruntime.Failure {
+	f := &registerruntime.Failure{Stage: "verify", Code: "account_unverified", Operation: "quota_probe=failed"}
+	if errors.Is(err, provider.ErrGrokInvalidCredentials) {
+		f.Code = "credentials_invalid"
+		f.Operation = "quota_probe=invalid_credentials"
+		return f
+	}
+	var quotaErr *provider.GrokQuotaError
+	if errors.As(err, &quotaErr) {
+		switch quotaErr.Kind {
+		case "request_invalid", "transport_failed", "timeout", "cancelled", "access_denied", "rate_limited", "upstream_unavailable", "upstream_rejected", "response_read_failed", "response_invalid", "quota_missing":
+			f.Operation = "quota_probe=" + quotaErr.Kind
+		}
+		if quotaErr.Status >= 100 && quotaErr.Status <= 599 {
+			f.UpstreamStatus = quotaErr.Status
+		}
+	}
+	return f
 }
 
 func (s *Server) retryGrokRegistration(w http.ResponseWriter, r *http.Request) {

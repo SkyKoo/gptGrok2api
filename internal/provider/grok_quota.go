@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +18,20 @@ import (
 )
 
 var ErrGrokInvalidCredentials = errors.New("grok credentials are invalid")
+
+// GrokQuotaError exposes a stable reason and HTTP status without response
+// bodies, request URLs, proxy passwords or Cookie values.
+type GrokQuotaError struct {
+	Kind   string
+	Status int
+}
+
+func (e *GrokQuotaError) Error() string {
+	if e.Status != 0 {
+		return fmt.Sprintf("grok rate-limits HTTP %d (%s)", e.Status, e.Kind)
+	}
+	return "grok rate-limits " + e.Kind
+}
 
 type QuotaWindow struct {
 	Remaining     int   `json:"remaining"`
@@ -89,7 +104,24 @@ func (q *GrokQuota) RefreshToken(ctx context.Context, token string, fields map[s
 }
 
 func (q *GrokQuota) ProbeFast(ctx context.Context, token string, fields map[string]any) (QuotaWindow, error) {
-	return q.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
+	// An explicit identity check must not inherit a long-lived connection
+	// shared with unrelated traffic. Keep the exact route, headers and timeout;
+	// this is one request, never an automatic retry after a 403 or challenge.
+	probe := *q
+	client := *q.Client
+	switch transport := client.Transport.(type) {
+	case *proxyruntime.Transport:
+		client.Transport = transport.Clone()
+	case *http.Transport:
+		client.Transport = transport.Clone()
+	case nil:
+		client.Transport = http.DefaultTransport.(*http.Transport).Clone()
+	default:
+		return q.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
+	}
+	defer client.CloseIdleConnections()
+	probe.Client = &client
+	return probe.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
 }
 
 func (q *GrokQuota) fetch(ctx context.Context, token string, fields map[string]any, modelName string) (QuotaWindow, error) {
@@ -103,28 +135,46 @@ func (q *GrokQuota) fetch(ctx context.Context, token string, fields map[string]a
 	}
 	req, err := http.NewRequestWithContext(proxyruntime.WithURL(ctx, proxyURL), http.MethodPost, q.URL, bytes.NewReader(body))
 	if err != nil {
-		return QuotaWindow{}, err
+		return QuotaWindow{}, &GrokQuotaError{Kind: "request_invalid"}
 	}
 	setGrokQuotaHeaders(req, token, fields)
 	response, err := q.Client.Do(req)
 	if err != nil {
-		return QuotaWindow{}, err
+		kind := "transport_failed"
+		var network net.Error
+		if errors.Is(err, context.Canceled) {
+			kind = "cancelled"
+		} else if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &network) && network.Timeout()) {
+			kind = "timeout"
+		}
+		return QuotaWindow{}, &GrokQuotaError{Kind: kind}
 	}
 	defer response.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+	raw, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if response.StatusCode == http.StatusUnauthorized || isGrokInvalidBody(string(raw)) {
 		return QuotaWindow{}, ErrGrokInvalidCredentials
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return QuotaWindow{}, fmt.Errorf("grok rate-limits HTTP %d", response.StatusCode)
+		kind := "upstream_rejected"
+		if response.StatusCode == 403 {
+			kind = "access_denied"
+		} else if response.StatusCode == 429 {
+			kind = "rate_limited"
+		} else if response.StatusCode >= 500 {
+			kind = "upstream_unavailable"
+		}
+		return QuotaWindow{}, &GrokQuotaError{Kind: kind, Status: response.StatusCode}
+	}
+	if readErr != nil {
+		return QuotaWindow{}, &GrokQuotaError{Kind: "response_read_failed", Status: response.StatusCode}
 	}
 	var value map[string]any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return QuotaWindow{}, fmt.Errorf("decode grok rate-limits response: %w", err)
+		return QuotaWindow{}, &GrokQuotaError{Kind: "response_invalid", Status: response.StatusCode}
 	}
 	remaining, ok := quotaNumber(value["remainingQueries"])
 	if !ok {
-		return QuotaWindow{}, errors.New("grok rate-limits response missing remainingQueries")
+		return QuotaWindow{}, &GrokQuotaError{Kind: "quota_missing", Status: response.StatusCode}
 	}
 	total, ok := quotaNumber(value["totalQueries"])
 	if !ok {

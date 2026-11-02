@@ -90,3 +90,32 @@ func TestGrokRetryRegistrationPreparesSavedMailbox(t *testing.T) {
 		t.Fatalf("saved mailbox was not prepared before retry: status=%s prepared=%d calls=%d", got.Status, mail.prepared.Load(), flow.calls.Load())
 	}
 }
+
+func TestGrokSavedResultRetainsSafeVerificationFailureAndResumesWithoutSignup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.json")
+	job := RegistrationJob{ID: "saved", Status: "verification_pending", Stage: "verify", Imported: true, Account: map[string]any{"sso": "secret"}}
+	raw, _ := json.Marshal([]RegistrationJob{job})
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	failure := &Failure{Stage: "verify", Code: "account_unverified", Operation: "quota_probe=access_denied", UpstreamStatus: 403}
+	e := NewGrokEngine(path, nil, func(context.Context, string, map[string]any) error { t.Fatal("reimported account"); return nil }, func(context.Context, string, map[string]any) error { return failure })
+	err := e.importAndVerify(context.Background(), job.ID)
+	if err != failure {
+		t.Fatalf("discarded safe failure: %v", err)
+	}
+	e.failJob(job.ID, err)
+	persisted := NewGrokEngine(path, nil, nil, nil)
+	got, _ := persisted.getJob(job.ID)
+	if got.Error != failure.Error() || got.Status != "verification_pending" || got.Account["sso"] != "secret" {
+		t.Fatal("saved state lost")
+	}
+	e.verifyAccount = func(context.Context, string, map[string]any) error { return nil }
+	if err := e.importAndVerify(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = e.getJob(job.ID)
+	if got.Status != "completed" || !got.Verified || got.Error != "" || len(got.Account) != 0 {
+		t.Fatal("resume did not complete")
+	}
+}

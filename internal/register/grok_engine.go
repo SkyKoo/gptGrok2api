@@ -319,6 +319,12 @@ func (e *GrokEngine) importAndVerify(ctx context.Context, id string) error {
 		return fail("verify", "account_verifier_not_configured")
 	}
 	if err := e.verifyAccount(ctx, id, job.Account); err != nil {
+		// Verifiers may return a safe structured failure. Preserve it so the
+		// task journal distinguishes a 403 or timeout from an invalid session.
+		var failure *Failure
+		if errors.As(err, &failure) && failure.Stage == "verify" {
+			return failure
+		}
 		return fail("verify", "account_unverified")
 	}
 	return e.change(id, func(j *RegistrationJob) {
