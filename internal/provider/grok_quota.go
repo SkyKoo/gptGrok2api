@@ -3,10 +3,12 @@ package provider
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -120,6 +122,7 @@ func (q *GrokQuota) ProbeFast(ctx context.Context, token string, fields map[stri
 		return q.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
 	}
 	defer client.CloseIdleConnections()
+	client.Transport = &grokProbeAuditTransport{base: client.Transport}
 	probe.Client = &client
 	return probe.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
 }
@@ -231,4 +234,38 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// grokProbeAuditTransport records bounded metadata for explicit validation.
+// Fingerprints compare requests without logging cookies, URLs or proxy credentials.
+type grokProbeAuditTransport struct{ base http.RoundTripper }
+
+func (t *grokProbeAuditTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	started := time.Now()
+	headers, _ := json.Marshal(req.Header)
+	fingerprint := sha256.Sum256(append([]byte(req.Method+"\n"+req.URL.String()+"\n"), headers...))
+	route := sha256.Sum256([]byte(proxyruntime.URLFromContext(req.Context())))
+	response, err := t.base.RoundTrip(req)
+	status, protocol, contentType, challenge := 0, "none", "other", false
+	if response != nil {
+		status = response.StatusCode
+		switch response.Proto {
+		case "HTTP/1.1", "HTTP/2.0":
+			protocol = response.Proto
+		}
+		rawType := strings.ToLower(strings.SplitN(response.Header.Get("Content-Type"), ";", 2)[0])
+		switch rawType {
+		case "application/json", "text/html", "text/plain":
+			contentType = rawType
+		}
+		challenge = strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge")
+	}
+	log.Printf("grok_verification request_fp=%x route_fp=%x status=%d protocol=%s content_type=%s challenge=%t elapsed_ms=%d", fingerprint[:8], route[:6], status, protocol, contentType, challenge, time.Since(started).Milliseconds())
+	return response, err
+}
+
+func (t *grokProbeAuditTransport) CloseIdleConnections() {
+	if closer, ok := t.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
