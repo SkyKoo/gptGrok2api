@@ -61,7 +61,9 @@ func (q *GrokQuota) RefreshMedia(parent context.Context, token string, fields ma
 	}
 	setGrokQuotaHeaders(req, token, fields)
 	req.Header.Set("Referer", "https://grok.com/imagine")
-	client := *q.Client
+	// A media balance check must not reuse a tunnel shared with other requests.
+	client, closeClient := newGrokQuotaCheckClient(q.Client, true)
+	defer closeClient()
 	// Do not forward session cookies through a redirect from this internal API.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	response, err := client.Do(req)

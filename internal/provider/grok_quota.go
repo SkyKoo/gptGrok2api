@@ -110,7 +110,20 @@ func (q *GrokQuota) ProbeFast(ctx context.Context, token string, fields map[stri
 	// shared with unrelated traffic. Keep the exact route, headers and timeout;
 	// this is one request, never an automatic retry after a 403 or challenge.
 	probe := *q
-	client := *q.Client
+	client, closeClient := newGrokQuotaCheckClient(q.Client, false)
+	defer closeClient()
+	probe.Client = client
+	return probe.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
+}
+
+// Explicit checks own their connection pools while keeping the configured route
+// and client policy. Custom transports are borrowed and must not be closed.
+func newGrokQuotaCheckClient(source *http.Client, media bool) (*http.Client, func()) {
+	if source == nil {
+		source = http.DefaultClient
+	}
+	client := *source
+	owned := true
 	switch transport := client.Transport.(type) {
 	case *proxyruntime.Transport:
 		client.Transport = transport.Clone()
@@ -119,12 +132,19 @@ func (q *GrokQuota) ProbeFast(ctx context.Context, token string, fields map[stri
 	case nil:
 		client.Transport = http.DefaultTransport.(*http.Transport).Clone()
 	default:
-		return q.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
+		owned = false
 	}
-	defer client.CloseIdleConnections()
-	client.Transport = &grokProbeAuditTransport{base: client.Transport}
-	probe.Client = &client
-	return probe.fetch(ctx, strings.TrimSpace(strings.TrimPrefix(token, "sso=")), fields, "fast")
+	transport := client.Transport
+	cleanup := func() {}
+	if owned {
+		cleanup = func() {
+			if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+				closer.CloseIdleConnections()
+			}
+		}
+	}
+	client.Transport = &grokProbeAuditTransport{base: transport, media: media}
+	return &client, cleanup
 }
 
 func (q *GrokQuota) fetch(ctx context.Context, token string, fields map[string]any, modelName string) (QuotaWindow, error) {
@@ -238,7 +258,10 @@ func maxInt(a, b int) int {
 
 // grokProbeAuditTransport records bounded metadata for explicit validation.
 // Fingerprints compare requests without logging cookies, URLs or proxy credentials.
-type grokProbeAuditTransport struct{ base http.RoundTripper }
+type grokProbeAuditTransport struct {
+	base  http.RoundTripper
+	media bool
+}
 
 func (t *grokProbeAuditTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	started := time.Now()
@@ -260,7 +283,11 @@ func (t *grokProbeAuditTransport) RoundTrip(req *http.Request) (*http.Response, 
 		}
 		challenge = strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge")
 	}
-	log.Printf("grok_verification request_fp=%x route_fp=%x status=%d protocol=%s content_type=%s challenge=%t elapsed_ms=%d", fingerprint[:8], route[:6], status, protocol, contentType, challenge, time.Since(started).Milliseconds())
+	label := "grok_verification"
+	if t.media {
+		label = "grok_media_quota"
+	}
+	log.Printf("%s request_fp=%x route_fp=%x status=%d protocol=%s content_type=%s challenge=%t elapsed_ms=%d", label, fingerprint[:8], route[:6], status, protocol, contentType, challenge, time.Since(started).Milliseconds())
 	return response, err
 }
 

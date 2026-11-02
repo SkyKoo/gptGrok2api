@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -10,6 +11,7 @@ const GrokMediaSettleDelay = 30 * time.Second
 
 type grokMediaSnapshot struct {
 	Status    string `json:"status"`
+	Error     string `json:"error"`
 	CheckedAt string `json:"checked_at"`
 	Quotas    map[string]struct {
 		Available *bool  `json:"available"`
@@ -67,6 +69,23 @@ func GrokMediaRefreshDue(row map[string]any, now time.Time) bool {
 	}
 	if last, e := time.Parse(time.RFC3339Nano, stringValue(row["media_quota_last_attempt_at"])); e == nil && now.Sub(last) < 30*time.Second {
 		return false
+	}
+	// An access refusal is not evidence of zero balance. Keep it unavailable and
+	// wait before automatic retries; manual refresh remains an explicit action.
+	snapshot := mediaSnapshot(row)
+	if snapshot.Status == "failed" {
+		delay := time.Minute
+		switch strings.TrimSpace(snapshot.Error) {
+		case "HTTP 401", "HTTP 403", "HTTP 429":
+			delay = 15 * time.Minute
+		}
+		attempted, _ := time.Parse(time.RFC3339Nano, snapshot.CheckedAt)
+		if last, e := time.Parse(time.RFC3339Nano, stringValue(row["media_quota_last_attempt_at"])); e == nil && last.After(attempted) {
+			attempted = last
+		}
+		if !attempted.IsZero() && now.Before(attempted.Add(delay)) {
+			return false
+		}
 	}
 	if !grokMediaReady(row, now) || row["quota_refresh_needed"] == true {
 		return true

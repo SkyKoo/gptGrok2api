@@ -183,3 +183,21 @@ func TestGrokCrashBeforeReleaseCannotReuseUnsettledPositiveBalance(t *testing.T)
 	}
 	p.Release(l)
 }
+
+func TestGrokMediaFailureRefreshWindows(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		reason string
+		age    time.Duration
+		due    bool
+	}{
+		{"HTTP 403", 14 * time.Minute, false}, {"HTTP 403", 16 * time.Minute, true},
+		{"HTTP 401", time.Minute, false}, {"HTTP 429", time.Minute, false},
+		{"network_error", 40 * time.Second, false}, {"network_error", 2 * time.Minute, true},
+	} {
+		row := map[string]any{"media_quota": map[string]any{"status": "failed", "error": tc.reason, "checked_at": now.Add(-tc.age).Format(time.RFC3339Nano)}, "media_quota_last_attempt_at": now.Add(-tc.age).Format(time.RFC3339Nano), "media_quota_refresh_needed": true}
+		if got := GrokMediaRefreshDue(row, now); got != tc.due {
+			t.Errorf("%s after %s: due=%v", tc.reason, tc.age, got)
+		}
+	}
+}
