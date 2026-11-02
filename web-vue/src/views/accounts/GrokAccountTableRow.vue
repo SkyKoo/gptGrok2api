@@ -11,9 +11,9 @@
       />
     </td>
     <td class="py-4 pr-5 align-middle">
-      <p class="max-w-[11rem] truncate text-sm font-medium text-foreground">{{ item.email || '-' }}</p>
-      <p class="mt-1 max-w-[11rem] truncate font-mono text-xs text-muted-foreground" :title="item.id">
-        {{ grokAccountTokenPreview(item) }}
+      <p class="max-w-[18rem] whitespace-normal break-all text-sm font-medium text-foreground">{{ item.email || '-' }}</p>
+      <p class="mt-1 max-w-[18rem] whitespace-normal break-all font-mono text-xs text-muted-foreground" :title="item.id">
+        ID：{{ item.id || '-' }}
       </p>
     </td>
     <td class="py-4 pr-5 align-middle">
@@ -155,7 +155,6 @@ import {
   grokAccountRowSignature,
   grokAccountStatusClass,
   grokAccountStatusText,
-  grokAccountTokenPreview,
   grokQuotaText,
   grokRecoveryStatusClass,
   grokRecoveryStatusText,

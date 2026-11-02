@@ -73,6 +73,9 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 		switch fmt.Sprint(object["type"]) {
 		case "error":
 			message := imagineFirstString(object["err_msg"], imagineFirstString(object["error"], "imagine websocket error"))
+			if isMediaModerationError(message) || isMediaModerationError(fmt.Sprint(object["err_code"])) {
+				return nil, imagineModerationError()
+			}
 			status := 502
 			if isImagineRateLimit(object["err_code"], message) {
 				status = 429
@@ -107,7 +110,8 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 			}
 		case "json":
 			if fmt.Sprint(object["current_status"]) == "completed" && boolValue(object["moderated"]) {
-				continue
+				// This is an explicit moderation terminal, not a preview to wait past.
+				return nil, imagineModerationError()
 			}
 		}
 	}

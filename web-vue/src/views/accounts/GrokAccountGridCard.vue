@@ -11,9 +11,9 @@
           @update:model-value="emit('toggle-select', item.id, $event)"
         />
         <div class="min-w-0">
-          <h3 class="truncate text-sm font-medium text-foreground">{{ item.email || '-' }}</h3>
-          <p class="mt-1 truncate font-mono text-xs text-muted-foreground" :title="item.id">
-            {{ grokAccountTokenPreview(item) }}
+          <h3 class="whitespace-normal break-all text-sm font-medium text-foreground">{{ item.email || '-' }}</h3>
+          <p class="mt-1 whitespace-normal break-all font-mono text-xs text-muted-foreground" :title="item.id">
+            ID：{{ item.id || '-' }}
           </p>
         </div>
       </div>
@@ -101,7 +101,6 @@ import {
   grokAccountRowSignature,
   grokAccountStatusClass,
   grokAccountStatusText,
-  grokAccountTokenPreview,
   grokOAuthStatusClass,
   grokOAuthStatusText,
   grokOAuthStatusTitle,

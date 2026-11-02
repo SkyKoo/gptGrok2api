@@ -359,7 +359,7 @@
                   @update:model-value="toggleSelectAllVisibleGrokAccounts"
                 />
               </th>
-              <th class="w-[12rem] py-3 pr-5">账号 / TOKEN</th>
+              <th class="w-[18rem] py-3 pr-5">邮箱 / 账号 ID</th>
               <th class="w-[5.5rem] py-3 pr-5">账号类型</th>
               <th class="w-[5.5rem] py-3 pr-5">注册状态</th>
               <th class="w-[8rem] py-3 pr-5">SSO 状态</th>

@@ -729,7 +729,7 @@ func publicAccount(item map[string]any) map[string]any {
 		result["refresh_error"] = errorText
 	}
 	if email := stringValue(item["email"]); email != "" {
-		result["email"] = maskEmail(email)
+		result["email"] = email
 	}
 	return result
 }
@@ -743,18 +743,6 @@ func normalizeGrokQuota(quota map[string]any) map[string]any {
 	}
 	delete(result, "grok_4_3")
 	return result
-}
-
-func maskEmail(value string) string {
-	parts := strings.SplitN(value, "@", 2)
-	if len(parts) != 2 {
-		return "***"
-	}
-	local := parts[0]
-	if len(local) <= 2 {
-		return local[:1] + "***@" + parts[1]
-	}
-	return local[:2] + "***" + local[len(local)-1:] + "@" + parts[1]
 }
 
 func cloneMap(input map[string]any) map[string]any {

@@ -25,6 +25,7 @@ func NewVideoDiagnostics(status int, contentType string, userIDPresent bool) *Vi
 
 func (d *VideoDiagnostics) Observe(line string) {
 	d.core.observe(line)
+	d.Moderated = d.Moderated || d.core.Moderated
 	_, events := protocol.ParseSSELine(line)
 	for _, event := range events {
 		if event.Kind != "video" {

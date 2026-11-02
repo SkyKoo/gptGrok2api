@@ -229,3 +229,34 @@ func asUpstreamError(err error, target **protocol.UpstreamError) bool {
 	}
 	return ok
 }
+
+func TestImagineSocketModerationTerminatesWithoutWaitingForEOF(t *testing.T) {
+	for _, response := range []string{
+		`{"type":"json","current_status":"completed","moderated":true,"image_id":"PRIVATE"}`,
+		`{"type":"error","err_code":3,"err_msg":"Content Moderated [WKE=grok:content-moderated] PRIVATE"}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			release := make(chan struct{})
+			server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+				for n := 0; n < 2; n++ {
+					if _, err := readClientText(reader); err != nil {
+						return
+					}
+				}
+				writeServerText(t, conn, response)
+				<-release
+			})
+			defer server.Close()
+			defer close(release)
+			socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, time.Second)
+			_, err := socket.Generate(context.Background(), accounts.Account{Token: "test-sso"}, "test prompt", "1:1", 1, true, true)
+			var upstream *protocol.UpstreamError
+			if !asUpstreamError(err, &upstream) || upstream.Status != http.StatusUnprocessableEntity {
+				t.Fatalf("explicit moderation should return 422 before server closes, got %v", err)
+			}
+			if !strings.Contains(upstream.Message, "内容审核") || strings.Contains(upstream.Message, "PRIVATE") || upstream.Body != "" {
+				t.Fatalf("unexpected moderation message: %v", err)
+			}
+		})
+	}
+}

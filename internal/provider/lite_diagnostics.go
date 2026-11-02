@@ -80,11 +80,14 @@ func (d *liteDiagnostics) observe(line string) {
 				d.TextEvents++
 			}
 		}
-		if failure, ok := node["error"]; ok && failure != nil {
+		if failure, ok := node["error"]; ok && hasMediaError(failure) {
 			// Inspect locally, emit only this closed set of categories.
 			raw, _ := json.Marshal(failure)
 			text := strings.ToLower(string(raw))
 			switch {
+			case isMediaModerationError(text):
+				d.Moderated = true
+				d.Failure = "moderated"
 			case strings.Contains(text, "rate_limit"), strings.Contains(text, "rate limit"), strings.Contains(text, "quota"), strings.Contains(text, "resource_exhausted"):
 				d.Failure = "rate_limited"
 			case strings.Contains(text, "unauthenticated"), strings.Contains(text, "unauthorized"):

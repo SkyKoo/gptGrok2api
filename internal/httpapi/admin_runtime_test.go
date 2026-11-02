@@ -486,7 +486,7 @@ func TestRegistrationManagementEndpoints(t *testing.T) {
 		t.Fatalf("unexpected registration runtime status: %d %s", runtimeResponse.Code, runtimeResponse.Body.String())
 	}
 	listResponse := adminRequest(handler, http.MethodGet, "/api/register/grok/accounts?page_size=10", nil)
-	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), "al***e@example.com") {
+	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), "alice@example.com") {
 		t.Fatalf("register list failed: %d %s", listResponse.Code, listResponse.Body.String())
 	}
 	if strings.Contains(listResponse.Body.String(), "sso-token") || strings.Contains(listResponse.Body.String(), `"password":"secret"`) {

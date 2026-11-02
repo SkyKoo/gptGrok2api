@@ -320,10 +320,6 @@ export function grokAccountSourceText(item: GrokAccount): string {
   return source === 'protocol' ? '纯协议注册' : (source || '-')
 }
 
-export function grokAccountTokenPreview(item: GrokAccount): string {
-  return cleanString(item.token_preview) || cleanString(item.id) || (item.has_sso ? 'SSO 已保存' : 'SSO 缺失')
-}
-
 export function grokAccountPoolText(item: GrokAccount): string {
   const pool = cleanString(item.pool).toLowerCase()
   if (pool === 'basic') return 'Basic'
@@ -397,7 +393,7 @@ export function grokUsageText(item: GrokAccount): string {
 
 export function grokAccountDetailItems(item: GrokAccount) {
   return [
-    { label: 'Token', value: grokAccountTokenPreview(item) },
+    { label: '账号 ID', value: cleanString(item.id) || '-' },
     { label: '类型', value: grokAccountPoolText(item) },
     { label: '注册状态', value: grokAccountStatusText(item) },
     { label: '运行状态', value: grokRuntimeStatusText(item) },

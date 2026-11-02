@@ -25,8 +25,8 @@ func TestStoreRegistrationControlAndAccountLifecycle(t *testing.T) {
 	if err != nil || total != 1 || len(items) != 1 || summary["active"] != 1 {
 		t.Fatalf("unexpected list: %#v %d %#v %v", items, total, summary, err)
 	}
-	if _, leaked := items[0]["sso"]; leaked || items[0]["sso_rw"] != nil || items[0]["cookie_header"] != nil || items[0]["has_sso"] != true || items[0]["email"] != "al***e@example.com" {
-		t.Fatalf("public account leaked or was not masked: %#v", items[0])
+	if _, leaked := items[0]["sso"]; leaked || items[0]["sso_rw"] != nil || items[0]["cookie_header"] != nil || items[0]["has_sso"] != true || items[0]["email"] != "alice@example.com" {
+		t.Fatalf("account list exposed credentials or did not preserve the full email: %#v", items[0])
 	}
 
 	count, err := store.SetDisabled([]string{"grok-one"}, true)
