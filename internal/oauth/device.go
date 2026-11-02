@@ -138,7 +138,7 @@ func (s *DeviceService) Poll(ctx context.Context, id string) (map[string]any, er
 	}
 	accessToken := stringValue(payload["access_token"])
 	if status == http.StatusOK && accessToken != "" {
-		account := Account{Email: firstNonEmpty(tokenEmail(accessToken), tokenEmail(stringValue(payload["id_token"]))), AccessToken: accessToken, RefreshToken: stringValue(payload["refresh_token"]), IDToken: stringValue(payload["id_token"]), ExpiresAt: time.Now().Unix() + int64(intValue(payload["expires_in"], 21600)), SourceType: "device_authorization"}
+		account := Account{Email: firstNonEmpty(tokenEmail(accessToken), tokenEmail(stringValue(payload["id_token"]))), AccessToken: accessToken, RefreshToken: stringValue(payload["refresh_token"]), IDToken: stringValue(payload["id_token"]), ExpiresAt: time.Now().Unix() + int64(intValue(payload["expires_in"], 21600)), SourceType: "device_authorization", TokenType: stringValue(payload["token_type"]), TokenEndpoint: s.tokenURL}
 		if session.ExpectedEmail != "" {
 			// Tokens arrive from the configured TLS-protected token endpoint. Check
 			// all available email claims before importing, including ID-token fallback.

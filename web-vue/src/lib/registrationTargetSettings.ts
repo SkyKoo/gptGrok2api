@@ -1,12 +1,14 @@
 import type { LegacyRegisterConfig, RegisterTarget, RegistrationTaskSettings } from '../api/register'
 
 type TaskConfig = Partial<RegistrationTaskSettings> & {
+  mail?: { source_id?: string }
   target?: string
   target_settings?: Partial<Record<RegisterTarget, Partial<RegistrationTaskSettings>>>
 }
 
 export function registrationTaskSettings(raw: Partial<RegistrationTaskSettings>, target: RegisterTarget): RegistrationTaskSettings {
   return {
+    mail_source_id: String(raw.mail_source_id || '').trim(),
     proxy: String(raw.proxy || '').trim(),
     resin_proxy_url: String(raw.resin_proxy_url || '').trim(),
     total: Math.max(1, Number(raw.total) || 1),
@@ -20,8 +22,8 @@ export function registrationTaskSettings(raw: Partial<RegistrationTaskSettings>,
 
 export function normalizeRegistrationTargetSettings(raw: TaskConfig): Record<RegisterTarget, RegistrationTaskSettings> {
   return {
-    openai: registrationTaskSettings({ ...raw, ...raw.target_settings?.openai }, 'openai'),
-    grok: registrationTaskSettings({ ...raw, ...raw.target_settings?.grok }, 'grok'),
+    openai: registrationTaskSettings({ ...raw, mail_source_id: raw.mail_source_id ?? raw.mail?.source_id, ...raw.target_settings?.openai }, 'openai'),
+    grok: registrationTaskSettings({ ...raw, mail_source_id: raw.mail_source_id ?? raw.mail?.source_id, ...raw.target_settings?.grok }, 'grok'),
   }
 }
 
@@ -29,7 +31,7 @@ export function normalizeRegistrationTargetSettings(raw: TaskConfig): Record<Reg
 export function registrationTargetSettingsPayload(config: TaskConfig): Record<RegisterTarget, RegistrationTaskSettings> {
   const profiles = normalizeRegistrationTargetSettings(config)
   const target = config.target === 'grok' ? 'grok' : 'openai'
-  profiles[target] = registrationTaskSettings(config, target)
+  profiles[target] = registrationTaskSettings({ ...config, mail_source_id: config.mail?.source_id ?? config.mail_source_id }, target)
   return profiles
 }
 
@@ -38,4 +40,5 @@ export function switchRegistrationTarget(config: LegacyRegisterConfig, target: R
   config.target_settings = profiles
   config.target = target
   Object.assign(config, profiles[target])
+  if (config.mail) config.mail.source_id = profiles[target].mail_source_id
 }

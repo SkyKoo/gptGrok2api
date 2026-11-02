@@ -98,6 +98,8 @@ func (i *ImagineSocket) Generate(ctx context.Context, account accounts.Account, 
 			status := http.StatusBadGateway
 			if isImagineRateLimit(event.ErrorCode, message) {
 				status = http.StatusTooManyRequests
+			} else if resolution == "2k" && (strings.EqualFold(strings.TrimSpace(message), "Invalid argument") || strings.EqualFold(fmt.Sprint(event.ErrorCode), "invalid_argument")) {
+				return nil, &protocol.UpstreamError{Status: http.StatusBadRequest, Message: "Grok 拒绝了当前 2K 请求参数，请改用 1K；尚未确认此账号支持 2K，未自动重试或降级", Endpoint: "/ws/imagine/listen"}
 			}
 			return nil, &protocol.UpstreamError{Status: status, Message: "imagine websocket error: " + message, Endpoint: "/ws/imagine/listen"}
 		}
@@ -182,7 +184,7 @@ type imagineImageState struct {
 
 func imagineOriginalURL(value string) (string, error) {
 	parsed, err := url.Parse(absoluteAssetURL(value))
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || (parsed.Hostname() != "assets.grok.com" && parsed.Hostname() != "grok.com") {
+	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || (parsed.Hostname() != "assets.grok.com" && parsed.Hostname() != "grok.com" && parsed.Hostname() != "imagine-public.x.ai") {
 		return "", fmt.Errorf("Grok 返回了无效的最终原图地址")
 	}
 	return parsed.String(), nil
@@ -362,8 +364,7 @@ func (w *wsConn) readText(ctx context.Context, deadline time.Time) (string, erro
 				return "", err
 			}
 			length = int64(binary.BigEndian.Uint16(buf[:]))
-		}
-		if length == 127 {
+		} else if length == 127 {
 			var buf [8]byte
 			if _, err := io.ReadFull(w.read, buf[:]); err != nil {
 				return "", err

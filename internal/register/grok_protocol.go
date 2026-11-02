@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
@@ -924,8 +925,10 @@ func NewGrokProtocolFlow(cfg GrokConfig, solver GrokTurnstileSolver) (*GrokProto
 
 func (f *GrokProtocolFlow) Close() {
 	if f != nil && f.browserCloser != nil && strings.TrimSpace(f.browserSessionID) != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = f.browserCloser.CloseSession(ctx, f.browserSessionID)
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		if err := f.browserCloser.CloseSession(ctx, f.browserSessionID); err != nil {
+			slog.Warn("Grok browser closure unconfirmed; worker retains capacity for cleanup")
+		}
 		cancel()
 		f.browserSessionID = ""
 	}
@@ -1058,7 +1061,15 @@ func (f *GrokProtocolFlow) registerNative(ctx context.Context, box Mailbox, cfg 
 	if err := progress("bootstrap"); err != nil {
 		return nil, err
 	}
-	started, err := native.StartSignup(ctx, grokSignupURL, cfg.Proxy)
+	var started GrokBrowserContext
+	var err error
+	if queued, ok := native.(interface {
+		StartSignupWithProgress(context.Context, string, string, Progress) (GrokBrowserContext, error)
+	}); ok {
+		started, err = queued.StartSignupWithProgress(ctx, grokSignupURL, cfg.Proxy, progress)
+	} else {
+		started, err = native.StartSignup(ctx, grokSignupURL, cfg.Proxy)
+	}
 	if err != nil {
 		return nil, err
 	}

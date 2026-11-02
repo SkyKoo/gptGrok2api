@@ -24,6 +24,17 @@ export type GrokOAuthProductUsage = {
 
 export type GrokOAuthQuota = {
   source?: 'billing' | 'model_probe'
+  status?: 'success' | 'error' | 'unavailable'
+  code?: string
+  error?: string
+  no_quota?: boolean // legacy billing field, not an account-wide capability verdict
+  monthly_zero?: boolean
+  monthly_exhausted?: boolean
+  total_remaining_known?: boolean
+  on_demand_only?: boolean
+  monthly_limit?: number
+  used?: number
+  on_demand_cap?: number
   used_percent?: number
   remaining_percent?: number
   period?: {
@@ -71,7 +82,7 @@ export type GrokOAuthAccount = {
   has_refresh_token: boolean
   has_id_token: boolean
   token_type: string
-  expires_at: string
+  expires_at: string | number
   last_refresh_at: string
   status: GrokOAuthAccountStatus | (string & {})
   source_type: string
@@ -82,6 +93,7 @@ export type GrokOAuthAccount = {
   models: string[]
   probe?: GrokOAuthProbe
   quota?: GrokOAuthQuota
+  cpa_sync?: { status: string; pool_id?: string; pool_name?: string; file_name?: string; at?: number; error?: string }
   recovery?: GrokOAuthRecovery
   use_count: number
   fail_count: number
@@ -197,6 +209,14 @@ export const grokOAuthAccountsApi = {
 
   refresh(id: string) {
     return apiClient.post<Record<string, never>, { account: GrokOAuthAccount }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/refresh`, {})
+  },
+
+  queryQuota(id: string) {
+    return apiClient.post<Record<string, never>, { account: GrokOAuthAccount; ok: boolean }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/quota`, {})
+  },
+
+  syncCPA(id: string, poolId: string) {
+    return apiClient.post<{ cpa_pool_id: string }, { account: GrokOAuthAccount; ok: boolean }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/cpa/sync`, { cpa_pool_id: poolId })
   },
 
   syncModels(id: string) {

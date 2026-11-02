@@ -94,6 +94,10 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"provider": "xai_cli_oauth", "items": items, "total": len(items)})
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/cpa/sync") && r.Method == http.MethodPost:
+		s.grokOAuthCPASync(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/cpa/sync"))
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/quota") && r.Method == http.MethodPost:
+		s.oauthQuotaAPI(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/quota"))
 	case path == "accounts/import" && r.Method == http.MethodPost:
 		var request struct {
 			AccessToken  string   `json:"access_token"`
@@ -107,10 +111,17 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &request) {
 			return
 		}
-		item, err := s.oauthStore.Import(oauth.Account{Email: request.Email, Subject: request.Subject, AccessToken: request.AccessToken, RefreshToken: request.RefreshToken, IDToken: request.IDToken, ExpiresAt: time.Now().Add(time.Duration(request.ExpiresIn) * time.Second).Unix(), Models: request.Models})
+		expiry := int64(0)
+		if request.ExpiresIn > 0 {
+			expiry = time.Now().Add(time.Duration(request.ExpiresIn) * time.Second).Unix()
+		}
+		item, err := s.oauthStore.Import(oauth.Account{Email: request.Email, Subject: request.Subject, AccessToken: request.AccessToken, RefreshToken: request.RefreshToken, IDToken: request.IDToken, ExpiresAt: expiry, Models: request.Models})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
+		}
+		if refreshed, refreshErr := s.refreshOAuthQuota(r.Context(), item.ID); refreshErr == nil {
+			item = refreshed
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"account": oauthPublic(item)})
 	case path == "device/start" && r.Method == http.MethodPost:
@@ -144,6 +155,7 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		s.finishOAuthQuota(r.Context(), result)
 		writeJSON(w, http.StatusOK, result)
 	case path == "accounts/status" && r.Method == http.MethodPost:
 		var request struct {
@@ -173,7 +185,7 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"removed": count})
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/refresh") && r.Method == http.MethodPost:
-		s.handleOAuthAccountAction(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/refresh"), "refresh")
+		s.oauthQuotaAPI(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/refresh"))
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/models/sync") && r.Method == http.MethodPost:
 		s.handleOAuthAccountAction(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/models/sync"), "models")
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/test") && r.Method == http.MethodPost:
@@ -184,6 +196,12 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOAuthAccountAction(w http.ResponseWriter, r *http.Request, id, action string) {
+	id = strings.TrimSpace(id)
+	if _, busy := s.grokOAuthActions.LoadOrStore(id, true); busy {
+		writeError(w, 409, "该账号正在刷新或同步，请稍后重试", "conflict")
+		return
+	}
+	defer s.grokOAuthActions.Delete(id)
 	items, err := s.oauthStore.List()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -211,27 +229,32 @@ func (s *Server) handleOAuthAccountAction(w http.ResponseWriter, r *http.Request
 		}
 		model, prompt = request.Model, request.Prompt
 	}
-	result := s.xaiProbe.Test(r.Context(), map[string]any{
-		"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken,
+	probeClient := *s.xaiProbe
+	if account.TokenEndpoint != "" {
+		probeClient.TokenURL = account.TokenEndpoint
+	}
+	result := probeClient.Test(r.Context(), map[string]any{
+		"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt,
 	}, model, prompt)
 	probe := map[string]any{"status": result.Status, "http_status": result.HTTPStatus, "code": result.Code, "quota": result.Quota, "checked_at": time.Now().UTC()}
-	updated, found, updateErr := s.oauthStore.UpdateProbe(account.ID, result.AccessToken, result.RefreshToken, result.IDToken, probe, result.Error)
+	updated, found, updateErr := s.oauthStore.UpdateProbe(*account, result.AccessToken, result.RefreshToken, result.IDToken, result.ExpiresAt, probe, result.Error)
 	if updateErr != nil {
 		writeError(w, http.StatusInternalServerError, updateErr.Error(), "server_error")
 		return
 	}
 	if !found {
-		writeError(w, http.StatusNotFound, "OAuth account not found", "not_found")
+		writeError(w, http.StatusConflict, "OAuth 凭据已变化，请重新操作", "conflict")
 		return
 	}
 	if action == "models" && result.Status == "valid" {
-		updated.Models = []string{provider.XAICLIModel}
-		if saved, saveErr := s.oauthStore.Import(updated); saveErr == nil {
+		if saved, applied, saveErr := s.oauthStore.UpdateIfCredential(updated, func(current *oauth.Account) { current.Models = []string{provider.XAICLIModel} }); saveErr == nil && applied {
 			updated = saved
 		}
 	}
 	status := http.StatusOK
-	if result.Status == "invalid" {
+	if result.Status == "denied" {
+		status = http.StatusForbidden
+	} else if result.Status == "invalid" {
 		status = http.StatusUnauthorized
 	} else if result.Status == "unknown" {
 		status = http.StatusBadGateway
@@ -443,6 +466,4 @@ func deleteLocalMedia(root, id string) int {
 	}
 	return count
 }
-func oauthPublic(item oauth.Account) map[string]any {
-	return map[string]any{"id": item.ID, "email": item.Email, "subject": item.Subject, "status": item.Status, "source_type": item.SourceType, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "models": item.Models, "created_at": item.CreatedAt, "updated_at": item.UpdatedAt}
-}
+func oauthPublic(item oauth.Account) map[string]any { return oauth.Public(item) }

@@ -12,7 +12,7 @@
       <p class="text-xs text-muted-foreground">点击账号的“后台授权”后，系统使用该账号登录态自动处理。若 xAI 要求额外验证，会显示具体原因；手动设备码作为备用入口。</p>
       <div class="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" :disabled="busy || loading" @click="loadAccounts">
-          {{ loading ? '刷新中...' : '刷新' }}
+          {{ loading ? '刷新中...' : '刷新列表' }}
         </Button>
         <Button size="sm" variant="outline" :disabled="busy || loading || !accounts.length" @click="openModelTest">
           账号测试
@@ -26,23 +26,31 @@
 
       </div>
 
+      <div class="space-y-2">
+        <label class="ui-field-label">CPA 同步目标</label>
+        <GroupedSelectMenu v-model="cpaPoolId" :options="cpaPoolOptions" placeholder="选择已配置的 CPA 连接" aria-label="CPA 同步目标" block />
+        <p v-if="cpaLoadError" class="text-xs text-rose-600">{{ cpaLoadError }}</p>
+        <p v-else-if="!cpaPools.length" class="text-xs text-muted-foreground">请先在账号导入中配置 CPA 连接。</p>
+      </div>
       <section class="space-y-2" aria-label="OAuth 额度与有效期">
         <h3 class="text-sm font-medium text-foreground">已授权凭据 · 额度与有效期</h3>
-        <p class="text-xs text-muted-foreground">这里只显示 OAuth 额度。SSO 图片和视频额度在账号管理中查看；未返回额度或周期时显示“尚未获取”。</p>
+        <p class="text-xs text-muted-foreground">这里显示上游返回的 OAuth 月度额度；月度上限为 0 不代表无法调用，也无法据此计算可用总量。实际调用结果在模型测试中确认。SSO 图片和视频额度仍在账号管理中查看。</p>
         <p v-if="!accounts.length" class="py-3 text-xs text-muted-foreground">暂无 OAuth 凭据，完成授权后显示。</p>
         <div v-else class="overflow-x-auto">
           <table class="w-full min-w-[700px] text-left text-xs">
             <thead class="text-muted-foreground"><tr>
               <th class="py-2 pr-4">邮箱 / OAuth 账号 ID</th><th class="py-2 pr-4">状态</th>
-              <th class="py-2 pr-4">OAuth 剩余</th><th class="py-2 pr-4">额度重置时间</th>
-              <th class="py-2 pr-4">凭据到期时间</th>
+              <th class="py-2 pr-4">月度额度 / 剩余</th><th class="py-2 pr-4">账期结束时间</th>
+              <th class="py-2 pr-4">凭据到期时间</th><th class="py-2 pr-4">CPA 同步</th><th class="py-2">操作</th>
             </tr></thead>
             <tbody><tr v-for="account in accounts" :key="account.id" class="border-t border-border">
               <td class="max-w-[18rem] break-all py-3 pr-4"><p>{{ account.email || '未返回邮箱' }}</p><p class="mt-1 font-mono text-muted-foreground">{{ account.id }}</p></td>
-              <td class="py-3 pr-4">{{ grokOAuthShortStatusText(oauthView(account)) }}</td>
-              <td class="py-3 pr-4">{{ grokOAuthRemainingQuotaText(oauthView(account)) === '-' ? '尚未获取' : grokOAuthRemainingQuotaText(oauthView(account)) }}</td>
-              <td class="whitespace-nowrap py-3 pr-4">{{ grokOAuthQuotaResetText(oauthView(account)) === '-' ? '尚未获取' : grokOAuthQuotaResetText(oauthView(account)) }}</td>
+              <td class="py-3 pr-4">{{ grokOAuthAuthorizationText(oauthView(account)) }}</td>
+              <td class="max-w-[18rem] py-3 pr-4"><p>{{ grokOAuthRemainingQuotaText(oauthView(account)) === '-' ? '待查询' : grokOAuthRemainingQuotaText(oauthView(account)) }}</p><p v-if="account.quota?.error" class="mt-1 break-words text-rose-600">{{ account.quota.error }}</p></td>
+              <td class="whitespace-nowrap py-3 pr-4">{{ grokOAuthQuotaResetText(oauthView(account)) === '-' ? (account.quota?.status === 'error' ? '查询失败' : account.quota ? '上游未提供' : '待查询') : grokOAuthQuotaResetText(oauthView(account)) }}</td>
               <td class="whitespace-nowrap py-3 pr-4">{{ formatGrokAccountDate(account.expires_at) }}</td>
+              <td class="max-w-[18rem] py-3 pr-4"><p>{{ cpaSyncText(account) }}</p><p v-if="account.cpa_sync?.pool_name" class="mt-1 text-muted-foreground">{{ account.cpa_sync.pool_name }}</p><p v-if="account.cpa_sync?.error" class="mt-1 break-words text-rose-600">{{ account.cpa_sync.error }}</p></td>
+              <td class="py-3"><div class="flex gap-2 whitespace-nowrap"><Button size="xs" variant="outline" :disabled="busy || account.status === 'disabled'" @click="refreshAccount(account.id)">刷新额度</Button><Button size="xs" variant="outline" :disabled="busy || !cpaPoolId || !account.has_access_token || !account.has_refresh_token || ['disabled','invalid'].includes(account.status)" @click="syncCPA(account)">{{ account.cpa_sync?.status === 'synced' ? '重新同步 CPA' : '同步 CPA' }}</Button></div></td>
             </tr></tbody>
           </table>
         </div>
@@ -51,9 +59,9 @@
       <SurfaceBox v-if="protocolJob" tone="muted" density="compact" class="space-y-2">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <span class="text-sm font-medium text-foreground">后台授权 · {{ protocolStageLabel }}</span>
-          <StateBadge :tone="protocolJobTone" size="xs">{{ protocolStatusLabel }}</StateBadge>
+          <StateBadge :tone="protocolJobTone" size="xs">{{ protocolPollError ? '状态待确认' : protocolStatusLabel }}</StateBadge>
         </div>
-        <p class="text-xs text-muted-foreground">{{ protocolJob.message }}</p>
+        <p class="text-xs text-muted-foreground">{{ protocolJob.message }}</p><p v-if="protocolPollError" class="text-xs text-amber-600">{{ protocolPollError }}</p>
         <p v-if="protocolJob.error" class="break-words text-xs text-rose-600">{{ protocolJob.error }}</p>
         <div v-if="protocolDeliveryItems.length" class="grid gap-1 border-t border-border pt-2">
           <div v-for="item in protocolDeliveryItems" :key="item.target" class="flex min-w-0 items-center justify-between gap-3 text-xs">
@@ -186,8 +194,9 @@ import {
   type GrokOAuthProtocolJob,
 } from '@/api/grokOAuthAccounts'
 import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
+import { accountImportsApi, type CPAPool } from '@/api/accountImports'
 import type { GrokAccount } from '@/api/grokAccounts'
-import { formatGrokAccountDate, grokOAuthQuotaResetText, grokOAuthRemainingQuotaText, grokOAuthShortStatusText } from './grokAccountView'
+import { formatGrokAccountDate, grokOAuthQuotaResetText, grokOAuthRemainingQuotaText, grokOAuthAuthorizationText } from './grokAccountView'
 
 function oauthView(account: GrokOAuthAccount): GrokAccount {
   return { oauth: account } as GrokAccount
@@ -220,6 +229,25 @@ const busy = ref(false)
 const showImport = ref(false)
 const device = ref<GrokOAuthDeviceSession | null>(null)
 const protocolJob = ref<GrokOAuthProtocolJob | null>(null)
+const protocolPollError = ref('')
+let protocolPollFailures = 0
+let disposed = false
+const cpaPools = ref<CPAPool[]>([])
+const cpaPoolId = ref('')
+const cpaLoadError = ref('')
+const cpaPoolOptions = computed(() => cpaPools.value.map(pool => ({ label: pool.name || pool.base_url, value: pool.id })))
+function cpaSyncText(account: GrokOAuthAccount) {
+ return ({ synced: '已同步', failed: '同步失败', pending: '凭据已更新，待同步' } as Record<string,string>)[account.cpa_sync?.status || ''] || '未同步'
+}
+async function syncCPA(account: GrokOAuthAccount) {
+ if (!cpaPoolId.value) return
+ busy.value = true
+ try {
+  await grokOAuthAccountsApi.syncCPA(account.id, cpaPoolId.value)
+  toast.success('xAI OAuth 凭据已同步到 CPA')
+ } catch(error) { toast.error(errorMessage(error, 'CPA 同步失败')) }
+ finally { await loadAccounts(); busy.value = false }
+}
 const credentialText = ref('')
 const accessToken = ref('')
 const refreshToken = ref('')
@@ -292,16 +320,27 @@ async function loadAccounts() {
   try {
     const [result] = await Promise.all([
       grokOAuthAccountsApi.list(),
+      accountImportsApi.listCPAPools().then(result => {
+        cpaPools.value = result.pools || []; cpaLoadError.value = ''
+        if (!cpaPools.value.some(pool => pool.id === cpaPoolId.value)) cpaPoolId.value = cpaPools.value.length === 1 ? cpaPools.value[0].id : ''
+      }).catch(() => { cpaLoadError.value = 'CPA 连接加载失败，请刷新列表'; cpaPoolId.value = '' }),
       grokOAuthAccountsApi.candidates().then(result => { candidates.value = result.items || []; candidateError.value = '' }).catch(() => { candidateError.value = 'Grok 待授权账号加载失败，请刷新重试' }),
     ])
     const active = candidates.value.find(item => item.oauth_job_id && ['queued', 'running'].includes(item.oauth_status))
-    if (active?.oauth_job_id && !protocolRunning.value) {
-      const resumed = await grokOAuthAccountsApi.getProtocolJob(active.oauth_job_id)
-      protocolJob.value = resumed.job
-      if (['pending', 'running'].includes(resumed.job.status)) scheduleProtocolPoll()
+    const trackedJobId = protocolJob.value?.id || active?.oauth_job_id
+    if (trackedJobId) {
+      try {
+        const resumed = await grokOAuthAccountsApi.getProtocolJob(trackedJobId)
+        if (disposed || (protocolJob.value && protocolJob.value.id !== trackedJobId)) return
+        protocolJob.value = resumed.job
+        protocolPollError.value = ''; protocolPollFailures = 0
+        if (['pending', 'running'].includes(resumed.job.status)) scheduleProtocolPoll()
+        else if (protocolPollTimer !== null) { window.clearTimeout(protocolPollTimer); protocolPollTimer = null }
+      } catch { protocolPollError.value = '任务状态读取失败，请刷新列表核对；页面状态不代表后台仍在运行' }
     }
+    if (disposed) return
     accounts.value = result.items || []
-    availableModels.value = result.available_models || []
+    availableModels.value = result.available_models || Array.from(new Set(accounts.value.flatMap(account => account.models || [])))
     const modelIds = modelTestOptions.value.map((option) => option.value)
     if (!modelIds.includes(testModel.value)) testModel.value = modelIds[0] || ''
     if (!accounts.value.some((account) => account.id === testAccountId.value)) {
@@ -416,16 +455,20 @@ async function startDeviceAuthorization(candidate?: GrokOAuthCandidate) {
 }
 
 function scheduleProtocolPoll() {
+  if (disposed) return
   if (protocolPollTimer !== null) window.clearTimeout(protocolPollTimer)
   protocolPollTimer = window.setTimeout(pollProtocolAuthorization, 1500)
 }
 
 async function pollProtocolAuthorization() {
   const jobId = protocolJob.value?.id
-  if (!jobId) return
+  if (disposed || !jobId) return
+  protocolPollTimer = null
   try {
     const result = await grokOAuthAccountsApi.getProtocolJob(jobId)
+    if (disposed || protocolJob.value?.id !== jobId) return
     protocolJob.value = result.job
+    protocolPollError.value = ''; protocolPollFailures = 0
     candidates.value = candidates.value.map(item => item.id === result.job.source_account_id
       ? { ...item, oauth_status: result.job.status === 'pending' ? 'queued' : result.job.status }
       : item)
@@ -442,7 +485,11 @@ async function pollProtocolAuthorization() {
     }
     scheduleProtocolPoll()
   } catch (error) {
-    toast.error(errorMessage(error, '后台授权状态读取失败'))
+    if (disposed || protocolJob.value?.id !== jobId) return
+    protocolPollError.value = '任务状态读取失败，正在重新查询；可点击刷新列表核对'
+    protocolPollFailures += 1
+    if (protocolPollFailures < 3) scheduleProtocolPoll()
+    else protocolPollError.value = '任务状态读取失败，请刷新列表核对；页面状态不代表后台仍在运行'
   }
 }
 
@@ -452,7 +499,7 @@ async function startProtocolAuthorization(candidate: GrokOAuthCandidate) {
     const result = await grokOAuthAccountsApi.startProtocol(candidate.id)
     protocolJob.value = result.job
     await loadAccounts()
-    scheduleProtocolPoll()
+    if (protocolRunning.value) scheduleProtocolPoll()
   } catch (error) {
     toast.error(errorMessage(error, '无法启动后台授权'))
   } finally {
@@ -523,12 +570,13 @@ async function importCredential() {
 async function refreshAccount(id: string) {
   busy.value = true
   try {
-    await grokOAuthAccountsApi.refresh(id)
-    toast.success('OAuth Token 已刷新')
+    const result = await grokOAuthAccountsApi.queryQuota(id)
+    if (result.ok) toast.success('OAuth 额度已更新')
+    else toast.warning(result.account.quota?.error || 'OAuth 额度查询失败，已保留具体原因')
     await loadAccounts()
     emit('changed')
   } catch (error) {
-    toast.error(error instanceof Error ? error.message : 'OAuth Token 刷新失败')
+    toast.error(error instanceof Error ? error.message : 'OAuth 额度查询失败')
   } finally {
     busy.value = false
   }
@@ -577,6 +625,7 @@ async function removeAccount(id: string) {
 
 onMounted(loadAccounts)
 onBeforeUnmount(() => {
+  disposed = true
   if (protocolPollTimer !== null) window.clearTimeout(protocolPollTimer)
 })
 

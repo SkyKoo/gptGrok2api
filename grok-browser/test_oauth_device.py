@@ -94,7 +94,8 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({c["url"] for c in cookies}, {"https://accounts.x.ai", "https://auth.x.ai"})
         self.assertTrue(all("domain" not in c and c["secure"] and c["httpOnly"] for c in cookies))
         self.assertNotIn("proxy", module.launch_async.await_args.kwargs)
-        context.close.assert_awaited_once()
+        # Closing the whole browser owns/cleans its contexts as well.
+        context.close.assert_not_awaited()
         browser.close.assert_awaited_once()
 
 

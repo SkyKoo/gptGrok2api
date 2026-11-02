@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import cloakbrowser
+from browser_sessions import launch_browser
 
 from signup_errors import REVIEW_REASONS
 from network_diagnostics import NetworkDiagnostics
@@ -85,18 +86,9 @@ class BrowserSession:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def close(self) -> None:
-        try:
-            await self.page.close()
-        except Exception:
-            pass
-        try:
-            await self.context.close()
-        except Exception:
-            pass
-        try:
-            await self.browser.close()
-        except Exception:
-            pass
+        # Chromium owns all pages/contexts. Its managed close is bounded and
+        # retains the shared slot until process closure has been confirmed.
+        await self.browser.close()
 
 
 _sessions: dict[str, BrowserSession] = {}
@@ -125,18 +117,19 @@ async def cleanup_expired_sessions() -> None:
     cutoff = time.monotonic() - _SESSION_TTL
     async with _sessions_lock:
         expired = [item for item in _sessions.values() if item.touched_at < cutoff]
-        for item in expired:
-            _sessions.pop(item.session_id, None)
     for item in expired:
-        await item.close()
+        try:
+            await close_session(item.session_id)
+        except Exception:
+            pass  # Queue retains the browser and retries only its cleanup.
 
 
-async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "", locale: str = "", profile: dict | None = None, timeout_s: int = 180) -> dict:
+async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "", locale: str = "", profile: dict | None = None, timeout_s: int = 180, browser: Any = None) -> dict:
     await cleanup_expired_sessions()
     target = _safe_url(signup_url, "browser_start")
-    browser = await cloakbrowser.launch_async(
-        **browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None, profile=profile)
-    )
+    if browser is None:
+        browser = await launch_browser(cloakbrowser.launch_async,
+            **browser_kwargs("TURNSTILE", proxy or None, timezone=timezone or None, locale=locale or None, profile=profile))
     context = None
     try:
         context = await browser.new_context(**native_browser_context_kwargs())
@@ -154,12 +147,7 @@ async def start_session(*, signup_url: str, proxy: str = "", timezone: str = "",
         async with _sessions_lock:
             _sessions[session_id] = current
         return {"ok": True, "session_id": session_id, "url": page.url, "user_agent": await _user_agent(page), "cookies": await cookie_snapshot(page), "diagnostic": await _page_diagnostic(page, response_status=response_status)}
-    except Exception:
-        if context is not None:
-            try:
-                await context.close()
-            except Exception:
-                pass
+    except BaseException:
         await browser.close()
         raise
 
@@ -937,10 +925,13 @@ def _cookie_value(cookies: list[dict], *names: str) -> str:
 
 async def close_session(session_id: str) -> bool:
     async with _sessions_lock:
-        current = _sessions.pop(str(session_id or "").strip(), None)
+        current = _sessions.get(str(session_id or "").strip())
     if current is None:
         return False
-    await current.close()
+    async with current.lock:
+        await current.close()
+    async with _sessions_lock:
+        _sessions.pop(current.session_id, None)
     return True
 
 

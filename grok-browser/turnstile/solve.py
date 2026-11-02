@@ -10,6 +10,7 @@ import time
 from urllib.parse import urlsplit
 
 import cloakbrowser
+from browser_sessions import launch_browser
 
 from common.browser import browser_context_kwargs, browser_kwargs, run_pre_actions, run_post_fetch
 
@@ -213,7 +214,7 @@ async def solve_turnstile_realpage(url: str, sitekey: str = None,
     t0 = time.monotonic()
 
     async with _solve_lock:
-        async with await cloakbrowser.launch_async(**_browser_kwargs(proxy)) as browser:
+        async with await launch_browser(cloakbrowser.launch_async, **_browser_kwargs(proxy)) as browser:
             context = await browser.new_context(**browser_context_kwargs())
             page = await context.new_page()
             try:
@@ -277,7 +278,7 @@ async def solve_turnstile_realpage_session(
     profile: dict = None,
 ):
     """Real-page solver variant that keeps Chromium alive for same-origin auth."""
-    browser = await cloakbrowser.launch_async(
+    browser = await launch_browser(cloakbrowser.launch_async,
         **browser_kwargs("TURNSTILE", proxy, timezone=timezone, locale=locale, profile=profile)
     )
     context = None
@@ -311,16 +312,6 @@ async def solve_turnstile_realpage_session(
         return browser, page, {"token": token, "cookies": cookies,
                                "user_agent": str(user_agent or ""),
                                "method": "real-page-session"}
-    except Exception:
-        if context is not None:
-            if page is not None:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
-            try:
-                await context.close()
-            except Exception:
-                pass
+    except BaseException:
         await browser.close()
         raise

@@ -98,19 +98,21 @@ async def confirm_on_page(page, *, user_code: str, expected_email: str, timeout_
     return result("uncertain" if consent_submitted else "manual_action_required", "oauth_worker_result_unknown" if consent_submitted else "oauth_consent_unrecognized")
 
 
-async def authorize_device(*, verification_uri_complete: str, user_code: str, sso: str, sso_rw: str = "", expected_email: str, proxy: str = "", timeout_s: int = 120) -> dict:
+async def authorize_device(*, verification_uri_complete: str, user_code: str, sso: str, sso_rw: str = "", expected_email: str, proxy: str = "", timeout_s: int = 120, browser=None) -> dict:
     validate_device_url(verification_uri_complete, user_code)
     if not sso.strip() or not expected_email.strip():
         return result("failed", "oauth_session_required")
     import cloakbrowser
-    browser = context = None
+    from browser_sessions import launch_browser
+    context = None
     try:
         launch_options = browser_kwargs("TURNSTILE", proxy=proxy)
         # Empty here explicitly means daily direct, not the registration worker's
         # optional environment proxy. Keep the two routes independent.
         if not proxy.strip():
             launch_options.pop("proxy", None)
-        browser = await cloakbrowser.launch_async(**launch_options)
+        if browser is None:
+            browser = await launch_browser(cloakbrowser.launch_async, **launch_options)
         context = await browser.new_context(**native_browser_context_kwargs())
         # Host-scoped cookies avoid sending the SSO to unrelated x.ai subdomains.
         cookies = [{"name": name, "value": value, "url": "https://" + host, "secure": True, "httpOnly": True, "sameSite": "Lax"}
@@ -133,9 +135,8 @@ async def authorize_device(*, verification_uri_complete: str, user_code: str, ss
         # a fixed error code and let the caller inspect the existing grant.
         return result("uncertain", "oauth_worker_result_unknown")
     finally:
-        if context is not None:
-            try: await context.close()
-            except Exception: pass
         if browser is not None:
+            # A close failure must not replay consent or overwrite its outcome.
+            # The queue keeps ownership until its background cleanup succeeds.
             try: await browser.close()
             except Exception: pass

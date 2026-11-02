@@ -16,21 +16,34 @@ import (
 	"time"
 )
 
+type CPASync struct {
+	Status   string `json:"status"`
+	PoolID   string `json:"pool_id,omitempty"`
+	PoolName string `json:"pool_name,omitempty"`
+	FileName string `json:"file_name,omitempty"`
+	At       int64  `json:"at,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 type Account struct {
-	ID           string         `json:"id"`
-	Email        string         `json:"email,omitempty"`
-	Subject      string         `json:"subject,omitempty"`
-	AccessToken  string         `json:"access_token,omitempty"`
-	RefreshToken string         `json:"refresh_token,omitempty"`
-	IDToken      string         `json:"id_token,omitempty"`
-	ExpiresAt    int64          `json:"expires_at,omitempty"`
-	Status       string         `json:"status"`
-	SourceType   string         `json:"source_type"`
-	Models       []string       `json:"models,omitempty"`
-	CreatedAt    int64          `json:"created_at"`
-	UpdatedAt    int64          `json:"updated_at"`
-	LastError    string         `json:"last_error,omitempty"`
-	Probe        map[string]any `json:"probe,omitempty"`
+	ID            string         `json:"id"`
+	Email         string         `json:"email,omitempty"`
+	Subject       string         `json:"subject,omitempty"`
+	AccessToken   string         `json:"access_token,omitempty"`
+	RefreshToken  string         `json:"refresh_token,omitempty"`
+	IDToken       string         `json:"id_token,omitempty"`
+	TokenType     string         `json:"token_type,omitempty"`
+	TokenEndpoint string         `json:"token_endpoint,omitempty"`
+	Quota         map[string]any `json:"quota,omitempty"`
+	CPASync       *CPASync       `json:"cpa_sync,omitempty"`
+	ExpiresAt     int64          `json:"expires_at,omitempty"`
+	Status        string         `json:"status"`
+	SourceType    string         `json:"source_type"`
+	Models        []string       `json:"models,omitempty"`
+	CreatedAt     int64          `json:"created_at"`
+	UpdatedAt     int64          `json:"updated_at"`
+	LastError     string         `json:"last_error,omitempty"`
+	Probe         map[string]any `json:"probe,omitempty"`
 }
 
 type Store struct {
@@ -83,7 +96,16 @@ func (s *Store) Import(item Account) (Account, error) {
 	updated := false
 	for index, current := range items {
 		if current.ID == item.ID || (item.Subject != "" && current.Subject == item.Subject) || (item.Email != "" && strings.EqualFold(current.Email, item.Email)) {
+			item.ID = current.ID
 			item.CreatedAt = current.CreatedAt
+			if item.CPASync == nil && current.CPASync != nil {
+				cp := *current.CPASync
+				if !SameCredential(item, current) {
+					cp.Status = "pending"
+					cp.Error = "凭据已更新，请重新同步"
+				}
+				item.CPASync = &cp
+			}
 			items[index] = item
 			updated = true
 			break
@@ -156,17 +178,8 @@ func (s *Store) Delete(ids []string) (int, error) {
 
 // UpdateProbe records non-secret probe telemetry and optional rotated tokens.
 // The public projection never includes the credential values themselves.
-func (s *Store) UpdateProbe(id, accessToken, refreshToken, idToken string, probe map[string]any, lastError string) (Account, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	items, err := s.load()
-	if err != nil {
-		return Account{}, false, err
-	}
-	for index, item := range items {
-		if item.ID != strings.TrimSpace(id) {
-			continue
-		}
+func (s *Store) UpdateProbe(expected Account, accessToken, refreshToken, idToken string, expiresAt int64, probe map[string]any, lastError string) (Account, bool, error) {
+	return s.UpdateIfCredential(expected, func(item *Account) {
 		if strings.TrimSpace(accessToken) != "" {
 			item.AccessToken = strings.TrimSpace(accessToken)
 		}
@@ -176,16 +189,21 @@ func (s *Store) UpdateProbe(id, accessToken, refreshToken, idToken string, probe
 		if strings.TrimSpace(idToken) != "" {
 			item.IDToken = strings.TrimSpace(idToken)
 		}
-		item.Probe = cloneProbe(probe)
-		item.LastError = strings.TrimSpace(lastError)
-		item.UpdatedAt = time.Now().Unix()
-		items[index] = item
-		if err := s.save(items); err != nil {
-			return Account{}, false, err
+		if expiresAt > 0 || !SameCredential(expected, *item) {
+			item.ExpiresAt = expiresAt
 		}
-		return item, true, nil
-	}
-	return Account{}, false, nil
+		if item.CPASync != nil && !SameCredential(expected, *item) {
+			cp := *item.CPASync
+			cp.Status = "pending"
+			cp.Error = "凭据已刷新，请重新同步"
+			item.CPASync = &cp
+		}
+		item.Probe = cloneProbe(probe)
+		if quota, ok := probe["quota"].(map[string]any); ok {
+			item.Quota = cloneProbe(quota)
+		}
+		item.LastError = strings.TrimSpace(lastError)
+	})
 }
 
 func (s *Store) SetStatus(ids []string, status string) (int, error) {
@@ -295,8 +313,58 @@ func (s *Store) decrypt(raw []byte) ([]byte, error) {
 	}
 	return gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
 }
+func Public(item Account) map[string]any { return public(item) }
+
 func public(item Account) map[string]any {
-	return map[string]any{"id": item.ID, "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
+	quota := item.Quota
+	if quota == nil && item.Probe != nil {
+		quota, _ = item.Probe["quota"].(map[string]any)
+	}
+	return map[string]any{"id": item.ID, "provider": "xai_cli_oauth", "auth_kind": "oauth", "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "has_id_token": item.IDToken != "", "token_type": item.TokenType, "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "quota": cloneProbe(quota), "cpa_sync": item.CPASync, "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
+}
+
+// SameCredential excludes telemetry so a quota query does not invalidate CPA delivery state.
+func SameCredential(a, b Account) bool {
+	return a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken && a.IDToken == b.IDToken
+}
+
+// UpdateIfCredential prevents a delayed request from overwriting a new authorization.
+func (s *Store) UpdateIfCredential(expected Account, apply func(*Account)) (Account, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	items, err := s.load()
+	if err != nil {
+		return Account{}, false, err
+	}
+	for i, current := range items {
+		if current.ID != expected.ID {
+			continue
+		}
+		if !SameCredential(current, expected) {
+			return current, false, nil
+		}
+		apply(&current)
+		current.UpdatedAt = time.Now().Unix()
+		items[i] = current
+		if err = s.save(items); err != nil {
+			return Account{}, false, err
+		}
+		return current, true, nil
+	}
+	return Account{}, false, nil
+}
+
+func (s *Store) Get(id string) (Account, bool, error) {
+	items, err := s.List()
+	if err != nil {
+		return Account{}, false, err
+	}
+	for _, item := range items {
+		if item.ID == strings.TrimSpace(id) {
+			return item, true, nil
+		}
+	}
+	return Account{}, false, nil
 }
 
 func cloneProbe(input map[string]any) map[string]any {

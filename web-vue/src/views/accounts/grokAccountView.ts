@@ -141,7 +141,7 @@ export function grokSyncStateText(item: GrokAccount): string {
   return '状态未知'
 }
 
-type GrokOAuthDisplayStatus = 'not_ready' | 'unauthorized' | 'denied' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid' | 'unknown'
+type GrokOAuthDisplayStatus = 'authorized' | 'not_ready' | 'unauthorized' | 'denied' | 'normal' | 'limited' | 'no_quota' | 'expired' | 'invalid' | 'unknown'
 
 function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
   if (!item.oauth) {
@@ -149,42 +149,57 @@ function grokOAuthDisplayStatus(item: GrokAccount): GrokOAuthDisplayStatus {
     return item.status === 'active' && item.has_sso ? 'unauthorized' : 'not_ready'
   }
   const probeCode = cleanString(item.oauth.probe?.code).toLowerCase()
-  if (probeCode === 'personal-team-blocked' || probeCode.startsWith('personal-team-blocked:')) return 'no_quota'
+  if (probeCode === 'personal-team-blocked' || probeCode.startsWith('personal-team-blocked:')) return 'denied'
   const status = cleanString(item.oauth.status).toLowerCase()
   if (status === 'expired') return 'expired'
   const expiry = accountEventTimestamp(item.oauth.expires_at)
   if (expiry !== null && (expiry < 10_000_000_000 ? expiry * 1000 : expiry) <= Date.now()) return 'expired'
   if (status === 'disabled' || status === 'invalid') return 'invalid'
   const probeStatus = cleanString(item.oauth?.probe?.status).toLowerCase()
+  if (probeStatus === 'denied') return 'denied'
+  if (['insufficient_quota', 'usage_limit_reached'].includes(probeCode)) return 'no_quota'
   if (probeStatus === 'valid') return 'normal'
   if (probeStatus === 'limited') return 'limited'
   if (probeStatus === 'invalid') return 'invalid'
   if (probeStatus === 'unknown') return 'unknown'
-  return status === 'active' ? 'unknown' : 'invalid'
+  return status === 'active' ? 'authorized' : 'invalid'
 }
 
 export function grokOAuthStatusText(item: GrokAccount): string {
   return ({
+    authorized: 'OAuth 已授权',
     not_ready: '等待登录态',
     unauthorized: 'OAuth 未授权',
-    denied: 'OAuth 拒绝',
+    denied: 'OAuth 无调用权限',
     normal: 'OAuth 正常',
     limited: 'OAuth 限流',
-    no_quota: '无额度/无订阅',
+    no_quota: '无可用额度',
     expired: 'OAuth 过期',
     invalid: 'OAuth 失效',
     unknown: 'OAuth 未确认',
   } as const)[grokOAuthDisplayStatus(item)]
 }
 
+// Authorization and billing are separate: a zero allowance does not undo consent.
+export function grokOAuthAuthorizationText(item: GrokAccount): string {
+  const oauth = item.oauth
+  if (!oauth) return '未授权'
+  if (oauth.status === 'disabled') return '已禁用'
+  if (oauth.status === 'invalid') return '失效'
+  const expiry = accountEventTimestamp(oauth.expires_at)
+  if (oauth.status === 'expired' || (expiry !== null && (expiry < 10_000_000_000 ? expiry * 1000 : expiry) <= Date.now())) return '凭据已过期'
+  return oauth.has_access_token ? '已授权' : '待刷新凭据'
+}
+
 export function grokOAuthShortStatusText(item: GrokAccount): string {
   return ({
+    authorized: '已授权',
     not_ready: '待 SSO',
     unauthorized: '未授权',
-    denied: '拒绝',
+    denied: '无调用权限',
     normal: '正常',
     limited: '限流',
-    no_quota: '无额度/无订阅',
+    no_quota: '无可用额度',
     expired: '过期',
     invalid: '失效',
     unknown: '未确认',
@@ -193,7 +208,7 @@ export function grokOAuthShortStatusText(item: GrokAccount): string {
 
 export function grokOAuthStatusClass(item: GrokAccount): string {
   const status = grokOAuthDisplayStatus(item)
-  if (status === 'normal') return PILL_TONE_CLASS.success
+  if (status === 'normal' || status === 'authorized') return PILL_TONE_CLASS.success
   if (status === 'limited' || status === 'no_quota' || status === 'unknown') return PILL_TONE_CLASS.warning
   if (status === 'denied' || status === 'expired' || status === 'invalid') return PILL_TONE_CLASS.danger
   return PILL_TONE_CLASS.neutral
@@ -239,7 +254,12 @@ function oauthQuotaPercentText(value: unknown): string {
 }
 
 export function grokOAuthRemainingQuotaText(item: GrokAccount): string {
-  return oauthQuotaPercentText(item.oauth?.quota?.remaining_percent)
+  const quota = item.oauth?.quota
+  if (quota?.status === 'error') return '查询失败'
+  if (quota?.status === 'success' && (quota.monthly_zero || quota.monthly_limit === 0)) return '月度额度 0 · 可用总量未知'
+  if (quota?.status === 'unavailable') return '上游未提供'
+  if (quota?.on_demand_only) return '按量额度'
+  return oauthQuotaPercentText(quota?.remaining_percent)
 }
 
 export function grokOAuthQuotaResetText(item: GrokAccount): string {
@@ -250,7 +270,7 @@ export function grokOAuthQuotaText(item: GrokAccount): string {
   if (!item.oauth?.quota || typeof item.oauth.quota !== 'object') return '-'
   const remaining = grokOAuthRemainingQuotaText(item)
   const reset = grokOAuthQuotaResetText(item)
-  return [remaining !== '-' ? `剩余 ${remaining}` : '', reset !== '-' ? `重置 ${reset}` : ''].filter(Boolean).join(' · ') || '-'
+  return [remaining !== '-' ? `剩余 ${remaining}` : '', reset !== '-' ? `账期结束 ${reset}` : ''].filter(Boolean).join(' · ') || '-'
 }
 
 export function grokOAuthStatusTitle(item: GrokAccount): string {

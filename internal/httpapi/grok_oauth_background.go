@@ -8,11 +8,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 	"github.com/auucoder/gptgrok2api-go/internal/tasks"
 )
 
 var grokOAuthMessages = map[string]string{
+	"oauth_browser_unavailable":      "浏览器准备失败或等待超时，请检查后台浏览器服务",
+	"browser_wait_timeout":           "等待浏览器会话释放超时，本次尚未申请设备授权码",
 	"oauth_in_progress":              "该账号的后台授权仍在收尾，请稍后重试",
 	"oauth_email_required":           "请先补充账号邮箱",
 	"oauth_session_required":         "账号缺少 SSO 登录态，请先恢复登录",
@@ -140,7 +143,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 	if found, err := s.registerStore.SetOAuthAuthorization(id, "running", ""); err != nil || !found {
 		return nil, errors.New("oauth_storage_failed")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
 	defer cancel()
 	email, sso := stringValue(account["email"]), stringValue(account["sso"])
 	guard := func() error {
@@ -172,16 +175,43 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 			proxyURL = s.proxyManager.Resolve(account, false)
 		}
 	}
+	config := mapValue(s.registerStore.Get()["grok"])
+	base := firstNonEmpty(stringValue(config["api_base"]), os.Getenv("CFM_GROK_BROWSER_URL"), "http://grok-browser:8899")
+	setStage := func(stage string) error {
+		if err := guard(); err != nil {
+			return err
+		}
+		if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
+			queue.SetStage(task.ID, stage)
+		}
+		return nil
+	}
+	lease, err := browserqueue.Acquire(ctx, s.requestClient, base, stringValue(config["api_key"]), map[string]any{"proxy": proxyURL, "daily_direct": true}, setStage)
+	if err != nil {
+		if guardErr := guard(); guardErr != nil {
+			return nil, guardErr
+		}
+		if err.Error() == "browser_wait_timeout" {
+			return nil, err
+		}
+		return nil, errors.New("oauth_browser_unavailable")
+	}
+	defer lease.Release()
+	// Browser is ready now; the device code's validity is never spent in queue.
+	grantCtx, grantCancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer grantCancel()
+	ctx = grantCtx
+	if err := setStage("authorize"); err != nil {
+		return nil, err
+	}
 	started, err := s.deviceOAuth.StartForAccount(ctx, proxyURL, email, guard)
 	if err != nil {
 		return nil, err
 	}
 	sessionID := stringValue(started["id"])
 	defer s.deviceOAuth.Discard(sessionID)
-	config := mapValue(s.registerStore.Get()["grok"])
-	base := firstNonEmpty(stringValue(config["api_base"]), os.Getenv("CFM_GROK_BROWSER_URL"), "http://grok-browser:8899")
 	outcome, err := oauth.ConfirmDeviceInBrowser(ctx, s.requestClient, base, stringValue(config["api_key"]), oauth.BrowserDeviceRequest{
-		VerificationURL: stringValue(started["verification_uri_complete"]), UserCode: stringValue(started["user_code"]), SSO: sso, SSORW: stringValue(account["sso_rw"]), Email: email, Proxy: proxyURL, Timeout: 120,
+		BrowserLease: lease.ID, VerificationURL: stringValue(started["verification_uri_complete"]), UserCode: stringValue(started["user_code"]), SSO: sso, SSORW: stringValue(account["sso_rw"]), Email: email, Proxy: proxyURL, Timeout: 120,
 	})
 	if err != nil && err.Error() != "oauth_worker_result_unknown" {
 		return nil, err
@@ -210,6 +240,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 			if _, err := finish("authorized", ""); err != nil {
 				return nil, err
 			}
+			s.finishOAuthQuota(ctx, value)
 			return map[string]any{"status": "authorized", "account": value["account"]}, nil
 		}
 		if seconds := intValue(value["interval"]); seconds > 0 {
@@ -230,6 +261,12 @@ func grokOAuthPublicJob(task tasks.Task) map[string]any {
 	switch task.Status {
 	case "running":
 		status, stage, message = "running", "authorize", "正在使用所选账号完成授权"
+		switch stringValue(task.Result["stage"]) {
+		case "waiting_browser":
+			stage, message = "waiting_browser", "等待浏览器会话释放"
+		case "starting_browser":
+			stage, message = "starting_browser", "正在启动浏览器"
+		}
 	case "completed":
 		status = stringValue(task.Result["status"])
 		if status == "authorized" {

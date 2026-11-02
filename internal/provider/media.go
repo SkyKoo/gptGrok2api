@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,6 +84,11 @@ func (m *Media) fetch(ctx context.Context, account accounts.Account, filePath st
 		return nil, "", err
 	}
 	applyMediaHeaders(req, account, origin, origin+"/")
+	if origin == "https://imagine-public.x.ai" {
+		// This public asset origin does not need Grok session credentials.
+		req.Header.Del("Cookie")
+		req.Header.Del("Authorization")
+	}
 	response, err := m.Client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -108,6 +114,35 @@ func (m *Media) fetch(ctx context.Context, account accounts.Account, filePath st
 	mime := strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0])
 	if mime == "" {
 		mime = mimeFromPath(urlValue)
+	}
+	return raw, mime, nil
+}
+
+// fetchImagineOriginal revalidates the final URL at the download boundary.
+// A public image must never receive SSO credentials or follow an unverified redirect.
+func (m *Media) fetchImagineOriginal(ctx context.Context, account accounts.Account, value string) ([]byte, string, error) {
+	original, err := imagineOriginalURL(value)
+	if err != nil {
+		return nil, "", err
+	}
+	client := *m.Client
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	media := *m
+	media.Client = &client
+	raw, mime, err := media.fetch(ctx, account, original, 64<<20)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		message := "Grok 最终原图下载失败；未重试或回退到预览"
+		var upstream *protocol.UpstreamError
+		if errors.As(err, &upstream) {
+			message = fmt.Sprintf("Grok 最终原图下载返回 HTTP %d；未重试或回退到预览", upstream.Status)
+		}
+		// A storage/CDN error does not prove that the account credentials or generation quota failed.
+		// Do not expose a signed URL through a transport error or an upstream response body.
+		return nil, "", &protocol.UpstreamError{Status: http.StatusBadGateway, Message: message}
 	}
 	return raw, mime, nil
 }

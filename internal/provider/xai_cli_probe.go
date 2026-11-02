@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -40,9 +42,13 @@ type XAIProbeResult struct {
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
+	ExpiresAt    int64
 }
 
-func (p *XAIProbe) Test(ctx context.Context, account map[string]any, model, prompt string) XAIProbeResult {
+func (p *XAIProbe) Test(ctx context.Context, account map[string]any, model, prompt string) (result XAIProbeResult) {
+	expiry, _ := numberValue(account["expires_at"])
+	expiresAt := int64(expiry)
+	defer func() { result.ExpiresAt = expiresAt }()
 	access, refresh, id := stringValue(account["access_token"]), stringValue(account["refresh_token"]), stringValue(account["id_token"])
 	if access == "" {
 		return XAIProbeResult{Status: "invalid", Code: "invalid_credentials", Error: "access_token is missing"}
@@ -54,9 +60,10 @@ func (p *XAIProbe) Test(ctx context.Context, account map[string]any, model, prom
 		prompt = "Reply only OK."
 	}
 	payload := map[string]any{"model": model, "input": []any{map[string]any{"role": "user", "content": prompt}}, "stream": false, "max_output_tokens": 64}
-	if tokenExpired(access) && refresh != "" {
+	if (tokenExpired(access) || (expiresAt > 0 && expiresAt <= time.Now().Unix())) && refresh != "" {
 		if rotated, err := p.refresh(ctx, refresh); err == nil {
 			access = rotated.AccessToken
+			expiresAt = rotated.ExpiresAt
 			if rotated.RefreshToken != "" {
 				refresh = rotated.RefreshToken
 			}
@@ -68,14 +75,18 @@ func (p *XAIProbe) Test(ctx context.Context, account map[string]any, model, prom
 	return p.probeWithToken(ctx, access, refresh, id, payload)
 }
 
-func (p *XAIProbe) Probe(ctx context.Context, account map[string]any) XAIProbeResult {
+func (p *XAIProbe) Probe(ctx context.Context, account map[string]any) (result XAIProbeResult) {
+	expiry, _ := numberValue(account["expires_at"])
+	expiresAt := int64(expiry)
+	defer func() { result.ExpiresAt = expiresAt }()
 	access, refresh, id := stringValue(account["access_token"]), stringValue(account["refresh_token"]), stringValue(account["id_token"])
 	if access == "" {
 		return XAIProbeResult{Status: "invalid", Code: "invalid_credentials", Error: "access_token is missing"}
 	}
-	if tokenExpired(access) && refresh != "" {
+	if (tokenExpired(access) || (expiresAt > 0 && expiresAt <= time.Now().Unix())) && refresh != "" {
 		if rotated, err := p.refresh(ctx, refresh); err == nil {
 			access = rotated.AccessToken
+			expiresAt = rotated.ExpiresAt
 			if rotated.RefreshToken != "" {
 				refresh = rotated.RefreshToken
 			}
@@ -91,16 +102,20 @@ func (p *XAIProbe) Probe(ctx context.Context, account map[string]any) XAIProbeRe
 		return XAIProbeResult{Status: "unknown", Error: err.Error(), AccessToken: access, RefreshToken: refresh, IDToken: id}
 	}
 	setXAIHeaders(req, access)
-	resp, err := p.HTTP.Do(req)
+	client := *p.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.Jar = nil
+	resp, err := client.Do(req)
 	if err != nil {
 		return XAIProbeResult{Status: "unknown", Error: err.Error(), AccessToken: access, RefreshToken: refresh, IDToken: id}
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	code, message := xaiError(body)
-	if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && refresh != "" {
+	if resp.StatusCode == http.StatusUnauthorized && refresh != "" {
 		if rotated, refreshErr := p.refresh(ctx, refresh); refreshErr == nil {
 			access = rotated.AccessToken
+			expiresAt = rotated.ExpiresAt
 			if rotated.RefreshToken != "" {
 				refresh = rotated.RefreshToken
 			}
@@ -111,13 +126,15 @@ func (p *XAIProbe) Probe(ctx context.Context, account map[string]any) XAIProbeRe
 			return p.probeWithToken(ctx, access, refresh, id, payload)
 		}
 	}
-	result := XAIProbeResult{HTTPStatus: resp.StatusCode, Code: code, Error: message, AccessToken: access, RefreshToken: refresh, IDToken: id}
+	result = XAIProbeResult{HTTPStatus: resp.StatusCode, Code: code, Error: message, AccessToken: access, RefreshToken: refresh, IDToken: id}
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		result.Status = "valid"
 	case resp.StatusCode == http.StatusTooManyRequests:
 		result.Status = "limited"
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusForbidden:
+		result.Status = "denied"
+	case resp.StatusCode == http.StatusUnauthorized:
 		result.Status = "invalid"
 	default:
 		result.Status = "unknown"
@@ -135,7 +152,10 @@ func (p *XAIProbe) probeWithToken(ctx context.Context, access, refresh, id strin
 		return XAIProbeResult{Status: "unknown", Error: err.Error(), AccessToken: access, RefreshToken: refresh, IDToken: id}
 	}
 	setXAIHeaders(req, access)
-	resp, err := p.HTTP.Do(req)
+	client := *p.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.Jar = nil
+	resp, err := client.Do(req)
 	if err != nil {
 		return XAIProbeResult{Status: "unknown", Error: err.Error(), AccessToken: access, RefreshToken: refresh, IDToken: id}
 	}
@@ -147,7 +167,9 @@ func (p *XAIProbe) probeWithToken(ctx context.Context, access, refresh, id strin
 		result.Status = "valid"
 	} else if resp.StatusCode == 429 {
 		result.Status = "limited"
-	} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+	} else if resp.StatusCode == 403 {
+		result.Status = "denied"
+	} else if resp.StatusCode == 401 {
 		result.Status = "invalid"
 	} else {
 		result.Status = "unknown"
@@ -166,7 +188,10 @@ func (p *XAIProbe) refresh(ctx context.Context, refreshToken string) (XAITokens,
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := p.HTTP.Do(req)
+	client := *p.HTTP
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client.Jar = nil
+	resp, err := client.Do(req)
 	if err != nil {
 		return XAITokens{}, err
 	}
@@ -177,41 +202,35 @@ func (p *XAIProbe) refresh(ctx context.Context, refreshToken string) (XAITokens,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || access == "" {
 		return XAITokens{}, fmt.Errorf("xAI OAuth refresh HTTP %d: %s", resp.StatusCode, stringValue(data["error_description"]))
 	}
-	return XAITokens{AccessToken: access, RefreshToken: stringValue(data["refresh_token"]), IDToken: stringValue(data["id_token"])}, nil
+	expiry := xaiTokenExpiry(access)
+	if seconds, ok := numberValue(data["expires_in"]); ok && seconds > 0 {
+		expiry = time.Now().Unix() + int64(seconds)
+	}
+	return XAITokens{AccessToken: access, RefreshToken: stringValue(data["refresh_token"]), IDToken: stringValue(data["id_token"]), ExpiresAt: expiry}, nil
 }
 
-type XAITokens struct{ AccessToken, RefreshToken, IDToken string }
+type XAITokens struct {
+	AccessToken, RefreshToken, IDToken string
+	ExpiresAt                          int64
+}
 
 func (p *XAIProbe) billing(ctx context.Context, access string) map[string]any {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.BaseURL+"/billing", nil)
-	if err != nil {
-		return nil
-	}
-	setXAIHeaders(req, access)
-	resp, err := p.HTTP.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
-	}
-	var data map[string]any
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data) != nil {
-		return nil
-	}
-	used, ok := numberValue(data["creditUsagePercent"])
-	if !ok {
-		return nil
-	}
-	return map[string]any{"source": "billing", "used_percent": used, "remaining_percent": 100 - used}
+	return p.queryBilling(ctx, access)
 }
 
 func setXAIHeaders(req *http.Request, token string) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "grok-cli/0.2.93 (linux; x86_64)")
+	version := strings.TrimSpace(os.Getenv("CFM_XAI_CLI_CLIENT_VERSION"))
+	if !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(version) {
+		version = "1.0.70"
+	}
+	req.Header.Set("User-Agent", "xai-grok-workspace/"+version)
+	req.Header.Set("X-XAI-Token-Auth", "xai-grok-cli")
+	req.Header.Set("x-grok-client-version", version)
+	req.Header.Set("x-grok-client-identifier", "grok-shell")
+	req.Header.Set("x-authenticateresponse", "authenticate-response")
 }
 func xaiError(raw []byte) (string, string) {
 	var data map[string]any

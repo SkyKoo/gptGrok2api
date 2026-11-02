@@ -487,7 +487,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
       ? raw.mail.providers.map(item => providerForRegisterTarget(normalizeProvider(item), target))
       : [],
   }
-  mail.source_id = String(raw.mail?.source_id || '').trim()
+  mail.source_id = String(raw.mail_source_id ?? raw.mail?.source_id ?? '').trim()
   if (!mail.providers.length) {
     mail.providers = [defaultProvider()]
   }
@@ -1255,6 +1255,8 @@ const registerRuntimeActionLabels: Record<string, string> = {
   manual_compensation: '手动补偿注册',
   retry_created: '创建补偿任务',
   automatic_compensation: '自动补偿注册',
+  waiting_browser: '等待浏览器会话释放',
+  starting_browser: '正在启动浏览器',
   bootstrap: '初始化浏览器会话',
   authorize: '初始化授权会话',
   submit_email: '提交邮箱',

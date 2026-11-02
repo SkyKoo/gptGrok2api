@@ -37,16 +37,17 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { Button, Input, Checkbox } from 'nanocat-ui'
-import { registerApi } from '@/api/register'
+import { registerApi, type RegisterTarget } from '@/api/register'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { registrationScheduleResult, validRegistrationInterval, type RegistrationSchedule } from '@/lib/registrationSchedule'
 
 const props = defineProps<{
   schedule?: RegistrationSchedule
-  prepare: () => Promise<boolean>
+  target: RegisterTarget
+  prepare: (target: RegisterTarget) => Promise<boolean>
   configSaving: boolean
 }>()
-const emit = defineEmits<{ (e: 'saved', schedule: RegistrationSchedule): void }>()
+const emit = defineEmits<{ (e: 'saved', schedule: RegistrationSchedule, target: RegisterTarget): void }>()
 const enabled = ref(false)
 const minutes = ref(60)
 const saving = ref(false)
@@ -88,18 +89,19 @@ watch([enabled, minutes], () => { saved.value = false })
 
 async function save() {
   if (!valid.value || saving.value || props.configSaving) return
+  const target = props.target
   saving.value = true
   error.value = ''
   try {
     // Disabling must remain possible even if there are invalid unsaved batch edits.
-    if (enabled.value && !await props.prepare()) {
+    if (enabled.value && !await props.prepare(target)) {
       error.value = '批次配置尚未保存，请先处理自动保存错误。'
       return
     }
-    const result = await registerApi.updateSchedule({ enabled: enabled.value, interval_minutes: minutes.value })
+    const result = await registerApi.updateSchedule({ enabled: enabled.value, interval_minutes: minutes.value }, target)
     enabled.value = result.schedule.enabled
     minutes.value = result.schedule.interval_minutes
-    emit('saved', result.schedule)
+    emit('saved', result.schedule, target)
     saved.value = true
   } catch (cause: any) {
     error.value = cause?.message || '保存定时设置失败'

@@ -20,6 +20,8 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 import cloakbrowser
+from browser_sessions import queue, launch_browser, BrowserQueueError
+from contextlib import asynccontextmanager
 
 from common.browser import browser_context_kwargs, browser_kwargs
 from signup_errors import signup_error_status
@@ -28,6 +30,7 @@ from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
     XaiBrowserFlowError,
     close_session as close_xai_session,
+    cleanup_expired_sessions,
     send_email as xai_send_email,
     signup as xai_signup,
     start_session as xai_start_session,
@@ -37,8 +40,30 @@ from xai_flow import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("grok-browser")
 
-app = FastAPI(title="CFM Grok Browser Worker", version="1.0.0")
-_slots = asyncio.Semaphore(max(1, int(os.getenv("GROK_BROWSER_CONCURRENCY", "1"))))
+async def _cleanup_sessions():
+    while True:
+        await asyncio.sleep(15)
+        await cleanup_expired_sessions()
+        for key, session in list(_sessions.items()):
+            if session["expires_at"] < asyncio.get_running_loop().time():
+                try: await _close_session(key)
+                except Exception: pass
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    queue.capacity = max(1, int(os.getenv("GROK_BROWSER_CONCURRENCY", "1")))
+    queue.start()
+    cleanup = asyncio.create_task(_cleanup_sessions())
+    try:
+        yield
+    finally:
+        cleanup.cancel()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        await queue.shutdown()
+
+
+app = FastAPI(title="CFM Grok Browser Worker", version="1.0.0", lifespan=lifespan)
 _auth_token = os.getenv("GROK_BROWSER_TOKEN", "").strip()
 _allowed_hosts = {"accounts.x.ai", "grok.com", "www.grok.com"}
 _sessions: dict[str, dict] = {}
@@ -60,6 +85,7 @@ class SessionCloseRequest(BaseModel):
 
 
 class NativeStartRequest(BaseModel):
+    browser_lease: str = Field(default="", max_length=64)
     url: str = Field(min_length=8, max_length=2048)
     proxy: str = Field(default="", max_length=2048)
     timezone: str = Field(default="", max_length=128)
@@ -91,6 +117,7 @@ class MaterializeRequest(BaseModel):
 
 
 class OAuthDeviceRequest(BaseModel):
+    browser_lease: str = Field(default="", max_length=64)
     verification_uri_complete: str = Field(min_length=8, max_length=2048)
     user_code: str = Field(min_length=8, max_length=9)
     sso: str = Field(min_length=1, max_length=8192)
@@ -112,8 +139,10 @@ async def oauth_authorize_device(req: OAuthDeviceRequest, authorization: str | N
     # exception is logged, because both may include session credentials.
     try:
         async with asyncio.timeout(150):
-            async with _slots:
-                return await authorize_device(**req.model_dump(exclude={"proxy"}), proxy=_normalize_proxy(req.proxy))
+            browser = queue.claim(req.browser_lease) if req.browser_lease else None
+            return await authorize_device(**req.model_dump(exclude={"proxy", "browser_lease"}), proxy=_normalize_proxy(req.proxy), browser=browser)
+    except BrowserQueueError:
+        return {"status":"failed", "code":"oauth_browser_unavailable"}
     except TimeoutError:
         return {"status":"uncertain", "code":"oauth_worker_result_unknown"}
 
@@ -231,24 +260,22 @@ def _worker_cookie_rows(items: list[dict]) -> list[dict]:
 
 async def _close_session(session_id: str) -> None:
     async with _sessions_lock:
-        session = _sessions.pop(session_id, None)
-    if not session:
-        return
-    try:
-        await session["page"].close()
-    finally:
-        try:
-            await session["context"].close()
-        finally:
-            await session["browser"].close()
+        session = _sessions.get(session_id)
+    if session:
+        await session["browser"].close()
+        async with _sessions_lock:
+            _sessions.pop(session_id, None)
 
 
 @app.post("/v1/session/close")
 async def session_close(req: SessionCloseRequest, authorization: str | None = Header(default=None)) -> dict:
     if not _authorized(authorization):
         raise HTTPException(status_code=401, detail="invalid worker token")
-    await close_xai_session(req.session_id)
-    await _close_session(req.session_id)
+    try:
+        await close_xai_session(req.session_id)
+        await _close_session(req.session_id)
+    except BrowserQueueError:
+        raise HTTPException(status_code=503, detail="browser_close_pending")
     return {"ok": True}
 
 
@@ -300,15 +327,17 @@ async def native_session_start(req: NativeStartRequest, authorization: str | Non
     if not _authorized(authorization):
         raise HTTPException(status_code=401, detail="invalid worker token")
     try:
-        async with _slots:
-            return await xai_start_session(
-                signup_url=_validate_url(req.url),
-                proxy=_normalize_proxy(req.proxy),
-                timezone=req.timezone.strip(),
-                locale=req.locale.strip(),
-                profile=_profile_for_worker(req.browser_profile),
-                timeout_s=req.timeout_s,
-            )
+        browser = queue.claim(req.browser_lease) if req.browser_lease else None
+        return await xai_start_session(
+            signup_url=_validate_url(req.url),
+            proxy=_normalize_proxy(req.proxy),
+            timezone=req.timezone.strip(),
+            locale=req.locale.strip(),
+            profile=_profile_for_worker(req.browser_profile),
+            timeout_s=req.timeout_s, browser=browser,
+        )
+    except BrowserQueueError as exc:
+        raise HTTPException(status_code=409, detail={"stage":"waiting_browser", "error":str(exc)})
     except XaiBrowserFlowError as exc:
         raise _native_error(exc)
     except asyncio.TimeoutError:
@@ -378,7 +407,7 @@ async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict])
     if success_url:
         urls.append(success_url)
     urls.extend(["https://accounts.x.ai/", "https://grok.com/"])
-    async with await cloakbrowser.launch_async(**browser_kwargs("TURNSTILE", proxy or None)) as browser:
+    async with await launch_browser(cloakbrowser.launch_async, **browser_kwargs("TURNSTILE", proxy or None)) as browser:
         context = await browser.new_context(**browser_context_kwargs())
         page = await context.new_page()
         try:
@@ -404,13 +433,12 @@ async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict])
             ua = await page.evaluate("() => navigator.userAgent")
             return "", _cookies_for_cfm(current), str(ua or "")
         finally:
-            await page.close()
-            await context.close()
+            await browser.close()
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "grok-browser", "capacity": _slots._value}
+    return {"status": "ok", "service": "grok-browser", "capacity": queue.available}
 
 
 @app.post("/v1/sso/materialize")
@@ -418,12 +446,11 @@ async def materialize_sso(req: MaterializeRequest, authorization: str | None = H
     if not _authorized(authorization):
         raise HTTPException(status_code=401, detail="invalid worker token")
     session_id = str(uuid.uuid4())
-    async with _slots:
-        try:
-            token, cookies, user_agent = await _materialize_in_browser(req.wrapper.strip(), _normalize_proxy(req.proxy), req.cookies)
-        except Exception:
-            log.warning("sso materialize failed session=%s", session_id)
-            raise HTTPException(status_code=502, detail="browser sso materialize failed")
+    try:
+        token, cookies, user_agent = await _materialize_in_browser(req.wrapper.strip(), _normalize_proxy(req.proxy), req.cookies)
+    except Exception:
+        log.warning("sso materialize failed session=%s", session_id)
+        raise HTTPException(status_code=502, detail="browser sso materialize failed")
     if not token:
         raise HTTPException(status_code=502, detail="browser worker did not receive a session cookie")
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=300)
@@ -437,39 +464,32 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
     page_url = _validate_url(req.url)
     session_id = str(uuid.uuid4())
     log.info("turnstile start session=%s host=%s", session_id, urlparse(page_url).hostname)
-    async with _slots:
-        live_session = None
-        try:
-            # xAI validates the Turnstile token against the live signup page.
-            # There is deliberately no route fixture or synthetic fallback:
-            # returning a token that was not minted by the real widget only
-            # creates a later, opaque anti-abuse failure.
-            browser, page, result = await solve_turnstile_realpage_session(
-                url=page_url,
-                sitekey=req.sitekey,
-                timeout_s=req.timeout_s,
-                proxy=_normalize_proxy(req.proxy) or None,
-                timezone=req.timezone.strip() or None,
-                locale=req.locale.strip() or None,
-                profile=_profile_for_worker(req.browser_profile),
-            )
-            live_session = {"browser": browser, "context": page.context, "page": page,
-                            "expires_at": asyncio.get_running_loop().time() + max(900, req.timeout_s)}
-        except asyncio.TimeoutError:
-            raise HTTPException(status_code=504, detail="browser turnstile timeout")
-        except Exception as exc:
-            log.warning("turnstile failed session=%s error=%s", session_id, type(exc).__name__)
-            raise HTTPException(status_code=502, detail="browser turnstile failed")
+    live_session = None
+    try:
+        # xAI validates the Turnstile token against the live signup page.
+        # There is deliberately no route fixture or synthetic fallback:
+        # returning a token that was not minted by the real widget only
+        # creates a later, opaque anti-abuse failure.
+        browser, page, result = await solve_turnstile_realpage_session(
+            url=page_url,
+            sitekey=req.sitekey,
+            timeout_s=req.timeout_s,
+            proxy=_normalize_proxy(req.proxy) or None,
+            timezone=req.timezone.strip() or None,
+            locale=req.locale.strip() or None,
+            profile=_profile_for_worker(req.browser_profile),
+        )
+        live_session = {"browser": browser, "context": page.context, "page": page,
+                        "expires_at": asyncio.get_running_loop().time() + max(900, req.timeout_s)}
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="browser turnstile timeout")
+    except Exception as exc:
+        log.warning("turnstile failed session=%s error=%s", session_id, type(exc).__name__)
+        raise HTTPException(status_code=502, detail="browser turnstile failed")
     token = str(result.get("token") or "").strip()
     if not token:
         if live_session is not None:
-            try:
-                await live_session["page"].close()
-            finally:
-                try:
-                    await live_session["context"].close()
-                finally:
-                    await live_session["browser"].close()
+            await live_session["browser"].close()
         raise HTTPException(status_code=502, detail="browser worker did not receive a token")
     if live_session is not None:
         async with _sessions_lock:
@@ -485,3 +505,48 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
         "user_agent": user_agent,
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
     }
+
+
+class BrowserReservationRequest(BaseModel):
+    id: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    proxy: str = Field(default="", max_length=2048)
+    timezone: str = Field(default="", max_length=128)
+    locale: str = Field(default="", max_length=64)
+    browser_profile: dict[str, Any] = Field(default_factory=dict)
+    daily_direct: bool = False
+
+
+@app.post("/v1/browser/reservations")
+async def reserve_browser(req: BrowserReservationRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    options = browser_kwargs("TURNSTILE", _normalize_proxy(req.proxy) or None,
+        timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
+    if req.daily_direct and not _normalize_proxy(req.proxy):
+        options.pop("proxy", None)
+    try:
+        return queue.enqueue(req.id, options, cloakbrowser.launch_async)
+    except BrowserQueueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+@app.get("/v1/browser/reservations/{key}")
+async def browser_reservation_status(key: str, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        return queue.status(key)
+    except BrowserQueueError:
+        raise HTTPException(status_code=404, detail="browser_reservation_expired")
+
+
+@app.delete("/v1/browser/reservations/{key}")
+async def release_browser_reservation(key: str, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        await queue.close(key)
+    except BrowserQueueError:
+        # Accepted cleanup; the slot remains occupied until closure completes.
+        return {"status": "closing"}
+    return {"status": "released"}

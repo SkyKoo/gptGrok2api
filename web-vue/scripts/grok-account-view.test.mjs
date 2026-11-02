@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { formatGrokAccountDate, grokAccountDetailItems, grokLastUsedText, grokOAuthRemainingQuotaText, grokSuccessRate, grokUsageText } from '../src/views/accounts/grokAccountView.ts'
+import { formatGrokAccountDate, grokAccountDetailItems, grokLastUsedText, grokOAuthAuthorizationText, grokOAuthRemainingQuotaText, grokOAuthShortStatusText, grokOAuthQuotaResetText, grokSuccessRate, grokUsageText } from '../src/views/accounts/grokAccountView.ts'
 
 test('missing usage stays unknown while a recorded zero remains zero', () => {
  const account={sync_state:'synced'}
@@ -23,4 +23,17 @@ test('unknown OAuth quota and unset timestamps do not appear exhausted or as 197
  assert.equal(grokOAuthRemainingQuotaText({oauth:{quota:{remaining_percent:0}}}),'0%')
  for(const value of [undefined,null,0,'0','invalid']) assert.equal(formatGrokAccountDate(value),'-')
  assert.equal(formatGrokAccountDate(1793577600),formatGrokAccountDate(1793577600000))
+})
+
+test('OAuth authorization is separate from its quota and model-test status',()=>{
+ const oauth={status:'active',has_access_token:true,has_refresh_token:true}
+ assert.equal(grokOAuthShortStatusText({oauth}),'已授权')
+ const quota={status:'success',monthly_limit:0,monthly_zero:true,no_quota:true,period:{end:'2026-12-01T00:00:00Z'}}
+ assert.equal(grokOAuthShortStatusText({oauth:{...oauth,quota}}),'已授权')
+ assert.equal(grokOAuthRemainingQuotaText({oauth:{...oauth,quota}}),'月度额度 0 · 可用总量未知')
+ assert.equal(grokOAuthAuthorizationText({oauth:{...oauth,quota}}),'已授权')
+ assert.equal(grokOAuthAuthorizationText({oauth:{...oauth,status:'disabled'}}),'已禁用')
+ assert.equal(grokOAuthQuotaResetText({oauth:{...oauth,quota}}),formatGrokAccountDate(quota.period.end))
+ assert.equal(grokOAuthRemainingQuotaText({oauth:{...oauth,quota:{status:'error'}}}),'查询失败')
+ assert.equal(grokOAuthRemainingQuotaText({oauth:{...oauth,quota:{status:'unavailable'}}}),'上游未提供')
 })

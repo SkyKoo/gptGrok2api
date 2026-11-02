@@ -112,8 +112,8 @@ const grokExportItems = [
 ]
 type RuntimeLogView = 'register' | 'oauth' | 'checkout'
 const activeLog = ref<RuntimeLogView>('register')
-const showCheckoutLogTab = computed(() => props.target === 'openai' || props.checkoutLogLines.length > 0)
-const showOauthLogTab = computed(() => props.target === 'grok' || props.grokOauthLogLines.length > 0)
+const showCheckoutLogTab = computed(() => props.target === 'openai')
+const showOauthLogTab = computed(() => props.target === 'grok')
 const showLogTabs = computed(() => showCheckoutLogTab.value || showOauthLogTab.value)
 const logTabs = computed(() => [
   { value: 'register', label: '注册日志' },

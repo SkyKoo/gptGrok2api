@@ -197,7 +197,7 @@ func (s *Server) retryGrokRegistration(w http.ResponseWriter, r *http.Request) {
 		registrationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
+	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshotForTarget("grok")})
 }
 
 func (s *Server) retryGrokRegistrationTask(w http.ResponseWriter, r *http.Request) {
@@ -221,5 +221,5 @@ func (s *Server) retryGrokRegistrationTask(w http.ResponseWriter, r *http.Reques
 		registrationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
+	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshotForTarget("grok")})
 }

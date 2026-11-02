@@ -1,12 +1,16 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,6 +157,79 @@ func TestResolveImagineUsesOriginalAndNeverFallsBackToPreview(t *testing.T) {
 			saved, err := os.ReadFile(filepath.Join(dir, files[0].Name()))
 			if err != nil || string(saved) != string(raw) || !strings.HasSuffix(files[0].Name(), ".png") {
 				t.Fatal("original was re-encoded or MIME trusted")
+			}
+		})
+	}
+}
+
+func TestResolvePublicImagineOriginalWithoutCredentialsOrRedirects(t *testing.T) {
+	raw := imagineTestPNG(t)
+	for _, kind := range []string{"valid", "redirect", "denied", "network", "untrusted"} {
+		t.Run(kind, func(t *testing.T) {
+			calls := 0
+			originalURL := "https://imagine-public.x.ai/imagine-public/images/final.jpg?signature=private-signature"
+			jar, _ := cookiejar.New(nil)
+			u, _ := url.Parse(originalURL)
+			jar.SetCookies(u, []*http.Cookie{{Name: "sso", Value: "jar-token"}})
+			client := &http.Client{Jar: jar, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.String() != originalURL {
+					t.Error("followed redirect or changed original URL")
+				}
+				if r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
+					t.Error("credentials sent to public asset host")
+				}
+				status := 200
+				body := raw
+				header := http.Header{"Content-Type": []string{"image/jpeg"}}
+				switch kind {
+				case "redirect":
+					status = 302
+					header.Set("Location", "https://assets.grok.com/leak?signature=private-signature")
+				case "denied":
+					status = 403
+					body = []byte("access denied private-signature")
+				case "network":
+					return nil, fmt.Errorf("signed URL failed: %s", originalURL)
+				}
+				return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(bytes.NewReader(body)), Request: r}, nil
+			})}
+			media := NewMedia(client, "", "", "", "", time.Second)
+			if kind == "untrusted" {
+				originalURL = "https://untrusted.example/final.jpg"
+			}
+			got, err := media.ResolveImage(context.Background(), accounts.Account{Token: "private-token", Fields: map[string]any{"cookie_header": "sso=private-cookie"}}, ImageResult{URL: originalURL, Base64: base64.StdEncoding.EncodeToString(raw), ImagineFinal: true}, "b64_json", "", "")
+			expectedCalls := 1
+			if kind == "untrusted" {
+				expectedCalls = 0
+			}
+			if calls != expectedCalls {
+				t.Fatalf("requests=%d", calls)
+			}
+			if kind == "valid" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				decoded, _ := base64.StdEncoding.DecodeString(got["b64_json"])
+				if !bytes.Equal(decoded, raw) || got["mime"] != "image/png" {
+					t.Fatal("original changed or wrong MIME")
+				}
+			} else {
+				if err == nil || got != nil {
+					t.Fatal("failed original fell back to preview")
+				}
+				if strings.Contains(err.Error(), "private-signature") || strings.Contains(err.Error(), "https://") {
+					t.Fatal("signed URL or body leaked")
+				}
+				if kind != "untrusted" {
+					var up *protocol.UpstreamError
+					if !errors.As(err, &up) || up.Status != 502 {
+						t.Fatalf("storage error affects account status: %v", err)
+					}
+				}
+			}
+			if client.Jar != jar || client.CheckRedirect != nil {
+				t.Fatal("shared client mutated")
 			}
 		})
 	}

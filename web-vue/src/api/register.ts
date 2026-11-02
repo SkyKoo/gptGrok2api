@@ -213,6 +213,7 @@ export type CheckoutTask = {
 }
 
 export type RegistrationTaskSettings = {
+  mail_source_id?: string
   proxy: string
   resin_proxy_url: string
   total: number
@@ -224,6 +225,9 @@ export type RegistrationTaskSettings = {
 }
 
 export type LegacyRegisterConfig = {
+  runtime_error?: string
+  mail_source_id?: string
+  target_runtime?: Partial<Record<RegisterTarget, Pick<LegacyRegisterConfig, "enabled" | "stats" | "logs" | "jobs" | "jobs_total" | "jobs_page" | "jobs_page_size" | "runtime_error" | "compensation_error" | "registration_schedule">>>
   target_settings?: Partial<Record<RegisterTarget, RegistrationTaskSettings>>
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
@@ -375,20 +379,20 @@ export const registerApi = {
   getCodexOAuthProgress(sessionId: string) {
     return apiClient.get<never, { session_id?: string; registration_job_id?: string; stage?: string; status?: string; message?: string; error?: string }>(`/api/accounts/codex/oauth/progress/${encodeURIComponent(sessionId)}`)
   },
-  updateSchedule(payload: { enabled: boolean; interval_minutes: number }) {
-    return apiClient.post<any, { schedule: RegistrationSchedule }>('/api/register/schedule', payload)
+  updateSchedule(payload: { enabled: boolean; interval_minutes: number }, target?: RegisterTarget) {
+    return apiClient.post<any, { schedule: RegistrationSchedule }>('/api/register/schedule', payload, { params: { target } })
   },
-  getConfig() {
-    return apiClient.get<any, { register: LegacyRegisterConfig }>('/api/register')
+  getConfig(target?: RegisterTarget) {
+    return apiClient.get<any, { register: LegacyRegisterConfig }>('/api/register', { params: { target } })
   },
-  updateConfig(payload: Partial<LegacyRegisterConfig>) {
-    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register', payload)
+  updateConfig(payload: Partial<LegacyRegisterConfig>, target?: RegisterTarget) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register', payload, { params: { target } })
   },
-  startLegacy() {
-    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/start')
+  startLegacy(target?: RegisterTarget) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/start', undefined, { params: { target } })
   },
-  stopLegacy() {
-    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/stop')
+  stopLegacy(target?: RegisterTarget) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/stop', undefined, { params: { target } })
   },
   stopCheckoutRetries() {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/checkout-retries/stop')
@@ -396,8 +400,8 @@ export const registerApi = {
   clearCheckoutHistory() {
     return apiClient.post<any, { register: LegacyRegisterConfig; removed: number }>('/api/register/checkout-history/clear')
   },
-  resetLegacy() {
-    return apiClient.post<any, { register: LegacyRegisterConfig; removed?: number }>('/api/register/reset')
+  resetLegacy(target?: RegisterTarget) {
+    return apiClient.post<any, { register: LegacyRegisterConfig; removed?: number }>('/api/register/reset', undefined, { params: { target } })
   },
   resetOutlookPool(scope: 'all' | 'retryable' | 'invalid' | 'unused' | 'failed' = 'all') {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/outlook-pool/reset', { scope })

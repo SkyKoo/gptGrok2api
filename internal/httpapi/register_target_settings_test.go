@@ -58,7 +58,11 @@ func TestRegistrationTargetSettingsAPIAndScheduledBatch(t *testing.T) {
 		if response.Code != 200 {
 			t.Fatal(response.Body.String())
 		}
-		s.runRegistrationSchedule(scheduleDue(t, s))
+		due, err := time.Parse(time.RFC3339Nano, s.registrationScheduleSnapshot(target).NextRunAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.runRegistrationSchedule(due)
 		deadline := time.Now().Add(3 * time.Second)
 		for s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true {
 			if time.Now().After(deadline) {

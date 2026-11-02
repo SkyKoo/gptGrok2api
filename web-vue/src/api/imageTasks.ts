@@ -186,11 +186,6 @@ export const GROK_IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
   createSizePreset('1792x1024', '3:2', '1K'),
   createSizePreset('720x1280', '9:16', '1K'),
   createSizePreset('1280x720', '16:9', '1K'),
-  createSizePreset('2048x2048', '1:1', '2K'),
-  createSizePreset('2048x3072', '2:3', '2K'),
-  createSizePreset('3072x2048', '3:2', '2K'),
-  createSizePreset('1440x2560', '9:16', '2K'),
-  createSizePreset('2560x1440', '16:9', '2K'),
 ]
 
 const AUTO_IMAGE_SIZE_PRESET: ImageSizePreset[] = [

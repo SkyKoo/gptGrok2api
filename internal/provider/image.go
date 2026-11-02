@@ -108,7 +108,7 @@ func (m *Media) ResolveImage(ctx context.Context, account accounts.Account, imag
 	if raw == nil {
 		var err error
 		if image.ImagineFinal {
-			raw, mime, err = m.fetch(ctx, account, image.URL, 64<<20)
+			raw, mime, err = m.fetchImagineOriginal(ctx, account, image.URL)
 		} else {
 			raw, mime, err = m.Fetch(ctx, account, image.URL)
 		}

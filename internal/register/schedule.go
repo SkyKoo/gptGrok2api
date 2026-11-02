@@ -11,6 +11,7 @@ import (
 // RegistrationSchedule contains only timing state. Batch options are always
 // loaded from the current registration configuration when a timer fires.
 type RegistrationSchedule struct {
+	Target          string `json:"target,omitempty"`
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"interval_minutes"`
 	NextRunAt       string `json:"next_run_at"`
@@ -39,7 +40,7 @@ func NewSchedule(path string) *Schedule {
 		return s
 	}
 	var state RegistrationSchedule
-	if json.Unmarshal(raw, &state) != nil || state.IntervalMinutes < 1 || state.IntervalMinutes > 10080 {
+	if json.Unmarshal(raw, &state) != nil || state.IntervalMinutes < 1 || state.IntervalMinutes > 10080 || (state.Target != "" && state.Target != "openai" && state.Target != "grok") {
 		s.loadError = fail("storage", "schedule_state_invalid")
 		return s
 	}
@@ -51,6 +52,25 @@ func NewSchedule(path string) *Schedule {
 	}
 	s.state = state
 	return s
+}
+
+// BindTarget fixes the schedule to its owning channel. Legacy files without a
+// target retain the channel selected before migration, even after later tab changes.
+func (s *Schedule) BindTarget(target string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loadError != nil {
+		return s.loadError
+	}
+	if s.state.Target != "" {
+		return nil
+	}
+	if target != "openai" && target != "grok" {
+		return fail("config", "invalid_registration_target")
+	}
+	next := s.state
+	next.Target = target
+	return s.save(next)
 }
 
 func (s *Schedule) Snapshot() RegistrationSchedule {

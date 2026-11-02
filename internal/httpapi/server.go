@@ -41,6 +41,7 @@ type Server struct {
 	proxyBindingMu     sync.Mutex
 	authStartMu        sync.Mutex
 	cpaSyncing         sync.Map
+	grokOAuthActions   sync.Map
 	twofaMu            sync.Mutex
 	twofaTasks         map[string]*accountTwoFATask
 	cfg                config.Config
@@ -106,12 +107,13 @@ type Server struct {
 	probeWake          chan struct{}
 	proxyProbeURL      string
 
-	registrationSchedule *registerruntime.Schedule
-	registrationStop     chan struct{}
-	registrationClosing  bool
-	codexMu              sync.RWMutex
-	codexProgress        map[string]*codexOAuthProgress
-	codexEmailMu         sync.Mutex
+	registrationSchedule      *registerruntime.Schedule
+	registrationExtraSchedule *registerruntime.Schedule
+	registrationStop          chan struct{}
+	registrationClosing       bool
+	codexMu                   sync.RWMutex
+	codexProgress             map[string]*codexOAuthProgress
+	codexEmailMu              sync.Mutex
 }
 
 func New(cfg config.Config) *Server {

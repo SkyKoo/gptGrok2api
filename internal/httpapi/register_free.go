@@ -46,6 +46,18 @@ func (s *Server) initFreeRegistration() {
 		journalDir = filepath.Dir(s.cfg.RegisterPath)
 	}
 	s.registrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "openai_registration_schedule.json"))
+	// Preserve the old timer's owner once; UI selection no longer routes timers.
+	legacyTarget := stringValue(s.registerStore.Get()["target"])
+	if legacyTarget != "grok" {
+		legacyTarget = "openai"
+	}
+	_ = s.registrationSchedule.BindTarget(legacyTarget)
+	extraTarget := "grok"
+	if s.registrationSchedule.Snapshot().Target == "grok" {
+		extraTarget = "openai"
+	}
+	s.registrationExtraSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "registration_extra_schedule.json"))
+	_ = s.registrationExtraSchedule.BindTarget(extraTarget)
 	s.registrationStop = make(chan struct{})
 	s.freeRegister = registerruntime.NewFreeEngine(filepath.Join(journalDir, "openai_registration_tasks.json"), factory, s.importRegisteredAccount, s.verifyRegisteredAccount)
 	s.freeRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
@@ -106,8 +118,21 @@ func (s *Server) verifyRegisteredAccount(ctx context.Context, id string, account
 	return err
 }
 func (s *Server) registrationSnapshot() map[string]any {
-	value := s.registerStore.Get()
-	value["registration_schedule"] = s.registrationSchedule.Snapshot()
+	return s.registrationSnapshotForTarget(stringValue(s.registerStore.Get()["target"]))
+}
+
+func (s *Server) registrationSnapshotForTarget(target string) map[string]any {
+	value := s.registerStore.ConfigForTarget(target)
+	states := map[string]any{}
+	for name, state := range map[string]map[string]any{"openai": s.freeRegister.Snapshot(), "grok": s.grokRegister.Snapshot()} {
+		runtime := map[string]any{"enabled": state["running"], "runtime_error": state["error"], "registration_schedule": s.registrationScheduleSnapshot(name)}
+		for _, key := range []string{"stats", "logs", "jobs", "compensation_error", "jobs_total", "jobs_page", "jobs_page_size"} {
+			runtime[key] = state[key]
+		}
+		states[name] = runtime
+	}
+	value["target_runtime"] = states
+	value["registration_schedule"] = s.registrationScheduleSnapshot(target)
 	providers, _ := mapValue(value["mail"])["providers"].([]any)
 	for _, raw := range providers {
 		p := mapValue(raw)
@@ -116,22 +141,8 @@ func (s *Server) registrationSnapshot() map[string]any {
 			delete(p, "admin_password")
 		}
 	}
-	if stringValue(value["target"]) == "openai" {
-		state := s.freeRegister.Snapshot()
-		value["enabled"], value["stats"], value["logs"], value["jobs"] = state["running"], state["stats"], state["logs"], state["jobs"]
-		value["runtime_error"] = state["error"]
-		value["compensation_error"] = state["compensation_error"]
-		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
-			value[key] = state[key]
-		}
-	} else if strings.EqualFold(stringValue(value["target"]), "grok") {
-		state := s.grokRegister.Snapshot()
-		value["enabled"], value["stats"], value["logs"], value["jobs"] = state["running"], state["stats"], state["logs"], state["jobs"]
-		value["runtime_error"] = state["error"]
-		value["compensation_error"] = state["compensation_error"]
-		for _, key := range []string{"jobs_total", "jobs_page", "jobs_page_size"} {
-			value[key] = state[key]
-		}
+	for key, item := range mapValue(states[target]) {
+		value[key] = item
 	}
 	return value
 }
@@ -190,7 +201,7 @@ func (s *Server) retryFreeRegistration(w http.ResponseWriter, r *http.Request) {
 		registrationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
+	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshotForTarget("openai")})
 }
 
 func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +225,7 @@ func (s *Server) retryFreeRegistrationTask(w http.ResponseWriter, r *http.Reques
 		registrationError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshot()})
+	writeJSON(w, http.StatusAccepted, map[string]any{"register": s.registrationSnapshotForTarget("openai")})
 }
 
 // ShutdownRegistration cancels background registration before the process exits.

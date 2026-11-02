@@ -1,0 +1,85 @@
+"""Exercise the real Worker HTTP routes using an in-memory browser only."""
+import asyncio
+import importlib.util
+import sys
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+HTTP_TESTS = bool(importlib.util.find_spec('fastapi') and importlib.util.find_spec('httpx'))
+if HTTP_TESTS:
+    import httpx
+    sys.modules.setdefault('cloakbrowser', SimpleNamespace(launch_async=AsyncMock()))
+    import server
+    import browser_sessions
+
+
+@unittest.skipUnless(HTTP_TESTS, 'requires fastapi and httpx (no real browser)')
+class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.queue = browser_sessions.BrowserQueue(close_timeout=.05)
+        self.launch = AsyncMock(side_effect=lambda **_: SimpleNamespace(close=AsyncMock()))
+        self.patches = [patch.object(server,'queue',self.queue), patch.object(browser_sessions,'queue',self.queue),
+                        patch.object(server,'_auth_token','worker-secret'), patch.object(server.cloakbrowser,'launch_async',self.launch,create=True)]
+        for p in self.patches:p.start()
+        self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url='http://worker',headers={'Authorization':'Bearer worker-secret'})
+
+    async def asyncTearDown(self):
+        await self.client.aclose()
+        await self.queue.shutdown()
+        for p in reversed(self.patches):p.stop()
+
+    async def ready(self,key):
+        async with asyncio.timeout(2):
+            while (await self.client.get('/v1/browser/reservations/'+key)).json()['status']!='ready':
+                await asyncio.sleep(.01)
+
+    async def test_signup_and_oauth_share_one_prepared_browser_queue(self):
+        registration='a'*48;oauth='b'*48;active={}
+        async def signup(**kwargs):
+            active['signup']=kwargs['browser']
+            return {'ok':True,'session_id':'native-test-session'}
+        async def close(_):await active['signup'].close()
+        async def consent(**kwargs):
+            await kwargs['browser'].close()
+            return {'status':'approved','code':''}
+        with patch.object(server,'xai_start_session',signup),patch.object(server,'close_xai_session',close),patch.object(server,'authorize_device',consent):
+            denied=await self.client.post('/v1/browser/reservations',headers={'Authorization':'bad'},json={'id':registration})
+            self.assertEqual(denied.status_code,401)
+            response=await self.client.post('/v1/browser/reservations',json={'id':registration,'proxy':'http://private:secret@example.test:8080'})
+            self.assertNotIn('secret',response.text)
+            await self.ready(registration)
+            started=await self.client.post('/v1/session/start',json={'browser_lease':registration,'url':'https://accounts.x.ai/sign-up'})
+            self.assertEqual(started.status_code,200)
+            duplicate=await self.client.post('/v1/session/start',json={'browser_lease':registration,'url':'https://accounts.x.ai/sign-up'})
+            self.assertEqual(duplicate.status_code,409)
+            await self.client.post('/v1/browser/reservations',json={'id':oauth,'daily_direct':True})
+            await asyncio.sleep(.25)
+            status=(await self.client.get('/v1/browser/reservations/'+oauth)).json()
+            self.assertEqual(status['status'],'waiting_browser')
+            self.assertEqual(status['message'],'等待浏览器会话释放')
+            self.assertEqual(self.launch.await_count,1)
+            await self.client.post('/v1/session/close',json={'session_id':'native-test-session'})
+            await self.ready(oauth)
+            response=await self.client.post('/v1/oauth/authorize-device',json={'browser_lease':oauth,'verification_uri_complete':'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH','user_code':'ABCD-EFGH','sso':'sensitive','expected_email':'selected@example.test'})
+            self.assertEqual(response.json()['status'],'approved')
+            self.assertEqual(self.launch.await_count,2)
+            self.assertNotIn('proxy',self.launch.call_args.kwargs)
+            self.assertEqual((await self.client.get('/health')).json()['capacity'],1)
+
+    async def test_cancel_during_launch_reports_closing_and_waits_for_real_close(self):
+        gate=asyncio.Event();browser=SimpleNamespace(close=AsyncMock())
+        async def delayed(**_):await gate.wait();return browser
+        self.launch.side_effect=delayed
+        key='c'*48
+        await self.client.post('/v1/browser/reservations',json={'id':key})
+        await asyncio.sleep(.02)
+        result=await self.client.delete('/v1/browser/reservations/'+key)
+        self.assertEqual(result.json()['status'],'closing')
+        self.assertEqual((await self.client.get('/health')).json()['capacity'],0)
+        gate.set()
+        await asyncio.sleep(.25)
+        browser.close.assert_awaited_once()
+        self.assertEqual((await self.client.get('/health')).json()['capacity'],1)
+
+if __name__=='__main__':unittest.main()

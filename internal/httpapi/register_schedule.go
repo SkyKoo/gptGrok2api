@@ -4,13 +4,38 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
+func (s *Server) registrationScheduleForTarget(target string) *registerruntime.Schedule {
+	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule} {
+		if schedule != nil && schedule.Snapshot().Target == target {
+			return schedule
+		}
+	}
+	return nil
+}
+
+func (s *Server) registrationScheduleSnapshot(target string) registerruntime.RegistrationSchedule {
+	if schedule := s.registrationScheduleForTarget(target); schedule != nil {
+		return schedule.Snapshot()
+	}
+	// Failed migration/load must not launch the wrong channel or hide the error.
+	return registerruntime.RegistrationSchedule{Target: target, IntervalMinutes: 60, LastError: "storage: schedule_state_unavailable"}
+}
+
 func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request) {
+	target, ok := s.registrationRequestTarget(w, r)
+	if !ok {
+		return
+	}
+	schedule := s.registrationScheduleForTarget(target)
+	if schedule == nil {
+		writeError(w, 500, "注册定时状态不可用，请检查配置存储", "server_error")
+		return
+	}
 	// registerAPI has already required administrator authentication.
 	if r.Method == http.MethodPost {
 		var body struct {
@@ -31,9 +56,9 @@ func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		if *body.Enabled {
-			config := s.registerStore.Get()
+			config := s.registerStore.ConfigForTarget(target)
 			var err error
-			if strings.EqualFold(stringValue(config["target"]), "grok") {
+			if target == "grok" {
 				_, err = registerruntime.ParseGrokConfig(config)
 			} else {
 				_, err = registerruntime.ParseFreeConfig(config)
@@ -43,7 +68,7 @@ func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
-		if err := s.registrationSchedule.Configure(*body.Enabled, *body.IntervalMinutes, time.Now()); err != nil {
+		if err := schedule.Configure(*body.Enabled, *body.IntervalMinutes, time.Now()); err != nil {
 			registrationError(w, err)
 			return
 		}
@@ -51,7 +76,7 @@ func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request)
 		writeError(w, 405, "method not allowed", "invalid_request_error")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"schedule": s.registrationSchedule.Snapshot()})
+	writeJSON(w, 200, map[string]any{"schedule": schedule.Snapshot()})
 }
 
 func (s *Server) registrationScheduler() {
@@ -74,28 +99,32 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 	if s.registrationClosing {
 		return
 	}
-	_ = s.registrationSchedule.RunDue(now, func() error {
-		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
-			return &registerruntime.Failure{Stage: "task", Code: "maintenance"}
+	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule} {
+		if schedule == nil {
+			continue
 		}
-		config := s.registerStore.Get()
-		var err error
-		if strings.EqualFold(stringValue(config["target"]), "grok") {
-			_, err = s.grokRegister.Start(config)
-		} else {
-			_, err = s.freeRegister.Start(config)
+		target := schedule.Snapshot().Target
+		if target != "openai" && target != "grok" {
+			continue
 		}
-		return err
-	}) // Storage/launch failures are exposed by the persisted schedule snapshot.
+		_ = schedule.RunDue(now, func() error {
+			if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+				return &registerruntime.Failure{Stage: "task", Code: "maintenance"}
+			}
+			config := s.registerStore.ConfigForTarget(target)
+			var err error
+			if target == "grok" {
+				_, err = s.grokRegister.Start(config)
+			} else {
+				_, err = s.freeRegister.Start(config)
+			}
+			return err
+		}) // Each channel durably claims only its own timer slot.
+	}
 	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
 		return
 	}
-	// A scheduled/manual batch owns the same engine slot and takes precedence.
-	// Compensation runs even when the new-account batch timer is disabled.
-	config := s.registerStore.Get()
-	if strings.EqualFold(stringValue(config["target"]), "grok") {
-		_, _ = s.grokRegister.RunCompensation(config, now)
-	} else {
-		_, _ = s.freeRegister.RunCompensation(config, now)
-	}
+	// Existing per-engine compensation rules remain independent of the viewed tab.
+	_, _ = s.freeRegister.RunCompensation(s.registerStore.ConfigForTarget("openai"), now)
+	_, _ = s.grokRegister.RunCompensation(s.registerStore.ConfigForTarget("grok"), now)
 }

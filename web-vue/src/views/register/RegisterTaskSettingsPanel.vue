@@ -1,7 +1,7 @@
 <template>
   <div class="register-task-settings">
     <FormSection title="注册目标" density="roomy">
-      <fieldset class="register-target-segmented" :disabled="config.enabled">
+      <fieldset class="register-target-segmented">
         <SegmentedTabs
           :model-value="config.target"
           :options="targetOptions"
@@ -12,7 +12,7 @@
     </FormSection>
 
     <FormSection :title="`${config.target === 'grok' ? 'Grok' : 'OpenAI'} 任务参数`" density="roomy">
-      <p class="register-proxy-hint">参数按渠道独立自动保存，切换渠道后恢复对应设置。</p>
+      <p class="register-proxy-hint">参数按渠道独立自动保存，运行中也可切换渠道；切换不会停止任务。</p>
       <div class="register-form-grid">
         <label class="register-field">
           <span class="register-label">任务模式</span>

@@ -18,7 +18,8 @@
     "test:account-relogin": "node --experimental-strip-types --test scripts/account-relogin.test.mjs",
     "test:account-edit": "node --experimental-strip-types --test scripts/account-edit.test.mjs",
     "test:account-progress-layout": "node --experimental-strip-types --test scripts/account-progress-layout.test.mjs",
-    "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs"
+    "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs",
+    "test:registration-channel-isolation": "node --experimental-strip-types --test scripts/registration-channel-isolation.test.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",

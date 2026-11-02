@@ -27,10 +27,27 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 		{name: "cancelled", workerStatus: "approved", email: "selected@example.test", want: "failed", cancel: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var starts, confirmations, polls atomic.Int32
+			var starts, confirmations, polls, billing atomic.Int32
 			var s *Server
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/browser/reservations/") {
+					w.Write([]byte(`{"status":"released"}`))
+					return
+				}
 				switch r.URL.Path {
+				case "/v1/browser/reservations":
+					if starts.Load() != 0 || confirmations.Load() != 0 {
+						t.Error("device grant created before browser reservation")
+					}
+					var body map[string]any
+					json.NewDecoder(r.Body).Decode(&body)
+					if body["daily_direct"] != true || body["proxy"] != "" {
+						t.Error("wrong daily route")
+					}
+					w.Write([]byte(`{"status":"ready"}`))
+				case "/billing":
+					billing.Add(1)
+					w.Write([]byte(`{"config":{"monthlyLimit":{"val":0},"used":{"val":0},"onDemandCap":{"val":0},"billingPeriodEnd":"2026-12-01T00:00:00Z"}}`))
 				case "/device":
 					starts.Add(1)
 					_ = json.NewEncoder(w).Encode(map[string]any{"device_code": "DEVICE-SECRET", "user_code": "ABCD-EFGH", "verification_uri_complete": "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH", "interval": 1})
@@ -42,7 +59,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 				case "/v1/oauth/authorize-device":
 					confirmations.Add(1)
 					var body oauth.BrowserDeviceRequest
-					if json.NewDecoder(r.Body).Decode(&body) != nil || body.SSO != "SSO-SECRET" || body.Email != "selected@example.test" || body.Proxy != "" || body.UserCode != "ABCD-EFGH" || r.Header.Get("Authorization") != "Bearer WORKER-SECRET" {
+					if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.BrowserLease) != 48 || body.SSO != "SSO-SECRET" || body.Email != "selected@example.test" || body.Proxy != "" || body.UserCode != "ABCD-EFGH" || r.Header.Get("Authorization") != "Bearer WORKER-SECRET" {
 						t.Error("worker received wrong account, route or authentication")
 					}
 					if tc.cancel {
@@ -59,6 +76,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 			}))
 			defer upstream.Close()
 			cfg := adminTestConfig(t.TempDir())
+			cfg.XAICLIBaseURL = upstream.URL
 			cfg.OAuthDeviceURL = upstream.URL + "/device"
 			cfg.OAuthTokenURL = upstream.URL + "/token"
 			s = New(cfg)
@@ -121,6 +139,9 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+			if tc.want == "authorized" && billing.Load() != 1 {
+				t.Fatalf("authorization did not query billing exactly once: %d", billing.Load())
 			}
 			stored, err := s.oauthStore.List()
 			if err != nil {
@@ -226,5 +247,60 @@ func TestGrokBackgroundConcurrentStartsAndReload(t *testing.T) {
 	response = adminRequest(s.Handler(), "GET", "/api/grok/oauth/protocol/jobs/"+other.ID, nil)
 	if response.Code != 404 {
 		t.Fatal("OAuth endpoint exposed an unrelated job")
+	}
+}
+
+func TestGrokOAuthWaitingCancelsBeforeAnyDeviceGrant(t *testing.T) {
+	var admissions, grants, released atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/browser/reservations":
+			admissions.Add(1)
+			w.Write([]byte(`{"status":"waiting_browser"}`))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/browser/reservations/"):
+			released.Add(1)
+			w.Write([]byte(`{"status":"released"}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/browser/reservations/"):
+			w.Write([]byte(`{"status":"waiting_browser"}`))
+		default:
+			grants.Add(1)
+			t.Errorf("business request while queued: %s", r.URL.Path)
+			http.Error(w, "unexpected", 500)
+		}
+	}))
+	defer upstream.Close()
+	cfg := adminTestConfig(t.TempDir())
+	cfg.OAuthDeviceURL = upstream.URL + "/device"
+	s := New(cfg)
+	s.registerStore.AddAccount(map[string]any{"id": "waiting", "email": "selected@example.test", "sso": "SECRET", "status": "active"})
+	s.registerStore.Update(map[string]any{"grok": map[string]any{"api_base": upstream.URL}})
+	job, _, err := s.startGrokOAuth("waiting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.taskQueue.Start(1)
+	deadline := time.Now().Add(3 * time.Second)
+	waiting := false
+	for time.Now().Before(deadline) {
+		task, _ := s.taskQueue.Get(job.ID)
+		public := grokOAuthPublicJob(task)
+		if public["stage"] == "waiting_browser" && admissions.Load() > 0 {
+			waiting = true
+			if public["message"] != "等待浏览器会话释放" {
+				t.Fatal("missing wait message")
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !waiting || grants.Load() != 0 {
+		t.Fatal("device code created before browser readiness")
+	}
+	s.taskQueue.Cancel(job.ID)
+	for time.Now().Before(deadline) && released.Load() == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if released.Load() != 1 || grants.Load() != 0 || admissions.Load() != 1 {
+		t.Fatalf("cancellation leaked/replayed: releases=%d grants=%d admissions=%d", released.Load(), grants.Load(), admissions.Load())
 	}
 }

@@ -18,13 +18,16 @@ async function imageSizes() {
  const js=ts.transpileModule(source.replace("import apiClient from './client'",'const apiClient = {}'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText
  return import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 }
-test('Grok generation offers 1K and 2K for each ratio but no unsupported 4K',async()=>{
+test('Grok generation keeps Pro 1K ratios and hides unverified 2K/4K choices',async()=>{
  const {resolveImageSizePresets,isImageSizeSupportedByModel}=await imageSizes()
  const presets=resolveImageSizePresets('grok-imagine-image-pro')
  for(const ratio of ['1:1','2:3','3:2','9:16','16:9']){
-  for(const resolution of ['1K','2K']) assert.ok(presets.some(p=>p.ratio===ratio&&p.resolution===resolution),`${ratio} ${resolution}`)
+  assert.ok(presets.some(p=>p.ratio===ratio&&p.resolution==='1K'),`${ratio} 1K`)
  }
- assert.equal(isImageSizeSupportedByModel('2560x1440','grok-imagine-image-pro'),true)
+ assert.equal(isImageSizeSupportedByModel('2560x1440','grok-imagine-image-pro'),false)
+ assert.equal(isImageSizeSupportedByModel('2048x2048','grok-imagine-image-pro'),false)
+ assert.equal(isImageSizeSupportedByModel('auto','grok-imagine-image-pro'),true)
+ assert.equal(isImageSizeSupportedByModel('2048x2048','codex-gpt-image-2'),true)
  assert.equal(isImageSizeSupportedByModel('3840x2160','grok-imagine-image-pro'),false)
  assert.equal(isImageSizeSupportedByModel('2048x2048','grok-imagine-image-edit'),false)
  assert.deepEqual(resolveImageSizePresets('grok-imagine-image-edit').map(p=>p.value),['auto','1024x1024'])

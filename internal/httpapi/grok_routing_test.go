@@ -9,6 +9,7 @@ import (
 	"golang.org/x/net/websocket"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,99 +68,127 @@ func TestGrokImageGenerationUsesProForLegacyAndCanonicalModels(t *testing.T) {
 	}
 }
 
-func TestGrokAsyncImageTaskPreserves2KAndDownloadsOriginals(t *testing.T) {
-	original := sizeTestPNG(t, 3, 2)
-	var generations, downloads atomic.Int32
-	received := make(chan map[string]any, 1)
-	mux := http.NewServeMux()
-	mux.Handle("/listen", websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(ws *websocket.Conn) {
-		defer ws.Close()
-		var reset, request map[string]any
-		if websocket.JSON.Receive(ws, &reset) != nil || websocket.JSON.Receive(ws, &request) != nil {
-			t.Error("missing request")
-			return
-		}
-		generations.Add(1)
-		input := request["item"].(map[string]any)["content"].([]any)[0].(map[string]any)
-		received <- input["properties"].(map[string]any)
-		// Two interleaved results; a large preview must not finish the task.
-		for _, event := range []map[string]any{
-			{"type": "image", "order": 0, "percentage_complete": 40, "url": "/preview.jpg", "blob": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("p"), 300<<10))},
-			{"type": "json", "order": 1, "current_status": "completed", "url": "/b.jpg"},
-			{"type": "json", "order": 0, "current_status": "completed", "url": "/a.jpg"},
-		} {
-			event["request_id"] = input["requestId"]
-			if err := websocket.JSON.Send(ws, event); err != nil {
-				t.Error(err)
-				return
+type grokOriginalTransport func(*http.Request) (*http.Response, error)
+
+func (f grokOriginalTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestGrokAsyncImageTaskDownloadsPrivateAndPublicOriginals(t *testing.T) {
+	for _, tc := range []struct{ name, size, resolution, aspect, assetOrigin string }{
+		{"private_2k", "2560x1440", "2k", "16:9", ""},
+		{"public_1k", "1024x1024", "1k", "1:1", "https://imagine-public.x.ai"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original := sizeTestPNG(t, 3, 2)
+			var generations, downloads atomic.Int32
+			received := make(chan map[string]any, 1)
+			mux := http.NewServeMux()
+			mux.Handle("/listen", websocket.Server{Handshake: func(*websocket.Config, *http.Request) error { return nil }, Handler: func(ws *websocket.Conn) {
+				defer ws.Close()
+				var reset, request map[string]any
+				if websocket.JSON.Receive(ws, &reset) != nil || websocket.JSON.Receive(ws, &request) != nil {
+					t.Error("missing request")
+					return
+				}
+				generations.Add(1)
+				input := request["item"].(map[string]any)["content"].([]any)[0].(map[string]any)
+				received <- input["properties"].(map[string]any)
+				// Two interleaved results; a large preview must not finish the task.
+				for _, event := range []map[string]any{
+					{"type": "image", "order": 0, "percentage_complete": 40, "url": "/preview.jpg", "blob": base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("p"), 300<<10))},
+					{"type": "json", "order": 1, "current_status": "completed", "url": tc.assetOrigin + "/b.jpg"},
+					{"type": "json", "order": 0, "current_status": "completed", "url": tc.assetOrigin + "/a.jpg"},
+				} {
+					event["request_id"] = input["requestId"]
+					if err := websocket.JSON.Send(ws, event); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/a.jpg" && r.URL.Path != "/b.jpg" {
+					t.Errorf("preview or unexpected asset requested: %s", r.URL.Path)
+					http.NotFound(w, r)
+					return
+				}
+				if tc.assetOrigin != "" && (r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "") {
+					t.Error("public download sent credentials")
+				}
+				downloads.Add(1)
+				w.Header().Set("Content-Type", "image/png")
+				w.Write(original)
+			})
+			upstream := httptest.NewServer(mux)
+			defer upstream.Close()
+			s := imageTaskTestServer(t)
+			s.cfg.ImagineWSURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/listen"
+			client := upstream.Client()
+			if tc.assetOrigin != "" {
+				target, _ := url.Parse(upstream.URL)
+				transport := client.Transport
+				client.Transport = grokOriginalTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Hostname() != "imagine-public.x.ai" {
+						t.Error("unexpected original host")
+					}
+					request := r.Clone(r.Context())
+					request.URL.Scheme = target.Scheme
+					request.URL.Host = target.Host
+					return transport.RoundTrip(request)
+				})
 			}
-		}
-	}})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/a.jpg" && r.URL.Path != "/b.jpg" {
-			t.Errorf("preview or unexpected asset requested: %s", r.URL.Path)
-			http.NotFound(w, r)
-			return
-		}
-		downloads.Add(1)
-		w.Header().Set("Content-Type", "image/png")
-		w.Write(original)
-	})
-	upstream := httptest.NewServer(mux)
-	defer upstream.Close()
-	s := imageTaskTestServer(t)
-	s.cfg.ImagineWSURL = "ws" + strings.TrimPrefix(upstream.URL, "http") + "/listen"
-	s.mediaProvider = provider.NewMedia(upstream.Client(), upstream.URL, upstream.URL, upstream.URL, upstream.URL, 3*time.Second)
-	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"access_token": "test-token", "media_quota": testGrokMediaSnapshot()}})
-	body := `{"client_task_id":"grok-2k-original","model":"grok-imagine-image-pro","prompt":"a red cat","n":2,"size":"2560x1440"}`
-	response := imageTaskCall(s, "POST", "/api/image-tasks/generations", "api-secret", body)
-	if response.Code != 202 {
-		t.Fatalf("submit: %d %s", response.Code, response.Body.String())
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		response = imageTaskCall(s, "GET", "/api/image-tasks/grok-2k-original", "api-secret", "")
-		var task imageTaskState
-		if err := json.Unmarshal(response.Body.Bytes(), &task); err != nil {
-			t.Fatal(err)
-		}
-		if task.Status == "error" {
-			t.Fatal(task.Error)
-		}
-		if task.Status == "success" {
-			if len(task.Data) != 2 || task.Size != "2560x1440" {
-				t.Fatalf("lost size or results: %s", response.Body.String())
+			s.mediaProvider = provider.NewMedia(client, upstream.URL, upstream.URL, upstream.URL, upstream.URL, 3*time.Second)
+			_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"access_token": "test-token", "media_quota": testGrokMediaSnapshot()}})
+			body := fmt.Sprintf(`{"client_task_id":"grok-2k-original","model":"grok-imagine-image-pro","prompt":"a red cat","n":2,"size":%q}`, tc.size)
+			response := imageTaskCall(s, "POST", "/api/image-tasks/generations", "api-secret", body)
+			if response.Code != 202 {
+				t.Fatalf("submit: %d %s", response.Code, response.Body.String())
 			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("async task did not finish")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	properties := <-received
-	if properties["resolution_name"] != "2k" || properties["aspect_ratio"] != "16:9" || properties["num_generations"] != float64(2) {
-		t.Fatalf("async parameters lost: %+v", properties)
-	}
-	if generations.Load() != 1 || downloads.Load() != 2 {
-		t.Fatalf("generations=%d downloads=%d", generations.Load(), downloads.Load())
-	}
-	files, err := os.ReadDir(s.cfg.ImageDataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	originals := 0
-	for _, file := range files {
-		if !strings.HasSuffix(file.Name(), ".png") {
-			continue
-		}
-		originals++
-		raw, err := os.ReadFile(filepath.Join(s.cfg.ImageDataDir, file.Name()))
-		if err != nil || !bytes.Equal(raw, original) {
-			t.Fatal("original bytes changed")
-		}
-	}
-	if originals != 2 {
-		t.Fatalf("expected two original PNG files, got %d", originals)
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				response = imageTaskCall(s, "GET", "/api/image-tasks/grok-2k-original", "api-secret", "")
+				var task imageTaskState
+				if err := json.Unmarshal(response.Body.Bytes(), &task); err != nil {
+					t.Fatal(err)
+				}
+				if task.Status == "error" {
+					t.Fatal(task.Error)
+				}
+				if task.Status == "success" {
+					if len(task.Data) != 2 || task.Size != tc.size {
+						t.Fatalf("lost size or results: %s", response.Body.String())
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("async task did not finish")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			properties := <-received
+			if properties["resolution_name"] != tc.resolution || properties["aspect_ratio"] != tc.aspect || properties["num_generations"] != float64(2) {
+				t.Fatalf("async parameters lost: %+v", properties)
+			}
+			if generations.Load() != 1 || downloads.Load() != 2 {
+				t.Fatalf("generations=%d downloads=%d", generations.Load(), downloads.Load())
+			}
+			files, err := os.ReadDir(s.cfg.ImageDataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			originals := 0
+			for _, file := range files {
+				if !strings.HasSuffix(file.Name(), ".png") {
+					continue
+				}
+				originals++
+				raw, err := os.ReadFile(filepath.Join(s.cfg.ImageDataDir, file.Name()))
+				if err != nil || !bytes.Equal(raw, original) {
+					t.Fatal("original bytes changed")
+				}
+			}
+			if originals != 2 {
+				t.Fatalf("expected two original PNG files, got %d", originals)
+			}
+		})
 	}
 }

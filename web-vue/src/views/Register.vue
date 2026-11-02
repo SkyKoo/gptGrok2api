@@ -87,7 +87,7 @@
             @export-grok="exportGrokAccounts"
           >
             <template #schedule>
-              <RegisterSchedulePanel v-if="registerConfig.target === 'openai'" :schedule="registerConfig.registration_schedule"
+              <RegisterSchedulePanel :key="registerTarget" :target="registerTarget" :schedule="registerConfig.registration_schedule"
                 :prepare="registerConfigRuntime.flushAutosave" :config-saving="legacySaving" @saved="applyRegistrationSchedule" />
             </template>
             <FormSection v-if="taskRecordTabs.length" title="任务记录" density="roomy" class="register-task-records">
@@ -131,7 +131,7 @@
               </div>
 
               <div v-if="registerConfig.target === 'openai' || registerConfig.target === 'grok'" v-show="activeTaskRecord === 'register'" role="region" aria-label="注册任务记录">
-                <RegisterFreeJobs :jobs="registerConfig.jobs" :total="registerConfig.jobs_total" :page-size="registerConfig.jobs_page_size" :running="registerConfig.enabled" :compensation-error="registerConfig.compensation_error" :target="registerTarget" @changed="refreshFreeJobs" />
+                <RegisterFreeJobs :key="registerTarget" :jobs="registerConfig.jobs" :total="registerConfig.jobs_total" :page-size="registerConfig.jobs_page_size" :running="registerConfig.enabled" :compensation-error="registerConfig.compensation_error" :target="registerTarget" @changed="refreshFreeJobs" />
               </div>
               <div v-if="hasCheckoutRuntime" v-show="activeTaskRecord === 'checkout'" id="checkout-runtime" class="register-link-tasks" role="region" aria-label="提链任务记录">
                 <CheckoutTaskTable :tasks="checkoutTasks" @copy-payment-link="copyCheckoutPaymentLink" />
@@ -150,7 +150,7 @@ import { Icon } from '@iconify/vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button } from 'nanocat-ui'
 import { icloudApi, type ICloudMailboxSource } from '@/api/icloud'
-import { registerApi } from '@/api/register'
+import { registerApi, type RegisterTarget } from '@/api/register'
 import FormSection from '@/components/ai/FormSection.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
@@ -212,8 +212,8 @@ const autosaveStatus = registerConfigRuntime.autosaveStatus
 const autosaveMessage = registerConfigRuntime.autosaveMessage
 const registerConfig = registerConfigRuntime.config
 async function refreshFreeJobs() { await registerConfigRuntime.loadConfig(true); startLiveUpdates() }
-function applyRegistrationSchedule(schedule: RegistrationSchedule) {
-  if (registerConfig.value) registerConfig.value.registration_schedule = schedule
+function applyRegistrationSchedule(schedule: RegistrationSchedule, target: RegisterTarget) {
+  registerConfigRuntime.applySchedule(schedule, target)
   startLiveUpdates()
 }
 const registerProviders = registerConfigRuntime.providers
@@ -283,8 +283,8 @@ const liveRuntime = useRegisterLiveRuntime({
   loadConfig: () => loadRegisterRuntimeConfig(),
   applyConfig: (config) => applyRegisterRuntimeConfig(config),
   isTaskEnabled: registerConfigRuntime.isTaskEnabled,
-  hasActiveCheckoutRetries,
-  hasScheduledRegistration: () => Boolean(registerConfig.value?.registration_schedule?.enabled),
+  hasActiveCheckoutRetries: registerConfigRuntime.hasActiveCheckoutRetries,
+  hasScheduledRegistration: registerConfigRuntime.hasScheduledRegistration,
 })
 const startLiveUpdates = liveRuntime.startLiveUpdates
 registerConfigRuntime.onConfigApplied(() => pruneGptMailStates())
@@ -341,11 +341,7 @@ const clearableCheckoutTaskCount = computed(() => checkoutTasks.value.filter((ta
   !['queued', 'running', 'retrying', 'pending'].includes(String(task.status || '').trim().toLowerCase())
 )).length)
 const checkoutRetriesActive = computed(hasActiveCheckoutRetries)
-const hasCheckoutRuntime = computed(() => (
-  registerTarget.value === 'openai' ||
-  checkoutRetriesActive.value ||
-  checkoutTasks.value.length > 0
-))
+const hasCheckoutRuntime = computed(() => registerTarget.value === 'openai')
 const activeTaskRecord = ref<'register' | 'checkout'>('register')
 const taskRecordTabs = computed(() => [
   ...(registerTarget.value === 'openai' || registerTarget.value === 'grok' ? [{ value: 'register', label: '注册任务' }] : []),

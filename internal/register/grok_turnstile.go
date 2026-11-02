@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/browserprofile"
+	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 )
 
 // GrokTurnstileSolver is intentionally independent from OpenAI Sentinel. It
@@ -364,12 +365,46 @@ func sanitizeBrowserWorkerPath(value string) string {
 }
 
 func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy string) (GrokBrowserContext, error) {
+	return s.StartSignupWithProgress(ctx, pageURL, proxy, nil)
+}
+
+func (s *HTTPGrokBrowserSolver) StartSignupWithProgress(ctx context.Context, pageURL, proxy string, progress Progress) (GrokBrowserContext, error) {
 	payload := map[string]any{"url": pageURL, "proxy": proxy}
 	if s.Profile != nil {
 		payload["timezone"] = strings.TrimSpace(s.Profile.TimezoneIANA)
 		payload["locale"] = strings.TrimSpace(s.Profile.NavigatorLanguage)
 		if profile := s.browserProfilePayload(); profile != nil {
 			payload["browser_profile"] = profile
+		}
+	}
+	previousStage := ""
+	queueProgress := func(stage string) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if progress == nil || previousStage == stage {
+			return nil
+		}
+		previousStage = stage
+		return progress(stage)
+	}
+	lease, err := browserqueue.Acquire(ctx, s.Client, s.BaseURL, s.APIKey, payload, queueProgress)
+	if err != nil {
+		if ctx.Err() != nil {
+			return GrokBrowserContext{}, ctx.Err()
+		}
+		return GrokBrowserContext{}, fail("waiting_browser", err.Error())
+	}
+	keep := false
+	defer func() {
+		if !keep {
+			lease.Release()
+		}
+	}()
+	payload["browser_lease"] = lease.ID
+	if progress != nil {
+		if err := progress("bootstrap"); err != nil {
+			return GrokBrowserContext{}, err
 		}
 	}
 	body, err := s.workerPost(ctx, "/v1/session/start", payload, "bootstrap")
@@ -386,6 +421,7 @@ func (s *HTTPGrokBrowserSolver) StartSignup(ctx context.Context, pageURL, proxy 
 	if json.Unmarshal(body, &result) != nil || !result.OK || strings.TrimSpace(result.SessionID) == "" {
 		return GrokBrowserContext{}, fail("bootstrap", "browser_worker_invalid_response")
 	}
+	keep = true
 	return GrokBrowserContext{SessionID: strings.TrimSpace(result.SessionID), Cookies: result.Cookies, UserAgent: strings.TrimSpace(result.UserAgent), RedirectURL: strings.TrimSpace(result.URL)}, nil
 }
 

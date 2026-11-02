@@ -142,7 +142,8 @@ class NativeBrowserContextTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["user_agent"], "engine-UA")
             finally:
                 await xai_flow.close_session(result["session_id"])
-            context.close.assert_awaited_once()
+            # Closing the whole browser owns/cleans its contexts as well.
+            context.close.assert_not_awaited()
             browser.close.assert_awaited_once()
 
 

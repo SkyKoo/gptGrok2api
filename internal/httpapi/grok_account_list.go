@@ -135,6 +135,8 @@ func grokAccountListMatches(item map[string]any, keyword, status string) bool {
 			code := strings.ToLower(stringValue(probe["code"]))
 			switch {
 			case code == "personal-team-blocked" || strings.HasPrefix(code, "personal-team-blocked:"):
+				state = "denied"
+			case code == "insufficient_quota" || code == "usage_limit_reached":
 				state = "no_quota"
 			case credential["status"] == "disabled" || credential["status"] == "invalid":
 				state = "invalid"
@@ -146,6 +148,8 @@ func grokAccountListMatches(item map[string]any, keyword, status string) bool {
 					state = "normal"
 				case "limited":
 					state = "limited"
+				case "denied":
+					state = "denied"
 				case "invalid":
 					state = "invalid"
 				}

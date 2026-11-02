@@ -206,7 +206,7 @@
                     </div>
                     <p class="studio-size-current">{{ selectedSizeDetailLabel }}</p>
                     <p v-if="imageForm.model.startsWith('grok-imagine-image') && imageForm.model !== 'grok-imagine-image-edit'" class="studio-size-current">
-                      2K 需要账号支持，实际像素以上游最终原图为准。
+                      Pro 原图 · 当前提供 1K 档位，实际像素以上游返回为准。
                     </p>
                   </div>
                 </div>

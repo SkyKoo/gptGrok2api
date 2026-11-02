@@ -6,8 +6,8 @@ import (
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
-// 仅任务参数按渠道隔离，邮箱来源、渠道专属功能和运行状态保持各自的原有归属。
-var targetSettingKeys = []string{"mode", "total", "threads", "target_quota", "target_available", "check_interval", "proxy", "resin_proxy_url"}
+// 任务参数和邮箱来源选择按渠道隔离；来源连接与凭据由共享邮箱资产模块管理。
+var targetSettingKeys = []string{"mode", "total", "threads", "target_quota", "target_available", "check_interval", "proxy", "resin_proxy_url", "mail_source_id"}
 
 func registrationTarget(value any) string {
 	target := strings.ToLower(strings.TrimSpace(stringValue(value)))
@@ -19,7 +19,7 @@ func registrationTarget(value any) string {
 
 func taskSettings(raw map[string]any) map[string]any {
 	defaults := defaultConfig()
-	result := map[string]any{"proxy": ""}
+	result := map[string]any{"proxy": "", "mail_source_id": stringValue(object(raw["mail"])["source_id"])}
 	for _, key := range targetSettingKeys {
 		if value, ok := defaults[key]; ok {
 			result[key] = value
@@ -61,6 +61,9 @@ func applyTargetSettings(value map[string]any, target string) {
 	for key, item := range object(object(value["target_settings"])[target]) {
 		value[key] = item
 	}
+	mail := object(value["mail"])
+	mail["source_id"] = value["mail_source_id"]
+	value["mail"] = mail
 	value["target"] = target
 }
 
@@ -87,6 +90,9 @@ func updateTargetSettings(current, updates map[string]any) {
 		}
 		current[key] = value
 	}
+	if source, ok := object(updates["mail"])["source_id"]; ok {
+		current["mail_source_id"] = source
+	}
 	if target == "openai" || target == "grok" {
 		profiles[target] = taskSettings(current)
 	}
@@ -105,4 +111,47 @@ func registrationProxyForTarget(raw map[string]any, target, selection string) st
 		return proxyruntime.RegistrationResinChannel + ":" + target
 	}
 	return selection
+}
+
+// UpdateForTarget saves only the named channel. A browser tab is not a global
+// routing switch; stale forms must not overwrite another channel's settings.
+func (s *Store) UpdateForTarget(target string, updates map[string]any) (map[string]any, error) {
+	target = strings.ToLower(strings.TrimSpace(target))
+	if target != "openai" && target != "grok" {
+		return nil, fail("config", "invalid_registration_target")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.getLocked()
+	selected := registrationTarget(current["target"])
+	scoped := map[string]any{"target": target}
+	profile := object(object(updates["target_settings"])[target])
+	for _, key := range targetSettingKeys {
+		if value, ok := profile[key]; ok {
+			scoped[key] = value
+		}
+		if value, ok := updates[key]; ok {
+			scoped[key] = value
+		}
+	}
+	if source, ok := object(updates["mail"])["source_id"]; ok {
+		scoped["mail_source_id"] = source
+	}
+	keys := []string{"grok"}
+	if target == "openai" {
+		keys = []string{"openai_free", "checkout", "sub2api_sync", "cpa_sync", "agent_identity_archive"}
+	}
+	for _, key := range keys {
+		if value, ok := updates[key]; ok {
+			scoped[key] = value
+		}
+	}
+	updateTargetSettings(current, scoped)
+	applyTargetSettings(current, selected)
+	if err := writeJSON0600(s.configPath, current); err != nil {
+		return nil, err
+	}
+	result := cloneMap(current)
+	applyTargetSettings(result, target)
+	return result, nil
 }

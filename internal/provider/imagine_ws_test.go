@@ -111,6 +111,10 @@ func TestImagineSocketCompletionProtocol(t *testing.T) {
 		{name: "upstream_resolution_downgrade", count: 1, wantError: true, events: []map[string]any{
 			{"type": "json", "order": 0, "url": "/original.jpg", "resolution_name": "1k", "current_status": "completed"},
 		}},
+		{name: "public_original_host", count: 1, urls: []string{"https://imagine-public.x.ai/imagine-public/images/final.jpg"}, events: []map[string]any{
+			{"type": "image", "order": 0, "url": "https://imagine-public.x.ai/imagine-public/images/final.jpg", "percentage_complete": 100},
+			{"type": "json", "order": 0, "current_status": "completed"},
+		}},
 		{name: "untrusted_original_host", count: 1, wantError: true, events: []map[string]any{
 			{"type": "json", "order": 0, "url": "https://untrusted.example/image.jpg", "current_status": "completed"},
 		}},
@@ -379,6 +383,74 @@ func TestImagineSocketModerationTerminatesWithoutWaitingForEOF(t *testing.T) {
 			if !strings.Contains(upstream.Message, "内容审核") || strings.Contains(upstream.Message, "PRIVATE") || upstream.Body != "" {
 				t.Fatalf("unexpected moderation message: %v", err)
 			}
+		})
+	}
+}
+
+func TestImagine2KInvalidArgumentHasActionableError(t *testing.T) {
+	for _, tc := range []struct {
+		resolution, code, message string
+		status                    int
+	}{
+		{"2k", "invalid_argument", "Invalid argument", 400},
+		{"2k", "invalid_argument", "", 400},
+		{"2k", "rate_limit_exceeded", "Invalid argument", 429},
+		{"1k", "invalid_argument", "Invalid argument", 502},
+	} {
+		t.Run(tc.resolution+tc.code+tc.message, func(t *testing.T) {
+			calls := make(chan struct{}, 2)
+			server := newImagineTestServer(t, func(conn net.Conn, reader *bufio.Reader) {
+				id, _ := readImagineRequest(t, reader)
+				calls <- struct{}{}
+				writeServerText(t, conn, mustJSON(map[string]any{"type": "error", "request_id": id, "err_code": tc.code, "err_msg": tc.message}))
+			})
+			defer server.Close()
+			socket := NewImagineSocket("ws"+strings.TrimPrefix(server.URL, "http"), nil, time.Second)
+			_, err := socket.Generate(context.Background(), accounts.Account{Token: "test"}, "test", "1:1", tc.resolution, 1, true, true)
+			var up *protocol.UpstreamError
+			if !errors.As(err, &up) || up.Status != tc.status {
+				t.Fatalf("wrong error: %v", err)
+			}
+			if tc.status == 400 && (!strings.Contains(up.Message, "2K") || !strings.Contains(up.Message, "1K")) {
+				t.Fatalf("not actionable: %v", err)
+			}
+			if len(calls) != 1 {
+				t.Fatalf("unexpected generation retry: %d", len(calls))
+			}
+		})
+	}
+}
+
+func TestImagineOriginalURLRejectsLookalikes(t *testing.T) {
+	for _, value := range []string{
+		"https://imagine-public.x.ai.evil.example/image.jpg",
+		"https://imagine-public.x.ai@evil.example/image.jpg",
+		"http://imagine-public.x.ai/image.jpg",
+		"https://imagine-public.x.ai:444/image.jpg",
+		"https://user:password@imagine-public.x.ai/image.jpg",
+		"https://127.0.0.1/image.jpg",
+	} {
+		if _, err := imagineOriginalURL(value); err == nil {
+			t.Errorf("accepted %q", value)
+		}
+	}
+}
+
+func TestImagineWebSocketLengthBoundaries(t *testing.T) {
+	for _, size := range []int{125, 126, 127, 128, 65535, 65536} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			payload := strings.Repeat("x", size)
+			done := make(chan struct{})
+			go func() { defer close(done); writeServerText(t, server, payload) }()
+			conn := wsConn{conn: client, read: bufio.NewReader(client)}
+			got, err := conn.readText(context.Background(), time.Now().Add(time.Second))
+			if err != nil || got != payload {
+				t.Fatalf("size=%d len=%d err=%v", size, len(got), err)
+			}
+			<-done
 		})
 	}
 }

@@ -68,9 +68,22 @@ func (s *Server) runGrokProbeCycle() {
 }
 
 func (s *Server) probeOAuthAccount(account oauth.Account) {
+	if _, busy := s.grokOAuthActions.LoadOrStore(account.ID, true); busy {
+		return
+	}
+	defer s.grokOAuthActions.Delete(account.ID)
+	fresh, found, err := s.oauthStore.Get(account.ID)
+	if err != nil || !found || fresh.Status == "disabled" {
+		return
+	}
+	account = fresh
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	result := s.xaiProbe.Probe(ctx, map[string]any{"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken})
+	probeClient := *s.xaiProbe
+	if account.TokenEndpoint != "" {
+		probeClient.TokenURL = account.TokenEndpoint
+	}
+	result := probeClient.Probe(ctx, map[string]any{"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt})
 	probe := map[string]any{"status": result.Status, "model": "grok-4.5", "http_status": result.HTTPStatus, "code": result.Code, "error": result.Error, "quota": result.Quota, "probed_at": time.Now().UTC().Format(time.RFC3339)}
 	status := account.Status
 	if result.Status == "valid" {
@@ -80,8 +93,12 @@ func (s *Server) probeOAuthAccount(account oauth.Account) {
 	} else if result.Status == "limited" {
 		status = "limited"
 	}
-	_, _, _ = s.oauthStore.UpdateProbe(account.ID, result.AccessToken, result.RefreshToken, result.IDToken, probe, result.Error)
-	if status != account.Status && status != "" {
-		_, _ = s.oauthStore.SetStatus([]string{account.ID}, status)
+	updated, applied, err := s.oauthStore.UpdateProbe(account, result.AccessToken, result.RefreshToken, result.IDToken, result.ExpiresAt, probe, result.Error)
+	if err == nil && applied && status != account.Status && status != "" {
+		_, _, _ = s.oauthStore.UpdateIfCredential(updated, func(current *oauth.Account) {
+			if current.Status != "disabled" {
+				current.Status = status
+			}
+		})
 	}
 }

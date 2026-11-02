@@ -16,6 +16,7 @@ import (
 // BrowserDeviceRequest is sent only over the private Worker connection, never
 // persisted in queue payloads or exposed by management job endpoints.
 type BrowserDeviceRequest struct {
+	BrowserLease    string `json:"browser_lease,omitempty"`
 	VerificationURL string `json:"verification_uri_complete"`
 	UserCode        string `json:"user_code"`
 	SSO             string `json:"sso"`

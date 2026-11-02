@@ -65,7 +65,7 @@ func TestHTTPGrokBrowserSolverPassesProfileEnvironment(t *testing.T) {
 		if workerProfile["inner_width"] != float64(1440) || workerProfile["device_pixel_ratio"] != float64(2) {
 			t.Fatalf("worker profile lost viewport fields: %v", workerProfile)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"ok":true,"session_id":"session-1","token":"turnstile-token"}`)), Header: make(http.Header)}, nil
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"status":"ready","ok":true,"session_id":"session-1","token":"turnstile-token"}`)), Header: make(http.Header)}, nil
 	}), Timeout: time.Second}
 	profile := NewBrowserProfile()
 	profile.TimezoneIANA = "America/Phoenix"
@@ -127,7 +127,14 @@ func TestHTTPGrokBrowserSolverNativeSignupFlow(t *testing.T) {
 		}
 		var response string
 		switch req.URL.Path {
+		case "/v1/browser/reservations":
+
+			response = `{"status":"ready"}`
 		case "/v1/session/start":
+			if lease, _ := payload["browser_lease"].(string); len(lease) != 48 {
+				t.Fatal("signup lacks prepared browser")
+			}
+
 			if payload["url"] != "https://accounts.x.ai/sign-up?redirect=grok-com" {
 				t.Fatalf("unexpected start payload: %s", body)
 			}
@@ -273,12 +280,21 @@ func TestHTTPGrokBrowserSolverResinTaskSession(t *testing.T) {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatalf("invalid native payload: %v", err)
 		}
-		if req.URL.Path != "/v1/session/start" && payload["session_id"] != "native-1" {
+		if req.URL.Path != "/v1/browser/reservations" && req.URL.Path != "/v1/session/start" && payload["session_id"] != "native-1" {
 			t.Fatal("registration step changed browser session")
 		}
 		var response string
 		switch req.URL.Path {
+		case "/v1/browser/reservations":
+			if payload["proxy"] != "http://CFM-Grok.task-fixture:fixture-token@resin.invalid:2260" {
+				t.Fatal("reservation lost proxy identity")
+			}
+			response = `{"status":"ready"}`
 		case "/v1/session/start":
+			if lease, _ := payload["browser_lease"].(string); len(lease) != 48 {
+				t.Fatal("signup lacks prepared browser")
+			}
+
 			if payload["proxy"] != "http://CFM-Grok.task-fixture:fixture-token@resin.invalid:2260" {
 				t.Fatal("Worker lost task proxy identity")
 			}

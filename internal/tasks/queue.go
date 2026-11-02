@@ -232,3 +232,17 @@ func taskID() string {
 	}
 	return "task_" + base64.RawURLEncoding.EncodeToString(raw)
 }
+
+// SetStage updates public progress without storing device codes or credentials.
+func (q *Queue) SetStage(id, stage string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if task, ok := q.items[id]; ok && task.Status == "running" {
+		if task.Result != nil && task.Result["stage"] == stage {
+			return
+		}
+		task.Result = map[string]any{"stage": stage}
+		task.UpdatedAt = time.Now().Unix()
+		_ = q.saveLocked()
+	}
+}

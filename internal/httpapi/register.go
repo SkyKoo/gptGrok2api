@@ -26,17 +26,17 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/register")
 	switch {
 	case (path == "" || path == "/") && r.Method == http.MethodGet:
-		s.registerConfig(w)
+		s.registerConfig(w, r)
 	case (path == "" || path == "/") && r.Method == http.MethodPost:
 		s.updateRegisterConfig(w, r)
 	case path == "/schedule":
 		s.registrationScheduleAPI(w, r)
 	case path == "/start" && r.Method == http.MethodPost:
-		s.setRegisterEnabled(w, true)
+		s.setRegisterEnabled(w, r, true)
 	case path == "/stop" && r.Method == http.MethodPost:
-		s.setRegisterEnabled(w, false)
+		s.setRegisterEnabled(w, r, false)
 	case path == "/reset" && r.Method == http.MethodPost:
-		s.resetRegister(w)
+		s.resetRegister(w, r)
 	case path == "/runtime" && r.Method == http.MethodGet:
 		s.registerRuntimeStatus(w)
 	case path == "/openai/jobs" && r.Method == http.MethodGet:
@@ -120,8 +120,29 @@ func (s *Server) refreshRegistrationResinChannel() {
 	}
 }
 
-func (s *Server) registerConfig(w http.ResponseWriter) {
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
+func (s *Server) registrationRequestTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
+	values, explicit := r.URL.Query()["target"]
+	target := strings.ToLower(strings.TrimSpace(stringValue(s.registerStore.Get()["target"])))
+	if explicit {
+		if len(values) != 1 {
+			writeError(w, 400, "请指定唯一注册渠道", "invalid_request_error")
+			return "", false
+		}
+		target = strings.ToLower(strings.TrimSpace(values[0]))
+	}
+	if target != "openai" && target != "grok" {
+		writeError(w, 400, "不支持的注册渠道", "invalid_request_error")
+		return "", false
+	}
+	return target, true
+}
+
+func (s *Server) registerConfig(w http.ResponseWriter, r *http.Request) {
+	target, ok := s.registrationRequestTarget(w, r)
+	if !ok {
+		return
+	}
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target)})
 }
 
 func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
@@ -131,88 +152,94 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &updates) {
 		return
 	}
-	if s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true {
-		writeError(w, http.StatusConflict, "stop registration before changing configuration", "registration_running")
+	target, ok := s.registrationRequestTarget(w, r)
+	if !ok {
 		return
 	}
-	for _, key := range []string{"enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
+	_, scoped := r.URL.Query()["target"]
+	running := s.freeRegister.Snapshot()["running"] == true
+	if target == "grok" {
+		running = s.grokRegister.Snapshot()["running"] == true
+	}
+	if (!scoped && (s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true)) || (scoped && running) {
+		writeError(w, http.StatusConflict, "请先停止本渠道注册，再修改该渠道配置", "registration_running")
+		return
+	}
+	for _, key := range []string{"target_runtime", "enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
 		delete(updates, key)
 	}
-	s.mergeHMEPassword(updates)
-	_, err := s.registerStore.Update(updates)
+	var err error
+	if scoped {
+		_, err = s.registerStore.UpdateForTarget(target, updates)
+	} else {
+		s.mergeHMEPassword(updates)
+		_, err = s.registerStore.Update(updates)
+		target = stringValue(s.registerStore.Get()["target"])
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
 	s.refreshRegistrationResinChannel()
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target)})
 }
 
-func (s *Server) setRegisterEnabled(w http.ResponseWriter, enabled bool) {
+func (s *Server) setRegisterEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	if enabled && s.registrationClosing {
 		writeError(w, 503, "服务正在停止，请稍后重试", "server_error")
 		return
 	}
-	target := strings.ToLower(strings.TrimSpace(stringValue(s.registerStore.Get()["target"])))
-	if target == "" {
-		target = "openai"
+	target, ok := s.registrationRequestTarget(w, r)
+	if !ok {
+		return
 	}
+	config := s.registerStore.ConfigForTarget(target)
+	var err error
 	if target == "openai" {
 		if enabled {
-			if _, err := s.freeRegister.Start(s.registerStore.Get()); err != nil {
-				registrationError(w, err)
-				return
-			}
+			_, err = s.freeRegister.Start(config)
 		} else {
 			s.freeRegister.Stop()
 		}
-		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot()})
-		return
-	}
-	if enabled {
-		config := s.registerStore.Get()
-		if target != "grok" {
-			writeError(w, http.StatusBadRequest, "不支持的注册目标", "invalid_request_error")
-			return
-		}
-		if _, err := s.grokRegister.Start(config); err != nil {
-			registrationError(w, err)
-			return
-		}
 	} else {
-		if target == "grok" {
+		if enabled {
+			_, err = s.grokRegister.Start(config)
+		} else {
 			s.grokRegister.Stop()
 		}
 	}
-	value, err := s.registerStore.SetEnabled(enabled)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		registrationError(w, err)
 		return
 	}
-	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": value})
+	writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target)})
 }
 
-func (s *Server) resetRegister(w http.ResponseWriter) {
+func (s *Server) resetRegister(w http.ResponseWriter, r *http.Request) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
-	if stringValue(s.registerStore.Get()["target"]) == "openai" {
+	target, ok := s.registrationRequestTarget(w, r)
+	if !ok {
+		return
+	}
+	if target == "openai" {
 		removed, err := s.freeRegister.ClearFinished()
 		if err != nil {
 			registrationError(w, err)
 			return
 		}
-		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot(), "removed": removed})
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target), "removed": removed})
 		return
 	}
-	if strings.EqualFold(stringValue(s.registerStore.Get()["target"]), "grok") {
+	if target == "grok" {
 		removed, err := s.grokRegister.ClearFinished()
 		if err != nil {
 			registrationError(w, err)
 			return
 		}
-		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshot(), "removed": removed})
+		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target), "removed": removed})
 		return
 	}
 	value, err := s.registerStore.Reset()
