@@ -193,7 +193,7 @@ func Load(root string) (Config, error) {
 		ConsoleURL:              env("GO_CONSOLE_RESPONSES_URL", "https://console.x.ai/v1/responses"),
 		MediaChatURL:            env("GO_MEDIA_CHAT_URL", "https://grok.com/rest/app-chat/conversations/new"),
 		MediaPostURL:            env("GO_MEDIA_POST_URL", "https://grok.com/rest/media/post/create"),
-		AssetUploadURL:          env("GO_ASSET_UPLOAD_URL", "https://grok.com/rest/app-chat/upload-file"),
+		AssetUploadURL:          env("GO_ASSET_UPLOAD_URL", "https://grok.com/rest/app-chat/upload-file-v2"),
 		AssetsBaseURL:           env("GO_ASSETS_BASE_URL", "https://assets.grok.com"),
 		ImagineWSURL:            env("GO_IMAGINE_WS_URL", "wss://grok.com/ws/imagine/listen"),
 		ProxyURL:                strings.TrimSpace(os.Getenv("GO_PROXY_URL")),

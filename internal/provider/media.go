@@ -3,11 +3,13 @@ package provider
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -32,6 +34,10 @@ type Media struct {
 func (m *Media) SetProxyManager(manager *proxyruntime.Manager) { m.Proxy = manager }
 
 func NewMedia(client *http.Client, imageChatURL, mediaPostURL, assetUploadURL, assetsBaseURL string, timeout time.Duration) *Media {
+	// Migrate the old official default as well as the new configuration default.
+	if strings.TrimRight(assetUploadURL, "/") == "https://grok.com/rest/app-chat/upload-file" {
+		assetUploadURL = "https://grok.com/rest/app-chat/upload-file-v2"
+	}
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
@@ -54,13 +60,25 @@ func (m *Media) CreatePost(ctx context.Context, account accounts.Account, mediaT
 }
 
 func (m *Media) Upload(ctx context.Context, account accounts.Account, filename, mime, encoded string) (string, string, error) {
-	if _, err := base64.StdEncoding.DecodeString(encoded); err != nil {
-		return "", "", fmt.Errorf("invalid base64 content: %w", err)
+	raw, decodeErr := base64.StdEncoding.DecodeString(encoded)
+	if decodeErr != nil {
+		return "", "", &MediaUploadError{Status: 400, Kind: "invalid_upload", ContentType: "none"}
 	}
-	body, err := m.doJSONMap(ctx, http.MethodPost, m.AssetUploadURL, account, map[string]any{
-		"fileName": filename, "fileMimeType": mime, "content": encoded,
-	})
+	var body map[string]any
+	var err error
+	if strings.HasSuffix(m.AssetUploadURL, "/upload-file-v2") {
+		body, err = m.uploadV2(ctx, account, filename, mime, raw)
+	} else {
+		body, err = m.doJSONMap(ctx, http.MethodPost, m.AssetUploadURL, account, map[string]any{"fileName": filename, "fileMimeType": mime, "content": encoded})
+	}
+
 	if err != nil {
+		err = safeMediaUploadError(err)
+		if err.(*MediaUploadError).Stage == "" {
+			err.(*MediaUploadError).Stage = "upload"
+		}
+		diagnostics := MediaUploadDiagnostics(err)
+		log.Printf("grok_reference_upload stage=%s kind=%s status=%d content_type=%s challenge=%t bytes=%d input_sha256=%x", diagnostics["upload_stage"], diagnostics["upload_error_kind"], diagnostics["upload_http_status"], diagnostics["upload_content_type"], diagnostics["upload_challenge"], len(raw), sha256.Sum256(raw))
 		return "", "", err
 	}
 	return firstString(body["fileMetadataId"], firstString(body["fileId"], "")), firstString(body["fileUri"], ""), nil
@@ -155,6 +173,9 @@ func (m *Media) doJSONMap(ctx context.Context, method, endpoint string, account 
 	defer response.Body.Close()
 	var value map[string]any
 	if err := json.NewDecoder(response.Body).Decode(&value); err != nil {
+		if endpoint == m.AssetUploadURL {
+			return nil, &MediaUploadError{Status: 502, Kind: "invalid_upload_response", ContentType: "other"}
+		}
 		return nil, fmt.Errorf("decode upstream JSON: %w", err)
 	}
 	return value, nil
@@ -182,7 +203,12 @@ func (m *Media) doJSON(ctx context.Context, method, endpoint string, account acc
 		return nil, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		err := readHTTPError(response)
+		var err error
+		if endpoint == m.AssetUploadURL {
+			err = readMediaUploadError(response)
+		} else {
+			err = readHTTPError(response)
+		}
 		response.Body.Close()
 		return nil, err
 	}

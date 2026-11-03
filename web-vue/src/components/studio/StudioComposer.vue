@@ -47,6 +47,10 @@
             </div>
           </div>
 
+          <p v-if="canAttachReferences" class="px-3 text-xs" :class="referenceError ? 'text-red-500' : 'text-muted-foreground'" :role="referenceError ? 'alert' : undefined">
+            {{ referenceError || `参考图 ${references.length}/${referenceLimit} 张` }}
+          </p>
+
           <textarea
             ref="textareaRef"
             v-model="textValue"
@@ -229,8 +233,8 @@
               v-else
               type="submit"
               class="chat-input-send"
-              :class="text.trim() && !isSending ? 'chat-input-send-ready' : 'chat-input-send-idle'"
-              :disabled="isSending || !text.trim()"
+              :class="text.trim() && !isSending && !referenceError ? 'chat-input-send-ready' : 'chat-input-send-idle'"
+              :disabled="isSending || !text.trim() || !!referenceError"
               :aria-label="mode === 'image' ? '提交图片任务' : mode === 'video' ? '提交视频任务' : '发送消息'"
               @click.stop
             >
@@ -265,6 +269,7 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
+import { studioReferenceLimit, studioReferenceCountError } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -286,6 +291,9 @@ const props = defineProps<{
   isStreaming: boolean
   isEditing: boolean
 }>()
+
+const referenceLimit = computed(() => studioReferenceLimit(props.mode, props.imageForm.model))
+const referenceError = computed(() => studioReferenceCountError(props.mode, props.imageForm.model, props.references.length))
 
 const emit = defineEmits<{
   'update:mode': [mode: StudioComposeMode]

@@ -1,4 +1,4 @@
-import { validateStudioImageModel } from '@/lib/studioMedia'
+import { validateStudioImageModel, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { streamChatCompletion } from '@/api/chatStream'
 import { debugApi, type DebugChatContentPart, type DebugChatMessage } from '@/api/debug'
 import {
@@ -97,6 +97,7 @@ export async function runStudioSearchRequest(prompt: string, ownerId: string): P
 
 export async function createStudioImageTask(input: StudioImageTaskInput): Promise<ImageTask> {
   const model = input.imageForm.model || DEFAULT_IMAGE_MODEL
+  validateStudioReferenceCount('image', model, input.files.length)
   validateStudioImageModel(model, input.files.length > 0)
   const n = normalizeImageCount(input.imageForm.n)
   const size = input.imageForm.size

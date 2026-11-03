@@ -137,9 +137,15 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		s.grokAccountPool.MarkSent(lease, "file_upload")
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(context.Background(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
 		if uploadErr != nil {
-			// Upload failures must not expose signed URLs or silently become text-to-video.
-			err := &protocol.UpstreamError{Status: upstreamStatus(uploadErr), Message: fmt.Sprintf("第 %d 张视频参考图上传失败（file_upload）；已停止生成，请稍后重新提交", index+1)}
-			s.failVideoUpstream(job, lease, "reference_upload_failed", err)
+			// The provider exposes only safe diagnostics, preserving challenge vs quota errors.
+			code := "reference_upload_failed"
+			if diagnostics := provider.MediaUploadDiagnostics(uploadErr); diagnostics != nil {
+				s.monitor.enrich(job.ID, map[string]any{"metrics": diagnostics})
+				if diagnostics["upload_challenge"] == true {
+					code = "reference_verification_required"
+				}
+			}
+			s.failVideoUpstream(job, lease, code, fmt.Errorf("第 %d 张视频参考图：%w", index+1, uploadErr))
 			return
 		}
 		ref := videoReferenceURL(fileID, fileURI, cookieUserID(lease.Account))
@@ -278,7 +284,11 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 func (s *Server) failVideoUpstream(job *videoJob, lease *accounts.Lease, code string, err error) {
 	status := upstreamStatus(err)
 	s.grokAccountPool.FeedbackIntent(lease, status, err)
-	s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": err.Error(), "upstream_status": status})
+	failure := map[string]any{"code": code, "message": err.Error(), "upstream_status": status}
+	if diagnostics := provider.MediaUploadDiagnostics(err); diagnostics != nil {
+		failure["upload_diagnostics"] = diagnostics
+	}
+	s.setVideoStatus(job, "failed", 0, failure)
 }
 
 func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {

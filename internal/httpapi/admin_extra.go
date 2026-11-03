@@ -741,7 +741,14 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	files := r.MultipartForm.File["image[]"]
-	if len(files) == 0 {
+	if strings.HasPrefix(modelName, "grok-") {
+		// Both aliases belong to the same request; never ignore either batch.
+		files = append(files, r.MultipartForm.File["image"]...)
+		if err := validateGrokImageReferenceCount(modelName, len(files)); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+			return
+		}
+	} else if len(files) == 0 {
 		files = r.MultipartForm.File["image"]
 	}
 	if len(files) == 0 {
@@ -752,7 +759,7 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		writeImageOptionError(w, invalidMask("mask requires exactly one source image"))
 		return
 	}
-	if len(files) > 7 {
+	if isOpenAIImageModel(modelName) && len(files) > 7 {
 		files = files[len(files)-7:]
 	}
 	images := make([][]byte, 0, len(files))

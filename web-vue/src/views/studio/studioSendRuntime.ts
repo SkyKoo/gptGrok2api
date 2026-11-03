@@ -1,6 +1,6 @@
 import { nextTick, type Ref } from 'vue'
 import { videosApi } from '@/api/videos'
-import { DEFAULT_VIDEO_OPTIONS } from '@/lib/studioMedia'
+import { DEFAULT_VIDEO_OPTIONS, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { normalizeImageCount } from '@/api/imageTasks'
 import type {
   StudioComposeMode,
@@ -37,7 +37,7 @@ export type StudioSendRuntimeInput = {
   chatModel: Ref<string>
   chatReasoningEffort: Ref<string>
   imageForm: StudioImageForm
-  toast: Pick<ReturnType<typeof useToast>, 'success'>
+  toast: Pick<ReturnType<typeof useToast>, 'success' | 'error'>
   hooks: StudioSendRuntimeHooks
 }
 
@@ -66,6 +66,16 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     toast,
   } = input
 
+  function validReferences(mode: StudioComposeMode, files: File[]) {
+    try {
+      validateStudioReferenceCount(mode, imageForm.model, files.length)
+      return true
+    } catch (error) {
+      toast.error(studioErrorMessage(error, '参考图数量超出限制'))
+      return false
+    }
+  }
+
   async function sendMessage() {
     const content = composerRuntime.composerText.value.trim()
     if (!content || composerRuntime.isSending.value || chatStreamRuntime.isStreaming.value) return
@@ -75,10 +85,11 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       return
     }
 
-    const conversation = hooks.ensureConversation(content)
     const mode = composerRuntime.composeMode.value
-    const withReferences = mode === 'image' || mode === 'chat' || mode === 'video'
     const files = referenceRuntime.selectedFiles()
+    if (!validReferences(mode, files)) return
+    const conversation = hooks.ensureConversation(content)
+    const withReferences = mode === 'image' || mode === 'chat' || mode === 'video'
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
     const clearReferencesImmediately = mode === 'chat' && referenceImages.length > 0
@@ -114,6 +125,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     const mode = composerRuntime.composeMode.value
     const withReferences = mode === 'image' || mode === 'chat' || mode === 'video'
     const files = referenceRuntime.selectedFiles()
+    if (!validReferences(mode, files)) return
     const attachments = referenceRuntime.attachmentNames()
     const referenceImages = withReferences ? referenceRuntime.messageReferenceImages() : []
     const clearReferencesImmediately = mode === 'chat' && referenceImages.length > 0
@@ -148,6 +160,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     const prompt = request.prompt.trim()
     if (!prompt || composerRuntime.isSending.value || chatStreamRuntime.isStreaming.value) return false
 
+    if (!validReferences('image', request.files)) return false
     const userContent = request.userContent?.trim() || prompt
     const conversation = hooks.ensureConversation(userContent)
     hooks.activeConversationId.value = conversation.id

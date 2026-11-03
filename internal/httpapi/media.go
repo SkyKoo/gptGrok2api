@@ -368,6 +368,16 @@ func (s *Server) parseImageEditRequest(r *http.Request) (imageEditRequest, error
 	if err := request.ImageOutputOptions.Validate(); err != nil {
 		return imageEditRequest{}, err
 	}
+	count := 0
+	for _, field := range imageEditReferenceFields {
+		count += len(r.MultipartForm.File[field])
+		for _, value := range values[field] {
+			count += imageReferenceValueCount(value)
+		}
+	}
+	if err := validateGrokImageReferenceCount(firstNonEmpty(request.Model, "grok-imagine-image-edit"), count); err != nil {
+		return imageEditRequest{}, err
+	}
 	mask, err := s.parseMultipartImageMask(r)
 	if err != nil {
 		return imageEditRequest{}, err
@@ -423,6 +433,13 @@ func (s *Server) parseJSONImageEditRequest(r *http.Request) (imageEditRequest, e
 		Size:               stringValue(body["size"]),
 		Quality:            stringValue(body["quality"]),
 		ResponseFormat:     stringValue(body["response_format"]),
+	}
+	count := 0
+	for _, field := range imageEditReferenceFields {
+		count += imageReferenceValueCount(body[field])
+	}
+	if err := validateGrokImageReferenceCount(firstNonEmpty(request.Model, "grok-imagine-image-edit"), count); err != nil {
+		return imageEditRequest{}, err
 	}
 	if body["mask"] != nil && body["mask[]"] != nil {
 		return imageEditRequest{}, invalidMask("only one mask is supported")
@@ -819,10 +836,14 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "at least one image is required", "invalid_request_error")
 		return
 	}
-	if len(inputs) > 7 {
-		inputs = inputs[len(inputs)-7:]
+	if err := validateGrokImageReferenceCount(modelName, len(inputs)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
 	if isOpenAIImageModel(modelName) {
+		if len(inputs) > 7 {
+			inputs = inputs[len(inputs)-7:]
+		}
 		size := openAIImageRequestedSize(request.Size)
 		if !validOpenAIImageSize(size) {
 			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
@@ -854,6 +875,9 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		s.grokAccountPool.MarkSent(lease, "file_upload")
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
 		if uploadErr != nil {
+			if diagnostics := provider.MediaUploadDiagnostics(uploadErr); diagnostics != nil {
+				s.enrichRequestMonitor(r, map[string]any{"metrics": diagnostics})
+			}
 			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(uploadErr), uploadErr)
 			writeError(w, upstreamStatus(uploadErr), uploadErr.Error(), "upstream_error")
 			return

@@ -157,6 +157,7 @@
 </template>
 
 <script setup lang="ts">
+import { validateStudioReferenceCount } from '@/lib/studioMedia'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
 import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
@@ -220,7 +221,13 @@ const toast = useToast()
 const confirmDialog = useConfirmDialog()
 const pageRuntime = usePageRuntime('studio')
 const composerRuntime = useStudioComposerRuntime()
-const referenceRuntime = useStudioReferenceRuntime()
+const referenceRuntime = useStudioReferenceRuntime({
+  validateCount: count => validateStudioReferenceCount(
+    composerRuntime.composeMode.value === 'search' ? 'image' : composerRuntime.composeMode.value,
+    modelFormRuntime.imageForm.model,
+    count,
+  ),
+})
 const persistedConversationState = loadStudioConversationPersistenceState()
 const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0 })
 
@@ -459,8 +466,12 @@ function stopStreaming() {
 }
 
 async function appendFiles(files: File[]) {
-  const added = await referenceRuntime.append(files)
-  if (added && composeMode.value !== 'chat' && composeMode.value !== 'video') composerRuntime.activateImageMode()
+  try {
+    const added = await referenceRuntime.append(files)
+    if (added && composeMode.value !== 'chat' && composeMode.value !== 'video') composerRuntime.activateImageMode()
+  } catch (error) {
+    toast.error(studioErrorMessage(error, '添加参考图失败'))
+  }
 }
 
 function cleanAssetText(value: unknown) {
@@ -533,9 +544,11 @@ async function referenceGeneratedImage(asset: StudioImageAssetView, name: string
     return
   }
 
-  const added = await referenceRuntime.append([file])
-  if (!added) {
-    toast.error('最多只能添加 8 张参考图')
+  try {
+    const added = await referenceRuntime.append([file], count => validateStudioReferenceCount('image', imageForm.model, count))
+    if (!added) return
+  } catch (error) {
+    toast.error(studioErrorMessage(error, '添加参考图失败'))
     return
   }
   composerRuntime.activateImageMode()

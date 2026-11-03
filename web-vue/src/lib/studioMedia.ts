@@ -1,3 +1,24 @@
+export const GROK_IMAGE_REFERENCE_LIMIT = 5
+export const GROK_VIDEO_REFERENCE_LIMIT = 7
+
+export function studioReferenceLimit(mode: string, imageModel: string) {
+  if (mode === 'video') return GROK_VIDEO_REFERENCE_LIMIT
+  if (mode === 'image' && imageModel.startsWith('grok-')) return GROK_IMAGE_REFERENCE_LIMIT
+  return 8
+}
+
+export function studioReferenceCountError(mode: string, imageModel: string, count: number) {
+  const limit = studioReferenceLimit(mode, imageModel)
+  if (count <= limit) return ''
+  const label = mode === 'video' ? 'Grok 视频' : mode === 'image' && imageModel.startsWith('grok-') ? 'Grok 生图' : '当前模式'
+  return `${label}最多支持 ${limit} 张参考图，当前 ${count} 张，请减少参考图数量`
+}
+
+export function validateStudioReferenceCount(mode: string, imageModel: string, count: number) {
+  const error = studioReferenceCountError(mode, imageModel, count)
+  if (error) throw new Error(error)
+}
+
 // Keep endpoint selection and model selection consistent, including saved selections.
 export function resolveStudioImageModel(current: string, hasReferences: boolean, available: string[]) {
   if (['grok-imagine-image', 'grok-imagine-image-lite'].includes(current)) current = 'grok-imagine-image-pro'
@@ -29,7 +50,7 @@ export function buildVideoForm(prompt: string, options: StudioVideoOptions, file
   if (![6, 10, 15].includes(options.seconds)) throw new Error('视频时长仅支持 6、10、15 秒')
   if (!['720x1280', '1280x720', '1024x1024'].includes(options.size)) throw new Error('请选择支持的视频比例')
   if (!['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
-  if (files.length > 7) throw new Error('视频最多支持 7 张参考图')
+  validateStudioReferenceCount('video', '', files.length)
   const form = new FormData()
   form.set('model', 'grok-imagine-video')
   form.set('prompt', prompt)

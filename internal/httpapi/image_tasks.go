@@ -52,6 +52,10 @@ func imageTaskHash(task *imageTaskState) string {
 }
 
 func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *imageTaskState) {
+	if err := validateGrokImageReferenceCount(task.Model, len(task.Images)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
 	inputs := make([]provider.OpenAIImageInput, len(task.Images))
 	for i, raw := range task.Images {
 		inputs[i].Data = raw
@@ -261,6 +265,10 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ImageURL != "" {
 		body.Images = append(body.Images, body.ImageURL)
+	}
+	if err := validateGrokImageReferenceCount(firstNonEmpty(body.Model, "gpt-image-2"), len(body.Images)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
 	}
 	if len(body.Images) < 1 || len(body.Images) > 7 {
 		writeError(w, 400, "between 1 and 7 reference images are required", "invalid_request_error")

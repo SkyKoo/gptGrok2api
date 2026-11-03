@@ -54,15 +54,17 @@ func TestVideosRejectInvalidReferencesBeforeQueueing(t *testing.T) {
 
 func TestVideoReferenceFailureNeverFallsBackToText(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		failAt   int
-		response string
-		status   int
+		name      string
+		failAt    int
+		response  string
+		status    int
+		challenge bool
 	}{
-		{"upload rejected", 1, `{"error":"SECRET"}`, 429},
-		{"missing asset", 1, `{}`, 200},
-		{"invalid asset URL", 1, `{"fileUri":" "}`, 200},
-		{"second reference rejected", 2, `{"error":"SECRET"}`, 500},
+		{"upload rejected", 1, `{"error":"SECRET"}`, 429, false},
+		{"Cloudflare verification", 1, `<html>SECRET</html>`, 403, true},
+		{"missing asset", 1, `{}`, 200, false},
+		{"invalid asset URL", 1, `{"fileUri":" "}`, 200, false},
+		{"second reference rejected", 2, `{"error":"SECRET"}`, 500, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			uploads, post, chat := 0, 0, 0
@@ -71,6 +73,10 @@ func TestVideoReferenceFailureNeverFallsBackToText(t *testing.T) {
 				case "/upload":
 					uploads++
 					if uploads == tc.failAt {
+						if tc.challenge {
+							w.Header().Set("Cf-Mitigated", "challenge")
+							w.Header().Set("Content-Type", "text/html")
+						}
 						w.WriteHeader(tc.status)
 						fmt.Fprint(w, tc.response)
 					} else {
@@ -100,6 +106,18 @@ func TestVideoReferenceFailureNeverFallsBackToText(t *testing.T) {
 			}
 			if strings.Contains(stringValue(job.Error["message"]), "SECRET") {
 				t.Fatal("upstream error body exposed")
+			}
+			if tc.challenge {
+				if job.Error["code"] != "reference_verification_required" || job.Error["upstream_status"] != 403 || mapValue(job.Error["upload_diagnostics"])["upload_challenge"] != true {
+					t.Fatalf("challenge evidence missing: %v", job.Error)
+				}
+				if !strings.Contains(stringValue(job.Error["message"]), "Cloudflare") || strings.Contains(stringValue(job.Error["message"]), "稍后重新提交") {
+					t.Fatal("misleading challenge message")
+				}
+				rows, _, err := s.grokRuntimeStore.AccountSnapshot()
+				if err != nil || len(rows) != 1 || rows[0]["status"] != "active" {
+					t.Fatalf("challenge invalidated account: %v", err)
+				}
 			}
 		})
 	}

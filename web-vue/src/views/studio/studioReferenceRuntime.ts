@@ -9,6 +9,7 @@ const MESSAGE_PREVIEW_QUALITY = 0.82
 
 export type StudioReferenceRuntimeOptions = {
   maxFiles?: number
+  validateCount?: (count: number) => void
 }
 
 function isImageFile(file: File) {
@@ -90,7 +91,12 @@ export function toStudioMessageReferenceImage(reference: StudioReference): Studi
 }
 
 export function useStudioReferenceRuntime(options: StudioReferenceRuntimeOptions = {}) {
-  const maxFiles = options.maxFiles || DEFAULT_MAX_REFERENCE_FILES
+  const validateCount = options.validateCount || ((count: number) => {
+    const maxFiles = options.maxFiles || DEFAULT_MAX_REFERENCE_FILES
+    if (count > maxFiles) throw new Error(`最多只能添加 ${maxFiles} 张参考图，当前 ${count} 张`)
+  })
+  let appendQueue: Promise<boolean> = Promise.resolve(false)
+  let clearVersion = 0
   const files = ref<File[]>([])
   const references = ref<StudioReference[]>([])
   const preview = ref<StudioPreviewImage | null>(null)
@@ -103,24 +109,30 @@ export function useStudioReferenceRuntime(options: StudioReferenceRuntimeOptions
     return references.value
       .map(toStudioMessageReferenceImage)
       .filter((reference) => reference.dataUrl)
-      .slice(0, maxFiles)
   }
 
   function selectedFiles() {
-    return files.value.slice(0, maxFiles)
+    return files.value.slice()
   }
 
-  async function append(nextFiles: File[]) {
-    const remaining = Math.max(0, maxFiles - files.value.length)
-    const imageFiles = nextFiles.filter(isImageFile).slice(0, remaining)
-    if (!imageFiles.length) return false
-
-    for (const file of imageFiles) {
-      const reference = await createStudioReferenceFromFile(file)
-      files.value.push(file)
-      references.value.push(reference)
-    }
-    return true
+  function append(nextFiles: File[], validate = validateCount) {
+    const version = clearVersion
+    const imageFiles = nextFiles.filter(isImageFile)
+    // Serialize paste/drop/file-picker batches and commit each batch atomically.
+    const pending = appendQueue.then(async () => {
+      if (!imageFiles.length || version !== clearVersion) return false
+      validate(files.value.length + imageFiles.length)
+      const nextReferences: StudioReference[] = []
+      for (const file of imageFiles) nextReferences.push(await createStudioReferenceFromFile(file))
+      if (version !== clearVersion) return false
+      // The user may switch model/mode while previews are being read.
+      validate(files.value.length + imageFiles.length)
+      files.value.push(...imageFiles)
+      references.value.push(...nextReferences)
+      return true
+    })
+    appendQueue = pending.catch(() => false)
+    return pending
   }
 
   function remove(index: number) {
@@ -129,6 +141,7 @@ export function useStudioReferenceRuntime(options: StudioReferenceRuntimeOptions
   }
 
   function clear() {
+    clearVersion++
     files.value = []
     references.value = []
   }
