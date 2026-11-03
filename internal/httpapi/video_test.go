@@ -75,8 +75,8 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 
 	server.runVideoJob(job, "animate this", "16:9", "480p", 6, "custom", nil)
 	config := mapValue(mapValue(mapValue(mapValue(sawVideoPayload["responseMetadata"])["modelConfigOverride"])["modelMap"])["videoGenModelConfig"])
-	if config["resolutionName"] != "720p" {
-		t.Fatalf("legacy resolution not upgraded: %v", config)
+	if config["resolutionName"] != "480p" {
+		t.Fatalf("requested resolution was overridden: %v", config)
 	}
 
 	server.videoMu.RLock()

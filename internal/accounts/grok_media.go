@@ -28,7 +28,7 @@ func mediaSnapshot(row map[string]any) grokMediaSnapshot {
 }
 func isMediaIntent(i Intent) bool { return i.Kind == "image" || i.Kind == "video" }
 
-// The supported routes share the observed Pro image/edit and 720p video balances.
+// Pro image/edit share imagePro; observed 480p/720p video routes share video720p.
 // Unknown counts never become zero or an invented unlimited quota.
 func GrokMediaQuotas(row map[string]any) map[string]FeatureQuota {
 	result := map[string]FeatureQuota{}

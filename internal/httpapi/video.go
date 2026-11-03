@@ -19,20 +19,23 @@ import (
 )
 
 type videoJob struct {
-	ID          string         `json:"id"`
-	Object      string         `json:"object"`
-	CreatedAt   int64          `json:"created_at"`
-	Status      string         `json:"status"`
-	Model       string         `json:"model"`
-	Progress    int            `json:"progress"`
-	Prompt      string         `json:"prompt"`
-	Seconds     string         `json:"seconds"`
-	Size        string         `json:"size"`
-	Quality     string         `json:"quality"`
-	CompletedAt int64          `json:"completed_at,omitempty"`
-	Error       map[string]any `json:"error,omitempty"`
-	ContentPath string         `json:"-"`
-	VideoURL    string         `json:"-"`
+	ID             string         `json:"id"`
+	Object         string         `json:"object"`
+	CreatedAt      int64          `json:"created_at"`
+	Status         string         `json:"status"`
+	Model          string         `json:"model"`
+	Progress       int            `json:"progress"`
+	Prompt         string         `json:"prompt"`
+	Seconds        string         `json:"seconds"`
+	Size           string         `json:"size"`
+	Quality        string         `json:"quality"`
+	ResolutionName string         `json:"resolution_name"`
+	AspectRatio    string         `json:"aspect_ratio"`
+	Preset         string         `json:"preset"`
+	CompletedAt    int64          `json:"completed_at,omitempty"`
+	Error          map[string]any `json:"error,omitempty"`
+	ContentPath    string         `json:"-"`
+	VideoURL       string         `json:"-"`
 }
 
 func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
@@ -58,34 +61,9 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "prompt cannot be empty", "invalid_request_error")
 		return
 	}
-	seconds := positiveInt(r.FormValue("seconds"), 6)
-	if _, ok := protocol.VideoSegmentLengths(seconds); !ok {
-		writeError(w, http.StatusBadRequest, "seconds must be one of [6, 10, 15]", "invalid_request_error")
-		return
-	}
-	size := strings.TrimSpace(r.FormValue("size"))
-	if size == "" {
-		size = "720x1280"
-	}
-	aspect, ok := protocol.AspectRatio(size)
-	if !ok || (size != "720x1280" && size != "1280x720" && size != "1024x1024" && size != "1024x1792" && size != "1792x1024") {
-		writeError(w, http.StatusBadRequest, "invalid video size", "invalid_request_error")
-		return
-	}
-	resolution := strings.ToLower(strings.TrimSpace(r.FormValue("resolution_name")))
-	if resolution == "" {
-		resolution = "720p"
-	}
-	if resolution != "480p" && resolution != "720p" {
-		writeError(w, http.StatusBadRequest, "resolution_name must be 480p or 720p", "invalid_request_error")
-		return
-	}
-	preset := strings.ToLower(strings.TrimSpace(r.FormValue("preset")))
-	if preset == "" {
-		preset = "custom"
-	}
-	if preset != "fun" && preset != "normal" && preset != "spicy" && preset != "custom" {
-		writeError(w, http.StatusBadRequest, "invalid preset", "invalid_request_error")
+	options, err := parseVideoOptions(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
 	if _, ok := model.Find(s.catalog, modelName); !ok || modelName != "grok-imagine-video" {
@@ -97,7 +75,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(seconds), Size: size, Quality: "standard"}
+	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(options.Seconds), Size: options.Size, Quality: "standard", ResolutionName: options.Resolution, AspectRatio: options.Aspect, Preset: options.Preset}
 	s.videoMu.Lock()
 	s.videoJobs[job.ID] = job
 	s.videoMu.Unlock()
@@ -106,14 +84,12 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	s.videoMu.RLock()
 	initial := *job
 	s.videoMu.RUnlock()
-	go s.runVideoJob(job, prompt, aspect, resolution, seconds, preset, inputs)
+	go s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
 	writeJSON(w, http.StatusOK, initial)
 }
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput) {
 	s.setVideoStatus(job, "in_progress", 1, nil)
-	// All entry points, including queued legacy jobs, use the high-quality route.
-	resolution = "720p"
 	s.ensureGrokMediaQuotas(context.Background())
 	segments, _ := protocol.VideoSegmentLengths(seconds)
 	units := 0

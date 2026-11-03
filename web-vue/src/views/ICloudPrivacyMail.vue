@@ -25,7 +25,7 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用且无注册预留的邮箱，操作日志会保留。注册中、等待重试或最终结果待核对的邮箱会显示“注册预留”，不代表账号已注册成功。
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用且无注册预留的邮箱，操作日志会保留。Grok 仅在注册执行期间显示“注册预留”；注册失败且没有保存账号结果后释放预留，等待自动重试期间也不保留。重试执行前重新取得预留，成功保存账号后才显示“已占用”。
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
@@ -131,7 +131,7 @@
                   size="xs"
                   variant="outline"
                   :disabled="Boolean(mailboxActionID) || mailbox.status === 'deleted' || mailboxDeletionBlocked(mailbox)"
-                  :title="mailboxHasReservation(mailbox) ? '邮箱仍被注册任务预留，请先结束重试或核对注册结果' : mailboxDeletionBlocked(mailbox) ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
+                  :title="mailboxHasReservation(mailbox) ? '邮箱仍有注册任务正在执行，请等待任务结束' : mailboxDeletionBlocked(mailbox) ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
                   root-class="text-rose-600"
                   @click="deleteMailbox(mailbox)"
                 >

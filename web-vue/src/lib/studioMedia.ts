@@ -43,20 +43,35 @@ export interface StudioVideoOptions {
   seconds: number
   size: string
   resolution: string
+  preset?: string
 }
-export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { seconds: 6, size: '720x1280', resolution: '720p' }
+export const VIDEO_SIZE_OPTIONS = [
+  { label: '9:16 竖屏', value: '720x1280' },
+  { label: '16:9 横屏', value: '1280x720' },
+  { label: '1:1 方形', value: '1024x1024' },
+  { label: '2:3', value: '1024x1792' },
+  { label: '3:2', value: '1792x1024' },
+]
+export const VIDEO_PRESET_OPTIONS = [
+  { label: '自定义', value: 'custom' }, { label: '普通', value: 'normal' },
+  { label: '趣味', value: 'fun' }, { label: '大胆', value: 'spicy' },
+]
+export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
 
 export function buildVideoForm(prompt: string, options: StudioVideoOptions, files: File[]) {
-  if (![6, 10, 15].includes(options.seconds)) throw new Error('视频时长仅支持 6、10、15 秒')
-  if (!['720x1280', '1280x720', '1024x1024'].includes(options.size)) throw new Error('请选择支持的视频比例')
+  if (options.seconds !== 6) throw new Error('当前 Grok Web 视频仅支持 6 秒，更长时长尚未验证账号权限')
+  if (!VIDEO_SIZE_OPTIONS.some(option => option.value === options.size)) throw new Error('请选择支持的视频比例')
   if (!['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
+  const preset = options.preset || 'custom'
+  if (!VIDEO_PRESET_OPTIONS.some(option => option.value === preset)) throw new Error('请选择支持的视频风格')
   validateStudioReferenceCount('video', '', files.length)
   const form = new FormData()
   form.set('model', 'grok-imagine-video')
   form.set('prompt', prompt)
   form.set('seconds', String(options.seconds))
   form.set('size', options.size)
-  form.set('resolution_name', '720p')
+  form.set('resolution_name', options.resolution)
+  form.set('preset', preset)
   files.forEach(file => form.append('input_reference', file))
   return form
 }

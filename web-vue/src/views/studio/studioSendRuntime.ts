@@ -1,6 +1,6 @@
 import { nextTick, type Ref } from 'vue'
 import { videosApi } from '@/api/videos'
-import { DEFAULT_VIDEO_OPTIONS, validateStudioReferenceCount } from '@/lib/studioMedia'
+import { validateStudioReferenceCount, type StudioVideoOptions } from '@/lib/studioMedia'
 import { normalizeImageCount } from '@/api/imageTasks'
 import type {
   StudioComposeMode,
@@ -37,6 +37,7 @@ export type StudioSendRuntimeInput = {
   chatModel: Ref<string>
   chatReasoningEffort: Ref<string>
   imageForm: StudioImageForm
+  videoForm: StudioVideoOptions
   toast: Pick<ReturnType<typeof useToast>, 'success' | 'error'>
   hooks: StudioSendRuntimeHooks
 }
@@ -59,6 +60,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
     composerRuntime,
     hooks,
     imageForm,
+    videoForm,
     imageTaskRuntime,
     videoRuntime,
     messageRuntime,
@@ -343,7 +345,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
       role: 'assistant', mode: 'video', content: '视频任务已提交', status: 'queued', model: 'grok-imagine-video',
     })
     try {
-      const task = await videosApi.create(prompt, DEFAULT_VIDEO_OPTIONS, files)
+      const task = await videosApi.create(prompt, { ...videoForm }, files)
       videoRuntime.apply(assistantMessage, task)
       hooks.touchConversation(conversation)
       toast.success('视频任务已提交')

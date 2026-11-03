@@ -38,8 +38,8 @@ func TestGrokFailureReleasesOnlyFinishedUnusedReservation(t *testing.T) {
 	}{
 		{name: "rejected before signup", stage: "send_code", failure: fail("send_code", "verification_required"), wantRelease: 1},
 		{name: "cancelled before signup", stage: "wait_code", failure: context.Canceled, wantRelease: 1},
-		{name: "waiting automatic retry", stage: "send_code", failure: fail("send_code", "network_error")},
-		{name: "uncertain signup", stage: "signup", failure: context.DeadlineExceeded},
+		{name: "waiting automatic retry", stage: "send_code", failure: fail("send_code", "network_error"), wantRelease: 1},
+		{name: "uncertain signup", stage: "signup", failure: context.DeadlineExceeded, wantRelease: 1},
 		{name: "saved account verification failed", verifyFailure: true},
 		{name: "completed account"},
 	} {
@@ -114,7 +114,7 @@ func TestGrokExhaustedRetryReleasesRootReservation(t *testing.T) {
 	}
 }
 
-func TestGrokReleasePreservesUncertainHistoryAndReportsCleanupFailure(t *testing.T) {
+func TestGrokReleaseIgnoresFailedHistoryAndReportsCleanupFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		uncertain     bool
@@ -122,7 +122,7 @@ func TestGrokReleasePreservesUncertainHistoryAndReportsCleanupFailure(t *testing
 		releaseErr    error
 		want          int32
 	}{
-		{name: "old uncertain signup", uncertain: true},
+		{name: "old uncertain signup", uncertain: true, want: 1},
 		{name: "journal failure", brokenJournal: true},
 		{name: "database failure", releaseErr: errors.New("private db error"), want: 1},
 	} {
@@ -155,5 +155,101 @@ func TestGrokReleasePreservesUncertainHistoryAndReportsCleanupFailure(t *testing
 				}
 			}
 		})
+	}
+}
+
+func TestGrokHistoricalReservationsAreReleasedWithoutBrowser(t *testing.T) {
+	old := grokCompensationFixture(time.Now())
+	old.ID = "old"
+	old.Stage = "signup"
+	old.Error = "signup: account_page_missing"
+	old.AutoRetry.State = "superseded"
+	latest := cloneJob(old)
+	latest.ID = "latest"
+	latest.RootJobID = old.ID
+	latest.Stage = "send_code"
+	latest.Error = "send_code: email_input_missing"
+	latest.AutoRetry.State = "exhausted"
+	waiting := grokCompensationFixture(time.Now())
+	waiting.ID = "waiting"
+	waiting.Mailbox.Email = "waiting@example.test"
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	writeCompensationJobs(t, path, old, latest, waiting)
+	e := NewGrokEngine(path, func(GrokConfig) (MailSource, GrokRegistrationFlow, error) {
+		t.Fatal("cleanup opened registration browser")
+		return nil, nil, nil
+	}, nil, nil)
+	released := map[string]int{}
+	e.SetMailboxReservationReleaser(func(ctx context.Context, j RegistrationJob) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		released[mailboxClaimJobID(j)]++
+		return nil
+	})
+	if err := e.ReconcileMailboxReservations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if released["old"] != 1 || released["waiting"] != 1 || len(released) != 2 {
+		t.Fatal(released)
+	}
+	got, _ := e.getJob(waiting.ID)
+	if got.AutoRetry.State != "waiting" {
+		t.Fatal("cleanup changed retry plan", got.AutoRetry)
+	}
+}
+
+func TestGrokReleasePreservesSavedAndRunningJobs(t *testing.T) {
+	for _, kind := range []string{"running", "queued", "closing_browser", "saved", "imported"} {
+		t.Run(kind, func(t *testing.T) {
+			failed := grokCompensationFixture(time.Now())
+			failed.ID = "failed"
+			path := filepath.Join(t.TempDir(), "jobs.json")
+			writeCompensationJobs(t, path, failed)
+			e := NewGrokEngine(path, nil, nil, nil)
+			other := cloneJob(failed)
+			other.ID = "other"
+			switch kind {
+			case "running", "queued":
+				other.Status = kind
+			case "closing_browser":
+				e.active[other.ID] = &activeRegistration{}
+			case "saved":
+				other.Account = map[string]any{"sso": "fixture"}
+			case "imported":
+				other.Imported = true
+			}
+			e.jobs = append(e.jobs, other)
+			e.SetMailboxReservationReleaser(func(context.Context, RegistrationJob) error { t.Fatal("released live or saved account"); return nil })
+			e.releaseFailedMailboxReservation(failed.ID, nil)
+			if err := e.ReconcileMailboxReservations(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestGrokFactoryFailureStillReleasesOriginalReservation(t *testing.T) {
+	parent := grokCompensationFixture(time.Now())
+	path := filepath.Join(t.TempDir(), "jobs.json")
+	writeCompensationJobs(t, path, parent)
+	e := NewGrokEngine(path, func(GrokConfig) (MailSource, GrokRegistrationFlow, error) {
+		return nil, nil, fail("browser", "not_available")
+	}, nil, nil)
+	var released atomic.Int32
+	e.SetMailboxReservationReleaser(func(ctx context.Context, j RegistrationJob) error {
+		if mailboxClaimJobID(j) != parent.ID || j.ID == parent.ID || ctx.Err() != nil {
+			t.Error("wrong cleanup context or claim", j.ID)
+		}
+		released.Add(1)
+		return nil
+	})
+	started, err := e.RunCompensation(grokConfigFixture(), compensationDue(t, parent))
+	if err != nil || !started {
+		t.Fatal(started, err)
+	}
+	waitGrokCompensation(t, e)
+	if released.Load() != 1 {
+		t.Fatal("factory failure left reservation", released.Load())
 	}
 }

@@ -9,8 +9,8 @@ test('saved legacy image models migrate to Pro and editing switches back to Pro'
  }
  assert.equal(resolveStudioImageModel('grok-imagine-image-pro',true,['gpt-image-2','grok-imagine-image-edit']),'grok-imagine-image-edit')
 })
-test('legacy video options always submit 720p',()=>{
- for (const resolution of ['480p','720p']) assert.equal(buildVideoForm('test',{seconds:6,size:'720x1280',resolution},[]).get('resolution_name'),'720p')
+test('video options preserve the requested resolution',()=>{
+ for (const resolution of ['480p','720p']) assert.equal(buildVideoForm('test',{seconds:6,size:'720x1280',resolution},[]).get('resolution_name'),resolution)
 })
 
 async function imageSizes() {
@@ -31,4 +31,16 @@ test('Grok generation keeps Pro 1K ratios and hides unverified 2K/4K choices',as
  assert.equal(isImageSizeSupportedByModel('3840x2160','grok-imagine-image-pro'),false)
  assert.equal(isImageSizeSupportedByModel('2048x2048','grok-imagine-image-edit'),false)
  assert.deepEqual(resolveImageSizePresets('grok-imagine-image-edit').map(p=>p.value),['auto','1024x1024'])
+})
+
+// Verify that all controls reach the multipart request without fixed defaults.
+test('video settings serialize duration, ratio, resolution and style', () => {
+ const form = buildVideoForm('paper plane', { seconds: 6, size: '1792x1024', resolution: '480p', preset: 'fun' }, [])
+ assert.equal(form.get('seconds'), '6')
+ assert.equal(form.get('size'), '1792x1024')
+ assert.equal(form.get('resolution_name'), '480p')
+ assert.equal(form.get('preset'), 'fun')
+ for (const options of [{seconds: 5}, {seconds: 10}, {seconds: 15}, {size: '1920x1080'}, {resolution: '1080p'}, {preset: 'unknown'}]) {
+  assert.throws(() => buildVideoForm('test', {seconds: 6, size: '720x1280', resolution: '720p', ...options}, []))
+ }
 })

@@ -101,3 +101,40 @@ func TestFailedReservationReleasePreservesOtherChannelAndRetirement(t *testing.T
 		t.Fatalf("view=%+v err=%v", v, err)
 	}
 }
+
+func TestRetryReclaimsReleasedMailboxWithoutStealingAnotherTask(t *testing.T) {
+	s := isolatedMailboxStore(t)
+	ctx := context.Background()
+	box := seedMailbox(t, s, "retry-reclaim")
+	if err := s.EnsureRegistrationClaim(ctx, "grok", "old-root", box); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release(ctx, "grok", "old-root", box, "registration_failed_without_account"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureRegistrationClaim(ctx, "grok", "old-root", box); err != nil {
+		t.Fatal("retry could not reacquire free mailbox", err)
+	}
+	if err := s.Release(ctx, "grok", "old-root", box, "registration_failed_without_account"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureRegistrationClaim(ctx, "grok", "new-root", box); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureRegistrationClaim(ctx, "grok", "old-root", box); !errors.Is(err, ErrMailboxInUse) {
+		t.Fatal("retry stole new task reservation", err)
+	}
+	if err := s.Release(ctx, "grok", "old-root", box, "stale cleanup"); err != nil {
+		t.Fatal(err)
+	}
+	rows, _, err := s.List(ctx, 1, 20, MailboxListFilter{})
+	if err != nil || len(rows) != 1 || !rows[0].GrokReserved {
+		t.Fatal("stale cleanup released another task", rows, err)
+	}
+	if err := s.Commit(ctx, "grok", "new-root", "new-account", box); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureRegistrationClaim(ctx, "grok", "old-root", box); !errors.Is(err, ErrMailboxInUse) {
+		t.Fatal("retry reused successful account", err)
+	}
+}

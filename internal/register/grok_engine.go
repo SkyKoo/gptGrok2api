@@ -34,20 +34,21 @@ func waitGrokCode(mail MailSource, ctx context.Context, box Mailbox, after time.
 // GrokEngine mirrors FreeEngine's durable task lifecycle while keeping its
 // journal and account callbacks separate from OpenAI.
 type GrokEngine struct {
-	ProxyRouting      *ProxyRouting
-	mu                sync.Mutex
-	path              string
-	jobs              []RegistrationJob
-	active            map[string]*activeRegistration
-	runCancel         context.CancelFunc
-	runDone           chan struct{}
-	runThreads        int
-	loadError         error
-	compensationError string
-	closing           bool
-	factory           GrokFactory
-	importAccount     ImportAccount
-	verifyAccount     VerifyAccount
+	ProxyRouting              *ProxyRouting
+	mu                        sync.Mutex
+	path                      string
+	jobs                      []RegistrationJob
+	active                    map[string]*activeRegistration
+	runCancel                 context.CancelFunc
+	runDone                   chan struct{}
+	runThreads                int
+	loadError                 error
+	compensationError         string
+	releaseMailboxReservation func(context.Context, RegistrationJob) error
+	closing                   bool
+	factory                   GrokFactory
+	importAccount             ImportAccount
+	verifyAccount             VerifyAccount
 }
 
 func NewGrokEngine(path string, factory GrokFactory, importer ImportAccount, verifier VerifyAccount) *GrokEngine {

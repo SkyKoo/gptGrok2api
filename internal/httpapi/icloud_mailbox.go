@@ -446,6 +446,11 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 	} else {
 		reconcile("grok", grok, "grok_claims")
 	}
+	if s.grokRegister != nil {
+		if err := s.grokRegister.ReconcileMailboxReservations(ctx); err != nil {
+			result["errors"] = append(result["errors"].([]string), "失败注册预留清理未完成")
+		}
+	}
 	result["success"] = len(result["errors"].([]string)) == 0
 	writeJSON(w, http.StatusOK, result)
 }

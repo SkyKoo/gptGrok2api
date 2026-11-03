@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -57,6 +58,16 @@ func (s *Server) initGrokRegistration() {
 	}
 	s.grokRegister = registerruntime.NewGrokEngine(filepath.Join(journalDir, "grok_registration_tasks.json"), factory, s.importRegisteredGrokAccount, s.verifyRegisteredGrokAccount)
 	s.grokRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
+	if s.mailboxStore != nil {
+		s.grokRegister.SetMailboxReservationReleaser(func(ctx context.Context, job registerruntime.RegistrationJob) error {
+			return s.mailboxStore.Release(ctx, "grok", firstNonEmpty(job.RootJobID, job.ID), mailboxFromRegister(job.Mailbox), "registration_failed_without_account")
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.grokRegister.ReconcileMailboxReservations(ctx); err != nil {
+			log.Printf("grok failed mailbox reservation cleanup unavailable")
+		}
+	}
 }
 
 func (s *Server) importRegisteredGrokAccount(ctx context.Context, id string, account map[string]any) error {

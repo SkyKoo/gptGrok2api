@@ -6,20 +6,70 @@ import (
 	"time"
 )
 
-// 只有取得账号结果后才提交占用。确定失败且不再自动重试时释放注册预留；
-// 最终提交结果未知、已保存账号或仍在等待补偿时保留预留，避免重复建号。
-func (e *GrokEngine) releaseFailedMailboxReservation(id string, mail MailSource) {
-	releaser, ok := mail.(interface {
-		Release(context.Context, Mailbox, string) error
-	})
-	if !ok {
-		return
+// 预留只保护正在执行的注册。单次失败后释放，自动重试开始前重新取得；
+// 已保存账号、其他正在执行的同邮箱任务及其他任务链的预留不能释放。
+func (e *GrokEngine) canReleaseMailboxLocked(job RegistrationJob, finishingID string) bool {
+	if e.loadError != nil || job.Mailbox.Email == "" {
+		return false
 	}
+	switch job.Status {
+	case "registration_pending", "failed", "cancelled", "interrupted":
+	default:
+		return false
+	}
+	for _, other := range e.jobs {
+		if !strings.EqualFold(other.Mailbox.Email, job.Mailbox.Email) {
+			continue
+		}
+		if other.Imported || other.Verified || len(other.Account) > 0 || other.Status == "queued" || other.Status == "running" {
+			return false
+		}
+		if _, active := e.active[other.ID]; active && other.ID != finishingID {
+			return false
+		}
+	}
+	return true
+}
+
+// 直接操作本地邮箱资源，不依赖注册浏览器或邮箱上游是否能启动。
+func (e *GrokEngine) SetMailboxReservationReleaser(release func(context.Context, RegistrationJob) error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.releaseMailboxReservation = release
+}
+
+// 启动时和手动核对邮箱时清理旧失败任务的遗留预留；不改变任务重试计划。
+func (e *GrokEngine) ReconcileMailboxReservations(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.loadError != nil {
-		e.mu.Unlock()
-		return
+		return e.loadError
 	}
+	if e.releaseMailboxReservation == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, job := range e.jobs {
+		if !e.canReleaseMailboxLocked(job, "") {
+			continue
+		}
+		key := strings.ToLower(job.Mailbox.Email) + "/" + mailboxClaimJobID(job)
+		if seen[key] {
+			continue
+		}
+		if err := e.releaseMailboxReservation(ctx, cloneJob(job)); err != nil {
+			return err
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func (e *GrokEngine) releaseFailedMailboxReservation(id string, mail MailSource) {
+	// 释放不复用已经取消的注册 context。锁内执行，避免手动重试与释放交叉。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	e.mu.Lock()
 	var job RegistrationJob
 	for _, candidate := range e.jobs {
 		if candidate.ID == id {
@@ -27,28 +77,22 @@ func (e *GrokEngine) releaseFailedMailboxReservation(id string, mail MailSource)
 			break
 		}
 	}
-	release := job.Mailbox.Email != "" && (job.Status == "registration_pending" || job.Status == "failed" || job.Status == "cancelled")
-	for _, other := range e.jobs {
-		if !strings.EqualFold(other.Mailbox.Email, job.Mailbox.Email) {
-			continue
-		}
-		// 包括同邮箱的旧任务：后续一次失败不能抹掉此前未知的最终注册结果。
-		if other.Imported || other.Verified || len(other.Account) > 0 || grokRegistrationResultUncertain(other) || other.Status == "queued" || other.Status == "running" ||
-			other.AutoRetry != nil && (other.AutoRetry.State == "waiting" || other.AutoRetry.State == "running") {
-			release = false
-			break
-		}
-	}
-	e.mu.Unlock()
-	if !release {
+	if !e.canReleaseMailboxLocked(job, id) {
+		e.mu.Unlock()
 		return
 	}
-	// 任务超时/主动取消后仍须完成本地预留清理，不复用已取消的注册 context。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := releaser.Release(ctx, job.Mailbox, "registration_failed_without_account"); err != nil {
+	var err error
+	if e.releaseMailboxReservation != nil {
+		err = e.releaseMailboxReservation(ctx, job)
+	} else if releaser, ok := mail.(interface {
+		Release(context.Context, Mailbox, string) error
+	}); ok {
+		err = releaser.Release(ctx, job.Mailbox, "registration_failed_without_account")
+	}
+	e.mu.Unlock()
+	if err != nil {
 		_ = e.change(id, func(j *RegistrationJob) {
-			appendRegistrationLog(j, "mailbox_release_failed", "注册未成功，释放邮箱预留失败，需核对邮箱资产", "error")
+			appendRegistrationLog(j, "mailbox_release_failed", "注册未成功，释放邮箱预留失败", "error")
 		})
 	}
 }

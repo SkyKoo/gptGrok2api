@@ -100,6 +100,8 @@
         v-model:chat-model="chatModel"
         v-model:chat-reasoning-effort="chatReasoningEffort"
         :image-form="imageForm"
+        :video-form="videoForm"
+        @update:video-form="Object.assign(videoForm, $event)"
         :chat-model-options="chatModelOptions"
         :chat-model-labels="modelFormRuntime.chatModelLabels.value"
         :image-model-options="imageModelOptions"
@@ -157,10 +159,10 @@
 </template>
 
 <script setup lang="ts">
-import { validateStudioReferenceCount } from '@/lib/studioMedia'
+import { DEFAULT_VIDEO_OPTIONS, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
-import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -221,6 +223,7 @@ const toast = useToast()
 const confirmDialog = useConfirmDialog()
 const pageRuntime = usePageRuntime('studio')
 const composerRuntime = useStudioComposerRuntime()
+const videoForm = reactive({ ...DEFAULT_VIDEO_OPTIONS })
 const referenceRuntime = useStudioReferenceRuntime({
   validateCount: count => validateStudioReferenceCount(
     composerRuntime.composeMode.value === 'search' ? 'image' : composerRuntime.composeMode.value,
@@ -355,6 +358,7 @@ const sendRuntime = useStudioSendRuntime({
   chatStreamRuntime,
   imageTaskRuntime,
   videoRuntime,
+  videoForm,
   chatModel,
   chatReasoningEffort,
   imageForm,

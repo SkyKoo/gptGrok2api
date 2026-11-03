@@ -115,7 +115,40 @@
               </div>
             </template>
 
-            <span v-else-if="mode === 'video'" class="text-xs text-muted-foreground">Grok Imagine Video · 6 秒 · 720p · 竖屏</span>
+            <div v-else-if="mode === 'video'" ref="settingsAnchorRef" class="chat-settings-anchor">
+              <StudioToolbarSelectButton
+                class="chat-summary-button justify-between gap-1.5"
+                :expanded="settingsOpen"
+                aria-label="视频设置"
+                @click.stop="toggleSettings"
+              >
+                <Icon icon="lucide:sliders-horizontal" class="h-3.5 w-3.5" />
+                <span>{{ videoSummaryLabel }}</span>
+                <Icon icon="lucide:chevron-down" class="h-3.5 w-3.5" />
+              </StudioToolbarSelectButton>
+              <div v-if="settingsOpen" class="studio-size-popover studio-video-popover" @click.stop>
+                <div class="studio-video-heading">视频设置 · Grok Imagine Video</div>
+                <div class="studio-video-field">
+                  <span class="studio-video-label">时长</span>
+                  <span class="studio-video-value">6 秒</span>
+                </div>
+                <div v-for="group in videoSettingGroups" :key="group.key" class="studio-video-field">
+                  <span class="studio-video-label">{{ group.label }}</span>
+                  <div class="studio-video-choices">
+                    <Button
+                      v-for="option in group.options"
+                      :key="option.value"
+                      size="sm"
+                      :variant="String(videoForm[group.key]) === option.value ? 'primary' : 'outline'"
+                      :aria-pressed="String(videoForm[group.key]) === option.value"
+                      root-class="studio-video-choice"
+                      @click="selectVideoSetting(group.key, option.value)"
+                    >{{ option.label }}</Button>
+                  </div>
+                </div>
+                <p class="studio-size-current">当前免费 Web 通道仅开放 6 秒。分辨率为请求档位，实际输出以上游结果为准。</p>
+              </div>
+            </div>
             <template v-else-if="mode === 'image'">
               <div ref="settingsAnchorRef" class="chat-settings-anchor">
                 <StudioToolbarSelectButton
@@ -269,7 +302,7 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
-import { studioReferenceLimit, studioReferenceCountError } from '@/lib/studioMedia'
+import { studioReferenceLimit, studioReferenceCountError, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -283,6 +316,7 @@ const props = defineProps<{
   chatModel: string
   chatReasoningEffort: string
   imageForm: StudioImageForm
+  videoForm: StudioVideoOptions
   chatModelOptions: string[]
   chatModelLabels?: Record<string, string>
   imageModelOptions: string[]
@@ -304,6 +338,7 @@ const emit = defineEmits<{
   'update:imageSize': [size: string]
   'update:imageQuality': [quality: string]
   'update:imageCount': [count: number]
+  'update:videoForm': [options: StudioVideoOptions]
   submit: []
   stop: []
   'cancel-edit': []
@@ -381,6 +416,16 @@ const imageModelSelectOptions = computed(() => props.imageModelOptions.map((mode
   label: model,
   value: model,
 })))
+
+const videoSettingGroups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
+  { key: 'size', label: '宽高比', options: VIDEO_SIZE_OPTIONS },
+  { key: 'resolution', label: '分辨率', options: ['480p', '720p'].map(value => ({ label: value, value })) },
+  { key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS },
+]
+const videoSummaryLabel = computed(() => `${props.videoForm.seconds} 秒 · ${props.videoForm.resolution} · ${VIDEO_SIZE_OPTIONS.find(option => option.value === props.videoForm.size)?.label || '9:16 竖屏'}`)
+function selectVideoSetting(key: keyof StudioVideoOptions, value: string) {
+  emit('update:videoForm', { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : value })
+}
 
 const sizePresets = computed(() => resolveImageSizePresets(props.imageForm.model))
 const selectedPreset = computed(() => sizePresets.value.find((preset) => preset.value === props.imageForm.size))
@@ -978,6 +1023,54 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow-floating);
 }
 
+.studio-size-popover.studio-video-popover {
+  width: min(24rem, calc(100vw - 2rem));
+  padding: 0.75rem;
+  border-radius: 0.75rem;
+}
+
+.studio-video-heading {
+  margin-bottom: 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.studio-video-field {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: start;
+  margin-top: 0.55rem;
+}
+
+.studio-video-label,
+.studio-video-value {
+  padding-top: 0.3rem;
+  font-size: 0.75rem;
+  line-height: 1.2rem;
+}
+
+.studio-video-label {
+  color: hsl(var(--muted-foreground));
+}
+
+.studio-video-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+:deep(.studio-video-choice) {
+  width: auto;
+  min-width: 3rem;
+  height: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0 0.6rem;
+  border-radius: 0.45rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
 .studio-size-section + .studio-size-section {
   margin-top: 0.85rem;
 }
@@ -1070,6 +1163,11 @@ onBeforeUnmount(() => {
     left: 1rem;
     width: auto;
     max-height: min(30rem, calc(100dvh - 7rem));
+  }
+
+  .studio-size-popover.studio-video-popover {
+    left: auto;
+    right: 1rem;
   }
 
   .studio-choice-grid,
