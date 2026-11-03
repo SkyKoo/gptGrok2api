@@ -301,7 +301,7 @@ func TestMailboxReconcileRepairsOnlyProvenDeletedClaims(t *testing.T) {
 	}
 	views, _, _ := s.mailboxStore.List(ctx, 1, 100, mailboxstore.MailboxListFilter{})
 	for _, v := range views {
-		if !v.GrokClaimed || (v.Email == "deleted@example.test" && v.OpenAIClaimed) || (v.Email != "deleted@example.test" && !v.OpenAIClaimed) {
+		if !v.GrokClaimed || (v.Email == "deleted@example.test" && v.OpenAIClaimed) || (v.Email != "deleted@example.test" && !v.OpenAIClaimed && !v.OpenAIReserved) {
 			t.Fatalf("unsafe repair %+v", v)
 		}
 	}

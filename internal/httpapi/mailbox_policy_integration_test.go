@@ -66,3 +66,26 @@ func TestMailboxChannelPolicyAPI(t *testing.T) {
 		t.Fatalf("counts=%+v err=%v", counts, err)
 	}
 }
+
+func TestMailboxReservationAPIIsDistinctFromAccount(t *testing.T) {
+	s, _ := mailboxHTTPTestServer(t)
+	box := seedHTTPMailbox(t, s, "reserved-api")
+	if err := s.mailboxStore.EnsureRegistrationClaim(context.Background(), "grok", "pending", box); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.Handler()
+	rec := adminRequest(handler, "GET", "/api/icloud/mailboxes?platform=reserved", nil)
+	var payload struct {
+		Mailboxes []struct {
+			GrokClaimed    bool `json:"grok_claimed"`
+			GrokReserved   bool `json:"grok_reserved"`
+			OpenAIReserved bool `json:"openai_reserved"`
+		} `json:"mailboxes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != 200 || len(payload.Mailboxes) != 1 || payload.Mailboxes[0].GrokClaimed || !payload.Mailboxes[0].GrokReserved || payload.Mailboxes[0].OpenAIReserved {
+		t.Fatalf("response=%s", rec.Body.String())
+	}
+}

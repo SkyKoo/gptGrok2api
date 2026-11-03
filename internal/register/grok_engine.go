@@ -198,10 +198,12 @@ func (e *GrokEngine) runTask(parent context.Context, id string, cfg GrokConfig) 
 	e.active[id] = &activeRegistration{cancel: cancel, done: done}
 	e.mu.Unlock()
 	defer e.finishTask(id)
+	var mail MailSource
 	defer func() {
 		if recover() != nil {
 			e.failJob(id, fail("task", "internal_error"))
 		}
+		e.releaseFailedMailboxReservation(id, mail)
 	}()
 	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "grok", &cfg.Proxy, e.getJob, e.change)
 	if err != nil {
@@ -604,6 +606,7 @@ func (e *GrokEngine) RetryRegistration(raw map[string]any, id string) error {
 
 func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job RegistrationJob, cfg GrokConfig) {
 	defer e.finishTask(id)
+	var mail MailSource
 	var runErr error
 	defer func() {
 		if recover() != nil {
@@ -616,6 +619,7 @@ func (e *GrokEngine) runSavedRegistration(ctx context.Context, id string, job Re
 			}
 			e.failJob(id, runErr)
 		}
+		e.releaseFailedMailboxReservation(id, mail)
 	}()
 	releaseProxy, err := e.ProxyRouting.acquire(ctx, id, "grok", &cfg.Proxy, e.getJob, e.change)
 	if err != nil {

@@ -44,11 +44,11 @@ func TestDisabledMailboxLifecycle(t *testing.T) {
 	if err := store.EnsureClaim(ctx, "openai", prefix+"job", first); err != nil {
 		t.Fatal(err)
 	}
-	views, total, err := store.List(ctx, 1, 20, MailboxListFilter{Status: "disabled", SourceID: "hme-test", Platform: "openai"})
+	views, total, err := store.List(ctx, 1, 20, MailboxListFilter{Status: "disabled", SourceID: "hme-test", Platform: "reserved"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 1 || len(views) != 1 || views[0].ID != first.ID || !views[0].OpenAIClaimed {
+	if total != 1 || len(views) != 1 || views[0].ID != first.ID || !views[0].OpenAIReserved || views[0].OpenAIClaimed {
 		t.Fatalf("disabled/platform filter mismatch: total=%d views=%+v", total, views)
 	}
 	if err := store.Release(ctx, "openai", prefix+"job", first, "integration_release"); err != nil {

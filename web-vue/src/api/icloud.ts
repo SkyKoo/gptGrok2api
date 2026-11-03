@@ -62,6 +62,8 @@ export type ICloudMailbox = {
   grok_retired?: boolean
   openai_claimed?: boolean
   grok_claimed?: boolean
+  openai_reserved?: boolean
+  grok_reserved?: boolean
   account_id?: string
   account_apple_id?: string
   account_label?: string

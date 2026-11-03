@@ -65,6 +65,8 @@ type MailboxView struct {
 	GrokDisabled   bool       `json:"grok_disabled"`
 	OpenAIClaimed  bool       `json:"openai_claimed"`
 	GrokClaimed    bool       `json:"grok_claimed"`
+	OpenAIReserved bool       `json:"openai_reserved"`
+	GrokReserved   bool       `json:"grok_reserved"`
 	Claims         []Claim    `json:"claims,omitempty"`
 	Capabilities   any        `json:"capabilities,omitempty"`
 	Metadata       any        `json:"metadata,omitempty"`
@@ -106,8 +108,8 @@ var (
 )
 
 // MailboxListFilter controls the mailbox asset list shown in the admin UI.
-// Platform filters are based on active or reserved claims, so a mailbox can
-// be selected independently for GPT and Grok.
+// Platform occupancy requires an active account claim. Registration reservations
+// have a separate filter and continue to protect allocation and deletion.
 type MailboxListFilter struct {
 	Search   string
 	Status   string
@@ -558,8 +560,12 @@ func (s *Store) ensureClaim(ctx context.Context, platform, jobID string, item Ma
 			return err
 		}
 	}
-	var claimID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM mailbox_claims WHERE mailbox_id=$1 AND platform=$2 AND status IN ('reserved','active') LIMIT 1`, item.ID, platform).Scan(&claimID)
+	var claimID, claimJob, claimStatus string
+	err = tx.QueryRowContext(ctx, `SELECT id,registration_job_id,status FROM mailbox_claims WHERE mailbox_id=$1 AND platform=$2 AND status IN ('reserved','active') LIMIT 1`, item.ID, platform).Scan(&claimID, &claimJob, &claimStatus)
+	if err == nil && registration && (claimStatus == "active" || claimJob != jobID) {
+		tx.Rollback()
+		return ErrMailboxInUse
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		claimID = newID("clm")
 		if _, err = tx.ExecContext(ctx, `INSERT INTO mailbox_claims(id, mailbox_id, platform, registration_job_id, status) VALUES ($1,$2,$3,$4,'reserved')`, claimID, item.ID, platform, jobID); err != nil {
@@ -633,7 +639,7 @@ func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbo
 		return err
 	}
 	var canonicalID string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, item.Email).Scan(&canonicalID); err == nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1 FOR UPDATE`, item.Email).Scan(&canonicalID); err == nil {
 		item.ID = canonicalID
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		tx.Rollback()
@@ -643,7 +649,7 @@ func (s *Store) Release(ctx context.Context, platform, jobID string, item Mailbo
 		return nil
 	}
 	var claimID, sourceType string
-	err = tx.QueryRowContext(ctx, `SELECT c.id,m.source_type FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.mailbox_id=$1 AND c.platform=$2 AND (c.registration_job_id=$3 OR c.status IN ('reserved','active')) ORDER BY c.updated_at DESC LIMIT 1`, item.ID, strings.ToLower(strings.TrimSpace(platform)), strings.TrimSpace(jobID)).Scan(&claimID, &sourceType)
+	err = tx.QueryRowContext(ctx, `SELECT c.id,m.source_type FROM mailbox_claims c JOIN mailboxes m ON m.id=c.mailbox_id WHERE c.mailbox_id=$1 AND c.platform=$2 AND c.registration_job_id=$3 AND c.status='reserved' AND c.account_id='' ORDER BY c.updated_at DESC LIMIT 1`, item.ID, strings.ToLower(strings.TrimSpace(platform)), strings.TrimSpace(jobID)).Scan(&claimID, &sourceType)
 	if errors.Is(err, sql.ErrNoRows) {
 		tx.Rollback()
 		return nil
@@ -826,6 +832,12 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	}
 	if status := strings.TrimSpace(strings.ToLower(filter.Status)); status != "" {
 		switch status {
+		case "available":
+			conditions = append(conditions, "m.status NOT IN ('disabled','cleanup_pending','deleted') AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status IN ('reserved','active'))")
+		case "active":
+			conditions = append(conditions, "m.status NOT IN ('disabled','cleanup_pending','deleted') AND EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='active')")
+		case "reserved":
+			conditions = append(conditions, "m.status NOT IN ('disabled','cleanup_pending','deleted') AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='active') AND EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='reserved')")
 		case "retired":
 			conditions = append(conditions, "(m.status<>'deleted' AND EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id))")
 		case "retired_openai", "retired_grok":
@@ -843,9 +855,11 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	}
 	switch platform := strings.TrimSpace(strings.ToLower(filter.Platform)); platform {
 	case "openai", "grok":
-		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.platform="+addArg(platform)+" AND fp.status IN ('reserved','active'))")
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.platform="+addArg(platform)+" AND fp.status='active')")
+	case "reserved":
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.status='reserved')")
 	case "unclaimed":
-		conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.status IN ('reserved','active'))")
+		conditions = append(conditions, "NOT EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.status='active')")
 	}
 	where := "WHERE " + strings.Join(conditions, " AND ")
 	var total int
@@ -859,7 +873,8 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 		(m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='grok')),
 		EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='openai'),
         EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='grok'),
-		COALESCE(bool_or(c.platform='openai' AND c.status IN ('reserved','active')),false), COALESCE(bool_or(c.platform='grok' AND c.status IN ('reserved','active')),false)
+		COALESCE(bool_or(c.platform='openai' AND c.status='active'),false), COALESCE(bool_or(c.platform='grok' AND c.status='active'),false),
+		COALESCE(bool_or(c.platform='openai' AND c.status='reserved'),false), COALESCE(bool_or(c.platform='grok' AND c.status='reserved'),false)
 		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder, args...)
 	if err != nil {
 		return nil, 0, err
@@ -868,8 +883,18 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	views := []MailboxView{}
 	for rows.Next() {
 		var view MailboxView
-		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIRetired, &view.GrokRetired, &view.OpenAIClaimed, &view.GrokClaimed); err != nil {
+		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIRetired, &view.GrokRetired, &view.OpenAIClaimed, &view.GrokClaimed, &view.OpenAIReserved, &view.GrokReserved); err != nil {
 			return nil, 0, err
+		}
+		if view.Status != "disabled" && view.Status != "cleanup_pending" && view.Status != "deleted" {
+			switch {
+			case view.OpenAIClaimed || view.GrokClaimed:
+				view.Status = "active"
+			case view.OpenAIReserved || view.GrokReserved:
+				view.Status = "reserved"
+			default:
+				view.Status = "available"
+			}
 		}
 		views = append(views, view)
 	}
@@ -1053,8 +1078,9 @@ func (s *Store) Counts(ctx context.Context) (map[string]any, error) {
 	result := map[string]any{}
 	for key, query := range map[string]string{
 		"mailboxes":       "SELECT count(*) FROM mailboxes",
-		"available":       "SELECT count(*) FROM mailboxes WHERE status='available'",
-		"active":          "SELECT count(*) FROM mailboxes WHERE status='active'",
+		"available":       "SELECT count(*) FROM mailboxes m WHERE status NOT IN ('disabled','cleanup_pending','deleted') AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status IN ('reserved','active'))",
+		"active":          "SELECT count(*) FROM mailboxes m WHERE status NOT IN ('disabled','cleanup_pending','deleted') AND EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='active')",
+		"reserved":        "SELECT count(*) FROM mailboxes m WHERE status NOT IN ('disabled','cleanup_pending','deleted') AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='active') AND EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='reserved')",
 		"disabled":        "SELECT count(*) FROM mailboxes m WHERE status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id)",
 		"cleanup_pending": "SELECT count(*) FROM mailboxes WHERE status='cleanup_pending'",
 		"retired":         "SELECT count(*) FROM mailboxes m WHERE status <> 'deleted' AND EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id)",

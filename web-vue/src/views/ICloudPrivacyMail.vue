@@ -25,7 +25,7 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用邮箱，操作日志会保留。
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用且无注册预留的邮箱，操作日志会保留。注册中、等待重试或最终结果待核对的邮箱会显示“注册预留”，不代表账号已注册成功。
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
@@ -109,8 +109,8 @@
                 <MetaChip size="xs" :tone="mailboxTone(mailbox)">{{ mailboxLabel(mailbox) }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
-                <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailbox.openai_claimed ? '已占用' : '未占用' }}</MetaChip>
-                <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailbox.grok_claimed ? '已占用' : '未占用' }}</MetaChip>
+                <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailboxOccupancyLabel(mailbox, 'openai') }}</MetaChip>
+                <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailboxOccupancyLabel(mailbox, 'grok') }}</MetaChip>
               </div>
               <div class="mt-2 flex flex-wrap gap-1.5">
                 <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'openai') || mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationLabel(mailbox, 'openai') }}</MetaChip>
@@ -130,8 +130,8 @@
                 <Button
                   size="xs"
                   variant="outline"
-                  :disabled="Boolean(mailboxActionID) || mailbox.status === 'deleted' || mailbox.openai_claimed || mailbox.grok_claimed"
-                  :title="mailbox.openai_claimed || mailbox.grok_claimed ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
+                  :disabled="Boolean(mailboxActionID) || mailbox.status === 'deleted' || mailboxDeletionBlocked(mailbox)"
+                  :title="mailboxHasReservation(mailbox) ? '邮箱仍被注册任务预留，请先结束重试或核对注册结果' : mailboxDeletionBlocked(mailbox) ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
                   root-class="text-rose-600"
                   @click="deleteMailbox(mailbox)"
                 >
@@ -171,7 +171,7 @@
 </template>
 
 <script setup lang="ts">
-import { mailboxRegistrationLabel, mailboxRegistrationRetired, mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
+import { mailboxOccupancyLabel, mailboxHasReservation, mailboxDeletionBlocked, mailboxRegistrationLabel, mailboxRegistrationRetired, mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
@@ -210,7 +210,8 @@ const sourceFilter = ref('')
 const mailboxStatusOptions = [
   { label: '全部状态', value: '' },
   { label: '可用', value: 'available' },
-  { label: '使用中', value: 'active' },
+  { label: '已占用', value: 'active' },
+  { label: '注册预留', value: 'reserved' },
   { label: '存在渠道禁用', value: 'disabled' },
   { label: 'GPT 已禁用', value: 'disabled_openai' },
   { label: 'Grok 已禁用', value: 'disabled_grok' },
@@ -225,6 +226,7 @@ const mailboxPlatformOptions = [
   { label: 'GPT 已占用', value: 'openai' },
   { label: 'Grok 已占用', value: 'grok' },
   { label: '暂无平台占用', value: 'unclaimed' },
+  { label: '注册预留', value: 'reserved' },
 ]
 const sourceFilterOptions = computed(() => [
   { label: '全部来源', value: '' },
@@ -289,7 +291,8 @@ const bridgeLabel = computed(() => bridge.value?.reachable ? '模块在线' : br
 const metrics = computed(() => [
   { label: '邮箱总数', value: counts.value.mailboxes || 0 },
   { label: '可用邮箱', value: counts.value.available || 0 },
-  { label: '使用中', value: counts.value.active || 0 },
+  { label: '已占用', value: counts.value.active || 0 },
+  { label: '注册预留', value: counts.value.reserved || 0 },
   { label: '有渠道禁用', value: counts.value.disabled || 0 },
   { label: '已使用', value: counts.value.retired || 0 },
   { label: '待清理', value: counts.value.cleanup_pending || 0 },
@@ -312,7 +315,8 @@ function mailboxSourceLabel(mailbox: ICloudMailbox) {
 function mailboxStatusLabel(mailbox: ICloudMailbox) {
   return ({
     available: '可用',
-    active: '使用中',
+    active: '已占用',
+    reserved: '注册预留',
     disabled: '两渠道均禁用',
     cleanup_pending: '待清理',
     deleted: '已删除',
@@ -333,6 +337,7 @@ function mailboxLabel(mailbox: ICloudMailbox) {
   if (mailbox.status === 'deleted') return '已删除'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return '两平台均占用'
   if (mailbox.openai_claimed || mailbox.grok_claimed) return '部分占用'
+  if (mailboxHasReservation(mailbox)) return '注册预留'
   if (mailbox.openai_retired || mailbox.grok_retired) return '已使用，待清理'
   return '可用'
 }
@@ -343,6 +348,7 @@ function mailboxTone(mailbox: ICloudMailbox): 'success' | 'info' | 'warning' | '
   if (mailbox.status === 'deleted') return 'danger'
   if (mailbox.openai_claimed && mailbox.grok_claimed) return 'warning'
   if (mailbox.openai_claimed || mailbox.grok_claimed) return 'info'
+  if (mailboxHasReservation(mailbox)) return 'warning'
   if (mailbox.openai_retired || mailbox.grok_retired) return 'warning'
   return 'success'
 }
@@ -388,7 +394,7 @@ async function setMailboxStatus(mailbox: ICloudMailbox, platform: RegistrationCh
 
 async function deleteMailbox(mailbox: ICloudMailbox) {
   const id = String(mailbox.id || '')
-  if (!id || mailbox.openai_claimed || mailbox.grok_claimed) return
+  if (!id || mailboxDeletionBlocked(mailbox)) return
   if (!window.confirm(`确认删除邮箱 ${mailbox.email || id}？这会同步删除上游邮箱；在其他渠道使用过此邮箱的账号也会失去收件能力。操作日志将保留。`)) return
   mailboxActionID.value = id
   notice.value = ''

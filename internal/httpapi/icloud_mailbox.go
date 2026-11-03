@@ -234,15 +234,12 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]map[string]any, 0, len(views))
 	for _, view := range views {
-		status := view.Status
-		if status == "active" && view.OpenAIClaimed && view.GrokClaimed {
-			status = "active"
-		}
 		items = append(items, map[string]any{
 			"id": view.ID, "email": view.Email, "source_id": view.SourceID, "source_type": view.SourceType,
 			"source_account_id": view.SourceAccountID, "source_mailbox_id": view.SourceMailboxID,
-			"status": status, "api_active": true, "icloud_active": true,
+			"status": view.Status, "api_active": true, "icloud_active": true,
 			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed,
+			"openai_reserved": view.OpenAIReserved, "grok_reserved": view.GrokReserved,
 			"openai_disabled": view.OpenAIDisabled, "grok_disabled": view.GrokDisabled,
 			"openai_retired": view.OpenAIRetired, "grok_retired": view.GrokRetired,
 			"last_error": view.LastError, "created_at": view.CreatedAt, "updated_at": view.UpdatedAt,
