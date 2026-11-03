@@ -21,6 +21,12 @@ func holdUncertainGrokRegistration(job *RegistrationJob) {
 
 func planGrokRegistrationCompensation(job *RegistrationJob, err error, now time.Time) {
 	planRegistrationCompensation(job, err, now)
+	if job.AutoRetry != nil && grokRegistrationRateLimited(*job) {
+		due := now.Add(registrationRetryDelay(job.Error, now, compensationDelays[min(max(job.AutoRetry.Attempts, 0), len(compensationDelays)-1)]))
+		if old, err := time.Parse(time.RFC3339Nano, job.AutoRetry.NotBeforeAt); err != nil || due.After(old) {
+			job.AutoRetry.NotBeforeAt = due.UTC().Format(time.RFC3339Nano)
+		}
+	}
 	holdUncertainGrokRegistration(job)
 }
 
@@ -87,7 +93,12 @@ func (e *GrokEngine) RunCompensation(raw map[string]any, now time.Time) (bool, e
 		planGrokRegistrationCompensation(&job, nil, now)
 		e.jobs[i] = job
 	}
-	if before != nil {
+	migrated := before != nil
+	if before == nil {
+		before = append([]RegistrationJob(nil), e.jobs...)
+	}
+	normalized := e.normalizeMailboxRetriesLocked(now)
+	if normalized || migrated {
 		if err := e.saveLocked(); err != nil {
 			e.jobs = before
 			e.loadError = err
@@ -148,6 +159,31 @@ func (e *GrokEngine) RunCompensation(raw map[string]any, now time.Time) (bool, e
 // 手动和自动补偿都创建子任务；整条任务链共享邮箱占用及自动重试预算。
 func (e *GrokEngine) startGrokCompensationLocked(index int, cfg GrokConfig, automatic bool, now time.Time) error {
 	parent := cloneJob(e.jobs[index])
+	for _, other := range e.jobs {
+		if !strings.EqualFold(strings.TrimSpace(other.Mailbox.Email), strings.TrimSpace(parent.Mailbox.Email)) {
+			continue
+		}
+		if other.ProxyBinding != nil && now.Before(other.ProxyBinding.BlockedUntil) {
+			return fail("proxy", "registration_cooldown")
+		}
+		if other.AutoRetry != nil {
+			if due, err := time.Parse(time.RFC3339Nano, other.AutoRetry.NotBeforeAt); err == nil && now.Before(due) {
+				return fail("task", "mailbox_registration_cooldown")
+			}
+			if grokRegistrationRateLimited(other) {
+				if due, err := time.Parse(time.RFC3339Nano, other.AutoRetry.NextAttemptAt); err == nil && now.Before(due) {
+					return fail("task", "mailbox_registration_cooldown")
+				}
+			}
+		}
+	}
+	if parent.AutoRetry != nil && parent.AutoRetry.Reason == "duplicate_mailbox_retry" {
+		return fail("task", "mailbox_retry_already_scheduled")
+	}
+	attempts := e.mailboxAutomaticAttemptsLocked(parent.Mailbox.Email)
+	if automatic && attempts >= len(compensationDelays) {
+		return fail("task", "retry_limit_reached")
+	}
 	job, err := newRegistrationAttempt(parent, now)
 	if err != nil {
 		return err
@@ -174,7 +210,7 @@ func (e *GrokEngine) startGrokCompensationLocked(index int, cfg GrokConfig, auto
 		job.AutoRetry.Attempts++
 		job.AutoRetry.State, job.AutoRetry.Reason = "running", ""
 		job.AutoRetry.LastAttemptAt = now.UTC().Format(time.RFC3339Nano)
-		delay := compensationDelays[min(job.AutoRetry.Attempts, len(compensationDelays)-1)]
+		delay := compensationDelays[min(attempts+1, len(compensationDelays)-1)]
 		job.AutoRetry.NextAttemptAt = now.Add(cfg.Timeout + delay).UTC().Format(time.RFC3339Nano)
 	} else if job.AutoRetry != nil {
 		finishRegistrationCompensation(&job, "manual_running")
@@ -182,14 +218,16 @@ func (e *GrokEngine) startGrokCompensationLocked(index int, cfg GrokConfig, auto
 	job.MailboxAPIBase = cfg.HME.BaseURL
 	action, detail := "manual_compensation", "复用已创建邮箱，开始手动补偿注册"
 	if automatic {
-		action, detail = "automatic_compensation", fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", job.AutoRetry.Attempts, len(compensationDelays))
+		action, detail = "automatic_compensation", fmt.Sprintf("复用已创建邮箱，开始第 %d/%d 次自动补偿注册", attempts+1, len(compensationDelays))
 	}
 	appendRegistrationLogAt(&job, job.UpdatedAt, action, detail+"；原任务 "+parent.ID, "info")
 	previous := e.jobs[index]
 	e.jobs[index] = registrationParentWithChild(parent, job)
+	beforeJobs := append([]RegistrationJob(nil), e.jobs...)
 	e.jobs = append(e.jobs, job)
+	e.normalizeMailboxRetriesLocked(now)
 	if err := e.saveLocked(); err != nil {
-		e.jobs = e.jobs[:len(e.jobs)-1]
+		e.jobs = beforeJobs
 		e.jobs[index] = previous
 		e.loadError = err
 		return err

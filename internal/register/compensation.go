@@ -19,6 +19,7 @@ type RegistrationCompensation struct {
 	State         string `json:"state"`
 	Attempts      int    `json:"attempts"`
 	NextAttemptAt string `json:"next_attempt_at,omitempty"`
+	NotBeforeAt   string `json:"not_before_at,omitempty"`
 	LastAttemptAt string `json:"last_attempt_at,omitempty"`
 	Reason        string `json:"reason,omitempty"`
 }

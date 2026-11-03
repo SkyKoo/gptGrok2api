@@ -102,10 +102,14 @@ func newMailboxResourceSource(ctx context.Context, manager *mailboxstore.Resourc
 }
 
 func (s *mailboxResourceSource) Acquire(ctx context.Context, jobID string) (registerruntime.Mailbox, error) {
+	return s.AcquireExcluding(ctx, jobID, nil)
+}
+
+func (s *mailboxResourceSource) AcquireExcluding(ctx context.Context, jobID string, excluded []string) (registerruntime.Mailbox, error) {
 	s.mu.Lock()
 	s.jobID = strings.TrimSpace(jobID)
 	s.mu.Unlock()
-	box, err := s.session.Acquire(ctx, s.platform, jobID)
+	box, err := s.session.AcquireExcluding(ctx, s.platform, jobID, excluded)
 	if err != nil {
 		return registerruntime.Mailbox{}, err
 	}

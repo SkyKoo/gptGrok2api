@@ -35,6 +35,7 @@ func waitGrokCode(mail MailSource, ctx context.Context, box Mailbox, after time.
 // journal and account callbacks separate from OpenAI.
 type GrokEngine struct {
 	ProxyRouting              *ProxyRouting
+	mailboxMu                 sync.Mutex
 	mu                        sync.Mutex
 	path                      string
 	jobs                      []RegistrationJob
@@ -86,6 +87,7 @@ func NewGrokEngine(path string, factory GrokFactory, importer ImportAccount, ver
 				changed = true
 			}
 		}
+		changed = e.normalizeMailboxRetriesLocked(time.Now()) || changed
 		if changed && e.saveLocked() != nil {
 			e.loadError = fail("storage", "journal_write_failed")
 		}
@@ -234,16 +236,8 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 		e.failJob(id, err)
 		return
 	}
-	box, err := mail.Acquire(ctx, id)
+	box, err := e.acquireNewMailbox(ctx, id, mail)
 	if err != nil {
-		e.failJob(id, err)
-		return
-	}
-	if err := e.change(id, func(j *RegistrationJob) {
-		j.Mailbox = box
-		attachRegistrationLogAccount(j)
-		appendRegistrationLog(j, "mailbox_acquired", "邮箱资源已分配，开始注册", "info")
-	}); err != nil {
 		e.failJob(id, err)
 		return
 	}
@@ -394,7 +388,7 @@ func (e *GrokEngine) saveLocked() error {
 }
 
 func (e *GrokEngine) failJob(id string, err error) {
-	_ = e.change(id, func(job *RegistrationJob) {
+	changeErr := e.change(id, func(job *RegistrationJob) {
 		e.ProxyRouting.recordFailure(job, err)
 		job.Error = safeFailure(err)
 		var failure *Failure
@@ -427,6 +421,17 @@ func (e *GrokEngine) failJob(id string, err error) {
 		}
 		appendRegistrationLog(job, action, job.Error, "error")
 	})
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if changeErr != nil {
+		e.loadError = fail("storage", "journal_write_failed")
+		return
+	}
+	if e.normalizeMailboxRetriesLocked(time.Now()) {
+		if err := e.saveLocked(); err != nil {
+			e.loadError = fail("storage", "journal_write_failed")
+		}
+	}
 }
 
 func (e *GrokEngine) cancelQueued(id string, reason error) {
@@ -754,7 +759,7 @@ func (e *GrokEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		_, active := e.active[job.ID]
-		jobs = append(jobs, map[string]any{"id": job.ID, "parent_job_id": job.ParentJobID, "root_job_id": job.RootJobID, "retry_job_id": job.RetryJobID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": job.RetryJobID == "" && job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": compensationSummary(grokRegistrationCompensation(job))})
+		jobs = append(jobs, map[string]any{"id": job.ID, "parent_job_id": job.ParentJobID, "root_job_id": job.RootJobID, "retry_job_id": job.RetryJobID, "status": job.Status, "stage": job.Stage, "error": job.Error, "email": job.Mailbox.Email, "imported": job.Imported, "verified": job.Verified, "created_at": job.CreatedAt, "updated_at": job.UpdatedAt, "can_retry": len(job.Account) > 0 && !active, "can_retry_registration": (job.AutoRetry == nil || job.AutoRetry.Reason != "duplicate_mailbox_retry") && job.RetryJobID == "" && job.Mailbox.Email != "" && len(job.Account) == 0 && !job.Imported && !job.Verified && !active, "twofa": nil, "auto_retry": compensationSummary(e.mailboxCompensationSummaryLocked(job))})
 	}
 	for _, job := range e.jobs {
 		logs = append(logs, job.Logs...)

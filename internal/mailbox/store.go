@@ -397,6 +397,24 @@ func (s *Store) Upsert(ctx context.Context, item Mailbox, eventType string) (Mai
 // platform, or creates one through acquire when no suitable mailbox exists.
 // The prepare callback re-authenticates an existing provider mailbox.
 func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+	return s.ReserveExcluding(ctx, platform, jobID, sourceID, nil, acquire, prepare)
+}
+
+// ReserveExcluding keeps registration scheduling separate from asset ownership.
+// Exclusions are channel-local task history, not new mailbox states.
+func (s *Store) ReserveExcluding(ctx context.Context, platform, jobID, sourceID string, excluded []string, acquire func(context.Context) (Mailbox, error), prepare func(context.Context, Mailbox) error) (Mailbox, error) {
+	blocked := make(map[string]bool, len(excluded))
+	for _, email := range excluded {
+		blocked[strings.ToLower(strings.TrimSpace(email))] = true
+	}
+	create := acquire
+	acquire = func(ctx context.Context) (Mailbox, error) {
+		box, err := create(ctx)
+		if err == nil && blocked[strings.ToLower(strings.TrimSpace(box.Email))] {
+			return Mailbox{}, errors.New("mailbox requires retry through its existing registration task")
+		}
+		return box, err
+	}
 	if !s.Enabled() {
 		return acquire(ctx)
 	}
@@ -409,6 +427,9 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 	if existing, ok, err := s.claimForJob(ctx, platform, jobID); err != nil {
 		return Mailbox{}, err
 	} else if ok {
+		if blocked[strings.ToLower(strings.TrimSpace(existing.Email))] {
+			return Mailbox{}, errors.New("mailbox requires retry through its existing registration task")
+		}
 		if err := s.checkRegistrationAllowed(ctx, s.db, existing.ID, platform); err != nil {
 			return Mailbox{}, err
 		}
@@ -429,14 +450,16 @@ func (s *Store) Reserve(ctx context.Context, platform, jobID, sourceID string, a
 	if err != nil {
 		return Mailbox{}, err
 	}
+	excludedJSON, _ := json.Marshal(excluded)
 	row := tx.QueryRowContext(ctx, `SELECT m.id,m.source_id,m.source_type,m.source_account_id,m.source_mailbox_id,m.email,m.status,m.last_error,m.created_at,m.updated_at
 		FROM mailboxes m
 		WHERE m.status IN ('available','active')
 		AND ($1='' OR m.source_id=$1)
+		AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(NULLIF($3::jsonb, 'null'::jsonb), '[]'::jsonb)) x(email) WHERE lower(m.email)=lower(trim(x.email)))
 		AND NOT EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform=$2)
 		AND NOT EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform=$2)
 		AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.platform=$2 AND c.status IN ('reserved','active'))
-		ORDER BY m.created_at ASC, m.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, sourceID, platform)
+		ORDER BY m.created_at ASC, m.id ASC FOR UPDATE SKIP LOCKED LIMIT 1`, sourceID, platform, string(excludedJSON))
 	if scanErr := row.Scan(&candidate.ID, &candidate.SourceID, &candidate.SourceType, &candidate.SourceAccountID, &candidate.SourceMailboxID, &candidate.Email, &candidate.Status, &candidate.LastError, &candidate.CreatedAt, &candidate.UpdatedAt); scanErr != nil && !errors.Is(scanErr, sql.ErrNoRows) {
 		tx.Rollback()
 		return Mailbox{}, scanErr

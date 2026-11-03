@@ -1,10 +1,10 @@
 <template>
   <section class="register-free-jobs">
-    <p class="text-xs text-muted-foreground mb-3">{{ target === 'grok' ? 'Grok 失败任务会保留原邮箱，当前需人工检查后手动重试，不会自动补偿。' : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。' }}</p>
+    <p class="text-xs text-muted-foreground mb-3">{{ registrationCompensationHelp(target) }}</p>
     <p v-if="compensationError" class="text-xs text-amber-600 mb-3">自动补偿暂缓：请检查已保存的批次和邮箱来源配置。</p>
     <EmptyState v-if="!visibleJobs.length" plain title="暂无注册任务" description="启动注册后会在这里显示任务记录。" />
     <div v-for="job in visibleJobs" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words">
-      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id) }}</p>
+      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id, target) }}</p>
       <p v-if="job.parent_job_id" class="text-xs text-muted-foreground break-all">补偿任务 {{ job.id }} · 来源任务 {{ job.parent_job_id }}</p>
       <p v-if="job.retry_job_id" class="text-xs text-muted-foreground break-all">后续补偿任务 {{ job.retry_job_id }}</p>
       <p class="text-xs text-muted-foreground">{{ stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
@@ -14,7 +14,7 @@
         <span v-if="job.twofa.error"> · {{ job.twofa.error }}</span>
       </p>
       <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
-      <p v-if="registrationCompensationText(job.auto_retry, running, now)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now) }}</p>
+      <p v-if="registrationCompensationText(job.auto_retry, running, now, target)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target) }}</p>
       <Button v-if="job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
@@ -35,7 +35,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationProxyFailureText } from '@/lib/registrationProxy'
-import { registrationCompensationText, registrationJobStatusText } from '@/lib/registrationCompensation'
+import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText } from '@/lib/registrationCompensation'
 const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
@@ -84,7 +84,7 @@ async function retry(id: string) {
 async function retryRegistration(id: string) {
   busy.value = true; error.value = ''
   try { if (props.target === 'grok') await registerApi.retryGrokRegistration(id); else await registerApi.retryFreeRegistration(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
-  catch (e: any) { error.value = e?.message || '补偿注册失败' }
+  catch (e: any) { error.value = registrationProxyFailureText(e?.message || '补偿注册失败') }
   finally { busy.value = false }
 }
 </script>

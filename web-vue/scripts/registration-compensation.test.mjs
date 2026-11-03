@@ -54,3 +54,23 @@ test('superseded attempt points to a child and no longer advertises waiting', as
 test('uncertain final signup explains why registration is not replayed', () => {
   assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, false, now), /最终注册提交.*核对账号.*不自动重复注册/)
 })
+
+test('Grok explains shared retries without claiming a failed mailbox is reserved', async () => {
+  const { registrationCompensationHelp, registrationJobStatusText } = await import('../src/lib/registrationCompensation.ts')
+  const help = registrationCompensationHelp('grok')
+  assert.match(help, /同一邮箱共用次数和冷却/)
+  assert.match(help, /失败后释放预留/)
+  assert.doesNotMatch(help, /不会自动补偿/)
+  assert.match(registrationCompensationText(waiting, false, now, 'grok'), /同邮箱累计.*1\/3/)
+  assert.doesNotMatch(registrationJobStatusText('registration_pending', waiting, undefined, 'grok'), /邮箱已保留/)
+  assert.match(registrationJobStatusText('registration_pending', { ...waiting, state: 'manual', reason: 'duplicate_mailbox_retry' }, undefined, 'grok'), /已合并.*记录保留/)
+  assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'duplicate_mailbox_retry' }, false, now, 'grok'), /重复补偿计划已合并/)
+  assert.match(registrationCompensationText({ ...waiting, state: 'exhausted', attempts: 3 }, false, now, 'grok'), /同邮箱累计.*3\/3.*预留已释放/)
+  assert.match(registrationJobStatusText('registration_pending', waiting), /邮箱已保留/)
+})
+
+test('shared mailbox cooldown and merged retries have actionable errors', async () => {
+  const { registrationProxyFailureText } = await import('../src/lib/registrationProxy.ts')
+  assert.match(registrationProxyFailureText('task: mailbox_registration_cooldown'), /冷却.*等待/)
+  assert.match(registrationProxyFailureText('task: mailbox_retry_already_scheduled'), /已合并.*有效任务/)
+})

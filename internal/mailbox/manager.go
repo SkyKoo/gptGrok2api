@@ -165,13 +165,17 @@ func (s *ResourceSession) Source() Source {
 }
 
 func (s *ResourceSession) Acquire(ctx context.Context, platform, jobID string) (Mailbox, error) {
+	return s.AcquireExcluding(ctx, platform, jobID, nil)
+}
+
+func (s *ResourceSession) AcquireExcluding(ctx context.Context, platform, jobID string, excluded []string) (Mailbox, error) {
 	if s == nil || s.manager == nil || s.provider == nil {
 		return Mailbox{}, errors.New("mailbox resource session is not configured")
 	}
 	if s.manager.store == nil || !s.manager.store.Enabled() {
 		return s.provider.Acquire(ctx, jobID)
 	}
-	return s.manager.store.Reserve(ctx, platform, jobID, s.source.ID,
+	return s.manager.store.ReserveExcluding(ctx, platform, jobID, s.source.ID, excluded,
 		func(ctx context.Context) (Mailbox, error) {
 			return s.provider.Acquire(ctx, jobID)
 		}, func(ctx context.Context, box Mailbox) error {

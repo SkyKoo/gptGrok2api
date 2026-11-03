@@ -342,7 +342,7 @@ func TestGrokCompensationRejectsUnsafeClaims(t *testing.T) {
 					t.Fatal("source mismatch not deferred")
 				}
 			case "duplicate":
-				if err == nil || got.AutoRetry.State != "manual" || got.AutoRetry.Reason != "saved_account_exists" {
+				if err != nil || got.AutoRetry.State != "manual" || got.AutoRetry.Reason != "saved_account_exists" {
 					t.Fatal("duplicate not held")
 				}
 			case "persist", "legacy_persist":
