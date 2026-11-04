@@ -388,3 +388,49 @@ func TestVideoCompletionStorageFailureCannotPublishSuccess(t *testing.T) {
 		t.Fatal("failure log missing")
 	}
 }
+
+func TestLegacyVideoDownloadsSurviveUpgradeWithoutRewritingData(t *testing.T) {
+	cfg := adminTestConfig(t.TempDir())
+	s := New(cfg)
+	id := "video_1793801222012984956"
+	raw := videoTestMP4("legacy video", "legacy signature")
+	path, hash, err := s.storeVideoResult(id, "legacy-request", raw, "video/mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, _ := json.Marshal(map[string]any{"call_id": id, "request_sha256": "legacy-request", "media_sha256": hash})
+	if err := os.WriteFile(path+".meta.json", metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restarted := New(cfg)
+	job := restarted.videoJobs[id]
+	if job == nil || job.Status != "completed" || job.Prompt != "" || job.Verification != nil {
+		t.Fatal("legacy download not restored faithfully")
+	}
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(method, "/v1/videos/"+id+"/content", nil)
+		request.Header.Set("Authorization", "Bearer api-secret")
+		restarted.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK || (method == http.MethodGet && response.Body.String() != string(raw)) {
+			t.Fatalf("legacy %s failed: %d", method, response.Code)
+		}
+	}
+	if len(restarted.loadCallLogs()) != 0 {
+		t.Fatal("upgrade invented historical call logs")
+	}
+	for _, folder := range []string{"video_tasks", "video_logs"} {
+		if _, err := os.Stat(filepath.Join(cfg.DataDir, folder)); !os.IsNotExist(err) {
+			t.Fatal("upgrade rewrote historical business data")
+		}
+	}
+	if after, _ := os.ReadFile(path + ".meta.json"); string(after) != string(metadata) {
+		t.Fatal("upgrade rewrote media metadata")
+	}
+	if err := os.WriteFile(path, videoTestMP4("tampered content", "legacy signature"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if New(cfg).videoJobs[id] != nil {
+		t.Fatal("legacy digest mismatch accepted")
+	}
+}

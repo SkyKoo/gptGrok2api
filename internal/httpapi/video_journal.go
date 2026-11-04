@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -92,6 +93,55 @@ func (s *Server) loadVideoTasks() {
 		} else {
 			s.monitor.active[job.ID] = &saved.Record
 		}
+	}
+	s.loadLegacyVideoTasks()
+}
+
+// Older releases kept job state only in memory. Rebuild a download index from
+// their saved media metadata without inventing logs or modifying business data.
+func (s *Server) loadLegacyVideoTasks() {
+	entries, err := os.ReadDir(s.cfg.VideoDataDir)
+	if err != nil && !os.IsNotExist(err) {
+		s.videoLoadErr = err
+		return
+	}
+	for _, entry := range entries {
+		ext := filepath.Ext(entry.Name())
+		if !entry.Type().IsRegular() || (ext != ".mp4" && ext != ".webm") {
+			continue
+		}
+		id := "video_" + strings.TrimSuffix(entry.Name(), ext)
+		if _, exists := s.videoJobs[id]; exists {
+			continue
+		}
+		created, err := strconv.ParseInt(strings.TrimPrefix(id, "video_"), 10, 64)
+		if err != nil || created <= 0 {
+			continue
+		}
+		path := filepath.Join(s.cfg.VideoDataDir, entry.Name())
+		raw, err := os.ReadFile(path + ".meta.json")
+		var meta videoResultRecord
+		if err != nil || json.Unmarshal(raw, &meta) != nil || meta.CallID != id || meta.Rejected {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			continue
+		}
+		hash, hashErr := videoMediaFingerprint(file, info.Size())
+		_ = file.Close()
+		if hashErr != nil || hash != meta.MediaHash {
+			continue
+		}
+		s.videoJobs[id] = &videoJob{ID: id, Object: "video", Model: "grok-imagine-video",
+			CreatedAt: created / 1_000_000_000, CompletedAt: info.ModTime().Unix(),
+			Status: "completed", Progress: 100, ContentPath: path, logWritten: true,
+			Verification: meta.Verification}
 	}
 }
 
