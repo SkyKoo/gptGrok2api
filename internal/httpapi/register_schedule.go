@@ -93,6 +93,10 @@ func (s *Server) registrationScheduler() {
 }
 
 func (s *Server) runRegistrationSchedule(now time.Time) {
+	if !s.beginDeploymentBackground() {
+		return
+	}
+	defer s.endDeploymentBackground()
 	// Serialize timer claims with manual start/stop and batch configuration writes.
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()

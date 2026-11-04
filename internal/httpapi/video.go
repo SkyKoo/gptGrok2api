@@ -84,7 +84,9 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	s.videoMu.RLock()
 	initial := *job
 	s.videoMu.RUnlock()
-	go s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
+	s.launchDeploymentWork(func() {
+		s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
+	})
 	writeJSON(w, http.StatusOK, initial)
 }
 

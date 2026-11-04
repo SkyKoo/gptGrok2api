@@ -112,7 +112,10 @@ func (s *Server) grokMediaQuotaScheduler() {
 	defer ticker.Stop()
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		s.refreshDueGrokMediaQuotas(ctx)
+		if s.beginDeploymentBackground() {
+			s.refreshDueGrokMediaQuotas(ctx)
+			s.endDeploymentBackground()
+		}
 		cancel()
 		select {
 		case <-s.probeStop:

@@ -46,10 +46,11 @@ func (s *Server) capabilityScheduler() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
-		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) && s.beginDeploymentBackground() {
 			s.refreshDueCapabilities()
 			s.refreshDueModels()
 			s.refreshDueGrokWebModels(context.Background(), "", 2, nil)
+			s.endDeploymentBackground()
 		}
 		select {
 		case <-s.probeStop:

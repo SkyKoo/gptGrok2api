@@ -108,7 +108,7 @@ func (s *Server) startAccountRelogin(account map[string]any, automatic bool) (ac
 	id := newChatID()
 	progress := &accountReloginProgress{accountToken: accountToken(latest), ProgressID: id, AccountRef: publicRef, Email: stringValue(latest["email"]), Stage: "queued", StartedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano), Automatic: automatic, refreshAfterLogin: automatic || s.autoReloginEligible(latest)}
 	s.reloginProgress[id] = progress
-	go s.runAccountRelogin(id, publicRef)
+	s.launchDeploymentWork(func() { s.runAccountRelogin(id, publicRef) })
 	return reloginSummary(progress), nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAuthKeyLifecycleKeepsPrivateHashOutOfPublicPayload(t *testing.T) {
@@ -218,5 +219,36 @@ func TestRotateAccountTokensRetainsPartialReloginBlock(t *testing.T) {
 	}
 	if updated["relogin_blocked"] == true || updated["last_relogin_error"] != nil || updated["enabled"] != false {
 		t.Fatal("verified recovery did not clear block or changed enabled state")
+	}
+}
+
+func TestSealAccountsFlushesFeedbackAndFencesOldTimer(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "accounts.json")
+	old := New(path, filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	if err := old.SaveAccounts([]map[string]any{{"access_token": "fixture", "email": "initial@example.test"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.UpdateAccountRuntime("fixture", map[string]any{"runtime_feedback": "last accepted"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.SealAccounts(); err != nil {
+		t.Fatal(err)
+	}
+	next := New(path, old.authKeysPath, old.configPath)
+	rows, err := next.AccountList()
+	if err != nil || rows[0]["runtime_feedback"] != "last accepted" {
+		t.Fatal("last feedback lost", err)
+	}
+	if _, _, err := next.UpdateAccount("fixture", map[string]any{"email": "after-handoff@example.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.UpdateAccountRuntime("fixture", map[string]any{"email": "stale@example.test"}); err == nil {
+		t.Fatal("sealed timer rescheduled")
+	}
+	time.Sleep(accountRuntimeFlushDelay + 50*time.Millisecond)
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), "after-handoff@example.test") {
+		t.Fatal("old timer overwrote successor", err)
 	}
 }

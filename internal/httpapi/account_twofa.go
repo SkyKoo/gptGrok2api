@@ -225,7 +225,7 @@ func (s *Server) accountTwoFAAPI(w http.ResponseWriter, r *http.Request) {
 	s.twofaTasks[t.ID] = t
 	summary := t.accountTwoFAProgress
 	s.twofaMu.Unlock()
-	go s.runAccountTwoFA(ctx, t, account, flow)
+	s.launchDeploymentWork(func() { s.runAccountTwoFA(ctx, t, account, flow) })
 	writeJSON(w, http.StatusOK, map[string]any{"progress": summary})
 }
 
@@ -316,7 +316,7 @@ func (s *Server) runAccountTwoFA(ctx context.Context, t *accountTwoFATask, accou
 	// automatic delivery compete for the same one-shot channel under twofaMu.
 	mailCtx, mailCancel := context.WithCancel(ctx)
 	defer mailCancel()
-	go s.twoFAAutoCode(mailCtx, t, account, after)
+	s.launchDeploymentWork(func() { s.twoFAAutoCode(mailCtx, t, account, after) })
 	var code string
 	select {
 	case <-ctx.Done():

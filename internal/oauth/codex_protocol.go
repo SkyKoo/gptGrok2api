@@ -1241,3 +1241,14 @@ func findCallback(value any) string {
 	walk(value)
 	return found
 }
+
+// ActiveSessions prevents handoff from discarding unfinished authorizations.
+func (s *CodexProtocolLogin) ActiveSessions() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(time.Now())
+	return len(s.sessions)
+}

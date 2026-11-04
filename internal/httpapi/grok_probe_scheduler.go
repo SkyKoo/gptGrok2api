@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -11,29 +13,29 @@ import (
 
 func (s *Server) grokProbeScheduler() {
 	for {
-		config := s.registerStore.GrokProbeSchedulerStatus()
-		if !boolValue(config["enabled"], false) {
-			select {
-			case <-s.probeStop:
-				return
-			case <-s.probeWake:
-			}
-			continue
+		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) && s.beginDeploymentBackground() {
+			func() {
+				defer s.endDeploymentBackground()
+				config := s.registerStore.GrokProbeSchedulerStatus()
+				if !boolValue(config["enabled"], false) {
+					return
+				}
+				interval := intValue(config["interval_minutes"])
+				if interval < 1 {
+					interval = 60
+				}
+				last := stringValue(config["last_finished_at"])
+				due := last == ""
+				if parsed, err := time.Parse(time.RFC3339, last); err == nil {
+					due = time.Since(parsed) >= time.Duration(interval)*time.Minute
+				}
+				if due {
+					s.runGrokProbeCycle()
+				}
+				next := time.Now().UTC().Add(time.Duration(interval) * time.Minute).Format(time.RFC3339)
+				_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, next, stringValue(config["last_finished_at"]), "")
+			}()
 		}
-		interval := intValue(config["interval_minutes"])
-		if interval < 1 {
-			interval = 60
-		}
-		last := stringValue(config["last_finished_at"])
-		due := last == ""
-		if parsed, err := time.Parse(time.RFC3339, last); err == nil {
-			due = time.Since(parsed) >= time.Duration(interval)*time.Minute
-		}
-		if due {
-			s.runGrokProbeCycle()
-		}
-		next := time.Now().UTC().Add(time.Duration(interval) * time.Minute).Format(time.RFC3339)
-		_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, next, stringValue(config["last_finished_at"]), "")
 		timer := time.NewTimer(30 * time.Second)
 		select {
 		case <-s.probeStop:

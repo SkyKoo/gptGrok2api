@@ -206,9 +206,15 @@ func (s *fakeRedis) handle(conn net.Conn) {
 			builder.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(member), member))
 		}
 		writeRESP(conn, builder.String())
-	case "RPUSH":
+	case "RPUSH", "LPUSH":
 		s.mu.Lock()
-		s.lists[args[1]] = append(s.lists[args[1]], args[2:]...)
+		if command == "LPUSH" {
+			for _, value := range args[2:] {
+				s.lists[args[1]] = append([]string{value}, s.lists[args[1]]...)
+			}
+		} else {
+			s.lists[args[1]] = append(s.lists[args[1]], args[2:]...)
+		}
 		oldWakeup := s.wakeup
 		s.wakeup = make(chan struct{})
 		s.mu.Unlock()
@@ -285,3 +291,36 @@ func writeRESP(writer io.Writer, value string) {
 }
 
 var _ = bytes.NewBuffer
+
+func TestRedisPauseDrainsPoppedIDsBeforeLeaseHandoff(t *testing.T) {
+	redis := newFakeRedis(t)
+	q := NewRedis(redis.addr(), "", 0, "handoff")
+	q.Start(1)
+	defer q.StopDeployment()
+	end := time.Now().Add(time.Second)
+	for q.DeploymentActive() == 0 && time.Now().Before(end) {
+		time.Sleep(time.Millisecond)
+	}
+	if q.DeploymentActive() == 0 {
+		t.Fatal("blocking consumer was not counted")
+	}
+	q.SetDeploymentPaused(true)
+	item := q.Submit("deferred", nil)
+	end = time.Now().Add(2 * time.Second)
+	for q.DeploymentActive() != 0 && time.Now().Before(end) {
+		time.Sleep(time.Millisecond)
+	}
+	if q.DeploymentActive() != 0 {
+		t.Fatal("consumer failed to drain")
+	}
+	redis.mu.Lock()
+	list := append([]string(nil), redis.lists[q.queueKey()]...)
+	redis.mu.Unlock()
+	if len(list) != 1 || list[0] != item.ID {
+		t.Fatal("popped accepted ID not returned to queue", list)
+	}
+	current, ok := q.Get(item.ID)
+	if !ok || current.Status != "queued" {
+		t.Fatal("paused task executed or lost")
+	}
+}

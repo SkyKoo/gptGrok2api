@@ -323,7 +323,7 @@ func (s *Server) maybeStartCodexEmailAuto(sessionID string) {
 	copyProgress := *progress
 	s.codexMu.Unlock()
 	s.saveRegistrationCodexProgress(&copyProgress)
-	go s.autoSubmitCodexEmailCode(copyProgress)
+	s.launchDeploymentWork(func() { s.autoSubmitCodexEmailCode(copyProgress) })
 }
 
 func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {

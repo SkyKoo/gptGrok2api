@@ -119,10 +119,10 @@ func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *i
 	if start {
 		ctx, cancel := s.imageTaskContext(context.Background())
 		authHeader, apiKey := r.Header.Get("Authorization"), r.Header.Get("X-API-Key")
-		go func() {
+		s.launchDeploymentWork(func() {
 			defer cancel()
 			s.runImageTask(ctx, task, authHeader, apiKey)
-		}()
+		})
 	}
 	writeJSON(w, http.StatusAccepted, response)
 }

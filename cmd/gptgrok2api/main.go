@@ -17,6 +17,10 @@ import (
 )
 
 func main() {
+	if os.Getenv("CFM_ROLLING_CONTROL_ADDR") != "" {
+		managedMain()
+		return
+	}
 	cfg, err := config.Load("")
 	if err != nil {
 		log.Fatalf("load config: %v", err)

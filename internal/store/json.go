@@ -37,6 +37,7 @@ type Store struct {
 	accountsLoaded     bool
 	accountsRevision   uint64
 	accountsDirty      bool
+	accountsSealed     bool
 	accountsTimer      *time.Timer
 }
 
@@ -504,6 +505,9 @@ func (s *Store) UpdateAccountRuntime(token string, updates map[string]any) (map[
 func (s *Store) UpdateAccountRuntimeIf(token string, updates map[string]any, allow func(map[string]any) bool) (map[string]any, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.accountsSealed {
+		return nil, errors.New("account runtime is sealed")
+	}
 	if err := s.loadAccountsLocked(); err != nil {
 		return nil, err
 	}
@@ -532,6 +536,30 @@ func (s *Store) UpdateAccountRuntimeIf(token string, updates map[string]any, all
 // orderly shutdowns and deterministic tests; normal requests use the timer.
 func (s *Store) FlushAccounts() error {
 	return s.persistRuntimeAccounts()
+}
+
+// SealAccounts flushes delayed feedback under the write lock and permanently
+// fences any timer callback before the process relinquishes its writer lease.
+func (s *Store) SealAccounts() error {
+	s.accountsWriteMu.Lock()
+	defer s.accountsWriteMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.accountsSealed {
+		return nil
+	}
+	if s.accountsTimer != nil {
+		s.accountsTimer.Stop()
+		s.accountsTimer = nil
+	}
+	if s.accountsDirty {
+		if err := writeJSON(s.accountsPath, s.accountsCache); err != nil {
+			return err
+		}
+		s.accountsDirty = false
+	}
+	s.accountsSealed = true
+	return nil
 }
 
 // RotateAccountTokens updates an account using its previous access token as
@@ -641,7 +669,7 @@ func (s *Store) persistRuntimeAccounts() error {
 	defer s.accountsWriteMu.Unlock()
 
 	s.mu.RLock()
-	if !s.accountsLoaded || !s.accountsDirty {
+	if s.accountsSealed || !s.accountsLoaded || !s.accountsDirty {
 		s.mu.RUnlock()
 		return nil
 	}

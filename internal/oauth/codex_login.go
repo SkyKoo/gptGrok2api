@@ -258,3 +258,14 @@ func codexString(values map[string]any, keys ...string) string {
 	}
 	return ""
 }
+
+// ActiveSessions prevents handoff from discarding unfinished authorizations.
+func (s *CodexLogin) ActiveSessions() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.purgeLocked(time.Now())
+	return len(s.sessions)
+}

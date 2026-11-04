@@ -15,13 +15,16 @@ COPY go.mod ./
 COPY go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gptgrok2api ./cmd/gptgrok2api
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gptgrok2api ./cmd/gptgrok2api \
+    && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /cfm-gateway ./cmd/cfm-gateway
 
 FROM alpine:3.21 AS app
+LABEL io.cfm.rolling.protocol="cfm-single-writer-v1"
 RUN apk add --no-cache nodejs \
     && adduser -D -H -u 10001 app
 WORKDIR /app
 COPY --from=go-build /gptgrok2api /app/gptgrok2api
+COPY --from=go-build /cfm-gateway /app/cfm-gateway
 COPY --from=web-build /src/web-vue/dist /app/web_dist
 COPY internal/register/sentinel-runner.js /app/sentinel/sentinel-runner.js
 COPY internal/register/sentinel-sdk.js /app/sentinel/sdk.js

@@ -18,11 +18,14 @@ import (
 // RESP subset needed by the task lifecycle, so deployments without the Go
 // module cache can still build the service.
 type RedisQueue struct {
+	stopped  bool
 	addr     string
 	password string
 	database int
 	prefix   string
 	mu       sync.Mutex
+	paused   bool
+	active   int
 	handlers map[string]func(*Task) (map[string]any, error)
 }
 
@@ -135,48 +138,83 @@ func (q *RedisQueue) List() []Task {
 
 func (q *RedisQueue) worker() {
 	for {
-		raw, err := q.command(context.Background(), "BLPOP", q.queueKey(), "5")
-		if err != nil {
-			time.Sleep(time.Second)
-			continue
-		}
-		values, ok := raw.([]any)
-		if !ok || len(values) < 2 {
-			continue
-		}
-		id := stringValue(rawBytes(values[1]))
-		task, ok := q.Get(id)
-		if !ok || task.Status != "queued" {
-			continue
-		}
-		task.Status = "running"
-		task.UpdatedAt = time.Now().Unix()
-		_ = q.save(&task)
 		q.mu.Lock()
-		handler := q.handlers[task.Kind]
-		q.mu.Unlock()
-		var result map[string]any
-		var handlerErr error
-		if handler == nil {
-			handlerErr = errors.New("no task handler")
-		} else {
-			result, handlerErr = handler(&task)
+		if q.stopped {
+			q.mu.Unlock()
+			return
 		}
-		current, exists := q.Get(id)
-		if !exists || current.Status == "cancelled" {
+		if q.paused {
+			q.mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		current.UpdatedAt = time.Now().Unix()
-		if handlerErr != nil {
-			current.Status = "failed"
-			current.Error = handlerErr.Error()
-		} else {
-			current.Status = "completed"
-			current.Progress = 100
-			current.Result = result
-		}
-		_ = q.save(&current)
+		// Include a pending BLPOP in the handoff fence. Otherwise a paused worker
+		// could pop an ID and die before returning it to the durable queue.
+		q.active++
+		q.mu.Unlock()
+		q.pollDeploymentTask()
 	}
+}
+func (q *RedisQueue) pollDeploymentTask() {
+	defer func() { q.mu.Lock(); q.active--; q.mu.Unlock() }()
+	raw, err := q.command(context.Background(), "BLPOP", q.queueKey(), "1")
+	if err != nil {
+		time.Sleep(time.Second)
+		return
+	}
+	values, ok := raw.([]any)
+	if !ok || len(values) < 2 {
+		return
+	}
+	id := stringValue(rawBytes(values[1]))
+	task, ok := q.Get(id)
+	if !ok || task.Status != "queued" {
+		return
+	}
+	q.mu.Lock()
+	if q.paused {
+		q.mu.Unlock()
+		// Keep the poll counted until the popped ID is durably returned.
+		// A failed requeue must block retirement rather than lose accepted work.
+		for {
+			if _, err := q.command(context.Background(), "LPUSH", q.queueKey(), id); err == nil {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+	}
+	q.mu.Unlock()
+	q.executeDeploymentTask(id, task)
+}
+
+func (q *RedisQueue) executeDeploymentTask(id string, task Task) {
+	task.Status = "running"
+	task.UpdatedAt = time.Now().Unix()
+	_ = q.save(&task)
+	q.mu.Lock()
+	handler := q.handlers[task.Kind]
+	q.mu.Unlock()
+	var result map[string]any
+	var handlerErr error
+	if handler == nil {
+		handlerErr = errors.New("no task handler")
+	} else {
+		result, handlerErr = handler(&task)
+	}
+	current, exists := q.Get(id)
+	if !exists || current.Status == "cancelled" {
+		return
+	}
+	current.UpdatedAt = time.Now().Unix()
+	if handlerErr != nil {
+		current.Status = "failed"
+		current.Error = handlerErr.Error()
+	} else {
+		current.Status = "completed"
+		current.Progress = 100
+		current.Result = result
+	}
+	_ = q.save(&current)
 }
 
 func (q *RedisQueue) save(task *Task) error {
@@ -199,6 +237,11 @@ func (q *RedisQueue) queueKey() string         { return q.prefix + ":tasks:queue
 func (q *RedisQueue) indexKey() string         { return q.prefix + ":tasks:index" }
 
 func (q *RedisQueue) command(ctx context.Context, args ...string) (any, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", q.addr)
 	if err != nil {
 		return nil, err
@@ -290,3 +333,8 @@ func rawBytes(value any) []byte {
 }
 
 func stringValue(value any) string { return strings.TrimSpace(string(rawBytes(value))) }
+
+func (q *RedisQueue) SetDeploymentPaused(paused bool) { q.mu.Lock(); q.paused = paused; q.mu.Unlock() }
+func (q *RedisQueue) DeploymentActive() int           { q.mu.Lock(); defer q.mu.Unlock(); return q.active }
+
+func (q *RedisQueue) StopDeployment() { q.mu.Lock(); q.stopped = true; q.paused = true; q.mu.Unlock() }

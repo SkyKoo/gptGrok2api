@@ -299,7 +299,7 @@ func (s *Server) sub2APIServerAPI(w http.ResponseWriter, r *http.Request) {
 				writeError(w, 500, err.Error(), "server_error")
 				return
 			}
-			go s.runSubImport(item, ids, job)
+			s.launchDeploymentWork(func() { s.runSubImport(item, ids, job) })
 			writeJSON(w, 200, map[string]any{"import_job": job})
 			return
 		}

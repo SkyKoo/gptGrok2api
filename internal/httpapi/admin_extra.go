@@ -1032,7 +1032,7 @@ func (s *Server) editableFileTasksAPI(w http.ResponseWriter, r *http.Request) {
 		s.saveEditableFileTasksLocked()
 	}
 	s.fileTaskMu.Unlock()
-	go s.runEditableFileTask(task)
+	s.launchDeploymentWork(func() { s.runEditableFileTask(task) })
 	writeJSON(w, 202, editableTaskPublic(task))
 }
 
@@ -1097,7 +1097,7 @@ func (s *Server) editableGeneration(w http.ResponseWriter, r *http.Request, kind
 		s.saveEditableFileTasksLocked()
 	}
 	s.fileTaskMu.Unlock()
-	go s.runEditableFileTask(task)
+	s.launchDeploymentWork(func() { s.runEditableFileTask(task) })
 	writeJSON(w, http.StatusAccepted, editableTaskPublic(task))
 }
 

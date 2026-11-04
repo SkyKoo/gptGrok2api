@@ -24,10 +24,14 @@ type Task struct {
 }
 
 type Queue struct {
+	stopped  bool
+	done     chan struct{}
 	path     string
 	mu       sync.Mutex
 	items    map[string]*Task
 	wake     chan struct{}
+	paused   bool
+	active   int
 	handlers map[string]func(*Task) (map[string]any, error)
 }
 
@@ -41,7 +45,7 @@ type QueueAPI interface {
 }
 
 func New(path string) *Queue {
-	q := &Queue{path: path, items: map[string]*Task{}, wake: make(chan struct{}, 1), handlers: map[string]func(*Task) (map[string]any, error){}}
+	q := &Queue{done: make(chan struct{}), path: path, items: map[string]*Task{}, wake: make(chan struct{}, 1), handlers: map[string]func(*Task) (map[string]any, error){}}
 	_ = q.load()
 	return q
 }
@@ -69,9 +73,10 @@ func (q *Queue) Submit(kind string, payload map[string]any) *Task {
 	q.mu.Lock()
 	q.items[task.ID] = task
 	_ = q.saveLocked()
+	reply := clone(task)
 	q.mu.Unlock()
 	q.signal()
-	return clone(task)
+	return reply
 }
 
 func (q *Queue) Get(id string) (Task, bool) {
@@ -113,6 +118,19 @@ func (q *Queue) List() []Task {
 func (q *Queue) worker() {
 	for {
 		q.mu.Lock()
+		if q.stopped {
+			q.mu.Unlock()
+			return
+		}
+		if q.paused {
+			q.mu.Unlock()
+			select {
+			case <-q.wake:
+			case <-q.done:
+				return
+			}
+			continue
+		}
 		var selected *Task
 		for _, task := range q.items {
 			if task.Status == "queued" {
@@ -122,6 +140,7 @@ func (q *Queue) worker() {
 			}
 		}
 		if selected != nil {
+			q.active++
 			selected.Status = "running"
 			selected.UpdatedAt = time.Now().Unix()
 			_ = q.saveLocked()
@@ -132,13 +151,21 @@ func (q *Queue) worker() {
 				handler = current
 			}
 		}
+		if selected != nil {
+			selected = clone(selected)
+		}
 		q.mu.Unlock()
 		if selected == nil {
-			<-q.wake
+			select {
+			case <-q.wake:
+			case <-q.done:
+				return
+			}
 			continue
 		}
 		result, err := handler(selected)
 		q.mu.Lock()
+		q.active--
 		if current, ok := q.items[selected.ID]; ok && current.Status == "running" {
 			current.UpdatedAt = time.Now().Unix()
 			if err != nil {
@@ -245,4 +272,25 @@ func (q *Queue) SetStage(id, stage string) {
 		task.UpdatedAt = time.Now().Unix()
 		_ = q.saveLocked()
 	}
+}
+
+func (q *Queue) SetDeploymentPaused(paused bool) {
+	q.mu.Lock()
+	q.paused = paused
+	q.mu.Unlock()
+	if !paused {
+		q.signal()
+	}
+}
+func (q *Queue) DeploymentActive() int { q.mu.Lock(); defer q.mu.Unlock(); return q.active }
+
+func (q *Queue) StopDeployment() {
+	q.mu.Lock()
+	if !q.stopped {
+		q.stopped = true
+		close(q.done)
+	}
+	q.paused = true
+	q.mu.Unlock()
+	q.signal()
 }

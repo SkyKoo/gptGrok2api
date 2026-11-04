@@ -110,7 +110,7 @@ func (s *Server) accountRefreshStart(w http.ResponseWriter, r *http.Request) {
 	}
 	s.refreshMu.Unlock()
 
-	go s.runAccountRefresh(progressID, refs)
+	s.launchDeploymentWork(func() { s.runAccountRefresh(progressID, refs) })
 	writeJSON(w, http.StatusOK, map[string]any{"progress_id": progressID})
 }
 

@@ -38,6 +38,13 @@ import (
 )
 
 type Server struct {
+	deploySealed       bool
+	deployStopOnce     sync.Once
+	deployDetached     int
+	deployMu           sync.Mutex
+	deployPaused       bool
+	deployBackground   int
+	workersOnce        sync.Once
 	proxyBindingMu     sync.Mutex
 	authStartMu        sync.Mutex
 	cpaSyncing         sync.Map
@@ -118,7 +125,10 @@ type Server struct {
 	codexEmailMu              sync.Mutex
 }
 
-func New(cfg config.Config) *Server {
+func New(cfg config.Config) *Server { return NewWithWorkers(cfg, true) }
+
+// NewWithWorkers defers all schedulers/queue consumers for controlled activation.
+func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	repository := store.New(cfg.AccountsPath, cfg.AuthKeysPath, cfg.ConfigPath)
 	var mailboxStore *mailboxstore.Store
 	var mailboxInitErr error
@@ -154,6 +164,7 @@ func New(cfg config.Config) *Server {
 	}
 	server := &Server{
 		cfg:                cfg,
+		deployPaused:       !startWorkers,
 		auth:               auth.New(cfg.APIKey, cfg.AdminKey, cfg.AuthKeysPath, cfg.AllowAnonymous, repository),
 		store:              repository,
 		mailboxStore:       mailboxStore,
@@ -228,15 +239,11 @@ func New(cfg config.Config) *Server {
 	server.mediaProvider.SetProxyManager(proxyManager)
 	server.deviceOAuth = oauth.NewDeviceService(requestClient, cfg.OAuthDeviceURL, cfg.OAuthTokenURL, server.oauthStore)
 	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
-	if cfg.Version != "test" {
-		server.taskQueue.Start(2)
-		go server.imageRetentionScheduler()
-		go server.grokProbeScheduler()
-		go server.openAISurvivalScheduler()
-		go server.capabilityScheduler()
-		go server.grokMediaQuotaScheduler()
-		go server.registrationScheduler()
+	server.PauseDeployment(!startWorkers)
+	if startWorkers {
+		server.StartWorkers()
 	}
+
 	return server
 }
 
@@ -2701,4 +2708,19 @@ func isWithin(root, candidate string) bool {
 	candidate, _ = filepath.Abs(candidate)
 	relative, err := filepath.Rel(root, candidate)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func (s *Server) StartWorkers() {
+	if s.cfg.Version == "test" {
+		return
+	}
+	s.workersOnce.Do(func() {
+		s.taskQueue.Start(2)
+		go s.imageRetentionScheduler()
+		go s.grokProbeScheduler()
+		go s.openAISurvivalScheduler()
+		go s.capabilityScheduler()
+		go s.grokMediaQuotaScheduler()
+		go s.registrationScheduler()
+	})
 }

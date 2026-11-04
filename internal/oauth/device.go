@@ -293,3 +293,14 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// ActiveSessions prevents handoff from discarding unfinished authorizations.
+func (s *DeviceService) ActiveSessions() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	return len(s.sessions)
+}

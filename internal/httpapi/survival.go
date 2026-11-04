@@ -37,7 +37,7 @@ func (s *Server) runOpenAISurvival(w http.ResponseWriter) {
 	s.survivalStatus["last_started_at"] = time.Now().UTC().Format(time.RFC3339)
 	s.survivalStatus["last_error"] = ""
 	s.survivalMu.Unlock()
-	go s.executeOpenAISurvival()
+	s.launchDeploymentWork(s.executeOpenAISurvival)
 	writeJSON(w, 202, map[string]any{"started": true, "survival": s.survivalSnapshot()})
 }
 
@@ -95,6 +95,9 @@ func (s *Server) openAISurvivalScheduler() {
 	// configuration updates settle before the first remote probe.
 	timer := time.NewTimer(60 * time.Second)
 	select {
+	case <-s.probeStop:
+		timer.Stop()
+		return
 	case <-timer.C:
 	case <-s.survivalWake:
 		timer.Stop()
@@ -125,6 +128,9 @@ func (s *Server) openAISurvivalScheduler() {
 		}
 		timer := time.NewTimer(30 * time.Second)
 		select {
+		case <-s.probeStop:
+			timer.Stop()
+			return
 		case <-s.survivalWake:
 			timer.Stop()
 		case <-timer.C:
@@ -133,6 +139,10 @@ func (s *Server) openAISurvivalScheduler() {
 }
 
 func (s *Server) runOpenAISurvivalInternal() {
+	if !s.beginDeploymentBackground() {
+		return
+	}
+	defer s.endDeploymentBackground()
 	s.survivalMu.Lock()
 	if s.survivalRunning {
 		s.survivalMu.Unlock()
@@ -143,7 +153,7 @@ func (s *Server) runOpenAISurvivalInternal() {
 	s.survivalStatus["last_started_at"] = time.Now().UTC().Format(time.RFC3339)
 	s.survivalStatus["last_error"] = ""
 	s.survivalMu.Unlock()
-	go s.executeOpenAISurvival()
+	s.launchDeploymentWork(s.executeOpenAISurvival)
 }
 
 func (s *Server) survivalProbe(account map[string]any, refreshFirst bool) string {

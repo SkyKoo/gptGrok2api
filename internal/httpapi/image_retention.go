@@ -20,13 +20,21 @@ func (s *Server) imageRetentionScheduler() {
 		if !s.cleanupImagesOutsideMaintenance() {
 			delay = time.Second
 		}
-		time.Sleep(delay)
+		select {
+		case <-s.probeStop:
+			return
+		case <-time.After(delay):
+		}
 	}
 }
 
 // Startup must preserve the frozen backup manifest until deployment verification
 // completes. Poll while maintenance is present, then resume the original policy.
 func (s *Server) cleanupImagesOutsideMaintenance() bool {
+	if !s.beginDeploymentBackground() {
+		return false
+	}
+	defer s.endDeploymentBackground()
 	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
 		return false
 	}
