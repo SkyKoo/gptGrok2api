@@ -222,7 +222,9 @@ func (i *Instance) Freeze() error {
 			}
 			phase = "gateway"
 		}
-		if err := i.savePhase(phase); err != nil {
+		// Do not persist a completed phase until Seal has finished. A crash
+		// during sealing must require recovery instead of reopening this cache.
+		if err := i.savePhase("sealing"); err != nil {
 			return err
 		}
 		i.phase = "sealing"
@@ -255,6 +257,9 @@ func (i *Instance) Freeze() error {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if err := i.savePhase(phase); err != nil {
+		return err
+	}
 	if err := releaseLease(i.lease); err != nil {
 		return err
 	}

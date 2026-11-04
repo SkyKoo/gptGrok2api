@@ -2,9 +2,11 @@ package rolling
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -318,6 +320,41 @@ func TestFailedInitializerRetainsLeaseAndCannotAutoRestart(t *testing.T) {
 	if restarted.Restore() == nil || restarted.Status()["phase"] != "recovery_required" || calls.Load() != 0 {
 		t.Fatal("partial init silently replayed")
 	}
+}
+
+func TestFailedSealCannotRestoreAsCompleted(t *testing.T) {
+	dir := t.TempDir()
+	lease, state := filepath.Join(dir, "lock"), filepath.Join(dir, "state")
+	i, _ := NewInstance(lease, state, func() (*Application, error) {
+		app := fakeApp(http.NotFoundHandler(), new(atomic.Int32))
+		app.Seal = func(context.Context) error { return context.Canceled }
+		return app, nil
+	})
+	if err := i.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := i.Freeze(); err == nil {
+		t.Fatal("failed seal was accepted")
+	}
+	if i.Status()["writer_lease"] != true {
+		t.Fatal("failed seal released writer lease")
+	}
+	raw, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved["phase"] != "sealing" {
+		t.Fatalf("unsafe persisted phase: %v", saved["phase"])
+	}
+	restarted, _ := NewInstance(lease, state, i.factory)
+	if err := restarted.Restore(); err == nil || restarted.Status()["phase"] != "recovery_required" {
+		t.Fatalf("failed seal was restorable: err=%v status=%v", err, restarted.Status())
+	}
+	_ = i.lease.Close()
 }
 
 func TestBootstrapQueuesAreBoundedWhileOldDiskWriterSeals(t *testing.T) {
