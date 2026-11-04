@@ -480,7 +480,7 @@ export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailFi
   if (!hasDiagnosticSignal(item) && item.endpoint !== '/v1/videos') return []
   const shouldShowBooleans = isFailed(item) || isLimited(item) || Boolean(item.errorCode || item.error || item.reason)
   return compactDetailFields([
-    review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '无法确认，已拦截' } : null,
+    review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'skipped' ? '未开启内容核对' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '无法确认，已拦截' } : null,
     review ? { label: '核对原因', value: formatInlineValue(review.reason) } : null,
     review ? { label: '核对模型', value: formatInlineValue(review.model) } : null,
     review ? { label: '核对数量', value: `${review.frames || 0} 个视频帧 / ${review.references || 0} 张参考图` } : null,

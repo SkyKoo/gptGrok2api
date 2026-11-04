@@ -75,7 +75,7 @@
         <span v-if="file.endpoint">{{ file.endpoint }}</span>
       </div>
       <div v-if="file.type === 'video'" class="file-meta">
-        <span>{{ file.verification?.verdict === 'matched' ? '抽帧内容核对通过' : '历史视频 · 未进行内容核对' }}</span>
+        <span>{{ file.verification?.verdict === 'matched' ? '抽帧内容核对通过' : file.verification?.verdict === 'skipped' ? '未开启内容核对' : '历史视频 · 未进行内容核对' }}</span>
       </div>
       <div v-if="file.tags.length" class="tag-row">
         <button

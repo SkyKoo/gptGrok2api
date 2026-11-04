@@ -97,8 +97,9 @@ func TestRejectedVideoFingerprintSurvivesRestartAndBlocksSameInput(t *testing.T)
 }
 
 func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
-	for _, verdict := range []string{"matched", "mismatch", "uncertain"} {
+	for _, verdict := range []string{"matched", "mismatch", "uncertain", "disabled-default", "disabled-explicit"} {
 		t.Run(verdict, func(t *testing.T) {
+			reviewEnabled := !strings.HasPrefix(verdict, "disabled-")
 			calls := 0
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
@@ -119,6 +120,11 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			defer upstream.Close()
 			cfg := adminTestConfig(t.TempDir())
 			s := New(cfg)
+			if verdict != "disabled-default" {
+				if _, err := s.store.UpdateConfig("video_review_enabled", reviewEnabled); err != nil {
+					t.Fatal(err)
+				}
+			}
 			s.mediaProvider = provider.NewMedia(upstream.Client(), upstream.URL+"/chat", upstream.URL+"/post", upstream.URL, upstream.URL, cfg.RequestTimeout)
 			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "SECRET", "enabled": true, "status": "active"}})
 			if err != nil {
@@ -126,27 +132,34 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			}
 			reviewed := false
 			s.newVideoVerifier = func(context.Context, int) (videoResultVerifier, error) {
+				if !reviewEnabled {
+					t.Fatal("disabled review reserved a reviewer")
+				}
 				return fixtureVideoVerifier{verdict: verdict, seen: func(prompt string, refs []provider.OpenAIImageInput, raw []byte) {
 					reviewed = true
 					if prompt != "private prompt" || len(refs) != 0 || string(raw) != "fixture-mp4" {
 						t.Fatal("review inputs not forwarded")
+					}
+					// An in-flight review keeps the decision captured at job start.
+					if _, err := s.store.UpdateConfig("video_review_enabled", false); err != nil {
+						t.Fatal(err)
 					}
 				}}, nil
 			}
 			job := &videoJob{ID: "video_fixture", Model: "grok-imagine-video", Prompt: "private prompt", Status: "queued"}
 			s.videoJobs[job.ID] = job
 			s.runVideoJob(job, job.Prompt, "9:16", "720p", 6, "custom", nil)
-			if calls != 1 || !reviewed {
+			if calls != 1 || reviewed != reviewEnabled {
 				t.Fatalf("calls=%d reviewed=%v", calls, reviewed)
 			}
 			want := "failed"
-			if verdict == "matched" {
+			if verdict == "matched" || !reviewEnabled {
 				want = "completed"
 			}
 			if job.Status != want {
 				t.Fatalf("job=%+v", job)
 			}
-			if verdict != "matched" {
+			if want == "failed" {
 				if job.ContentPath != "" || job.VideoURL != "" || len(listMediaItems(cfg.VideoDataDir, "video", "video/")) != 0 {
 					t.Fatal("rejected media was published")
 				}
@@ -155,6 +168,9 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 				if w.Code != http.StatusConflict {
 					t.Fatalf("download status=%d", w.Code)
 				}
+			}
+			if !reviewEnabled && (job.Verification == nil || job.Verification.Verdict != "skipped" || job.Verification.Frames != 0 || job.Verification.Model != "") {
+				t.Fatal("disabled review was not marked as skipped")
 			}
 			logs := s.loadCallLogs()
 			if len(logs) != 1 {
@@ -170,7 +186,7 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			if detail["endpoint"] != "/v1/videos" || mapValue(mapValue(detail["monitor"])["metrics"])["video_stream"] == nil {
 				t.Fatal("missing terminal diagnostics")
 			}
-			if verdict != "matched" && detail["output_videos"] != nil {
+			if want == "failed" && detail["output_videos"] != nil {
 				t.Fatal("failed log has deliverable")
 			}
 			s.setVideoStatus(job, "completed", 100, nil)
@@ -181,7 +197,7 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			if restarted.videoLoadErr != nil || restarted.videoJobs[job.ID] == nil || restarted.videoJobs[job.ID].Status != want || len(restarted.loadCallLogs()) != 1 {
 				t.Fatal("restart lost result/log")
 			}
-			if verdict == "matched" {
+			if want == "completed" {
 				w := httptest.NewRecorder()
 				restarted.videoContent(w, httptest.NewRequest("GET", "/", nil), job.ID)
 				if w.Code != 200 || w.Body.String() != "fixture-mp4" {
@@ -201,6 +217,9 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 
 func TestUnavailableVideoReviewerPreventsGeneration(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
+	if _, err := s.store.UpdateConfig("video_review_enabled", true); err != nil {
+		t.Fatal(err)
+	}
 	job := &videoJob{ID: "video_no_reviewer", Model: "grok-imagine-video"}
 	s.videoJobs[job.ID] = job
 	s.runVideoJob(job, "private prompt", "9:16", "720p", 6, "custom", nil)
@@ -209,6 +228,56 @@ func TestUnavailableVideoReviewerPreventsGeneration(t *testing.T) {
 	}
 	if len(s.loadCallLogs()) != 1 {
 		t.Fatal("missing reviewer failure log")
+	}
+}
+
+func TestVideoReviewSettingDefaultsOffAndPersistsThroughSettingsAPI(t *testing.T) {
+	cfg := adminTestConfig(t.TempDir())
+	s := New(cfg)
+	read := func(server *Server) bool {
+		t.Helper()
+		response := adminRequest(server.Handler(), http.MethodGet, "/api/settings", nil)
+		var body map[string]any
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &body) != nil {
+			t.Fatalf("settings response: %s", response.Body.String())
+		}
+		enabled, ok := mapValue(body["config"])["video_review_enabled"].(bool)
+		if !ok {
+			t.Fatal("settings omitted the boolean default")
+		}
+		return enabled
+	}
+	if read(s) {
+		t.Fatal("video review enabled without opt-in")
+	}
+	for _, value := range []string{`"true"`, `1`, `null`, `{}`} {
+		response := adminRequest(s.Handler(), http.MethodPost, "/api/settings", strings.NewReader(`{"video_review_enabled":`+value+`,"invalid_patch_marker":true}`))
+		settings, err := s.store.Config()
+		if response.Code != http.StatusBadRequest || err != nil || settings["invalid_patch_marker"] != nil || read(s) {
+			t.Fatal("invalid setting applied a partial patch")
+		}
+	}
+	reviewerCalls := 0
+	s.newVideoVerifier = func(context.Context, int) (videoResultVerifier, error) {
+		reviewerCalls++
+		return nil, fmt.Errorf("review unavailable in fixture")
+	}
+	for i, enabled := range []bool{true, false} {
+		response := adminRequest(s.Handler(), http.MethodPost, "/api/settings", strings.NewReader(fmt.Sprintf(`{"video_review_enabled":%t}`, enabled)))
+		if response.Code != http.StatusOK || read(s) != enabled || read(New(cfg)) != enabled {
+			t.Fatal("saved setting lost or requires restart")
+		}
+		job := &videoJob{ID: fmt.Sprintf("video_setting_%d", i), Model: "grok-imagine-video", Status: "queued"}
+		s.runVideoJob(job, "fixture", "9:16", "720p", 6, "normal", nil)
+		if enabled && job.Error["code"] != "video_review_unavailable" {
+			t.Fatal("enabled review did not gate generation")
+		}
+		if !enabled && job.Error["code"] != "no_available_account" {
+			t.Fatal("disabled review still required a reviewer")
+		}
+	}
+	if reviewerCalls != 1 {
+		t.Fatal("disabled review consumed reviewer capacity")
 	}
 }
 

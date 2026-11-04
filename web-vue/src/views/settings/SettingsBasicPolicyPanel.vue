@@ -44,6 +44,22 @@
       </FormField>
     </FormSection>
 
+    <FormSection title="视频内容核对">
+      <div class="settings-check-grid settings-check-grid--single">
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox v-model="settings.video_review_enabled">视频内容核对与拦截</Checkbox>
+          </div>
+        </div>
+      </div>
+      <p class="text-xs leading-5 text-muted-foreground">
+        默认关闭。开启后将提示词、全部参考图和 6 张视频采样帧发送至 ChatGPT，额外消耗视觉对话与图片上传额度；内容不符或无法确认时，任务失败且不交付视频。
+      </p>
+      <p class="text-xs leading-5 text-muted-foreground">
+        保存后对后续任务生效，无需重启。关闭时不抽帧、不调用核对模型，仍保留视频日志和原有任务关联、上游审核及重复媒体检查。
+      </p>
+    </FormSection>
+
     <FormSection title="控制台日志级别">
       <div class="settings-check-grid settings-check-grid--single mt-3">
         <div

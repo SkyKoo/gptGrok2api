@@ -985,6 +985,10 @@ func monitorStageLabel(stage string) string {
 		return "上游视频生成中"
 	case "video_download":
 		return "下载视频待核对"
+	case "video_downloaded":
+		return "视频下载完成"
+	case "video_content_review_skipped":
+		return "未开启视频内容核对"
 	case "video_content_review":
 		return "核对视频画面"
 	case "video_content_reviewed":

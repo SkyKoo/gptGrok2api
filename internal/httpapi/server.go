@@ -2100,11 +2100,18 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		configValue["image_task_timeout_secs"] = configuredImageTaskTimeoutSeconds(configValue)
+		configValue["video_review_enabled"], _ = configValue["video_review_enabled"].(bool)
 		writeJSON(w, http.StatusOK, map[string]any{"runtime": "go", "config": configValue})
 	case http.MethodPost:
 		var updates map[string]any
 		if !decodeJSON(w, r, &updates) {
 			return
+		}
+		if value, exists := updates["video_review_enabled"]; exists {
+			if _, ok := value.(bool); !ok {
+				writeError(w, http.StatusBadRequest, "video_review_enabled must be a boolean", "invalid_request_error")
+				return
+			}
 		}
 		if value, exists := updates["image_task_timeout_secs"]; exists {
 			seconds, err := parseImageTaskTimeoutSeconds(value)

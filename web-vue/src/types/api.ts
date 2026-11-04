@@ -82,6 +82,7 @@ export interface Settings {
   image_error_friendly_enabled?: boolean
   image_error_messages: ImageErrorMessages
   image_settle_enabled?: boolean
+  video_review_enabled?: boolean
   image_check_before_hit_enabled?: boolean
   image_settle_secs?: number
   image_task_timeout_secs?: number

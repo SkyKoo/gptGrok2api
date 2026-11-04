@@ -135,12 +135,23 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		return
 	}
 	s.setVideoStatus(job, "in_progress", 1, nil)
-	verifier, err := s.newVideoVerifier(ctx, len(inputs))
+	settings, err := s.store.Config()
 	if err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_review_unavailable", "message": "视频内容核对不可用；请检查 FFmpeg 和 ChatGPT 核对账号/模型，本次未向 Grok 提交生成"})
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_settings_unavailable", "message": "无法读取视频核对设置，本次未向 Grok 提交生成"})
 		return
 	}
-	defer verifier.Close()
+	// Capture the setting once so saving settings cannot change an active job.
+	reviewEnabled, _ := settings["video_review_enabled"].(bool)
+	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_review_enabled": reviewEnabled}})
+	var verifier videoResultVerifier
+	if reviewEnabled {
+		verifier, err = s.newVideoVerifier(ctx, len(inputs))
+		if err != nil {
+			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_review_unavailable", "message": "视频内容核对不可用；请检查 FFmpeg 和 ChatGPT 核对账号/模型，本次未向 Grok 提交生成"})
+			return
+		}
+		defer verifier.Close()
+	}
 	s.ensureGrokMediaQuotas(ctx)
 	segments, _ := protocol.VideoSegmentLengths(seconds)
 	units := 0
@@ -323,18 +334,31 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": message})
 		return
 	}
-	if !stage("video_content_review", map[string]any{"download_ms": time.Since(downloadStarted).Milliseconds(), "video_bytes": len(raw)}) {
+	if !stage("video_downloaded", map[string]any{"download_ms": time.Since(downloadStarted).Milliseconds(), "video_bytes": len(raw)}) {
 		return
 	}
-	reviewStarted := time.Now()
-	verification := verifier.Verify(ctx, prompt, inputs, raw, seconds)
+	verification := videoVerification{Verdict: "skipped", Reason: "disabled", References: len(inputs)}
+	reviewMetrics := map[string]any{}
+	if reviewEnabled {
+		if !stage("video_content_review", nil) {
+			return
+		}
+		reviewStarted := time.Now()
+		verification = verifier.Verify(ctx, prompt, inputs, raw, seconds)
+		reviewMetrics["video_review_ms"] = time.Since(reviewStarted).Milliseconds()
+	}
 	s.videoMu.Lock()
 	job.Verification = &verification
 	s.videoMu.Unlock()
-	if !stage("video_content_reviewed", map[string]any{"video_verification": verification, "video_review_ms": time.Since(reviewStarted).Milliseconds()}) {
+	reviewMetrics["video_verification"] = verification
+	reviewStage := "video_content_review_skipped"
+	if reviewEnabled {
+		reviewStage = "video_content_reviewed"
+	}
+	if !stage(reviewStage, reviewMetrics) {
 		return
 	}
-	if verification.Verdict != "matched" {
+	if reviewEnabled && verification.Verdict != "matched" {
 		code, message := "video_content_unverified", "无法确认视频与提示词及参考图一致，已停止交付；未自动重试"
 		if verification.Verdict == "mismatch" {
 			code, message = "video_content_mismatch", "视频画面与提示词或参考图不符，已拦截该结果；未自动重试"
