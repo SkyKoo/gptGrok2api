@@ -31,7 +31,7 @@
             <th class="py-3 pr-5">调用账号</th>
             <th class="py-3 pr-5">调用耗时</th>
             <th class="py-3 pr-5">状态</th>
-            <th class="py-3 pr-5">图片</th>
+            <th class="py-3 pr-5">媒体</th>
             <th class="py-3 pr-5">简述</th>
             <th class="py-3 pr-4 text-right">操作</th>
           </tr>

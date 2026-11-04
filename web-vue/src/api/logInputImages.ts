@@ -28,6 +28,7 @@ export function normalizeLogInputImages(detail: Record<string, any>): LogInputIm
 
 // Never allow input previews to leak into the result list's recursive fallback.
 export function logOutputSource(detail: Record<string, any>): unknown {
+  if (Array.isArray(detail.output_videos) && detail.output_videos.length) return detail.output_videos
   if (Array.isArray(detail.output_images) && detail.output_images.length) return detail.output_images
   if (Array.isArray(detail.image_urls) && detail.image_urls.length) return detail.image_urls
   const { input_images, request_meta, request_shape, ...legacy } = detail

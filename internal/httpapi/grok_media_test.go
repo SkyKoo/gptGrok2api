@@ -205,7 +205,7 @@ func TestGrokReferenceV2AssetsReachImageAndVideoGeneration(t *testing.T) {
 				}
 				return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(strings.NewReader(raw)), Request: r}, nil
 			})}
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			s.cfg.VideoDataDir = t.TempDir()
 			s.mediaProvider = provider.NewMedia(client, "https://grok.test/chat", "https://grok.test/post", "https://grok.test/rest/app-chat/upload-file-v2", "", s.cfg.RequestTimeout)
 			for _, token := range []string{"account-a", "account-b"} {

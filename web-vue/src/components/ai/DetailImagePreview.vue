@@ -2,7 +2,7 @@
   <div v-if="images.length" class="detail-image-preview">
     <div class="detail-image-preview__header">
       <span class="detail-image-preview__title">{{ title }}</span>
-      <span class="detail-image-preview__count">{{ images.length }} 张</span>
+      <span class="detail-image-preview__count">{{ images.length }} 个</span>
     </div>
     <div class="detail-image-preview__grid">
       <button
@@ -16,13 +16,16 @@
       >
         <div class="detail-image-preview__media">
           <img
-            v-if="!image.broken && !image.loading"
+            v-if="!image.broken && !image.loading && image.type !== 'video'"
             :src="image.url"
             :alt="image.alt || `日志结果图片 ${index + 1}`"
             loading="lazy"
             class="detail-image-preview__image"
             @error="$emit('image-error', $event, image.url)"
           />
+          <video v-else-if="!image.broken && !image.loading && image.type === 'video'"
+            :src="image.url" muted playsinline preload="metadata" class="detail-image-preview__image"
+            @error="$emit('image-error', $event, image.url)" />
           <span v-else>{{ image.loading ? '加载中…' : image.unavailableText || '图片已过期或无法预览' }}</span>
         </div>
         <p class="detail-image-preview__filename">
@@ -35,6 +38,7 @@
 
 <script setup lang="ts">
 export type DetailImagePreviewItem = {
+  type?: 'image' | 'video'
   url: string
   title?: string
   filename?: string

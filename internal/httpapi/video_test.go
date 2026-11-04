@@ -58,7 +58,7 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	cfg.AssetsBaseURL = upstream.URL
 	cfg.Version = "test"
 	cfg.RequestTimeout = 3 * time.Second
-	server := New(cfg)
+	server := newVideoTestServer(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
 		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "video-token",
@@ -108,7 +108,7 @@ func TestVideosCreateRejectsMalformedMultipartBeforeStartingJob(t *testing.T) {
 	cfg.AuthKeysPath = filepath.Join(root, "data", "auth_keys.json")
 	cfg.ConfigPath = filepath.Join(root, "data", "config.json")
 	cfg.Version = "test"
-	server := New(cfg)
+	server := newVideoTestServer(cfg)
 	request := httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(""))
 	request.Header.Set("Authorization", "Bearer api-secret")
 	request.Header.Set("Content-Type", "multipart/form-data; boundary=missing")
@@ -169,7 +169,7 @@ func TestVideosAPICompletesAndServesContent(t *testing.T) {
 	cfg.AssetsBaseURL = upstream.URL
 	cfg.Version = "test"
 	cfg.RequestTimeout = 3 * time.Second
-	server := New(cfg)
+	server := newVideoTestServer(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
 		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "video-api-token",

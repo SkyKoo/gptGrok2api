@@ -3,17 +3,20 @@
     <button
       type="button"
       class="log-image-preview-cell__button"
-      title="查看图片预览"
+      title="查看媒体预览"
       @click="$emit('preview-click')"
     >
       <img
-        v-if="firstImageUrl && !firstImageBroken"
+        v-if="firstImageUrl && !firstImageBroken && !isVideoUrl(firstImageUrl)"
         :src="firstImageUrl"
         :alt="alt || '日志结果图片'"
         loading="lazy"
         class="log-image-preview-cell__image"
         @error="$emit('image-error', $event, firstImageUrl)"
       />
+      <video v-else-if="firstImageUrl && !firstImageBroken && isVideoUrl(firstImageUrl)"
+        :src="firstImageUrl" muted playsinline preload="metadata" class="log-image-preview-cell__image"
+        @error="$emit('image-error', $event, firstImageUrl)" />
       <span v-else class="log-image-preview-cell__fallback">
         无法预览
       </span>
@@ -27,6 +30,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { isVideoUrl } from '@/lib/mediaType'
 import MetaChip from './MetaChip.vue'
 
 const props = defineProps<{

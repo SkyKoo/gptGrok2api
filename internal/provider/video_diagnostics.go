@@ -55,6 +55,19 @@ func (d *VideoDiagnostics) Failure() error {
 	return nil
 }
 
+func (d *VideoDiagnostics) Snapshot() map[string]any {
+	if d == nil {
+		return nil
+	}
+	return map[string]any{
+		"http_status": d.core.HTTPStatus, "format": d.core.Format, "lines": d.core.Lines,
+		"json_events": d.core.JSONEvents, "invalid_json": d.core.InvalidJSON,
+		"text_events": d.core.TextEvents, "done": d.core.Done, "failure": d.core.Failure,
+		"video_events": d.VideoEvents, "moderated": d.Moderated, "rejected": d.Rejected,
+		"url_present": d.URLPresent, "post_id_present": d.PostIDPresent, "max_progress": d.MaxProgress,
+	}
+}
+
 func (d *VideoDiagnostics) Err(reason string) error {
 	if d.core.Failure != "" {
 		reason = d.core.Failure

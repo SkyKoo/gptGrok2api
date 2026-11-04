@@ -158,6 +158,9 @@ func (s *Server) DeploymentReady() error {
 	if s.imageTaskLoadErr != nil {
 		return errors.New("image journal unavailable")
 	}
+	if s.videoLoadErr != nil {
+		return errors.New("video journal unavailable")
+	}
 	if s.cfg.QueueBackend == "redis" {
 		if _, ok := s.taskQueue.(*tasks.RedisQueue); !ok {
 			return errors.New("Redis queue unavailable")

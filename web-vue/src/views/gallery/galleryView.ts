@@ -82,6 +82,8 @@ export function storageLabel(file: GalleryFile): string {
 export function galleryFileCardSignature(file: GalleryFile, input: GalleryFileCardSignatureInput): string {
   return [
     file.path,
+    file.type,
+    file.verification?.verdict,
     boundedSignatureText(file.filename),
     boundedSignatureText(input.imageUrl, 220),
     input.selected ? 1 : 0,
@@ -112,7 +114,7 @@ export function buildTagOptions(tags: readonly string[]) {
 }
 
 export function formatPaginationSummary(currentPage: number, pageCount: number, totalItems: number): string {
-  return `第 ${currentPage} / ${pageCount} 页，共 ${totalItems} 张`
+  return `第 ${currentPage} / ${pageCount} 页，共 ${totalItems} 个媒体`
 }
 
 export function formatStorageUsagePercent(stats: ImageStorageStats | null | undefined): string {
@@ -180,7 +182,7 @@ export function buildGalleryMetricItems(
 ): GalleryMetricItem[] {
   return [
     { label: '当前视图', value: totalItems, icon: 'lucide:image', iconClass: 'text-cyan-600', iconBgClass: 'bg-transparent' },
-    { label: '图库总量', value: storageStats ? storageStats.image_count : counts.all, icon: 'lucide:archive', iconClass: 'text-violet-600', iconBgClass: 'bg-transparent' },
+    { label: '当前图片 / 视频', value: `${counts.image} / ${counts.video}`, icon: 'lucide:archive', iconClass: 'text-violet-600', iconBgClass: 'bg-transparent' },
     { label: '当前占用', value: formatSize(totalSize), icon: 'lucide:database', iconClass: 'text-emerald-600', iconBgClass: 'bg-transparent' },
     { label: '磁盘剩余', value: storageStats ? formatSize(storageStats.disk_free_mb * 1024 * 1024) : '-', icon: 'lucide:hard-drive', iconClass: 'text-amber-600', iconBgClass: 'bg-transparent' },
   ]

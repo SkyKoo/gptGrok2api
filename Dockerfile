@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /gptgrok2api ./cmd/gptg
 
 FROM alpine:3.21 AS app
 LABEL io.cfm.rolling.protocol="cfm-single-writer-v1"
-RUN apk add --no-cache nodejs \
+RUN apk add --no-cache nodejs ffmpeg \
     && adduser -D -H -u 10001 app
 WORKDIR /app
 COPY --from=go-build /gptgrok2api /app/gptgrok2api

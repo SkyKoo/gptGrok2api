@@ -1,7 +1,7 @@
 <template>
   <div class="gallery-page">
     <PagePanel class="gallery-hero">
-      <PanelHeader title="图片管理">
+      <PanelHeader title="图片与视频">
         <template #actions>
           <Button size="sm" variant="outline" :disabled="isLoading" @click="openStorageModal">
             存储管理
@@ -25,6 +25,9 @@
           root-class="gallery-filter-search"
           @update:model-value="searchQuery = $event"
         />
+        <div class="gallery-filter-field gallery-filter-field--tag">
+          <GroupedSelectMenu v-model="mediaType" :options="[{ label: '全部媒体', value: 'all' }, { label: '图片', value: 'image' }, { label: '视频', value: 'video' }]" selected-indicator="none" />
+        </div>
         <div class="gallery-filter-field gallery-filter-field--tag">
           <GroupedSelectMenu
             v-model="tagFilter"
@@ -87,14 +90,14 @@
       <PageLoadingState
         v-if="!hasLoadedOnce && files.length === 0"
         class="gallery-state-block"
-        title="正在加载图片"
-        description="读取图片记录、标签和分页数据。"
+        title="正在加载媒体"
+        description="读取图片、视频、标签和分页数据。"
       />
 
       <StateBlock
         v-else-if="files.length === 0"
         class="gallery-state-block"
-        :title="galleryLoadError ? '图片管理加载失败' : '暂无图片'"
+        :title="galleryLoadError ? '媒体加载失败' : '暂无媒体'"
         :description="galleryLoadError || '换个筛选条件或刷新后再看。'"
       >
         <template #media>
@@ -133,7 +136,7 @@
           v-model:page-size="pageSize"
           :total-count="totalItems"
           :page-size-options="galleryPageSizeOptions"
-          unit="张图片"
+          unit="个媒体"
           :disabled="isLoading"
         />
       </div>
@@ -166,7 +169,7 @@
 
     <SelectionBulkBar
       :selected-count="selectedCount"
-      :summary-text="`已选择 ${selectedCount} 张图片`"
+      :summary-text="`已选择 ${selectedCount} 个媒体`"
       density="compact"
     >
       <Button size="xs" variant="outline" :disabled="batchBusy" @click="handleBatchDownload">下载 zip</Button>
@@ -351,6 +354,7 @@ const isLoading = galleryQueryRuntime.isLoading
 const hasLoadedOnce = galleryQueryRuntime.hasLoadedOnce
 const galleryLoadError = galleryQueryRuntime.galleryLoadError
 const tagFilter = galleryQueryRuntime.tagFilter
+const mediaType = galleryQueryRuntime.mediaType
 const searchQuery = galleryQueryRuntime.searchQuery
 const startDate = galleryQueryRuntime.startDate
 const endDate = galleryQueryRuntime.endDate

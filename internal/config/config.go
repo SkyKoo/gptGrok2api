@@ -66,6 +66,7 @@ type Config struct {
 	OAuthTokenURL           string
 	ImageDataDir            string
 	VideoDataDir            string
+	VideoReviewModel        string
 	OAuthPath               string
 	QueuePath               string
 	RegisterPath            string
@@ -213,6 +214,7 @@ func Load(root string) (Config, error) {
 		OAuthTokenURL:           env("GO_XAI_OAUTH_TOKEN_URL", "https://auth.x.ai/oauth2/token"),
 		ImageDataDir:            resolvePath(root, env("GO_IMAGE_DATA_DIR", filepath.Join("data", "files", "images"))),
 		VideoDataDir:            resolvePath(root, env("GO_VIDEO_DATA_DIR", filepath.Join("data", "files", "videos"))),
+		VideoReviewModel:        env("GO_VIDEO_REVIEW_MODEL", "auto"),
 		OAuthPath:               resolvePath(root, env("GO_OAUTH_PATH", filepath.Join("data", "oauth_accounts.json.enc"))),
 		QueuePath:               resolvePath(root, env("GO_QUEUE_PATH", filepath.Join("data", "tasks.json"))),
 		RegisterPath:            resolvePath(root, env("GO_REGISTER_PATH", filepath.Join("data", "register.json"))),

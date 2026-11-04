@@ -6,10 +6,20 @@
   >
     <div class="media-wrapper" @click="handlePreview">
       <img
-        v-if="previewable"
+        v-if="previewable && file.type !== 'video'"
         :src="imageUrl"
         :alt="file.filename"
         loading="lazy"
+        class="media-content"
+        @error="handleImageError"
+      />
+      <video
+        v-else-if="previewable && file.type === 'video'"
+        :src="imageUrl"
+        :aria-label="file.filename"
+        preload="metadata"
+        muted
+        playsinline
         class="media-content"
         @error="handleImageError"
       />
@@ -25,7 +35,7 @@
           @update:model-value="handleSelect"
         />
         <span v-if="file.expired" class="media-badge danger">已过期</span>
-        <span v-else class="media-badge">{{ storageLabel }}</span>
+        <span v-else class="media-badge">{{ file.type === 'video' ? '视频 · 点击播放' : storageLabel }}</span>
       </div>
 
       <div class="media-overlay">
@@ -63,6 +73,9 @@
       <div class="file-meta" v-if="file.call_id">
         <span :title="file.call_id">请求 {{ file.call_id.slice(0, 12) }}</span>
         <span v-if="file.endpoint">{{ file.endpoint }}</span>
+      </div>
+      <div v-if="file.type === 'video'" class="file-meta">
+        <span>{{ file.verification?.verdict === 'matched' ? '抽帧内容核对通过' : '历史视频 · 未进行内容核对' }}</span>
       </div>
       <div v-if="file.tags.length" class="tag-row">
         <button

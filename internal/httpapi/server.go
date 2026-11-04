@@ -95,6 +95,9 @@ type Server struct {
 	videoResultMu      sync.Mutex
 	videoFingerprints  map[string]videoResultRecord
 	videoJobs          map[string]*videoJob
+	videoLoadErr       error
+	newVideoVerifier   func(context.Context, int) (videoResultVerifier, error)
+	videoReviewSlots   chan struct{}
 	imageTaskMu        sync.RWMutex
 	imageTasks         map[string]*imageTaskState
 	imageTaskLoadErr   error
@@ -187,6 +190,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 		grokQuota:          provider.NewGrokQuota(cfg.GrokRateLimitsURL, requestClient, proxyManager),
 		proxyManager:       proxyManager,
 		videoJobs:          map[string]*videoJob{},
+		videoReviewSlots:   make(chan struct{}, 2),
 		imageTasks:         map[string]*imageTaskState{},
 		imageSlots:         makeImageSlots(cfg.ImageMaxConcurrency),
 		fileTasks:          map[string]*editableFileTaskState{},
@@ -230,10 +234,12 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.initFreeRegistration()
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
+	server.newVideoVerifier = server.prepareVideoVerifier
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)
 	server.loadEditableFileTasks()
 	server.loadImageTasks()
+	server.loadVideoTasks()
 	server.chatProvider.SetProxyManager(proxyManager)
 	server.consoleProvider.SetProxyManager(proxyManager)
 	server.mediaProvider.SetProxyManager(proxyManager)
@@ -241,6 +247,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
 	server.PauseDeployment(!startWorkers)
 	if startWorkers {
+		server.recoverVideoTasks()
 		server.StartWorkers()
 	}
 
@@ -2715,6 +2722,7 @@ func (s *Server) StartWorkers() {
 		return
 	}
 	s.workersOnce.Do(func() {
+		s.recoverVideoTasks()
 		s.taskQueue.Start(2)
 		go s.imageRetentionScheduler()
 		go s.grokProbeScheduler()

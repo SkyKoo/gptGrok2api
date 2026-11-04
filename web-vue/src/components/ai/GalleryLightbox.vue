@@ -4,10 +4,21 @@
       <div class="lightbox-content">
         <ModalCloseButton class="lightbox-close" label="关闭预览" tone="dark" @click="$emit('close')" />
         <img
+          v-if="file.type !== 'video'"
           :src="imageUrl"
           :alt="file.filename"
           class="lightbox-media"
         />
+        <video
+          v-else
+          :key="imageUrl"
+          :src="imageUrl"
+          :aria-label="file.filename"
+          controls
+          playsinline
+          preload="metadata"
+          class="lightbox-media"
+        >浏览器不支持播放此视频，请使用下载按钮。</video>
         <div class="lightbox-info">
           <span class="max-w-[24rem] truncate" :title="file.path">{{ file.filename }}</span>
           <span v-if="sizeLabel">{{ sizeLabel }}</span>

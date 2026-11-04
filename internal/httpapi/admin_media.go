@@ -102,7 +102,7 @@ func listMediaItems(root, kind, prefix string) []map[string]any {
 	entries, _ := os.ReadDir(root)
 	items := make([]map[string]any, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".meta.json") {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || strings.HasSuffix(entry.Name(), ".meta.json") {
 			continue
 		}
 		info, err := entry.Info()
@@ -115,6 +115,9 @@ func listMediaItems(root, kind, prefix string) []map[string]any {
 		}
 		rel := prefix + filepath.ToSlash(entry.Name())
 		value := map[string]any{"path": rel, "rel": rel, "name": entry.Name(), "filename": entry.Name(), "type": kind, "size": info.Size(), "bytes": info.Size(), "updated_at": info.ModTime().UTC(), "url": "/images/" + rel}
+		if kind == "video" {
+			value["expired"], value["expires_in_seconds"] = false, nil
+		}
 		if meta := mediaMetadata(path); meta != nil {
 			for key, item := range meta {
 				value[key] = item
@@ -141,7 +144,6 @@ func mediaItemsSize(items []map[string]any) int64 {
 
 func (s *Server) publicImage(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/images/")
-	root := s.cfg.ImageDataDir
 	if strings.HasPrefix(r.URL.Path, "/image-thumbnails/") {
 		path = strings.TrimPrefix(r.URL.Path, "/image-thumbnails/")
 	}
@@ -149,12 +151,12 @@ func (s *Server) publicImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid image path", "invalid_request_error")
 		return
 	}
-	path, err := filepath.Rel(root, filepath.Join(root, filepath.FromSlash(path)))
-	if err != nil || path == ".." || strings.HasPrefix(path, ".."+string(os.PathSeparator)) {
+	root, clean := s.mediaPath(path)
+	if root == "" || strings.HasPrefix(filepath.Base(clean), ".") || strings.HasSuffix(clean, ".meta.json") {
 		writeError(w, http.StatusNotFound, "image not found", "not_found")
 		return
 	}
-	filePath := filepath.Join(root, path)
+	filePath := filepath.Join(root, clean)
 	if _, err := os.Stat(filePath); err != nil {
 		writeError(w, http.StatusNotFound, "image not found", "not_found")
 		return

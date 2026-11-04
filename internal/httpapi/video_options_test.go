@@ -55,7 +55,7 @@ func videoOptionsRequest(t *testing.T, fields url.Values) *http.Request {
 }
 
 func TestVideoInvalidOptionsNeverQueueOrCallUpstream(t *testing.T) {
-	s := New(adminTestConfig(t.TempDir()))
+	s := newVideoTestServer(adminTestConfig(t.TempDir()))
 	for _, form := range []string{
 		"seconds=10", "seconds=15", "seconds=0", "seconds=-1", "seconds=bad", "seconds=6.5", "seconds=5", "seconds=9999999999999999999999",
 		"size=1920x1080", "aspect_ratio=auto", "aspect_ratio=4:3", "aspect_ratio=21:9", "size=720x1280&aspect_ratio=16:9",
@@ -114,7 +114,7 @@ func TestVideoOptionsReachUpstream(t *testing.T) {
 				}
 			}))
 			defer up.Close()
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "test", "enabled": true, "status": "active"}})
 			if err != nil {
@@ -173,7 +173,7 @@ func TestVideoBothResolutionsRespectZeroSharedQuota(t *testing.T) {
 				http.Error(w, "unexpected", 500)
 			}))
 			defer up.Close()
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 			snapshot := testGrokMediaSnapshot()
 			mapValue(mapValue(snapshot["quotas"])["video720p"])["remaining"] = 0

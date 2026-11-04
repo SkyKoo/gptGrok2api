@@ -224,6 +224,7 @@ function isImageEndpointLog(endpoint: string, model = ''): boolean {
 }
 
 function pickEndpointTag(endpoint: string, model = ''): string {
+  if (endpoint === '/v1/videos') return 'VIDEO-GEN'
   if (endpoint.includes('/images/edits')) return 'IMAGE-EDIT'
   if (endpoint.includes('/images/generations')) return 'IMAGE-GEN'
   if (isImageChatLog(endpoint, model)) return 'IMAGE-CHAT'

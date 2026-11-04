@@ -54,6 +54,7 @@ type monitorRecord struct {
 
 	// Generated outputs are recorded separately from the capped HTTP response.
 	OutputImages         []map[string]string `json:"-"`
+	OutputVideos         []map[string]string `json:"output_videos,omitempty"`
 	InputImages          []logInputImage     `json:"-"`
 	ErrorDetail          string              `json:"-"`
 	ErrorDetailTruncated bool                `json:"-"`
@@ -804,6 +805,25 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 	if s == nil || strings.TrimSpace(record.CallID) == "" {
 		return
 	}
+	raw, err := json.Marshal(callLogEntry(record, statusCode, requestShape, responseBody, errorText))
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(s.cfg.DataDir, 0o755); err != nil {
+		return
+	}
+	path := filepath.Join(s.cfg.DataDir, "logs.jsonl")
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+	_, _ = file.Write(append(raw, '\n'))
+}
+
+func callLogEntry(record monitorRecord, statusCode int, requestShape any, responseBody []byte, errorText string) map[string]any {
 	if errText := strings.TrimSpace(errorText); errText != "" {
 		errorText = errText
 	}
@@ -877,6 +897,13 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		detail["output_images"] = outputs
 		detail["image_urls"] = outputs
 	}
+	if len(record.OutputVideos) > 0 {
+		detail["output_videos"] = record.OutputVideos
+	}
+	if record.Endpoint == "/v1/videos" {
+		detail["error_code"] = record.Metrics["video_error_code"]
+		detail["video_verification"] = record.Metrics["video_verification"]
+	}
 	entry := map[string]any{
 		"id":      record.CallID,
 		"time":    endedAt.Format(time.RFC3339),
@@ -884,22 +911,7 @@ func (s *Server) appendCallLog(record monitorRecord, statusCode int, requestShap
 		"summary": firstNonEmpty(strings.TrimSpace(record.Summary), record.Endpoint, record.Model, record.CallID),
 		"detail":  detail,
 	}
-	raw, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(s.cfg.DataDir, 0o755); err != nil {
-		return
-	}
-	path := filepath.Join(s.cfg.DataDir, "logs.jsonl")
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-	_, _ = file.Write(append(raw, '\n'))
+	return entry
 }
 
 func responseImageOutputs(raw []byte) []map[string]string {
@@ -959,6 +971,24 @@ func responseImageOutputs(raw []byte) []map[string]string {
 
 func monitorStageLabel(stage string) string {
 	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "video_validated":
+		return "视频输入校验完成"
+	case "video_reference_upload":
+		return "上传视频参考图"
+	case "video_reference_uploaded":
+		return "参考图上传完成"
+	case "video_create_post":
+		return "创建上游视频任务"
+	case "video_post_created":
+		return "上游视频任务已关联"
+	case "video_generation", "video_progress":
+		return "上游视频生成中"
+	case "video_download":
+		return "下载视频待核对"
+	case "video_content_review":
+		return "核对视频画面"
+	case "video_content_reviewed":
+		return "视频画面核对完成"
 	case "handler_submitted":
 		return "等待入口"
 	case "handler_started":

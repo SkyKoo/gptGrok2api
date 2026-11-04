@@ -207,18 +207,29 @@ func (s *Server) deleteLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"removed": 0})
 		return
 	}
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	removedVideos := 0
+	for id := range targets {
+		if err := os.Remove(filepath.Join(s.cfg.DataDir, "video_logs", videoJournalName(id))); err == nil {
+			removedVideos++
+		} else if !os.IsNotExist(err) {
+			writeError(w, http.StatusInternalServerError, "could not delete video log", "server_error")
+			return
+		}
+	}
 	path := filepath.Join(s.cfg.DataDir, "logs.jsonl")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeJSON(w, http.StatusOK, map[string]any{"removed": 0})
+			writeJSON(w, http.StatusOK, map[string]any{"removed": removedVideos})
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return
 	}
 	kept := make([]string, 0)
-	removed := 0
+	removed := removedVideos
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
@@ -238,13 +249,13 @@ func (s *Server) deleteLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loadCallLogs() []map[string]any {
+	items := s.loadVideoCallLogs()
 	path := filepath.Join(s.cfg.DataDir, "logs.jsonl")
 	file, err := os.Open(path)
 	if err != nil {
-		return []map[string]any{}
+		return items
 	}
 	defer file.Close()
-	items := []map[string]any{}
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 4096), 4<<20)
 	for scanner.Scan() {
@@ -257,7 +268,16 @@ func (s *Server) loadCallLogs() []map[string]any {
 }
 
 func logMatches(item map[string]any, query url.Values) bool {
-	text := func(key string) string { return strings.ToLower(strings.TrimSpace(fmt.Sprint(item[key]))) }
+	text := func(key string) string {
+		value := item[key]
+		if value == nil {
+			value = mapValue(item["detail"])[key]
+		}
+		if value == nil {
+			return ""
+		}
+		return strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	}
 	for _, key := range []string{"type", "status", "endpoint", "model", "account", "conversation_id"} {
 		want := strings.TrimSpace(query.Get(key))
 		if want != "" && !strings.Contains(text(key), strings.ToLower(want)) {

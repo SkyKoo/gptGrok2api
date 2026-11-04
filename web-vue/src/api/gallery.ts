@@ -26,6 +26,7 @@ export interface GalleryFile {
   endpoint?: string
   model?: string
   generated_at?: string
+  verification?: { verdict: string; reason: string }
 }
 
 export interface GalleryResponse {
@@ -216,6 +217,7 @@ function mapFile(item: BackendImageItem, retentionDays: number): GalleryFile {
   const safePath = path || name
   return {
     filename: name || safePath,
+    verification: item.verification,
     path: safePath,
     url: relativeUrl(cleanString(item.url), safePath),
     thumbnail_url: relativeUrl(cleanString(item.thumbnail_url || item.url), safePath),

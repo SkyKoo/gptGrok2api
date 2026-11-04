@@ -17,10 +17,12 @@
       <div class="gallery-tag-editor">
         <div class="gallery-tag-editor__grid">
           <img
+            v-if="file.type !== 'video'"
             :src="imageUrl"
             :alt="file.filename"
             class="gallery-tag-editor__thumb"
           />
+          <video v-else :src="imageUrl" controls playsinline preload="metadata" class="gallery-tag-editor__thumb" />
           <div class="gallery-tag-editor__body">
             <Input
               :model-value="draft"

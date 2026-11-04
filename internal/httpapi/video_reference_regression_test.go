@@ -28,7 +28,7 @@ func TestVideosRejectInvalidReferencesBeforeQueueing(t *testing.T) {
 		{"unsupported input field", tinyPNG, 1, "video_reference"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
 			_ = writer.WriteField("prompt", "a paper plane")
@@ -92,7 +92,7 @@ func TestVideoReferenceFailureNeverFallsBackToText(t *testing.T) {
 				}
 			}))
 			defer up.Close()
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 			if _, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "test", "enabled": true, "status": "active"}}); err != nil {
 				t.Fatal(err)
@@ -157,7 +157,7 @@ func TestVideoUploadsAndGenerationUseOneAccount(t *testing.T) {
 		}
 	}))
 	defer up.Close()
-	s := New(adminTestConfig(t.TempDir()))
+	s := newVideoTestServer(adminTestConfig(t.TempDir()))
 	s.cfg.VideoDataDir = t.TempDir()
 	s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 	for _, token := range []string{"account-a", "account-b"} {
@@ -201,7 +201,7 @@ func TestSequentialVideoJobsRejectRepeatedMediaForDifferentPrompts(t *testing.T)
 		}
 	}))
 	defer up.Close()
-	s := New(adminTestConfig(t.TempDir()))
+	s := newVideoTestServer(adminTestConfig(t.TempDir()))
 	s.cfg.VideoDataDir = t.TempDir()
 	s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 	for _, token := range []string{"sequence-a", "sequence-b"} {
@@ -257,7 +257,7 @@ func TestVideoExtensionRequiresItsOwnCompletedResult(t *testing.T) {
 				}
 			}))
 			defer up.Close()
-			s := New(adminTestConfig(t.TempDir()))
+			s := newVideoTestServer(adminTestConfig(t.TempDir()))
 			s.cfg.VideoDataDir = t.TempDir()
 			s.mediaProvider = provider.NewMedia(up.Client(), up.URL+"/chat", up.URL+"/post", up.URL+"/upload", up.URL, s.cfg.RequestTimeout)
 			if _, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "test", "enabled": true, "status": "active"}}); err != nil {

@@ -1,4 +1,5 @@
 import type { GalleryFile } from '@/api/gallery'
+import { isVideoUrl } from '@/lib/mediaType'
 import type { RuntimeLog, SystemLogsResponse, SystemLogRow } from '@/api/logs'
 import type { ActionMenuItem } from 'nanocat-ui'
 import { actionMenuGroups } from '@/components/ai/menuItems'
@@ -52,6 +53,7 @@ type AdvancedConditionGroup = {
 }
 
 export type LogPreviewImage = {
+  type?: 'image' | 'video'
   url: string
   title?: string
   filename?: string
@@ -108,9 +110,10 @@ export const systemQuickFilterOptions: LogGroupedSelectOption[] = [
   { label: '只看失败', value: 'quick:status:failed' },
   { label: '图生图', value: 'quick:endpoint:/v1/images/edits' },
   { label: '文生图', value: 'quick:endpoint:/v1/images/generations' },
+  { label: '生视频', value: 'quick:endpoint:/v1/videos' },
 ]
 
-export const quickEndpointValues = ['/v1/images/edits', '/v1/images/generations'] as const
+export const quickEndpointValues = ['/v1/images/edits', '/v1/images/generations', '/v1/videos'] as const
 
 export const systemQuickFilterGroups: LogGroupedSelectGroup[] = [
   { options: systemQuickFilterOptions },
@@ -291,6 +294,7 @@ export function buildLogPreviewImages(
     const sourceUrl = item.urls[index] || url
     return {
       url,
+      type: isVideoUrl(sourceUrl) ? 'video' : 'image',
       title: sourceUrl,
       filename: filenameFromUrl(sourceUrl),
       alt: `日志结果图片 ${index + 1}`,
@@ -311,7 +315,7 @@ export function buildLogPreviewGalleryFile(image: LogPreviewImage | null | undef
     created_at: '',
     mtime: 0,
     date: '',
-    type: 'image',
+    type: image.type || (isVideoUrl(image.title || image.url) ? 'video' : 'image'),
     expired: false,
     expires_in_seconds: null,
     tags: [],
@@ -440,6 +444,7 @@ export function buildSystemQuickFilterSelection(filters: Pick<SystemLogFilters, 
   if (filters.status === 'failed') values.push('quick:status:failed')
   if (filters.endpoint === '/v1/images/edits') values.push('quick:endpoint:/v1/images/edits')
   if (filters.endpoint === '/v1/images/generations') values.push('quick:endpoint:/v1/images/generations')
+  if (filters.endpoint === '/v1/videos') values.push('quick:endpoint:/v1/videos')
   return values
 }
 

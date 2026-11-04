@@ -11,16 +11,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
 var errRepeatedVideo = errors.New("Grok 返回了与其他输入相同的视频，无法确认结果与本次提示词和参考图一致；已停止返回该视频，未自动重试")
+var errRejectedVideo = errors.New("Grok 返回了曾被判定为内容不符的视频，已停止交付；未自动重试")
 
 type videoResultRecord struct {
-	RequestHash string `json:"request_sha256"`
-	MediaHash   string `json:"media_sha256"`
-	CallID      string `json:"call_id"`
+	RequestHash  string             `json:"request_sha256"`
+	MediaHash    string             `json:"media_sha256"`
+	CallID       string             `json:"call_id"`
+	Model        string             `json:"model,omitempty"`
+	Endpoint     string             `json:"endpoint,omitempty"`
+	SourceType   string             `json:"source_type,omitempty"`
+	GeneratedAt  string             `json:"generated_at,omitempty"`
+	Verification *videoVerification `json:"verification,omitempty"`
+	Rejected     bool               `json:"rejected,omitempty"`
 }
 
 func videoRequestFingerprint(model, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput) string {
@@ -143,11 +151,64 @@ func (s *Server) loadVideoFingerprints() error {
 		}
 		records[hash] = record
 	}
+	rejections, err := os.ReadDir(filepath.Join(s.cfg.DataDir, "video_rejections"))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, entry := range rejections {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "video_rejections", entry.Name()))
+		var record videoResultRecord
+		if err != nil || json.Unmarshal(raw, &record) != nil || len(record.MediaHash) != 64 || entry.Name() != record.MediaHash+".json" || !record.Rejected {
+			return fmt.Errorf("video rejection history unavailable")
+		}
+		records[record.MediaHash] = record
+	}
 	s.videoFingerprints = records
 	return nil
 }
 
-func (s *Server) storeVideoResult(callID, requestHash string, raw []byte, mime string) (string, string, error) {
+func (s *Server) checkVideoResult(requestHash string, raw []byte) (string, error) {
+	hash, err := videoMediaFingerprint(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return "", fmt.Errorf("Grok 返回的视频文件不完整，已停止返回结果")
+	}
+	s.videoResultMu.Lock()
+	defer s.videoResultMu.Unlock()
+	if err := s.loadVideoFingerprints(); err != nil {
+		return hash, err
+	}
+	return hash, s.checkVideoFingerprintLocked(hash, requestHash)
+}
+
+func (s *Server) checkVideoFingerprintLocked(hash, requestHash string) error {
+	if previous, exists := s.videoFingerprints[hash]; exists {
+		if previous.Rejected {
+			return errRejectedVideo
+		}
+		if previous.RequestHash == "" || previous.RequestHash != requestHash {
+			return errRepeatedVideo
+		}
+	}
+	return nil
+}
+
+// Keep only the encoded-media hash of a definite mismatch, never rejected media
+// bytes. Unlike same-input duplicates, a known bad result is never deliverable.
+func (s *Server) rejectVideoResult(callID, requestHash, hash string, verification videoVerification) error {
+	s.videoResultMu.Lock()
+	defer s.videoResultMu.Unlock()
+	if err := s.loadVideoFingerprints(); err != nil {
+		return err
+	}
+	record := videoResultRecord{CallID: callID, RequestHash: requestHash, MediaHash: hash, Rejected: true, Verification: &verification}
+	s.videoFingerprints[hash] = record
+	return writeVideoJSON(filepath.Join(s.cfg.DataDir, "video_rejections", hash+".json"), record)
+}
+
+func (s *Server) storeVideoResult(callID, requestHash string, raw []byte, mime string, verification ...videoVerification) (string, string, error) {
 	hash, err := videoMediaFingerprint(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return "", "", fmt.Errorf("Grok 返回的视频文件不完整，已停止返回结果")
@@ -157,8 +218,8 @@ func (s *Server) storeVideoResult(callID, requestHash string, raw []byte, mime s
 	if err := s.loadVideoFingerprints(); err != nil {
 		return "", "", err
 	}
-	if previous, exists := s.videoFingerprints[hash]; exists && (previous.RequestHash == "" || previous.RequestHash != requestHash) {
-		return "", hash, errRepeatedVideo
+	if err := s.checkVideoFingerprintLocked(hash, requestHash); err != nil {
+		return "", hash, err
 	}
 	if err := os.MkdirAll(s.cfg.VideoDataDir, 0o755); err != nil {
 		return "", "", err
@@ -168,15 +229,31 @@ func (s *Server) storeVideoResult(callID, requestHash string, raw []byte, mime s
 		ext = ".webm"
 	}
 	path := filepath.Join(s.cfg.VideoDataDir, strings.TrimPrefix(callID, "video_")+ext)
-	if err := os.WriteFile(path, raw, 0o644); err != nil {
+	record := videoResultRecord{RequestHash: requestHash, MediaHash: hash, CallID: callID, Model: "grok-imagine-video", Endpoint: "/v1/videos", SourceType: "generated_output", GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
+	if len(verification) > 0 {
+		record.Verification = &verification[0]
+	}
+	f, err := os.CreateTemp(s.cfg.VideoDataDir, ".video-*")
+	if err != nil {
+		return "", hash, err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(raw); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return "", hash, err
+	}
+	if closeErr != nil {
+		return "", hash, closeErr
+	}
+	if err := writeVideoJSON(path+".meta.json", record); err != nil {
 		return "", "", err
 	}
-	record := videoResultRecord{RequestHash: requestHash, MediaHash: hash, CallID: callID}
-	// Claim the content under the same lock even if metadata persistence fails.
+	if err := os.Rename(f.Name(), path); err != nil {
+		return "", hash, err
+	}
 	s.videoFingerprints[hash] = record
-	meta, _ := json.Marshal(record)
-	if err := os.WriteFile(path+".meta.json", meta, 0o600); err != nil {
-		return "", "", err
-	}
 	return path, hash, nil
 }

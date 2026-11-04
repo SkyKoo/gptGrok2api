@@ -80,7 +80,8 @@ const detailTimelineSteps: DetailTimelineStepConfig[] = [
   { key: 'conversation_stream_ms', label: '上游生成', group: '生成与结果', hint: '供应商会话流' },
   { key: 'stream_error_ms', label: '上游断流', group: '生成与结果', hint: 'HTTP2 / SSE' },
   { key: 'resolve_ms', label: '解析/轮询', group: '生成与结果', hint: 'conversation / file' },
-  { key: 'download_ms', label: '下载图片', group: '生成与结果', hint: '图片文件下载' },
+  { key: 'download_ms', label: '下载媒体', group: '生成与结果', hint: '生成文件下载' },
+  { key: 'video_review_ms', label: '核对视频画面', group: '生成与结果', hint: '视频抽帧与提示词、参考图一致性检查' },
   { key: 'retry_wait_ms', label: '重试等待', group: '生成与结果', hint: '轮询 / 退避' },
   { key: 'response_ms', label: '响应整理', group: '生成与结果', hint: 'Codex 响应' },
   { key: 'stream_ms', label: '单图内部', group: '生成与结果', hint: '单图链路' },
@@ -131,7 +132,7 @@ const detailTimelineCategoryLabels: Record<DetailTimelineCategory, string> = {
   network: 'HTTP 连接',
   upstream: '上游生成',
   resolve: '解析/轮询',
-  download: '图片下载',
+  download: '媒体下载',
   retry: '重试等待',
   response: '响应整理',
 }
@@ -245,7 +246,7 @@ function timelineStepCategory(key: string, group: string): DetailTimelineCategor
   if (group === 'HTTP 连接') return 'network'
   if (key === 'sse_first_event_ms' || key === 'sse_max_gap_ms' || key === 'sse_last_gap_ms') return 'upstream'
   if (key === 'conversation_stream_ms') return 'upstream'
-  if (key === 'resolve_ms') return 'resolve'
+  if (key === 'resolve_ms' || key === 'video_review_ms') return 'resolve'
   if (key === 'download_ms') return 'download'
   if (key === 'retry_wait_ms') return 'retry'
   return 'response'
@@ -296,7 +297,7 @@ function timelineStepNote(item: SystemLogRow, step: DetailTimelineStepConfig): s
   const parts = [step.hint || '']
   if (step.key === 'upload_ms') parts.push(requestShapeImageSummary(item))
   if (step.key === 'resolve_ms' && item.imageUrls.length) parts.push(`结果图 ${item.imageUrls.length}`)
-  if (step.key === 'download_ms' && item.imageUrls.length) parts.push(`下载 ${item.imageUrls.length} 张`)
+  if (step.key === 'download_ms' && item.imageUrls.length) parts.push(`下载 ${item.imageUrls.length} 个媒体`)
   return parts.filter(Boolean).join(' · ')
 }
 
@@ -473,9 +474,19 @@ export function buildPrimaryDetailFields(item: SystemLogRow | null): DetailField
 
 export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailField[] {
   if (!item) return []
-  if (!hasDiagnosticSignal(item)) return []
+  const metrics = monitorRecord(item).metrics || {}
+  const review = detailRecord(item).video_verification
+  const stream = metrics.video_stream
+  if (!hasDiagnosticSignal(item) && item.endpoint !== '/v1/videos') return []
   const shouldShowBooleans = isFailed(item) || isLimited(item) || Boolean(item.errorCode || item.error || item.reason)
   return compactDetailFields([
+    review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '无法确认，已拦截' } : null,
+    review ? { label: '核对原因', value: formatInlineValue(review.reason) } : null,
+    review ? { label: '核对模型', value: formatInlineValue(review.model) } : null,
+    review ? { label: '核对数量', value: `${review.frames || 0} 个视频帧 / ${review.references || 0} 张参考图` } : null,
+    stream ? { label: '上游审核标记', value: stream.moderated ? '已拦截' : '未报告拦截' } : null,
+    stream ? { label: '上游拒绝标记', value: stream.rejected ? '已拒绝' : '未报告拒绝' } : null,
+    item.endpoint === '/v1/videos' ? { label: '参考图上传', value: `${metrics.video_upload_completed || 0} / ${metrics.video_reference_count || 0}` } : null,
     { label: '状态码', value: item.statusCode },
     { label: '错误码', value: item.errorCode, copyable: true },
     { label: '阶段', value: diagnosticStageValue(item), copyable: true },

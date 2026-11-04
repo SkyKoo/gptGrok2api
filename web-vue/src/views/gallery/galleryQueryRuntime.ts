@@ -1,6 +1,6 @@
 import { computed, ref, watch, type Ref } from 'vue'
 
-import { galleryApi, type GalleryFile, type ImageStorageStats } from '@/api/gallery'
+import { galleryApi, type GalleryFile, type GalleryMediaType, type ImageStorageStats } from '@/api/gallery'
 import type { PageRuntime } from '@/composables/usePageRuntime'
 import { usePageDebouncedAction, usePagedQuery } from '@/composables/usePageQuery'
 import { getNumberPreference, preferenceKeys, setNumberPreference } from '@/lib/preferences'
@@ -32,6 +32,7 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
   const hasLoadedOnce = ref(false)
   const galleryLoadError = ref('')
   const tagFilter = ref('all')
+  const mediaType = ref<GalleryMediaType>('all')
   const searchQuery = ref('')
   const startDate = ref('')
   const endDate = ref('')
@@ -52,7 +53,7 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
       galleryApi.getFiles({
         page: Number(size) ? page : 1,
         page_size: Number(size),
-        media_type: 'all',
+        media_type: mediaType.value,
         tag: tagFilter.value,
         search: searchQuery.value,
         start_date: startDate.value,
@@ -119,7 +120,7 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
     searchDebounce.clear()
   }
 
-  watch([tagFilter, startDate, endDate, pageSize], () => {
+  watch([mediaType, tagFilter, startDate, endDate, pageSize], () => {
     if (!options.runtime.isActive.value) return
     resetAndLoad()
   })
@@ -139,6 +140,7 @@ export function useGalleryQueryRuntime(options: GalleryQueryRuntimeOptions) {
     hasLoadedOnce,
     galleryLoadError,
     tagFilter,
+    mediaType,
     searchQuery,
     startDate,
     endDate,
