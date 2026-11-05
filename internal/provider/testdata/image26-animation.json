@@ -1,0 +1,42 @@
+{
+  "conversation_id": "conversation-1",
+  "mapping": {
+    "generated": {
+      "message": {
+        "id": "generated",
+        "author": {
+          "role": "tool",
+          "name": "imagegen"
+        },
+        "status": "finished_successfully",
+        "content": {
+          "content_type": "multimodal_text",
+          "parts": [
+            {
+              "content_type": "image_asset_pointer",
+              "asset_pointer": "sediment://animation-primary",
+              "mime_type": "image/gif",
+              "metadata": {
+                "generation": {
+                  "animation": {
+                    "rows": 3,
+                    "columns": 3,
+                    "frame_count": 9,
+                    "frame_duration_ms": 200
+                  },
+                  "spritesheet": {
+                    "asset_pointer": "sediment://static-spritesheet",
+                    "mime_type": "image/png"
+                  },
+                  "gif_speed_variants": {
+                    "2": "sediment://animation-speed2"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"image"
 	"image/draw"
 	"image/jpeg"
@@ -16,8 +17,13 @@ import (
 // ImageOutputOptions describes output properties, never an editing operation.
 // Defaults follow Images API: background=auto and output_format=png.
 type ImageOutputOptions struct {
-	Background   string `json:"background,omitempty"`
-	OutputFormat string `json:"output_format,omitempty"`
+	Background        string `json:"background,omitempty"`
+	OutputFormat      string `json:"output_format,omitempty"`
+	FrameCount        *int   `json:"frame_count,omitempty"`
+	FrameDurationMS   *int   `json:"frame_duration_ms,omitempty"`
+	Stream            bool   `json:"stream,omitempty"`
+	PartialImages     *int   `json:"partial_images,omitempty"`
+	OutputCompression *int   `json:"output_compression,omitempty"`
 }
 
 type ImageOptionError struct {
@@ -28,15 +34,18 @@ type ImageOptionError struct {
 func (e *ImageOptionError) Error() string { return e.Message }
 
 func (o ImageOutputOptions) Validate() error {
+	if err := o.validateAnimation(); err != nil {
+		return err
+	}
 	switch o.Background {
 	case "", "auto", "transparent", "opaque":
 	default:
 		return &ImageOptionError{Param: "background", Message: "background must be auto, transparent, or opaque"}
 	}
 	switch o.OutputFormat {
-	case "", "png", "jpeg", "webp":
+	case "", "png", "jpeg", "webp", "gif":
 	default:
-		return &ImageOptionError{Param: "output_format", Message: "output_format must be png, jpeg, or webp"}
+		return &ImageOptionError{Param: "output_format", Message: "output_format must be png, jpeg, webp, or gif"}
 	}
 	if o.Background == "transparent" && o.OutputFormat == "jpeg" {
 		return &ImageOptionError{Param: "output_format", Message: "background=transparent requires output_format=png or webp; jpeg does not support transparency"}
@@ -52,6 +61,9 @@ func (o ImageOutputOptions) EffectiveFormat() string {
 }
 
 func (o ImageOutputOptions) promptSuffix() string {
+	if o.OutputFormat == "gif" {
+		return fmt.Sprintf("\nOutput requirement: use the image generation tool to create one animated GIF with exactly %d frames and %d milliseconds per frame, as a seamless loop. Return the original animated image asset, not a static preview, sprite sheet, Python-created substitute, code, or instructions.", o.effectiveFrameCount(), o.effectiveFrameDuration())
+	}
 	var suffix string
 	background := o.Background
 	if o.OutputFormat == "jpeg" && (background == "" || background == "auto") {
@@ -91,6 +103,30 @@ func invalidImageOutput(message string) error {
 // edges; PNG/WebP preserve alpha. No subject segmentation is performed.
 func (o ImageOutputOptions) apply(raw []byte, mime string) ([]byte, string, error) {
 	target := o.EffectiveFormat()
+	// Validate every GIF frame before the fast path or a static re-encode.
+	if mime == "image/gif" {
+		animation, err := decodeBoundedGIF(raw)
+		if err != nil {
+			return nil, "", invalidImageOutput("OpenAI returned an invalid or oversized GIF")
+		}
+		if target == "gif" {
+			if len(animation.Image) != o.effectiveFrameCount() {
+				return nil, "", invalidImageOutput("OpenAI GIF frame count did not match the request")
+			}
+			for _, delay := range animation.Delay {
+				if delay*10 != o.effectiveFrameDuration() {
+					return nil, "", invalidImageOutput("OpenAI GIF frame duration did not match the request")
+				}
+			}
+			return raw, "image/gif", nil
+		}
+		if len(animation.Image) > 1 {
+			return nil, "", invalidImageOutput("OpenAI returned an animated GIF; request output_format=gif to preserve its frames")
+		}
+	}
+	if target == "gif" {
+		return nil, "", invalidImageOutput("OpenAI did not return an animated GIF; static previews cannot satisfy output_format=gif")
+	}
 	if o.Background != "transparent" && o.Background != "opaque" && mime == "image/"+target {
 		return raw, mime, nil
 	}

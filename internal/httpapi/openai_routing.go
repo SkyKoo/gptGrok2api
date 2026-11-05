@@ -87,7 +87,7 @@ func (s *Server) rejectDuringMaintenance(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) routingFeedback(l *accounts.Lease, err error) {
 	rejected := provider.IsModelRejected(err)
-	if err == nil || rejected {
+	if (err == nil || rejected) && !provider.IsImage26Model(l.Intent().Model) {
 		_ = s.discovery.RecordOutcome(accounts.Identity(l.Account), l.Intent().Model, err == nil, rejected)
 	}
 	if !rejected {

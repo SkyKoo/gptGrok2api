@@ -21,7 +21,7 @@ func TestImageOutputOptionsValidateAndPrompt(t *testing.T) {
 			t.Fatal("output options became a removal operation")
 		}
 	}
-	for _, options := range []ImageOutputOptions{{Background: "clear"}, {Background: "transparent", OutputFormat: "jpeg"}, {OutputFormat: "jpg"}, {OutputFormat: "gif"}} {
+	for _, options := range []ImageOutputOptions{{Background: "clear"}, {Background: "transparent", OutputFormat: "jpeg"}, {OutputFormat: "jpg"}, {OutputFormat: "svg"}} {
 		var param *ImageOptionError
 		if !errors.As(options.Validate(), &param) {
 			t.Fatalf("accepted unsupported options: %+v", options)

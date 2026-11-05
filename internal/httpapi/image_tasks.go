@@ -36,7 +36,7 @@ func imageTaskKey(owner, id string) string {
 func imageTaskHash(task *imageTaskState) string {
 	fields := []any{task.Mode, task.Model, task.N, task.Size, task.Quality, task.Prompt, task.Images}
 	// Preserve persisted hashes for requests created before output options existed.
-	if task.Background != "" || task.OutputFormat != "" {
+	if task.Background != "" || task.OutputFormat != "" || task.FrameCount != nil || task.FrameDurationMS != nil {
 		fields = append(fields, task.ImageOutputOptions)
 	}
 	// Unmasked requests keep their historical hashes. A different mask must
@@ -52,6 +52,9 @@ func imageTaskHash(task *imageTaskState) string {
 }
 
 func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *imageTaskState) {
+	if task.Mode == "edit" && !validateImageEditOutput(w, task.Model, task.ImageOutputOptions) {
+		return
+	}
 	if err := validateGrokImageReferenceCount(task.Model, len(task.Images)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
@@ -252,7 +255,7 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "client_task_id and prompt are required", "invalid_request_error")
 		return
 	}
-	if !validateImageOutput(w, firstNonEmpty(body.Model, "gpt-image-2"), body.ImageOutputOptions) {
+	if !validateImageEditOutput(w, firstNonEmpty(body.Model, "gpt-image-2"), body.ImageOutputOptions) {
 		return
 	}
 	n := 1

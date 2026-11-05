@@ -864,7 +864,7 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 		contentType = writer.FormDataContentType()
 		target = "http://internal/v1/images/edits"
 	} else {
-		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "quality": task.Quality, "background": task.Background, "output_format": task.OutputFormat, "response_format": "url"})
+		raw, _ := json.Marshal(map[string]any{"model": task.Model, "prompt": task.Prompt, "n": task.N, "size": task.Size, "quality": task.Quality, "background": task.Background, "output_format": task.OutputFormat, "frame_count": task.FrameCount, "frame_duration_ms": task.FrameDurationMS, "response_format": "url"})
 		body = bytes.NewReader(raw)
 		target = "http://internal/v1/images/generations"
 	}
@@ -949,6 +949,12 @@ func imageTaskPublic(task *imageTaskState) map[string]any {
 	}
 	if isOpenAIImageModel(task.Model) {
 		value["output_format"] = task.EffectiveFormat()
+	}
+	if task.FrameCount != nil {
+		value["frame_count"] = *task.FrameCount
+	}
+	if task.FrameDurationMS != nil {
+		value["frame_duration_ms"] = *task.FrameDurationMS
 	}
 	if len(task.Data) > 0 {
 		value["data"] = task.Data

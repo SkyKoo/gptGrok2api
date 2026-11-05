@@ -149,6 +149,14 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 	if err := options.Validate(); err != nil {
 		return nil, err
 	}
+	if options.OutputFormat == "gif" {
+		if !IsImage26Model(model) {
+			return nil, &ImageOptionError{Param: "output_format", Message: "GIF output requires a GPT Image 2.6 model"}
+		}
+		if len(inputs) > 0 || mask != nil {
+			return nil, &ImageOptionError{Param: "output_format", Message: "GIF output is supported for generation only, not image edits"}
+		}
+	}
 	if strings.TrimSpace(account.Token) == "" {
 		return nil, fmt.Errorf("OpenAI image generation requires an access token")
 	}
@@ -555,6 +563,11 @@ func (o *OpenAIImage) prepare(ctx context.Context, account accounts.Account, req
 	}
 	token := stringValue(value["conduit_token"])
 	if token == "" {
+		// 2.6 Web prepare returns {status:"ok",conduit_token:null}. This is not
+		// an authentication bypass: only that exact successful envelope is accepted.
+		if IsImage26Model(model) && value["status"] == "ok" && value["error"] == nil {
+			return "", nil
+		}
 		return "", fmt.Errorf("OpenAI image prepare returned no conduit token")
 	}
 	return token, nil
@@ -624,7 +637,9 @@ func (o *OpenAIImage) start(ctx context.Context, account accounts.Account, requi
 		payload["image_generation_size"] = size
 	}
 	headers := o.requirementHeaders(requirements)
-	headers["X-Conduit-Token"] = conduit
+	if conduit != "" {
+		headers["X-Conduit-Token"] = conduit
+	}
 	headers["Accept"] = "text/event-stream"
 	applyOpenAITimezone(ctx, payload)
 	notifyQuotaSent(ctx, "reason")
@@ -1213,6 +1228,9 @@ func validatedImageMIME(raw []byte) (string, error) {
 	case "jpeg":
 		return "image/jpeg", nil
 	case "gif":
+		if _, err := decodeBoundedGIF(raw); err != nil {
+			return invalid("OpenAI image download contains an invalid or oversized GIF animation")
+		}
 		return "image/gif", nil
 	case "webp":
 		return "image/webp", nil
@@ -1417,6 +1435,10 @@ func scanOpenAISSE(reader io.Reader, onPayload func([]byte) bool) error {
 func collectOpenAIImageRefs(value any, conversationID *string, fileIDs *[]string) {
 	switch typed := value.(type) {
 	case map[string]any:
+		if pointer := primaryOpenAIAnimationRef(typed); pointer != "" {
+			*fileIDs = append(*fileIDs, pointer)
+			return
+		}
 		for key, item := range typed {
 			switch strings.ToLower(strings.TrimSpace(key)) {
 			case "conversation_id", "conversationid", "conversation-id":
@@ -1591,6 +1613,10 @@ func hasOpenAIImageAssetPointer(value any) bool {
 func collectOpenAIAssetPointerRefs(value any, refs *[]string) {
 	switch typed := value.(type) {
 	case map[string]any:
+		if pointer := primaryOpenAIAnimationRef(typed); pointer != "" {
+			*refs = append(*refs, pointer)
+			return
+		}
 		pointer := strings.TrimSpace(stringValue(typed["asset_pointer"]))
 		if strings.HasPrefix(pointer, "file-service://") {
 			*refs = append(*refs, strings.TrimPrefix(pointer, "file-service://"))

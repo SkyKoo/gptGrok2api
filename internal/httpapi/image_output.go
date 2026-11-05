@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -33,6 +34,10 @@ func validateImageOutput(w http.ResponseWriter, model string, options provider.I
 		writeImageOptionError(w, err)
 		return false
 	}
+	if options.OutputFormat == "gif" && !provider.IsImage26Model(model) {
+		writeImageOptionError(w, &provider.ImageOptionError{Param: "output_format", Message: "GIF output requires gpt-image-2.6-sunburst or gpt-image-2.6-flare"})
+		return false
+	}
 	if !isOpenAIImageModel(model) && (options.Background != "" || options.OutputFormat != "") {
 		param := "background"
 		if options.Background == "" {
@@ -60,5 +65,27 @@ func parseImageOutputJSON(body map[string]any) (provider.ImageOutputOptions, err
 		}
 		*field.dst = text
 	}
+	for _, field := range []struct {
+		name string
+		dst  any
+	}{{"frame_count", &options.FrameCount}, {"frame_duration_ms", &options.FrameDurationMS}, {"stream", &options.Stream}, {"partial_images", &options.PartialImages}, {"output_compression", &options.OutputCompression}} {
+		if value, ok := body[field.name]; ok && value != nil {
+			raw, err := json.Marshal(value)
+			if err != nil || json.Unmarshal(raw, field.dst) != nil {
+				return options, &provider.ImageOptionError{Param: field.name, Message: field.name + " has an invalid type"}
+			}
+		}
+	}
 	return options, options.Validate()
+}
+
+func validateImageEditOutput(w http.ResponseWriter, model string, options provider.ImageOutputOptions) bool {
+	if !validateImageOutput(w, model, options) {
+		return false
+	}
+	if options.OutputFormat == "gif" {
+		writeImageOptionError(w, &provider.ImageOptionError{Param: "output_format", Message: "GIF output is supported for generation only, not image edits"})
+		return false
+	}
+	return true
 }

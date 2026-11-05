@@ -188,6 +188,13 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 	if configErr != nil {
 		return nil, configErr
 	}
+	eligible := s.supportsChatModel(conversationModel)
+	if provider.IsImage26Model(model) {
+		// Image slugs need not appear in the chat picker. Never substitute the
+		// configurable legacy conversation model for an explicitly requested 2.6.
+		conversationModel = strings.ToLower(strings.TrimSpace(model))
+		eligible = isOpenAIAccount
+	}
 	trace := s.newRoutingTrace(r, model, conversationModel)
 	results := make([][]map[string]string, count)
 	sizeMeta := imageSizeRequestMetadata(size, inputs)
@@ -229,7 +236,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 			for attempt := 0; ; attempt++ {
 				accountStarted := time.Now()
 				s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
-				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, s.supportsChatModel(conversationModel), s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs) + maskCount(masks)})
+				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, eligible, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs) + maskCount(masks)})
 				if reserveErr != nil {
 					if lastAttemptErr != nil && ctx.Err() == nil {
 						reserveErr = lastAttemptErr
@@ -246,6 +253,9 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				if generateErr != nil {
 					toolFailure := provider.IsRetryableImageGenerationError(generateErr)
 					retry := ctx.Err() == nil && attempt < imageGenerationMaxRetries && (toolFailure || (s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)))
+					if provider.IsImage26Model(model) {
+						retry = false
+					} // No speculative regeneration for new image routes.
 					finish(generateErr, retry)
 					s.accountPool.Release(lease)
 					if !provider.IsImageOutputError(generateErr) && !(toolFailure && retry) {
@@ -302,7 +312,9 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				}
 				s.accountPool.Release(lease)
 				finish(nil, false)
-				_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
+				if !provider.IsImage26Model(model) {
+					_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
+				}
 				s.stageRequestMonitor(r, "image_response_ready", 95, map[string]any{"response_ms": time.Since(accountStarted).Milliseconds()})
 				s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
 				results[index] = items
@@ -802,7 +814,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	if modelName == "" {
 		modelName = "grok-imagine-image-edit"
 	}
-	if !validateImageOutput(w, modelName, request.ImageOutputOptions) {
+	if !validateImageEditOutput(w, modelName, request.ImageOutputOptions) {
 		return
 	}
 	s.enrichRequestMonitor(r, map[string]any{"model": modelName, "background": request.Background, "output_format": request.OutputFormat})
@@ -1055,7 +1067,7 @@ func mediaPools(modelName string) []string {
 }
 
 func isOpenAIImageModel(modelName string) bool {
-	return strings.EqualFold(strings.TrimSpace(modelName), "gpt-image-2")
+	return strings.EqualFold(strings.TrimSpace(modelName), "gpt-image-2") || provider.IsImage26Model(modelName)
 }
 
 func validOpenAIImageSize(size string) bool {
