@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/store"
 )
 
 // Intent describes the quota groups needed by one upstream attempt, not API billing.
@@ -196,7 +199,7 @@ func (p *Pool) reserveQuotaLocked(l *Lease) error {
 	for k, n := range l.intent.Costs() {
 		pending[k] += n
 	}
-	updates := map[string]any{"cfm_account_id": Identity(a), "quota_pending": pending, "quota_last_used_at": time.Now().UTC().Format(time.RFC3339)}
+	updates := map[string]any{"cfm_account_id": Identity(a), "quota_pending": pending, "quota_last_used_at": time.Now().UTC().Format(time.RFC3339), "quota_last_intent": l.intent.Kind}
 	if p.grokMedia && isMediaIntent(l.intent) {
 		// Persist the uncertainty before sending. A crash must not reopen a positive
 		// stale balance; normal completion shortens this conservative recovery hold.
@@ -239,7 +242,7 @@ func (p *Pool) finishQuotaLocked(l *Lease) {
 	}
 	// Pending estimates remain durable until a fresh snapshot with no in-flight
 	// requests reconciles them. Restart never invents refunded quota.
-	updates := map[string]any{"quota_pending": pending, "quota_refresh_needed": true}
+	updates := map[string]any{"quota_pending": pending, "quota_refresh_needed": true, "quota_deferred_until": nil}
 	if p.grokMedia {
 		delete(updates, "quota_refresh_needed")
 		if isMediaIntent(l.intent) && !l.used["image_gen"] && !l.used["video_gen"] {
@@ -258,7 +261,24 @@ func (p *Pool) finishQuotaLocked(l *Lease) {
 // held across network I/O; new leases wait, and credential rotation is detected.
 var ErrRefreshDeferred = errors.New("account refresh deferred while busy or credentials changed")
 
+// CapabilityObservation lets a verified survival check commit credentials and
+// quota in the same guarded operation as the lightweight quota check.
+type CapabilityObservation struct {
+	Fields          map[string]any
+	AccessToken     string
+	RefreshToken    string
+	IDToken         string
+	VerifiedAccount bool
+}
+
 func (p *Pool) RefreshCapabilities(a Account, fetch func(Account) (map[string]any, error)) error {
+	return p.RefreshAccountCapabilities(a, "quota", func(current Account) (CapabilityObservation, error) {
+		fields, err := fetch(current)
+		return CapabilityObservation{Fields: fields}, err
+	})
+}
+
+func (p *Pool) RefreshAccountCapabilities(a Account, source string, fetch func(Account) (CapabilityObservation, error)) error {
 	p.mu.Lock()
 	id := Identity(a)
 	if p.refreshing[id] || p.capabilityActive[id] > 0 {
@@ -271,14 +291,17 @@ func (p *Pool) RefreshCapabilities(a Account, fetch func(Account) (map[string]an
 	if err == nil {
 		a = current
 	}
-	var fields map[string]any
+	var observation CapabilityObservation
 	if err == nil {
-		fields, err = fetch(a)
+		observation, err = fetch(a)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	defer p.signalLocked()
 	defer delete(p.refreshing, id)
+	if errors.Is(err, ErrRefreshDeferred) {
+		return ErrRefreshDeferred
+	}
 	latest, e := p.currentAccountLocked(a)
 	if e != nil {
 		return e
@@ -286,41 +309,75 @@ func (p *Pool) RefreshCapabilities(a Account, fetch func(Account) (map[string]an
 	if latest.Token != a.Token {
 		return ErrRefreshDeferred
 	}
-	updates := map[string]any{"cfm_account_id": id, "quota_last_attempt_at": time.Now().UTC().Format(time.RFC3339)}
+	now := time.Now()
+	updates := map[string]any{"cfm_account_id": id, "quota_last_attempt_at": now.UTC().Format(time.RFC3339), "quota_deferred_until": nil}
 	if err != nil {
-		updates["quota_refresh_error"] = "upstream quota refresh failed; previous snapshot retained"
-	} else {
-		for k, v := range fields {
+		for k, v := range observation.Fields {
 			updates[k] = v
 		}
-		// Preserve the legacy image-only status for safe rollback to main.
-		if q := DecodeQuotas(fields["capability_quotas"])["image_gen"]; q.Remaining != nil {
-			if *q.Remaining == 0 && stringValue(latest.Fields["status"]) == "正常" {
-				updates["status"] = "限流"
-				updates["status_reason_code"] = "image_quota_exhausted"
-			}
-			if *q.Remaining > 0 && confirmedImageOnlyLimit(latest) {
-				updates["status"] = "正常"
-				updates["status_reason_code"] = nil
+		for k, v := range quotaFailureUpdates(latest.Fields, err, now) {
+			updates[k] = v
+		}
+	} else {
+		for k, v := range observation.Fields {
+			updates[k] = v
+		}
+		quotas := DecodeQuotas(observation.Fields["capability_quotas"])
+		if !observation.VerifiedAccount {
+			if q := quotas["image_gen"]; q.Remaining != nil {
+				if *q.Remaining == 0 && stringValue(latest.Fields["status"]) == "正常" {
+					updates["status"] = "限流"
+					updates["status_reason_code"] = "image_quota_exhausted"
+				}
+				if *q.Remaining > 0 && confirmedImageOnlyLimit(latest) {
+					updates["status"] = "正常"
+					updates["status_reason_code"] = nil
+				}
 			}
 		}
-		updates["quota_pending"] = map[string]int{}
-		updates["quota_refresh_needed"] = false
-		updates["quota_refresh_error"] = nil
-		// Only clear a block when the corresponding upstream balance is known positive.
+		// Unknown feature balances cannot settle earlier durable reservations.
+		pending := pendingQuotas(latest.Fields["quota_pending"])
 		blocks := map[string]any{}
 		old, _ := latest.Fields["capability_cooldowns"].(map[string]any)
 		for k, v := range old {
 			blocks[k] = v
 		}
-		for k, q := range DecodeQuotas(fields["capability_quotas"]) {
-			if q.Remaining != nil && *q.Remaining > 0 {
-				delete(blocks, k)
+		for k, q := range quotas {
+			if q.Remaining != nil {
+				delete(pending, k)
+				if *q.Remaining > 0 {
+					delete(blocks, k)
+				}
 			}
 		}
+		updates["quota_pending"] = pending
+		updates["quota_refresh_needed"] = false
+		updates["quota_refresh_error"] = nil
+		updates["quota_failure_count"] = 0
+		updates["quota_retry_at"] = nil
+		updates["quota_last_failure_kind"] = nil
 		updates["capability_cooldowns"] = blocks
+		updates["quota_history"] = quotaHistory(latest.Fields, quotas, source, now)
 	}
-	_, _, saveErr := p.repository.UpdateAccount(latest.Token, updates)
+	var saveErr error
+	// Compare both credentials and snapshot generation. Other explicit account
+	// operations may have committed while this network request was in progress.
+	unchanged := func(row map[string]any) bool {
+		return reflect.DeepEqual(row["capability_quotas"], a.Fields["capability_quotas"]) &&
+			reflect.DeepEqual(row["relogin_blocked"], a.Fields["relogin_blocked"]) &&
+			stringValue(row["status"]) == stringValue(a.Fields["status"]) &&
+			stringValue(row["last_error_at"]) == stringValue(a.Fields["last_error_at"]) &&
+			stringValue(row["quota_observed_at"]) == stringValue(a.Fields["quota_observed_at"]) &&
+			stringValue(row["last_token_refresh_at"]) == stringValue(a.Fields["last_token_refresh_at"])
+	}
+	if err == nil && observation.VerifiedAccount {
+		_, _, saveErr = p.repository.RotateAccountTokensIf(latest.Token, observation.AccessToken, observation.RefreshToken, observation.IDToken, updates, unchanged)
+	} else {
+		_, _, saveErr = p.repository.UpdateAccountIf(latest.Token, updates, unchanged)
+	}
+	if errors.Is(saveErr, store.ErrAccountChanged) {
+		return ErrRefreshDeferred
+	}
 	if saveErr != nil {
 		return saveErr
 	}

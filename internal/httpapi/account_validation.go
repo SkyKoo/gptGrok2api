@@ -56,6 +56,10 @@ func (s *Server) refreshValidatedAccount(ctx context.Context, account map[string
 	}
 	result.Fields["quota_refresh_needed"] = false
 	result.Fields["quota_refresh_error"] = nil
+	result.Fields["quota_failure_count"] = 0
+	result.Fields["quota_retry_at"] = nil
+	result.Fields["quota_last_failure_kind"] = nil
+	result.Fields["quota_deferred_until"] = nil
 	return result, nil
 }
 

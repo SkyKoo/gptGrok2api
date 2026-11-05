@@ -1,6 +1,7 @@
 import apiClient from './client'
 import type { ProxyGroup } from './proxy'
 import type { AccountReloginTask } from '@/lib/accountRelogin'
+import type { QuotaHistoryEvent } from '@/lib/accountQuotas'
 
 export type AccountLane = 'fast' | 'thinking' | 'pro'
 export type AccountBackendStatus = '正常' | '限流' | '异常' | '禁用'
@@ -45,6 +46,11 @@ export interface Account {
  quota_pending?: Record<string, number>
  quota_observed_at?: string
  quota_refresh_error?: string
+ quota_next_check_at?: string | null
+ quota_check_reason?: string
+ quota_last_attempt_at?: string
+ quota_failure_count?: number
+ quota_history?: QuotaHistoryEvent[]
   id: string
   access_token?: string
   has_access_token?: boolean
@@ -567,6 +573,11 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
     capability_quotas: item.capability_quotas,
     quota_pending: item.quota_pending,
     quota_observed_at: item.quota_observed_at,
+    quota_next_check_at: item.quota_next_check_at,
+    quota_check_reason: item.quota_check_reason,
+    quota_last_attempt_at: item.quota_last_attempt_at,
+    quota_failure_count: item.quota_failure_count,
+    quota_history: item.quota_history,
     quota_refresh_error: item.quota_refresh_error,
     access_token: accessToken,
     has_access_token: hasAccessToken,

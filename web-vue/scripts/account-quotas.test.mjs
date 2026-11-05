@@ -32,3 +32,13 @@ test('new upstream categories and pending use remain visible without changing ob
   assert.equal(items.find((q) => q.key === 'unseen_feature').text, '未知')
   assert.equal(items.find((q) => q.key === 'unseen_feature').pending, 1)
 })
+
+test('inspection status distinguishes backoff, busy and upstream reset checks', async () => {
+  const { quotaCheckReason, quotaHistoryText } = await import('../src/lib/accountQuotas.ts')
+  assert.equal(quotaCheckReason('backoff'), '查询失败，等待重试')
+  assert.equal(quotaCheckReason('busy'), '账号忙碌，稍后核对')
+  assert.equal(quotaCheckReason('reset_due'), '核对到期额度')
+  assert.equal(quotaCheckReason('disabled'), '账号已停用')
+  assert.equal(quotaHistoryText({ changes: { image_gen: { before: 0, after: 4 }, reason: { before: 10, after: 9 } } }), '图片 0 → 4；推理 10 → 9')
+  assert.equal(quotaHistoryText({ changes: { future_feature: { before: null, after: 2 } } }), 'future_feature 未知 → 2')
+})

@@ -33,3 +33,29 @@ export function accountQuotaItems(account: QuotaAccount) {
     }
   })
 }
+
+export interface QuotaHistoryEvent {
+  at: string
+  source: string
+  changes: Record<string, { before: number | null; after: number | null }>
+}
+
+export function quotaCheckReason(reason?: string): string {
+  return ({
+    unknown: '等待首次核对',
+    periodic: '定期核对',
+    reconcile: '等待核对使用量',
+    reset_due: '核对到期额度',
+    busy: '账号忙碌，稍后核对',
+    backoff: '查询失败，等待重试',
+    disabled: '账号已停用',
+    account_validation: '等待账号验证',
+  } as Record<string, string>)[reason || ''] || '等待检查计划'
+}
+
+export function quotaHistoryText(event: QuotaHistoryEvent): string {
+  return Object.entries(event.changes || {}).map(([key, change]) => {
+    const number = (value: number | null) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? String(value) : '未知'
+    return `${quotaLabels[key] || key} ${number(change.before)} → ${number(change.after)}`
+  }).join('；')
+}

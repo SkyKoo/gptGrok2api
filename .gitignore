@@ -66,6 +66,7 @@ docs/*.md
 !docs/AUTO_UPLOAD_SUB2API_CPA.md
 !docs/TROUBLESHOOTING_LOG_EXAMPLES.md
 !docs/image-mask.md
+!docs/gpt-quota-checks.md
 scripts/test_*.py
 scripts/probe_*.py
 scripts/pix_browser_capture.py

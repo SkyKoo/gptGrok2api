@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -27,13 +28,55 @@ func maskCount(masks []*provider.ImageMask) int {
 	return 0
 }
 func (s *Server) refreshAccountQuotas(ctx context.Context, a accounts.Account) error {
-	err := s.accountPool.RefreshCapabilities(a, func(current accounts.Account) (map[string]any, error) {
-		return s.openAIAccountClient().FetchQuotas(ctx, current)
-	})
-	s.recoverInvalidAccount(a.Fields, err)
+	_, err := s.observeAccountQuotas(ctx, a, false)
 	return err
 }
-func (s *Server) capabilityScheduler() {
+
+func (s *Server) observeAccountQuotas(ctx context.Context, a accounts.Account, scheduled bool) (bool, error) {
+	attempted := false
+	err := s.accountPool.RefreshCapabilities(a, func(current accounts.Account) (map[string]any, error) {
+		if scheduled && accounts.QuotaCheckPlan(current.Fields, time.Now()).At.After(time.Now()) {
+			return nil, accounts.ErrRefreshDeferred
+		}
+		attempted = true
+		fields, err := s.openAIAccountClient().FetchQuotas(ctx, current)
+		return fields, quotaRefreshError(err)
+	})
+	s.recoverInvalidAccount(a.Fields, err)
+	return attempted, err
+}
+
+func quotaRefreshError(err error) error {
+	if err == nil {
+		return nil
+	}
+	kind := "network"
+	retry := time.Duration(0)
+	var detail *provider.AccountEndpointError
+	if errors.As(err, &detail) {
+		retry = time.Duration(detail.RetryAfterSeconds) * time.Second
+		switch {
+		case detail.Status == 401:
+			kind = "auth"
+		case detail.Status == 429:
+			kind = "rate_limit"
+		case detail.Status >= 500:
+			kind = "upstream"
+		case detail.Status > 0:
+			kind = "invalid_response"
+		}
+	}
+	return &accounts.QuotaRefreshError{Err: err, Kind: kind, RetryAfter: retry}
+}
+
+func (s *Server) capabilityScheduler() { s.runCapabilitySchedule(s.refreshDueCapabilities) }
+func (s *Server) modelCapabilityScheduler() {
+	s.runCapabilitySchedule(func() {
+		s.refreshDueModels()
+		s.refreshDueGrokWebModels(context.Background(), "", 2, nil)
+	})
+}
+func (s *Server) runCapabilitySchedule(work func()) {
 	// Startup grace gives operators time to verify a rollout against a quiet data
 	// directory. The maintenance marker pauses this scheduler during deployments.
 	timer := time.NewTimer(2 * time.Minute)
@@ -47,9 +90,7 @@ func (s *Server) capabilityScheduler() {
 	defer ticker.Stop()
 	for {
 		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) && s.beginDeploymentBackground() {
-			s.refreshDueCapabilities()
-			s.refreshDueModels()
-			s.refreshDueGrokWebModels(context.Background(), "", 2, nil)
+			work()
 			s.endDeploymentBackground()
 		}
 		select {
@@ -64,8 +105,24 @@ func (s *Server) refreshDueCapabilities() {
 	if err != nil {
 		return
 	}
+	now := time.Now()
+	// Sort a copy: Store snapshots are immutable shared views.
+	items = append([]map[string]any(nil), items...)
+	sort.SliceStable(items, func(i, j int) bool {
+		return accounts.QuotaCheckPlan(items[i], now).At.Before(accounts.QuotaCheckPlan(items[j], now).At)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	count := 0
 	for _, row := range items {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-s.probeStop:
+			return
+		default:
+		}
 		if _, e := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(e) {
 			return
 		}
@@ -82,31 +139,20 @@ func (s *Server) refreshDueCapabilities() {
 			}
 			continue
 		}
-		if s.skipAccountRecoveryProbe(row) {
+		if s.skipAccountRecoveryProbe(row) || accounts.QuotaCheckPlan(row, time.Now()).At.After(time.Now()) {
 			continue
 		}
-		if row["quota_last_used_at"] == nil && row["quota_refresh_needed"] != true {
-			continue
-		}
-		observed, _ := time.Parse(time.RFC3339, stringValue(row["quota_observed_at"]))
-		attempt, _ := time.Parse(time.RFC3339, stringValue(row["quota_last_attempt_at"]))
-		if time.Since(attempt) < 30*time.Second {
-			continue
-		}
-		due := row["quota_refresh_needed"] == true || time.Since(observed) > 5*time.Minute
-		for _, q := range accounts.DecodeQuotas(row["capability_quotas"]) {
-			if q.Remaining != nil && *q.Remaining == 0 {
-				if reset, e := time.Parse(time.RFC3339, q.ResetAt); e == nil && time.Now().After(reset) {
-					due = true
-				}
+		attemptCtx, stop := context.WithTimeout(ctx, 20*time.Second)
+		attempted, err := s.observeAccountQuotas(attemptCtx, a, true)
+		stop()
+		if errors.Is(err, accounts.ErrRefreshDeferred) {
+			// A busy account did not query upstream; stale results after a query
+			// still count against the round's request budget.
+			_, _ = s.store.UpdateAccountRuntime(a.Token, map[string]any{"quota_deferred_until": time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)})
+			if !attempted {
+				continue
 			}
 		}
-		if !due {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		_ = s.refreshAccountQuotas(ctx, a)
-		cancel()
 		count++
 		if count >= 4 {
 			break

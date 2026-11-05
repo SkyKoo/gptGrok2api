@@ -2256,6 +2256,21 @@ func accountForAPI(account map[string]any) map[string]any {
 	if item["capability_quotas"] == nil {
 		item["capability_quotas"] = accounts.Quotas(account["limits_progress"], time.Time{})
 	}
+	now := time.Now()
+	plan := accounts.QuotaCheckPlan(account, now)
+	item["quota_check_reason"] = plan.Reason
+	at := plan.At
+	if at.Before(now) {
+		at = now
+	}
+	item["quota_next_check_at"] = at.UTC().Format(time.RFC3339)
+	if !boolValue(account["enabled"], true) {
+		item["quota_check_reason"] = "disabled"
+		item["quota_next_check_at"] = nil
+	} else if boolValue(account["relogin_blocked"], false) || mapValue(account["relogin_validation"])["pending"] == true {
+		item["quota_check_reason"] = "account_validation"
+		item["quota_next_check_at"] = nil
+	}
 	ref := accountPublicRef(account)
 	if ref != "" {
 		item["id"] = ref
@@ -2735,6 +2750,7 @@ func (s *Server) StartWorkers() {
 		go s.grokProbeScheduler()
 		go s.openAISurvivalScheduler()
 		go s.capabilityScheduler()
+		go s.modelCapabilityScheduler()
 		go s.grokMediaQuotaScheduler()
 		go s.registrationScheduler()
 	})

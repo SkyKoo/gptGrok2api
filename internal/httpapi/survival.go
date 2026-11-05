@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 	"net/http"
 	"strings"
@@ -50,7 +51,7 @@ func (s *Server) executeOpenAISurvival() {
 	if concurrency > 8 {
 		concurrency = 8
 	}
-	refreshFirst := boolValue(config["refresh_codex_rt"], true)
+	refreshCredentials := boolValue(config["refresh_codex_rt"], true)
 	items, err := s.store.AccountList()
 	if err != nil {
 		s.finishSurvival(map[string]any{"error": err.Error()})
@@ -70,7 +71,7 @@ func (s *Server) executeOpenAISurvival() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			status := s.survivalProbe(account, refreshFirst)
+			status := s.survivalProbe(account, refreshCredentials)
 			mu.Lock()
 			counts[status]++
 			mu.Unlock()
@@ -156,57 +157,61 @@ func (s *Server) runOpenAISurvivalInternal() {
 	s.launchDeploymentWork(s.executeOpenAISurvival)
 }
 
-func (s *Server) survivalProbe(account map[string]any, refreshFirst bool) string {
+func (s *Server) survivalProbe(account map[string]any, refreshCredentials bool) string {
 	token := accountToken(account)
 	if token == "" {
 		return "no_token"
 	}
-	active := account
-	refreshed := false
-	if refreshFirst && !strings.EqualFold(stringValue(account["source_type"]), "chatgpt_web") && stringValue(account["refresh_token"]) != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		result, err := s.refreshValidatedAccount(ctx, account)
-		cancel()
-		if err == nil {
-			updated, _, updateErr := s.store.RotateAccountTokens(token, result.AccessToken, result.RefreshToken, result.IDToken, result.Fields)
-			if updateErr == nil && updated != nil {
-				active = updated
-				refreshed = true
-			}
-		}
-	}
-	if refreshed {
-		if status := strings.ToLower(firstNonEmpty(stringValue(active["type"]), "free")); isHealthyOpenAIPlan(status) {
-			_, _, _ = s.store.UpdateAccount(accountToken(active), map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_alive": true, "survival_plan_type": status, "survival_check_error": nil})
-			return status
-		}
+	now := time.Now()
+	// Survival also reads quotas; do not let it bypass the quota Retry-After.
+	if retry, err := time.Parse(time.RFC3339, stringValue(account["quota_retry_at"])); err == nil && retry.After(now) {
+		return "deferred"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	result, err := s.refreshValidatedAccount(ctx, active)
+	status := "error"
+	active := account
+	err := s.accountPool.RefreshAccountCapabilities(accounts.Account{Token: token, Fields: account}, "survival", func(current accounts.Account) (accounts.CapabilityObservation, error) {
+		active = current.Fields
+		if retry, err := time.Parse(time.RFC3339, stringValue(current.Fields["quota_retry_at"])); err == nil && retry.After(time.Now()) {
+			return accounts.CapabilityObservation{}, accounts.ErrRefreshDeferred
+		}
+		// RefreshAccount already handles credentials when needed. Use one attempt,
+		// not a second immediate retry of a failed quota/identity observation.
+		candidate := current.Fields
+		if !refreshCredentials {
+			candidate = cloneMap(current.Fields)
+			delete(candidate, "refresh_token")
+		}
+		result, err := s.refreshValidatedAccount(ctx, candidate)
+		if err != nil {
+			if errors.Is(err, provider.ErrInvalidAccessToken) {
+				status = "token_dead"
+			}
+			fields := accountRefreshFailureUpdates(err)
+			fields["survival_status"] = status
+			fields["survival_last_probe_status"] = status
+			fields["survival_last_checked_at"] = time.Now().UTC().Format(time.RFC3339)
+			fields["survival_check_error"] = safeRefreshError(err)
+			return accounts.CapabilityObservation{Fields: fields}, quotaRefreshError(err)
+		}
+		fields := cloneMap(result.Fields)
+		status = firstNonEmpty(strings.ToLower(stringValue(fields["type"])), "free")
+		for k, v := range map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_alive": true, "survival_plan_type": status, "survival_check_error": nil} {
+			fields[k] = v
+		}
+		return accounts.CapabilityObservation{Fields: fields, AccessToken: result.AccessToken, RefreshToken: result.RefreshToken, IDToken: result.IDToken, VerifiedAccount: true}, nil
+	})
+	if errors.Is(err, accounts.ErrRefreshDeferred) {
+		return "deferred"
+	}
 	if err != nil {
-		status := "error"
-		if errors.Is(err, provider.ErrInvalidAccessToken) {
-			status = "token_dead"
-		}
-		fields := accountRefreshFailureUpdates(err)
-		for key, value := range map[string]any{"survival_status": status, "survival_last_probe_status": status, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_check_error": safeRefreshError(err)} {
-			fields[key] = value
-		}
-		_, _, _ = s.store.UpdateAccount(accountToken(active), fields)
 		s.recoverInvalidAccount(active, err)
-		return status
+		if status != "token_dead" {
+			return "error"
+		}
 	}
-	fields := cloneMap(result.Fields)
-	plan := firstNonEmpty(stringValue(fields["type"]), "free")
-	for key, value := range map[string]any{"survival_status": plan, "survival_last_probe_status": plan, "survival_last_checked_at": time.Now().UTC().Format(time.RFC3339), "survival_alive": true, "survival_plan_type": plan, "survival_check_error": nil} {
-		fields[key] = value
-	}
-	updated, _, updateErr := s.store.RotateAccountTokens(accountToken(active), result.AccessToken, result.RefreshToken, result.IDToken, fields)
-	if updateErr != nil || updated == nil {
-		return "error"
-	}
-	return firstNonEmpty(strings.ToLower(stringValue(result.Fields["type"])), "free")
+	return status
 }
 
 func (s *Server) finishSurvival(summary map[string]any) {
