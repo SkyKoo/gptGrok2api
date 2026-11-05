@@ -34,7 +34,7 @@ func validateImageOutput(w http.ResponseWriter, model string, options provider.I
 		writeImageOptionError(w, err)
 		return false
 	}
-	if options.OutputFormat == "gif" && !provider.IsImage26Model(model) {
+	if options.OutputFormat == "gif" && !provider.SupportsOpenAIImageGIF(model) {
 		writeImageOptionError(w, &provider.ImageOptionError{Param: "output_format", Message: "GIF output requires gpt-image-2.6-sunburst or gpt-image-2.6-flare"})
 		return false
 	}

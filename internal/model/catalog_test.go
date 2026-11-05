@@ -55,3 +55,15 @@ func TestConsoleThinkingAliasesUseNativeRoute(t *testing.T) {
 		}
 	}
 }
+
+func TestExplicitImageModelsStayOutOfChatCatalog(t *testing.T) {
+	for _, id := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"} {
+		spec, ok := Find(Catalog(), id)
+		if !ok || spec.Capability != Image {
+			t.Fatalf("incorrect image catalog entry for %s: %#v", id, spec)
+		}
+		if _, ok := ResolveChat(id); ok {
+			t.Fatalf("image model leaked into chat routing: %s", id)
+		}
+	}
+}

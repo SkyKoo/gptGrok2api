@@ -39,6 +39,8 @@ func Catalog() []Spec {
 		{"grok-web-expert", "Grok Web · 专家", "xai", created, Chat, true},
 		{"grok-web-heavy", "Grok Web · 重型", "xai", created, Chat, true},
 		{"gpt-image-2", "GPT Image 2", "openai-compatible", created, Image, true},
+		{"gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst", "openai-compatible", created, Image, true},
+		{"gpt-image-2.5-flare", "GPT Image 2.5 Flare", "openai-compatible", created, Image, true},
 		{"gpt-image-2.6-sunburst", "GPT Image 2.6 Sunburst", "openai-compatible", created, Image, true},
 		{"gpt-image-2.6-flare", "GPT Image 2.6 Flare", "openai-compatible", created, Image, true},
 		{"grok-imagine-image-pro", "Grok Imagine Image Pro", "xai", created, Image, true},

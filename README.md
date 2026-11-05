@@ -9,6 +9,7 @@
 - OpenAI 兼容接口：Chat Completions、Responses、Anthropic Messages、搜索、文件、图片、视频和可编辑文件任务。
 - ChatGPT Web：多模态对话、动态模型目录、能力额度、模型路由、浏览器环境和 Cookie 隔离、出口时区。
 - 图片处理：`gpt-image-2` 生成/编辑、多参考图、mask、`background`、`output_format`、异步任务、结果筛选和有限重试。
+- Image 2.5：`gpt-image-2.5-sunburst` / `gpt-image-2.5-flare` 接入同步和异步图片接口，按完整型号直通 Web；静态出图与 GIF 能力独立判断。旧 `gpt-image-2` 保留会话模型映射。说明与验证边界见 [GPT Web 图片模型](docs/image-web-models.md)。
 - Image 2.6：`gpt-image-2.6-sunburst` / `gpt-image-2.6-flare` 走独立 Web 模型路由；生成接口可使用 `output_format=gif`，保留完整动画并核对帧数和时长。使用说明与边界见 [Image 2.6 / GIF](docs/image26-web-protocol.md)。
 - 账号池：JWT、OAuth refresh token、Grok SSO/OAuth、分组、额度预占、失败换号、限流冷却和并发控制。
 - 账号维护：Session JSON 导入、重新登录进度、401 自动恢复、2FA 开启/续跑/TOTP 查看、账号清理。

@@ -184,16 +184,17 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 	if count < 1 {
 		count = 1
 	}
-	conversationModel, configErr := s.imageConversationModel()
-	if configErr != nil {
-		return nil, configErr
-	}
-	eligible := s.supportsChatModel(conversationModel)
-	if provider.IsImage26Model(model) {
-		// Image slugs need not appear in the chat picker. Never substitute the
-		// configurable legacy conversation model for an explicitly requested 2.6.
-		conversationModel = strings.ToLower(strings.TrimSpace(model))
-		eligible = isOpenAIAccount
+	conversationModel := strings.ToLower(strings.TrimSpace(model))
+	eligible := isOpenAIAccount
+	if !provider.IsDirectOpenAIImageModel(model) {
+		// Only the legacy gpt-image-2 entry uses a configurable chat model.
+		// Explicit image routes do not read or depend on that configuration.
+		var configErr error
+		conversationModel, configErr = s.imageConversationModel()
+		if configErr != nil {
+			return nil, configErr
+		}
+		eligible = s.supportsChatModel(conversationModel)
 	}
 	trace := s.newRoutingTrace(r, model, conversationModel)
 	results := make([][]map[string]string, count)
@@ -253,9 +254,9 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				if generateErr != nil {
 					toolFailure := provider.IsRetryableImageGenerationError(generateErr)
 					retry := ctx.Err() == nil && attempt < imageGenerationMaxRetries && (toolFailure || (s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)))
-					if provider.IsImage26Model(model) {
+					if provider.IsDirectOpenAIImageModel(model) {
 						retry = false
-					} // No speculative regeneration for new image routes.
+					} // Explicit image routes never trigger speculative regeneration.
 					finish(generateErr, retry)
 					s.accountPool.Release(lease)
 					if !provider.IsImageOutputError(generateErr) && !(toolFailure && retry) {
@@ -312,7 +313,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 				}
 				s.accountPool.Release(lease)
 				finish(nil, false)
-				if !provider.IsImage26Model(model) {
+				if !provider.IsDirectOpenAIImageModel(model) {
 					_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
 				}
 				s.stageRequestMonitor(r, "image_response_ready", 95, map[string]any{"response_ms": time.Since(accountStarted).Milliseconds()})
@@ -1067,7 +1068,7 @@ func mediaPools(modelName string) []string {
 }
 
 func isOpenAIImageModel(modelName string) bool {
-	return strings.EqualFold(strings.TrimSpace(modelName), "gpt-image-2") || provider.IsImage26Model(modelName)
+	return strings.EqualFold(strings.TrimSpace(modelName), "gpt-image-2") || provider.IsDirectOpenAIImageModel(modelName)
 }
 
 func validOpenAIImageSize(size string) bool {

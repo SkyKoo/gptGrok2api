@@ -150,7 +150,7 @@ func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.
 		return nil, err
 	}
 	if options.OutputFormat == "gif" {
-		if !IsImage26Model(model) {
+		if !SupportsOpenAIImageGIF(model) {
 			return nil, &ImageOptionError{Param: "output_format", Message: "GIF output requires a GPT Image 2.6 model"}
 		}
 		if len(inputs) > 0 || mask != nil {
@@ -563,9 +563,9 @@ func (o *OpenAIImage) prepare(ctx context.Context, account accounts.Account, req
 	}
 	token := stringValue(value["conduit_token"])
 	if token == "" {
-		// 2.6 Web prepare returns {status:"ok",conduit_token:null}. This is not
+		// Explicit 2.5/2.6 Web routes can return {status:"ok",conduit_token:null}. This is not
 		// an authentication bypass: only that exact successful envelope is accepted.
-		if IsImage26Model(model) && value["status"] == "ok" && value["error"] == nil {
+		if IsDirectOpenAIImageModel(model) && value["status"] == "ok" && value["error"] == nil {
 			return "", nil
 		}
 		return "", fmt.Errorf("OpenAI image prepare returned no conduit token")

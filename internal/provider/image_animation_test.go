@@ -130,11 +130,17 @@ func TestAnimationAssetsExcludeSpritesheetAndSpeedVariants(t *testing.T) {
 		t.Fatalf("non-deliverable animation assets selected: %v", refs)
 	}
 }
-func TestImage26EmptyConduitOnlyOnSuccessfulPrepare(t *testing.T) {
+func TestDirectImageEmptyConduitOnlyOnSuccessfulPrepare(t *testing.T) {
 	for _, tc := range []struct {
 		model, body string
 		accepted    bool
 	}{
+		{"gpt-image-2.5-sunburst", `{"status":"ok","conduit_token":null}`, true},
+		{"gpt-image-2.5-flare", `{"status":"ok","conduit_token":""}`, true},
+		{"gpt-image-2.5-flare", `{"status":"failed","conduit_token":null}`, false},
+		{"gpt-image-2.5-sunburst", `{"status":"ok","error":{"code":"denied"}}`, false},
+		{"gpt-image-2.5-flare", `{}`, false},
+		{"gpt-image-2.5-unknown", `{"status":"ok","conduit_token":null}`, false},
 		{"gpt-image-2.6-sunburst", `{"status":"ok","conduit_token":null}`, true},
 		{"gpt-image-2.6-flare", `{"status":"ok","conduit_token":""}`, true},
 		{"gpt-image-2", `{"status":"ok","conduit_token":null}`, false},

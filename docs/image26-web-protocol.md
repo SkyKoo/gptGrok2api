@@ -36,7 +36,9 @@
 ## 已观察的 Web 契约
 
 `POST /backend-api/f/conversation/prepare`可返回HTTP200及`status=ok`、空`conduit_token`。
-仅对两个明确的2.6名称接受这一成功组合，后续省略`X-Conduit-Token`。旧型号或错误/缺失状态保持拒绝。
+仅对明确登记的2.5/2.6 Sunburst、Flare名称接受这一成功组合，后续省略`X-Conduit-Token`。
+旧`gpt-image-2`、未登记型号或错误/缺失状态保持拒绝。原名路由不代表支持动画；GIF仍只开放给两个2.6型号。
+2.5静态图片接入见[GPT Web图片模型](image-web-models.md)。
 
 生成继续使用`POST /backend-api/f/conversation`的SSE，随后读取终态conversation：
 

@@ -1,6 +1,6 @@
 <template>
   <FormSection title="ChatGPT 模型路由">
-    <p class="text-xs leading-5 text-muted-foreground">聊天按调用方指定的模型执行，auto 由上游选择。生图对外使用 gpt-image-2，下方选择触发图片工具的会话模型；目录可见不代表所有编辑能力都已验证。</p>
+    <p class="text-xs leading-5 text-muted-foreground">聊天按调用方指定的模型执行，auto 由上游选择。下方会话模型仅用于旧 gpt-image-2 生图入口；Image 2.5 / 2.6 按调用方指定的完整型号直通上游。目录可见不代表所有编辑能力都已验证。</p>
     <FormField label="生图会话模型">
       <select v-model="selected" class="ui-input w-full" :disabled="busy || !loaded">
         <option v-for="id in choices" :key="id" :value="id">{{ id }}</option>

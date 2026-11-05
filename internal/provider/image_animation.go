@@ -8,14 +8,6 @@ import (
 	"strings"
 )
 
-// IsImage26Model lists the Web model slugs tested independently of the chat picker.
-func IsImage26Model(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "gpt-image-2.6-sunburst", "gpt-image-2.6-flare":
-		return true
-	}
-	return false
-}
 func (o ImageOutputOptions) effectiveFrameCount() int {
 	if o.FrameCount != nil {
 		return *o.FrameCount
