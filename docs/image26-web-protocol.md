@@ -29,7 +29,8 @@
 - 两个帧参数只适用于GIF。GIF只支持生成，不支持图片编辑、参考图、mask、stream、partial_images、output_compression或显式透明/不透明背景；background可省略或设为auto。
 - 参数通过提示词交给 Web 图片工具，未添加未经验证的顶层 Web 字段。收到文件后严格校验帧数和各帧时长，不满足时返回错误，不重新生成或用静态PNG充数。
 - 尺寸保持现有Web提示语义，不保证精确像素。建议使用auto；首个请求提示256×256，原始GIF实际为410×413。
-- 同步返回仍是`data[].b64_json`；CFM的`response_format=url`及异步任务返回`.gif`资源地址，下载MIME为`image/gif`。图库保留原始文件字节、帧延迟、循环及disposal信息。
+- GPT同步接口返回`data[].b64_json`及顶层`output_format=gif`，必须省略`response_format`；显式传入`url`或`b64_json`都会返回400。异步任务通过`data[].url`返回下载地址，URL不保证以`.gif`结尾，下载MIME为`image/gif`。图库保留原始文件字节、帧延迟、循环及disposal信息。
+- 异步任务查询中的`frame_count`、`frame_duration_ms`回显显式提交的参数；例如请求125ms时该字段仍为125，实际GIF每帧时长为取整后的130ms。省略的帧参数不会新增到任务查询结果中。
 - 新模型的生成错误不自动换号重生；账号仍必须通过现有启用、认证状态和生图额度检查，上游拒绝按实际错误返回。
 
 ## 已观察的 Web 契约
