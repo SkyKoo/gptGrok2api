@@ -146,7 +146,7 @@
                     >{{ option.label }}</Button>
                   </div>
                 </div>
-                <p class="studio-size-current">当前免费 Web 通道支持 2～6 秒，具体账号权限由上游返回。分辨率为请求档位，实际输出以上游结果为准。</p>
+                <p class="studio-size-current">当前免费 Web 通道支持 1～6 秒，具体账号权限由上游返回。分辨率为请求档位，实际输出以上游结果为准。</p>
               </div>
             </div>
             <template v-else-if="mode === 'image'">
