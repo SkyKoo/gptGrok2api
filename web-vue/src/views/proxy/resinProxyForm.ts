@@ -19,6 +19,8 @@ export function buildResinProxyURL(fields: ResinProxyFields): string {
     const url = new URL(fields.address.trim())
     url.username = encodeURIComponent(fields.platform)
     url.password = encodeURIComponent(fields.token)
+    // Preserve the stored URL representation used by existing task bindings.
+    // The backend removes the root path only from the dispatched proxy URL.
     return url.toString()
   } catch {
     return fields.address.trim()

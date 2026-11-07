@@ -104,3 +104,36 @@ func TestResinCooldownDoesNotFreezeOtherAccountsOnChannelOrLegacyGateway(t *test
 		resumed.Release()
 	}
 }
+
+func TestLegacyResinRootPathBindingKeepsIdentityAcrossRestart(t *testing.T) {
+	raw := "http://CFM-Grok:p%40ss%3A%2F%3F%23%25@resin.invalid:2260/"
+	// This is the persisted binding produced before URL normalization existed.
+	saved := Binding{Reference: RegistrationResinChannel, EndpointHash: proxyHash(raw),
+		Platform: "grok", Purpose: "registration", ResinPlatform: "CFM-Grok",
+		ResinAccount: "task-existing", BoundAt: "2026-11-06T13:43:22Z"}
+	before, _ := json.Marshal(saved)
+	manager := channelManager(raw)
+	lease, err := manager.AcquireTask(context.Background(), "direct", "grok", "registration", &saved, "ignored-new-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	want := "http://CFM-Grok.task-existing:p%40ss%3A%2F%3F%23%25@resin.invalid:2260"
+	if lease.URL != want || lease.Binding != saved || manager.resinChannels[RegistrationResinChannel] != raw {
+		t.Fatal("URL normalization modified a stored binding or configuration")
+	}
+	after, _ := json.Marshal(saved)
+	if string(before) != string(after) {
+		t.Fatal("caller binding was mutated")
+	}
+	resolved, bound, err := manager.ResolveBound(map[string]any{"proxy_binding": saved})
+	if err != nil || !bound || resolved != want {
+		t.Fatal("persisted account lost its normalized proxy", err)
+	}
+	// Removing the saved slash is still a configuration change: do not silently
+	// weaken endpoint matching to make the runtime normalization work.
+	manager.ConfigureResinChannel(RegistrationResinChannel, strings.TrimSuffix(raw, "/"))
+	if _, err := manager.AcquireTask(context.Background(), "direct", "grok", "registration", &saved); !errors.Is(err, ErrBindingUnavailable) {
+		t.Fatal("endpoint fingerprint check was weakened", err)
+	}
+}

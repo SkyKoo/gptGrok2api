@@ -23,7 +23,7 @@ import cloakbrowser
 from browser_sessions import queue, launch_browser, BrowserQueueError
 from contextlib import asynccontextmanager
 
-from common.browser import browser_context_kwargs, browser_kwargs
+from common.browser import browser_context_kwargs, browser_kwargs, InvalidBrowserProxy, is_proxy_configuration_error
 from signup_errors import signup_error_status
 from oauth_device import authorize_device, validate_device_url
 from turnstile.solve import solve_turnstile_realpage_session
@@ -342,7 +342,10 @@ async def native_session_start(req: NativeStartRequest, authorization: str | Non
         raise _native_error(exc)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail={"stage": "browser_start", "error": "browser start timeout"})
-    except Exception:
+    except Exception as exc:
+        if is_proxy_configuration_error(exc):
+            log.warning("native signup rejected invalid proxy configuration")
+            raise HTTPException(status_code=422, detail={"stage": "browser_start", "error": "proxy_configuration_invalid"}) from None
         log.exception("native signup session start failed")
         raise HTTPException(status_code=502, detail={"stage": "browser_start", "error": "browser start failed"})
 
@@ -520,12 +523,15 @@ class BrowserReservationRequest(BaseModel):
 async def reserve_browser(req: BrowserReservationRequest, authorization: str | None = Header(default=None)) -> dict:
     if not _authorized(authorization):
         raise HTTPException(status_code=401, detail="invalid worker token")
-    options = browser_kwargs("TURNSTILE", _normalize_proxy(req.proxy) or None,
-        timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
-    if req.daily_direct and not _normalize_proxy(req.proxy):
-        options.pop("proxy", None)
     try:
+        proxy = _normalize_proxy(req.proxy)
+        options = browser_kwargs("TURNSTILE", "direct" if req.daily_direct and not proxy else proxy or None,
+            timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
+        if req.daily_direct and not proxy:
+            options.pop("proxy", None)
         return queue.enqueue(req.id, options, cloakbrowser.launch_async)
+    except InvalidBrowserProxy:
+        raise HTTPException(status_code=422, detail={"stage": "browser_start", "error": "proxy_configuration_invalid"}) from None
     except BrowserQueueError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 

@@ -1,6 +1,9 @@
 export const registrationResinChannel = 'resin:registration'
 
 export function registrationProxyFailureText(value: string): string {
+  if (value.includes('worker_error=proxy_configuration_invalid')) {
+    return '浏览器拒绝了注册代理配置，请检查代理协议和网关地址；HTTP(S) 网关不能包含子路径、查询参数或片段。修正配置后再手动重试，不自动补偿。'
+  }
   if (value.includes('worker_error=signup_unavailable') || value.includes('upstream_code=email_signup_unavailable')) {
     return `xAI 拒绝本次邮箱注册，未进入收取验证码步骤；这不是邮件接收超时。具体限制原因未由上游说明，不自动补偿。诊断：${value}`
   }

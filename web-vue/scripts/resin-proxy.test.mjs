@@ -25,3 +25,17 @@ test('registration errors explain cooldown and preserve unrelated upstream diagn
   const upstream = 'send_code: browser_worker_rejected upstream_status=400'
   assert.equal(registrationProxyFailureText(upstream), upstream)
 })
+
+
+test('editing existing Resin fields preserves the URL used by persisted task bindings', () => {
+  const saved = 'http://CFM-Grok:p%40ss%3A%2F%3F%23%25word@resin:2260/'
+  assert.equal(buildResinProxyURL(readResinProxyURL(saved)), saved)
+})
+
+test('proxy configuration errors explain manual correction without echoing credentials', async () => {
+  const { registrationProxyFailureText } = await import('../src/lib/registrationProxy.ts')
+  const result = registrationProxyFailureText('bootstrap: browser_worker_rejected (HTTP 422) operation=worker_error=proxy_configuration_invalid upstream_stage=browser_start')
+  assert.match(result, /浏览器拒绝了注册代理配置/)
+  assert.match(result, /不自动补偿/)
+  assert.doesNotMatch(result, /unclassified/)
+})

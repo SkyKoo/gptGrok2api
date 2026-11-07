@@ -95,6 +95,7 @@ func testResinConnections(t *testing.T, channel bool) {
 	defer gateway.Close()
 	endpoint, _ := url.Parse(gateway.URL)
 	endpoint.User = url.UserPassword("CFM-Grok", "fixture-token")
+	endpoint.Path = "/" // Same persisted form produced by the registration UI.
 	m := resinManager(endpoint.String())
 	selection := "group:resin"
 	if channel {
@@ -106,6 +107,9 @@ func testResinConnections(t *testing.T, channel bool) {
 		t.Fatal(err)
 	}
 	defer lease.Release()
+	if strings.HasSuffix(lease.URL, "/") || lease.Binding.EndpointHash != proxyHash(endpoint.String()) {
+		t.Fatal("proxy dispatch retained a root path or changed the stored endpoint hash")
+	}
 	for _, host := range []string{"send.invalid:443", "verify.invalid:443", "profile.invalid:443"} {
 		conn, err := DialContext(context.Background(), host, lease.URL)
 		if err != nil {

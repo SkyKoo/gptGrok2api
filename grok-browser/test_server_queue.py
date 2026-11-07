@@ -82,4 +82,50 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
         browser.close.assert_awaited_once()
         self.assertEqual((await self.client.get('/health')).json()['capacity'],1)
 
+    async def test_reservation_normalizes_legacy_resin_url_before_browser_launch(self):
+        key='d'*48
+        raw='http://CFM-Grok.task-test:p%40ss%3A%2F%3F%23%25@resin:2260/'
+        response=await self.client.post('/v1/browser/reservations',json={'id':key,'proxy':raw})
+        self.assertEqual(response.status_code,200)
+        await self.ready(key)
+        self.assertEqual(self.launch.call_args.kwargs['proxy'],raw[:-1])
+        await self.client.delete('/v1/browser/reservations/'+key)
+
+    async def test_invalid_proxy_rejected_before_queue_admission_without_credentials(self):
+        response=await self.client.post('/v1/browser/reservations',json={'id':'e'*48,'proxy':'http://user:secret@resin:2260/api'})
+        self.assertEqual(response.status_code,422)
+        self.assertEqual(response.json()['detail'],{'stage':'browser_start','error':'proxy_configuration_invalid'})
+        self.assertNotIn('secret',response.text)
+        self.assertFalse(self.queue.entries)
+        self.launch.assert_not_awaited()
+
+    async def test_browser_proxy_rejection_has_explicit_safe_error_and_no_retry(self):
+        errors=[
+            RuntimeError('Page.goto: net::ERR_NO_SUPPORTED_PROXIES at http://user:secret@resin:2260/'),
+            server.InvalidBrowserProxy(),
+        ]
+        for exc in errors:
+            with self.subTest(error=type(exc).__name__), patch.object(server,'xai_start_session',AsyncMock(side_effect=exc)) as start:
+                response=await self.client.post('/v1/session/start',json={'url':'https://accounts.x.ai/sign-up'})
+                self.assertEqual(response.status_code,422)
+                self.assertEqual(response.json()['detail'],{'stage':'browser_start','error':'proxy_configuration_invalid'})
+                self.assertNotIn('secret',response.text)
+                start.assert_awaited_once()
+
+    async def test_other_browser_errors_keep_their_existing_classification(self):
+        with patch.object(server,'xai_start_session',AsyncMock(side_effect=RuntimeError('net::ERR_TUNNEL_CONNECTION_FAILED'))):
+            response=await self.client.post('/v1/session/start',json={'url':'https://accounts.x.ai/sign-up'})
+            self.assertEqual(response.status_code,502)
+            self.assertEqual(response.json()['detail']['error'],'browser start failed')
+
+    async def test_daily_direct_ignores_an_invalid_environment_proxy(self):
+        with patch.dict('os.environ',{'TURNSTILE_PROXY':'http://user:secret@resin:2260/api'}):
+            key='f'*48
+            response=await self.client.post('/v1/browser/reservations',json={'id':key,'daily_direct':True})
+            self.assertEqual(response.status_code,200)
+            await self.ready(key)
+            self.assertNotIn('proxy',self.launch.call_args.kwargs)
+            await self.client.delete('/v1/browser/reservations/'+key)
+
+
 if __name__=='__main__':unittest.main()

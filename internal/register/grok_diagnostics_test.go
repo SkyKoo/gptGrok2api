@@ -11,8 +11,8 @@ import (
 )
 
 func TestExplicitRefusalsRemainManualAcrossLegacyAndNewStatuses(t *testing.T) {
-	for _, status := range []string{"504", "422"} {
-		for reason, want := range map[string]string{"signup_unavailable": "upstream_signup_refused", "turnstile_incomplete": "human_verification_required", "email_invalid": "email_invalid", "cloudflare_challenge": "human_verification_required"} {
+	for _, status := range []string{"504", "502", "422"} {
+		for reason, want := range map[string]string{"signup_unavailable": "upstream_signup_refused", "turnstile_incomplete": "human_verification_required", "email_invalid": "email_invalid", "cloudflare_challenge": "human_verification_required", "proxy_configuration_invalid": "proxy_configuration_invalid"} {
 			j := compensationFixture(time.Now())
 			j.Error = "send_code: browser_worker_rejected (HTTP " + status + ") operation=worker_error=" + reason
 			planRegistrationCompensation(&j, nil, time.Now())
@@ -123,5 +123,25 @@ func TestEmailEntryDiagnosticsRejectUnboundedOrSecretValues(t *testing.T) {
 	got := safeBrowserEmailEntry(entry, &browserPageScripts{Pending: 99999999, Failed: -1, OldestPendingMS: 99999999})
 	if got != "" {
 		t.Fatalf("unsafe evidence retained: %s", got)
+	}
+}
+
+func TestBrowserProxyConfigurationErrorReachesJournalAndStopsCompensation(t *testing.T) {
+	for _, status := range []int{422, 502} {
+		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"detail":{"stage":"browser_start","error":"proxy_configuration_invalid","proxy":"http://private:secret@resin:2260/"}}`))}, nil
+		})}
+		solver := &HTTPGrokBrowserSolver{BaseURL: "http://worker.test", Client: client}
+		_, err := solver.workerPost(context.Background(), "/v1/browser/reservations", map[string]any{}, "bootstrap")
+		text := safeFailure(err)
+		if !strings.Contains(text, "worker_error=proxy_configuration_invalid") || !strings.Contains(text, "upstream_stage=browser_start") || strings.Contains(text, "secret") {
+			t.Fatalf("unsafe or missing proxy diagnostic: %s", text)
+		}
+		job := compensationFixture(time.Now())
+		job.Error = text
+		planRegistrationCompensation(&job, err, time.Now())
+		if job.AutoRetry.State != "manual" || job.AutoRetry.Reason != "proxy_configuration_invalid" || job.AutoRetry.Attempts != 0 || job.AutoRetry.NextAttemptAt != "" {
+			t.Fatalf("proxy configuration error consumed a retry: %+v", job.AutoRetry)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from urllib.parse import urlsplit, urlunsplit
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,38 @@ async def run_pre_actions(page, actions: list):
         await asyncio.sleep(0.5)
 
 
+class InvalidBrowserProxy(ValueError):
+    """A fixed, credential-free error for an invalid browser proxy endpoint."""
+
+    def __init__(self):
+        super().__init__("proxy_configuration_invalid")
+
+
+def normalize_browser_proxy(raw: str) -> str:
+    """Remove an HTTP gateway's root path only at the browser boundary.
+
+    Keep encoded credentials, authority and stored task bindings unchanged.
+    Chromium's authenticated --proxy-server parser rejects even a trailing /.
+    """
+    value = raw.strip()
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"}:
+            return value  # Preserve the existing SOCKS and bare-proxy handling.
+        if (not parsed.hostname or parsed.path not in {"", "/"}
+                or parsed.query or parsed.fragment
+                or any(char.isspace() for char in value)):
+            raise InvalidBrowserProxy()
+        _ = parsed.port  # Reject malformed/out-of-range ports without echoing them.
+    except ValueError:
+        raise InvalidBrowserProxy() from None
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+def is_proxy_configuration_error(exc: Exception) -> bool:
+    return isinstance(exc, InvalidBrowserProxy) or "net::ERR_NO_SUPPORTED_PROXIES" in str(exc)
+
+
 def browser_kwargs(
     prefix: str,
     proxy: str = None,
@@ -122,7 +155,7 @@ def browser_kwargs(
 
     configured_proxy = str(proxy or os.getenv(f"{prefix}_PROXY") or "").strip()
     if configured_proxy:
-        kw["proxy"] = configured_proxy
+        kw["proxy"] = normalize_browser_proxy(configured_proxy)
     if os.getenv(f"{prefix}_GEOIP") == "1":
         kw["geoip"] = True
     return kw

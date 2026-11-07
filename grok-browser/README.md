@@ -53,3 +53,5 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 只接受 `https://accounts.x.ai/oauth2/device` 与本次 `user_code`，会话 Cookie 仅绑定 accounts.x.ai 和 auth.x.ai。跳转到登录、MFA 或人机验证页时返回 `manual_action_required`；不自动创建账号、输入密码或求解挑战。确认点击超时返回 `uncertain`，由 Go 查询同一设备授权结果，不重放确认。浏览器异常只返回固定错误码，不打印 Cookie、设备链接或页面内容。每个请求有时限，并关闭临时上下文。
 
 离线测试：`python3 grok-browser/test_oauth_device.py -v`（从仓库根执行）；使用模拟页面，无需真实 SSO。Go 的 `internal/oauth` 与 `internal/httpapi` 测试覆盖 Token 身份校验、队列去重、恢复、取消和秘密字段不泄漏。实际 xAI 登录态与授权页的端到端验收需单独授权真实测试账号。
+
+HTTP(S) 代理网关允许空路径或根路径 `/`。Go 的 Resin 出口和 Worker 浏览器启动入口会在使用时去掉根路径，避免 Chromium 的认证代理参数触发 `ERR_NO_SUPPORTED_PROXIES`；保存的配置和既有任务 endpoint_hash 不迁移。Worker 拒绝带子路径、查询参数或片段的 HTTP(S) 代理，返回脱敏的 `proxy_configuration_invalid`（HTTP422）；CFM 将该错误归为需要人工修正，不自动补偿。此修复只保证代理参数可被浏览器接受，不代表 Resin 上游节点或完整注册流程已经通过验证。

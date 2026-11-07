@@ -70,6 +70,9 @@ func boundResinURL(raw string, b Binding) (string, error) {
 	}
 	token, _ := u.User.Password()
 	u.User = url.UserPassword(b.ResinPlatform+"."+b.ResinAccount, token)
+	// Chromium rejects a root path in an authenticated --proxy-server URL.
+	// Normalize only the dispatched URL; the saved endpoint hash stays intact.
+	u.Path, u.RawPath = "", ""
 	return u.String(), nil
 }
 

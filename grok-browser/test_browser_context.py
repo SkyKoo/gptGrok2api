@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from common.browser import browser_context_kwargs, browser_kwargs
+from common.browser import browser_context_kwargs, browser_kwargs, InvalidBrowserProxy, normalize_browser_proxy
 
 
 class BrowserArgumentLayerTests(unittest.TestCase):
@@ -71,6 +71,38 @@ class BrowserArgumentLayerTests(unittest.TestCase):
                     context = browser_context_kwargs(profile)
                     self.assertEqual(launch["locale"], "en-US")
                     self.assertEqual(context["locale"], "en-US")
+
+
+    def test_proxy_root_path_normalization_preserves_authority_and_encoded_credentials(self):
+        for base in [
+            "http://CFM-Grok.task-test:p%40ss%3A%2F%3F%23%25@resin:2260",
+            "https://CFM-Grok.task-test:p%2B%3D@resin:2260",
+            "http://user:token@[2001:db8::1]:2260",
+            "http://resin:2260",
+        ]:
+            for suffix in ["", "/"]:
+                with self.subTest(base=base, suffix=suffix):
+                    launch = browser_kwargs("TURNSTILE", base + suffix)
+                    self.assertEqual(launch["proxy"], base)
+                    self.assertEqual(normalize_browser_proxy(launch["proxy"]), base)
+
+    def test_proxy_environment_is_normalized_but_invalid_urls_never_fall_back(self):
+        with patch.dict(os.environ, {"TURNSTILE_PROXY": "http://env:token@resin:2260/"}):
+            self.assertEqual(browser_kwargs("TURNSTILE")["proxy"], "http://env:token@resin:2260")
+            with self.assertRaisesRegex(InvalidBrowserProxy, "^proxy_configuration_invalid$"):
+                browser_kwargs("TURNSTILE", "http://user:secret@resin:2260/api")
+
+    def test_invalid_http_gateways_are_rejected_without_leaking_credentials(self):
+        for raw in [
+            "http://user:secret@resin:2260/api", "http://user:secret@resin:2260//",
+            "http://user:secret@resin:2260/?q=secret", "http://user:secret@resin:2260/#secret",
+            "http://user:secret@resin:bad/", "http://user:secret@resin:99999/",
+            "http:///", "http://[invalid/", "http://user:secret@resin:2260/\npath",
+        ]:
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(InvalidBrowserProxy, "^proxy_configuration_invalid$"):
+                    browser_kwargs("TURNSTILE", raw)
+        self.assertEqual(normalize_browser_proxy("socks5://user:token@proxy:1080"), "socks5://user:token@proxy:1080")
 
 
 if __name__ == "__main__":

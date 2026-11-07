@@ -48,6 +48,7 @@ func registrationReviewReason(message string) string {
 		{"worker_error=email_invalid", "email_invalid"},
 		{"turnstile_incomplete", "human_verification_required"},
 		{"worker_error=cloudflare_challenge", "human_verification_required"},
+		{"worker_error=proxy_configuration_invalid", "proxy_configuration_invalid"},
 	} {
 		if strings.Contains(message, item.marker) {
 			return item.reason
