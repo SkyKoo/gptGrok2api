@@ -33,11 +33,11 @@ func parseVideoOptions(r *http.Request) (videoOptions, error) {
 		var err error
 		options.Seconds, err = strconv.Atoi(raw)
 		if err != nil {
-			return options, fmt.Errorf("当前 Grok Web 视频通道仅开放已验证的 6 秒；更长时长及续接需要单独确认账号权限")
+			return options, fmt.Errorf("当前 Grok Web 视频通道支持 2～6 秒；具体账号权限由上游返回")
 		}
 	}
-	if options.Seconds != 6 {
-		return options, fmt.Errorf("当前 Grok Web 视频通道仅开放已验证的 6 秒；更长时长及续接需要单独确认账号权限")
+	if options.Seconds < 2 || options.Seconds > 6 {
+		return options, fmt.Errorf("当前 Grok Web 视频通道支持 2～6 秒；具体账号权限由上游返回")
 	}
 	sizes := map[string]string{"9:16": "720x1280", "16:9": "1280x720", "1:1": "1024x1024", "2:3": "1024x1792", "3:2": "1792x1024"}
 	options.Size = strings.TrimSpace(r.FormValue("size"))

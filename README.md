@@ -223,7 +223,7 @@ Grok Imagine 视频使用 `POST /v1/videos`（`multipart/form-data`）。对话�
 | --- | --- | --- |
 | `model` | `grok-imagine-video` | 同左 |
 | `prompt` | 必填提示词 | 无 |
-| `seconds` | 当前免费 Web 通道仅开放已验证的 `6`；显式 10/15 秒请求报错，不自动续接 | `6` |
+| `seconds` | 当前免费 Web 通道接受 `2`～`6` 秒；显式 10/15 秒请求仍报错，不自动续接 | `6` |
 | `resolution_name` | `480p`、`720p`；也接受 `resolution` 别名 | `720p` |
 | `aspect_ratio` | `9:16`、`16:9`、`1:1`、`2:3`、`3:2` | `9:16` |
 | `size` | 与上述比例对应的 `720x1280`、`1280x720`、`1024x1024`、`1024x1792`、`1792x1024` | 按比例确定 |

@@ -160,8 +160,8 @@ func BuildVideoExtendPayload(prompt, parentPostID, extendPostID, aspectRatio, re
 
 func VideoSegmentLengths(seconds int) ([]int, bool) {
 	switch seconds {
-	case 6:
-		return []int{6}, true
+	case 2, 3, 4, 5, 6:
+		return []int{seconds}, true
 	case 10:
 		return []int{10}, true
 	case 15:

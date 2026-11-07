@@ -130,7 +130,7 @@
                 <div class="studio-video-heading">视频设置 · Grok Imagine Video</div>
                 <div class="studio-video-field">
                   <span class="studio-video-label">时长</span>
-                  <span class="studio-video-value">6 秒</span>
+                  <span class="studio-video-value">{{ videoForm.seconds }} 秒</span>
                 </div>
                 <div v-for="group in videoSettingGroups" :key="group.key" class="studio-video-field">
                   <span class="studio-video-label">{{ group.label }}</span>
@@ -146,7 +146,7 @@
                     >{{ option.label }}</Button>
                   </div>
                 </div>
-                <p class="studio-size-current">当前免费 Web 通道仅开放 6 秒。分辨率为请求档位，实际输出以上游结果为准。</p>
+                <p class="studio-size-current">当前免费 Web 通道支持 2～6 秒，具体账号权限由上游返回。分辨率为请求档位，实际输出以上游结果为准。</p>
               </div>
             </div>
             <template v-else-if="mode === 'image'">
@@ -302,7 +302,7 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
-import { studioReferenceLimit, studioReferenceCountError, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
+import { studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -418,6 +418,7 @@ const imageModelSelectOptions = computed(() => props.imageModelOptions.map((mode
 })))
 
 const videoSettingGroups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
+  { key: 'seconds', label: '时长', options: VIDEO_DURATION_OPTIONS },
   { key: 'size', label: '宽高比', options: VIDEO_SIZE_OPTIONS },
   { key: 'resolution', label: '分辨率', options: ['480p', '720p'].map(value => ({ label: value, value })) },
   { key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS },

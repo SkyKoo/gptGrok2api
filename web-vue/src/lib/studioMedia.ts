@@ -52,6 +52,7 @@ export const VIDEO_SIZE_OPTIONS = [
   { label: '2:3', value: '1024x1792' },
   { label: '3:2', value: '1792x1024' },
 ]
+export const VIDEO_DURATION_OPTIONS = [2, 3, 4, 5, 6].map(seconds => ({ label: `${seconds} 秒`, value: String(seconds) }))
 export const VIDEO_PRESET_OPTIONS = [
   { label: '自定义', value: 'custom' }, { label: '普通', value: 'normal' },
   { label: '趣味', value: 'fun' }, { label: '大胆', value: 'spicy' },
@@ -59,7 +60,7 @@ export const VIDEO_PRESET_OPTIONS = [
 export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
 
 export function buildVideoForm(prompt: string, options: StudioVideoOptions, files: File[]) {
-  if (options.seconds !== 6) throw new Error('当前 Grok Web 视频仅支持 6 秒，更长时长尚未验证账号权限')
+  if (!VIDEO_DURATION_OPTIONS.some(option => Number(option.value) === options.seconds)) throw new Error('请选择 2～6 秒的视频时长')
   if (!VIDEO_SIZE_OPTIONS.some(option => option.value === options.size)) throw new Error('请选择支持的视频比例')
   if (!['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
   const preset = options.preset || 'custom'

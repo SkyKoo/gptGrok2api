@@ -22,6 +22,8 @@ func TestVideoOptions(t *testing.T) {
 		want       videoOptions
 	}{
 		{"defaults", "", videoOptions{6, "720x1280", "9:16", "720p", "custom"}},
+		{"short video", "seconds=2&size=1280x720&resolution_name=480p&preset=normal", videoOptions{2, "1280x720", "16:9", "480p", "normal"}},
+		{"five seconds", "seconds=5&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{5, "1792x1024", "3:2", "480p", "fun"}},
 		{"explicit settings", "seconds=6&size=1280x720&resolution_name=480p&preset=normal", videoOptions{6, "1280x720", "16:9", "480p", "normal"}},
 		{"aliases", "seconds=6&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{6, "1792x1024", "3:2", "480p", "fun"}},
 		{"matching aliases", "size=1024x1792&aspect_ratio=2:3&resolution=720p&resolution_name=720p&quality=standard", videoOptions{6, "1024x1792", "2:3", "720p", "custom"}},
@@ -57,7 +59,7 @@ func videoOptionsRequest(t *testing.T, fields url.Values) *http.Request {
 func TestVideoInvalidOptionsNeverQueueOrCallUpstream(t *testing.T) {
 	s := newVideoTestServer(adminTestConfig(t.TempDir()))
 	for _, form := range []string{
-		"seconds=10", "seconds=15", "seconds=0", "seconds=-1", "seconds=bad", "seconds=6.5", "seconds=5", "seconds=9999999999999999999999",
+		"seconds=1", "seconds=0", "seconds=-1", "seconds=bad", "seconds=6.5", "seconds=7", "seconds=10", "seconds=15", "seconds=9999999999999999999999",
 		"size=1920x1080", "aspect_ratio=auto", "aspect_ratio=4:3", "aspect_ratio=21:9", "size=720x1280&aspect_ratio=16:9",
 		"resolution_name=1080p", "resolution_name=4k", "resolution_name=480p&resolution=720p", "resolution_name=480p&resolution_name=720p",
 		"quality=high", "preset=unknown", "audio=false", "search=false", "duration=5", "seed=1", "input_reference=https://example.test/a.png",
@@ -82,6 +84,8 @@ func TestVideoOptionsReachUpstream(t *testing.T) {
 		lengths                              []int
 	}{
 		{"default", "", "720p", "9:16", "custom", []int{6}},
+		{"2 seconds", "seconds=2&size=1280x720&resolution_name=480p&preset=normal", "480p", "16:9", "normal", []int{2}},
+		{"5 seconds", "seconds=5&aspect_ratio=1:1&resolution=480p&preset=fun", "480p", "1:1", "extremely-crazy", []int{5}},
 		{"480p landscape", "seconds=6&size=1280x720&resolution_name=480p&preset=normal", "480p", "16:9", "normal", []int{6}},
 		{"480p square", "seconds=6&aspect_ratio=1:1&resolution=480p&preset=fun", "480p", "1:1", "extremely-crazy", []int{6}},
 		{"720p wide", "seconds=6&aspect_ratio=3:2&resolution=720p&preset=spicy", "720p", "3:2", "extremely-spicy-or-crazy", []int{6}},

@@ -29,7 +29,7 @@ func TestParseDataURI(t *testing.T) {
 }
 
 func TestVideoSegmentLengths(t *testing.T) {
-	want := map[int][]int{6: {6}, 10: {10}, 15: {10, 5}}
+	want := map[int][]int{2: {2}, 3: {3}, 4: {4}, 5: {5}, 6: {6}, 10: {10}, 15: {10, 5}}
 	for seconds, expected := range want {
 		got, ok := VideoSegmentLengths(seconds)
 		if !ok || len(got) != len(expected) {
@@ -41,7 +41,7 @@ func TestVideoSegmentLengths(t *testing.T) {
 			}
 		}
 	}
-	for _, seconds := range []int{5, 7, 12, 16, 20} {
+	for _, seconds := range []int{1, 7, 12, 16, 20} {
 		if _, ok := VideoSegmentLengths(seconds); ok {
 			t.Fatalf("unsupported video length %d accepted", seconds)
 		}
