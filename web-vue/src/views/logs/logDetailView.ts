@@ -81,7 +81,7 @@ const detailTimelineSteps: DetailTimelineStepConfig[] = [
   { key: 'stream_error_ms', label: '上游断流', group: '生成与结果', hint: 'HTTP2 / SSE' },
   { key: 'resolve_ms', label: '解析/轮询', group: '生成与结果', hint: 'conversation / file' },
   { key: 'download_ms', label: '下载媒体', group: '生成与结果', hint: '生成文件下载' },
-  { key: 'video_review_ms', label: '核对视频画面', group: '生成与结果', hint: '视频抽帧与提示词、参考图一致性检查' },
+  { key: 'video_review_ms', label: '核对视频画面', group: '生成与结果', hint: '检查视频是否与提示词、参考图的主要内容相关，识别明显替代视频' },
   { key: 'retry_wait_ms', label: '重试等待', group: '生成与结果', hint: '轮询 / 退避' },
   { key: 'response_ms', label: '响应整理', group: '生成与结果', hint: 'Codex 响应' },
   { key: 'stream_ms', label: '单图内部', group: '生成与结果', hint: '单图链路' },
@@ -482,6 +482,7 @@ export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailFi
   return compactDetailFields([
     review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'skipped' ? '未开启内容核对' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '无法确认，已拦截' } : null,
     review ? { label: '核对原因', value: formatInlineValue(review.reason) } : null,
+    metrics.video_review_parse_error ? { label: '审核回复解析失败原因', value: formatInlineValue(metrics.video_review_parse_error) } : null,
     review ? { label: '核对模型', value: formatInlineValue(review.model) } : null,
     review ? { label: '核对数量', value: `${review.frames || 0} 个视频帧 / ${review.references || 0} 张参考图` } : null,
     stream ? { label: '上游审核标记', value: stream.moderated ? '已拦截' : '未报告拦截' } : null,

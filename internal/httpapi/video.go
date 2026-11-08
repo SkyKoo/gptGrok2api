@@ -351,6 +351,9 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	job.Verification = &verification
 	s.videoMu.Unlock()
 	reviewMetrics["video_verification"] = verification
+	if verification.parseError != "" {
+		reviewMetrics["video_review_parse_error"] = verification.parseError
+	}
 	reviewStage := "video_content_review_skipped"
 	if reviewEnabled {
 		reviewStage = "video_content_reviewed"
@@ -359,9 +362,9 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		return
 	}
 	if reviewEnabled && verification.Verdict != "matched" {
-		code, message := "video_content_unverified", "无法确认视频与提示词及参考图一致，已停止交付；未自动重试"
+		code, message := "video_content_unverified", "无法完成视频相关性核对，已停止交付；未自动重试"
 		if verification.Verdict == "mismatch" {
-			code, message = "video_content_mismatch", "视频画面与提示词或参考图不符，已拦截该结果；未自动重试"
+			code, message = "video_content_mismatch", "视频明显偏离提示词或参考图的主要内容，已拦截疑似替代视频；未自动重试"
 			if err := s.rejectVideoResult(job.ID, requestHash, fingerprint, verification); err != nil {
 				s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_rejection_persisted": false}})
 			} else {

@@ -27,6 +27,9 @@ func (v fixtureVideoVerifier) Verify(_ context.Context, prompt string, refs []pr
 	if v.seen != nil {
 		v.seen(prompt, refs, raw)
 	}
+	if v.verdict == "invalid-review" {
+		return parseVideoVerification("PRIVATE_REVIEW_RESPONSE", 6, len(refs))
+	}
 	reason := "consistent"
 	if v.verdict == "mismatch" {
 		reason = "unrelated_scene"
@@ -46,29 +49,49 @@ func newVideoTestServer(cfg config.Config) *Server {
 }
 
 func TestVideoVerificationVerdictsFailClosed(t *testing.T) {
-	valid := `{"verdict":"matched","prompt_match":"matched","reference_match":"matched","frames_reviewed":6,"references_reviewed":1,"reason":"consistent"}`
+	valid := `{"verdict":"matched","frames_reviewed":6,"references_reviewed":1,"reason":"consistent"}`
+	mismatch := strings.ReplaceAll(strings.Replace(valid, `"matched"`, `"mismatch"`, 1), `"consistent"`, `"unrelated_scene"`)
+	uncertain := strings.ReplaceAll(strings.Replace(valid, `"matched"`, `"uncertain"`, 1), `"consistent"`, `"insufficient_evidence"`)
 	for _, tc := range []struct {
-		name, raw string
-		refs      int
-		want      string
+		name, raw, want, cause string
+		refs                   int
 	}{
-		{"pass", valid, 1, "matched"},
-		{"text only", strings.ReplaceAll(strings.ReplaceAll(valid, `"references_reviewed":1`, `"references_reviewed":0`), `"reference_match":"matched"`, `"reference_match":"not_applicable"`), 0, "matched"},
-		{"unrelated video", strings.ReplaceAll(strings.ReplaceAll(valid, `"matched"`, `"mismatch"`), `"consistent"`, `"unrelated_scene"`), 1, "mismatch"},
-		{"contradictory", strings.Replace(valid, `"prompt_match":"matched"`, `"prompt_match":"mismatch"`, 1), 1, "uncertain"},
-		{"missing refs", valid, 2, "uncertain"},
-		{"missing frames", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":1`, 1), 1, "uncertain"},
-		{"empty", "", 1, "uncertain"},
-		{"refusal", "Cannot assess this video", 1, "uncertain"},
-		{"extra data", valid + `{}`, 1, "uncertain"},
-		{"duplicate key", strings.Replace(valid, `"verdict":"matched"`, `"verdict":"uncertain","verdict":"matched"`, 1), 1, "uncertain"},
-		{"markdown", "```json\n" + valid + "\n```", 1, "uncertain"},
-		{"arbitrary reason", strings.Replace(valid, "consistent", "PRIVATE", 1), 1, "uncertain"},
+		{"related", valid, "matched", "", 1},
+		{"no references", strings.Replace(valid, `"references_reviewed":1`, `"references_reviewed":0`, 1), "matched", "", 0},
+		{"unrelated scene", mismatch, "mismatch", "", 1},
+		{"unrelated subject", strings.Replace(mismatch, "unrelated_scene", "unrelated_subject", 1), "mismatch", "", 1},
+		{"placeholder", strings.Replace(mismatch, "unrelated_scene", "placeholder", 1), "mismatch", "", 1},
+		{"insufficient evidence", uncertain, "uncertain", "", 1},
+		{"json fence", "```json\n" + valid + "\n```", "matched", "", 1},
+		{"plain fence", "```\n" + valid + "\n```", "matched", "", 1},
+		{"fenced rejection", "```json\n" + mismatch + "\n```", "mismatch", "", 1},
+		{"fenced CRLF", " \n```JSON\r\n" + valid + "\r\n```\n ", "matched", "", 1},
+		{"contradictory", strings.Replace(valid, "consistent", "unrelated_scene", 1), "uncertain", "inconsistent_verdict", 1},
+		{"unsupported detail rejection", strings.Replace(mismatch, "unrelated_scene", "action_mismatch", 1), "uncertain", "invalid_reason", 1},
+		{"missing refs", valid, "uncertain", "reference_count_mismatch", 2},
+		{"missing frames", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":1`, 1), "uncertain", "frame_count_mismatch", 1},
+		{"null count", strings.Replace(valid, `"references_reviewed":1`, `"references_reviewed":null`, 1), "uncertain", "invalid_field_type", 0},
+		{"string count", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":"6"`, 1), "uncertain", "invalid_field_type", 1},
+		{"missing field", strings.Replace(valid, `,"references_reviewed":1`, "", 1), "uncertain", "missing_field", 1},
+		{"extra field", strings.Replace(valid, `{"verdict"`, `{"description":"PRIVATE","verdict"`, 1), "uncertain", "unexpected_field", 1},
+		{"empty", "", "uncertain", "invalid_json_object", 1},
+		{"refusal", "Cannot assess this video", "uncertain", "invalid_json_object", 1},
+		{"extra data", valid + `{}`, "uncertain", "trailing_content", 1},
+		{"duplicate key", strings.Replace(valid, `"verdict":"matched"`, `"verdict":"uncertain","verdict":"matched"`, 1), "uncertain", "duplicate_field", 1},
+		{"fence with commentary", "Here is the result: \n```json\n" + valid + "\n```", "uncertain", "invalid_json_object", 1},
+		{"multiple fenced objects", "```json\n" + valid + "\n" + mismatch + "\n```", "uncertain", "trailing_content", 1},
+		{"incomplete fence", "```json\n" + valid, "uncertain", "invalid_json_object", 1},
+		{"invalid verdict", strings.Replace(valid, "matched", "approved", 1), "uncertain", "invalid_verdict", 1},
+		{"arbitrary reason", strings.Replace(valid, "consistent", "PRIVATE", 1), "uncertain", "invalid_reason", 1},
+		{"oversized reply", strings.Repeat(" ", 4096) + valid, "uncertain", "response_too_long", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := parseVideoVerification(tc.raw, 6, tc.refs)
-			if got.Verdict != tc.want || strings.Contains(got.Reason, "PRIVATE") {
+			if got.Verdict != tc.want || got.parseError != tc.cause || strings.Contains(got.Reason, "PRIVATE") {
 				t.Fatalf("got=%+v", got)
+			}
+			if tc.cause != "" && got.Reason != "invalid_review_response" {
+				t.Fatalf("protocol failure became a content decision: %+v", got)
 			}
 		})
 	}
@@ -97,7 +120,7 @@ func TestRejectedVideoFingerprintSurvivesRestartAndBlocksSameInput(t *testing.T)
 }
 
 func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
-	for _, verdict := range []string{"matched", "mismatch", "uncertain", "disabled-default", "disabled-explicit"} {
+	for _, verdict := range []string{"matched", "mismatch", "uncertain", "invalid-review", "disabled-default", "disabled-explicit"} {
 		t.Run(verdict, func(t *testing.T) {
 			reviewEnabled := !strings.HasPrefix(verdict, "disabled-")
 			calls := 0
@@ -177,7 +200,10 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 				t.Fatalf("logs=%d", len(logs))
 			}
 			raw, _ := json.Marshal(logs)
-			for _, secret := range []string{"SECRET", "private prompt", "parent-private", "result-private", "signature="} {
+			if verdict == "invalid-review" && !strings.Contains(string(raw), `"video_review_parse_error":"invalid_json_object"`) {
+				t.Fatal("review parse failure classification not persisted")
+			}
+			for _, secret := range []string{"SECRET", "private prompt", "parent-private", "result-private", "signature=", "PRIVATE_REVIEW_RESPONSE"} {
 				if strings.Contains(string(raw), secret) {
 					t.Fatalf("log leaked %s", secret)
 				}
@@ -310,6 +336,12 @@ func TestChatVideoReviewerUploadsEveryReferenceAndDecodedFrame(t *testing.T) {
 		if len(messages) != 2 || mapValue(mapValue(messages[0])["author"])["role"] != "system" {
 			t.Error("review instructions not isolated")
 		}
+		systemParts := mapValue(mapValue(messages[0])["content"])["parts"].([]any)
+		instructions := stringValue(systemParts[0])
+		example := instructions[strings.LastIndex(instructions, "\n")+1:]
+		if got := parseVideoVerification(example, 6, 2); got.Verdict != "matched" {
+			t.Errorf("review response example does not use the real image counts: %+v", got)
+		}
 		parts := mapValue(mapValue(messages[1])["content"])["parts"].([]any)
 		attachments := 0
 		for _, part := range parts {
@@ -320,7 +352,7 @@ func TestChatVideoReviewerUploadsEveryReferenceAndDecodedFrame(t *testing.T) {
 		if attachments != 8 || !strings.Contains(stringValue(parts[0]), "animate a paper plane") {
 			t.Errorf("attachments=%d request=%v", attachments, parts[0])
 		}
-		verdict := `{"verdict":"mismatch","prompt_match":"mismatch","reference_match":"mismatch","frames_reviewed":6,"references_reviewed":2,"reason":"unrelated_scene"}`
+		verdict := `{"verdict":"mismatch","frames_reviewed":6,"references_reviewed":2,"reason":"unrelated_scene"}`
 		event, _ := json.Marshal(map[string]any{"message": map[string]any{"author": map[string]any{"role": "assistant"}, "content": map[string]any{"parts": []string{verdict}}}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\ndata: [DONE]\n", event)
