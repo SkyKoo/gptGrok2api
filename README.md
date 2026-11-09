@@ -6,6 +6,9 @@
 
 ## 功能
 
+项目自管的定时备份入口和恢复边界见 [CFM 核心备份](deploy/backup/README.md)。备份范围随
+数据结构更新，1Panel 仅负责定时调用；Google Drive 凭据及恢复密码不进入源码仓库。
+
 - OpenAI 兼容接口：Chat Completions、Responses、Anthropic Messages、搜索、文件、图片、视频和可编辑文件任务。
 - ChatGPT Web：多模态对话、动态模型目录、能力额度、模型路由、浏览器环境和 Cookie 隔离、出口时区。
 - 图片处理：`gpt-image-2` 生成/编辑、多参考图、mask、`background`、`output_format`、异步任务、结果筛选和有限重试。
