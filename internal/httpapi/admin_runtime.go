@@ -55,6 +55,7 @@ type monitorRecord struct {
 	// Generated outputs are recorded separately from the capped HTTP response.
 	OutputImages         []map[string]string `json:"-"`
 	OutputVideos         []map[string]string `json:"output_videos,omitempty"`
+	GrokMediaReviews     []grokMediaReview   `json:"grok_media_reviews,omitempty"`
 	InputImages          []logInputImage     `json:"-"`
 	ErrorDetail          string              `json:"-"`
 	ErrorDetailTruncated bool                `json:"-"`
@@ -886,6 +887,9 @@ func callLogEntry(record monitorRecord, statusCode int, requestShape any, respon
 			detail["error_detail_truncated"] = record.ErrorDetailTruncated
 		}
 	}
+	if len(record.GrokMediaReviews) > 0 {
+		detail["grok_media_reviews"] = record.GrokMediaReviews
+	}
 	if len(record.InputImages) > 0 {
 		detail["input_images"] = record.InputImages
 	}
@@ -981,6 +985,14 @@ func monitorStageLabel(stage string) string {
 		return "创建上游视频任务"
 	case "video_post_created":
 		return "上游视频任务已关联"
+	case "grok_media_regenerating":
+		return "已确认替代内容，重新生成一次"
+	case "grok_media_content_review":
+		return "核对 Grok 生成画面"
+	case "grok_media_content_reviewed":
+		return "Grok 画面核对完成"
+	case "video_generation_attempt":
+		return "开始本次视频生成"
 	case "video_generation", "video_progress":
 		return "上游视频生成中"
 	case "video_download":

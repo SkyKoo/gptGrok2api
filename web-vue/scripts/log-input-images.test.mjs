@@ -20,3 +20,9 @@ test('administrator token is never sent to URLs from arbitrary log content', () 
   }
   assert.deepEqual(logOutputSource({ input_images: [{ url }], request_meta: { url }, request_shape: { url }, url: '/images/legacy.png' }), { url: '/images/legacy.png' })
 })
+
+test('rejected Grok evidence is never listed as a deliverable result', () => {
+  const detail = { grok_media_reviews: [{ images: [{ url }], references: [{ url }], checks: [{ response: 'untrusted text' }] }], status: 'failed' }
+  assert.deepEqual(logOutputSource(detail), { status: 'failed' })
+  assert.deepEqual(normalizeLogInputImages({ input_images: detail.grok_media_reviews[0].images }).map(i => i.url), [url])
+})

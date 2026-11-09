@@ -107,6 +107,7 @@
           tone="warning"
           @copy="emit('copy', $event)"
         />
+        <GrokMediaReviewEvidence :entries="log.raw.detail?.grok_media_reviews" @preview-click="emit('preview-image', $event)" />
         <DetailImagePreview
           title="输入参考图"
           :images="inputImages"
@@ -156,6 +157,7 @@ import {
 import type { DetailPreviewImage } from '@/views/logs/logDetailRuntime'
 import { statusLabel, statusTone, summaryText } from '@/views/logs/logsView'
 import LogsDetailTimeline from '@/views/logs/LogsDetailTimeline.vue'
+import GrokMediaReviewEvidence from '@/views/logs/GrokMediaReviewEvidence.vue'
 
 defineProps<{
   log: SystemLogRow | null

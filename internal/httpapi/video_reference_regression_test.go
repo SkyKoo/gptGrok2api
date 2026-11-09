@@ -179,7 +179,7 @@ func TestVideoUploadsAndGenerationUseOneAccount(t *testing.T) {
 	}
 }
 
-func TestSequentialVideoJobsRejectRepeatedMediaForDifferentPrompts(t *testing.T) {
+func TestDisabledGrokReviewDoesNotBlockHistoricalDuplicateMedia(t *testing.T) {
 	prompts := []string{}
 	post := 0
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -217,8 +217,8 @@ func TestSequentialVideoJobsRejectRepeatedMediaForDifferentPrompts(t *testing.T)
 		if i == 0 && job.Status != "completed" {
 			t.Fatalf("first failed: %+v", job)
 		}
-		if i == 1 && (job.Status != "failed" || job.Error["code"] != "repeated_video_result" || job.ContentPath != "") {
-			t.Fatalf("replayed second video delivered: %+v", job)
+		if i == 1 && (job.Status != "completed" || job.ContentPath == "") {
+			t.Fatalf("disabled review still rejected historical content: %+v", job)
 		}
 	}
 	if len(prompts) != 2 || !strings.HasPrefix(prompts[0], "a paper plane") || !strings.HasPrefix(prompts[1], "a red boat") {

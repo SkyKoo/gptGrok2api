@@ -36,7 +36,7 @@ func (v fixtureVideoVerifier) Verify(_ context.Context, prompt string, refs []pr
 	} else if v.verdict != "matched" {
 		reason = "review_unavailable"
 	}
-	return videoVerification{Verdict: v.verdict, Reason: reason, Model: "fixture", Frames: 6, References: len(refs)}
+	return videoVerification{Verdict: v.verdict, Reason: reason, Model: "fixture", Frames: 6, References: len(refs), confirmed: v.verdict == "mismatch", expected: "人物", observed: "山湖", basis: "主要内容明显不相关"}
 }
 
 // Existing protocol tests isolate upstream translation from semantic review.
@@ -48,7 +48,7 @@ func newVideoTestServer(cfg config.Config) *Server {
 	return s
 }
 
-func TestVideoVerificationVerdictsFailClosed(t *testing.T) {
+func TestVideoVerificationFormattingAndSemanticBoundaries(t *testing.T) {
 	valid := `{"verdict":"matched","frames_reviewed":6,"references_reviewed":1,"reason":"consistent"}`
 	mismatch := strings.ReplaceAll(strings.Replace(valid, `"matched"`, `"mismatch"`, 1), `"consistent"`, `"unrelated_scene"`)
 	uncertain := strings.ReplaceAll(strings.Replace(valid, `"matched"`, `"uncertain"`, 1), `"consistent"`, `"insufficient_evidence"`)
@@ -68,22 +68,22 @@ func TestVideoVerificationVerdictsFailClosed(t *testing.T) {
 		{"fenced CRLF", " \n```JSON\r\n" + valid + "\r\n```\n ", "matched", "", 1},
 		{"contradictory", strings.Replace(valid, "consistent", "unrelated_scene", 1), "uncertain", "inconsistent_verdict", 1},
 		{"unsupported detail rejection", strings.Replace(mismatch, "unrelated_scene", "action_mismatch", 1), "uncertain", "invalid_reason", 1},
-		{"missing refs", valid, "uncertain", "reference_count_mismatch", 2},
-		{"missing frames", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":1`, 1), "uncertain", "frame_count_mismatch", 1},
-		{"null count", strings.Replace(valid, `"references_reviewed":1`, `"references_reviewed":null`, 1), "uncertain", "invalid_field_type", 0},
-		{"string count", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":"6"`, 1), "uncertain", "invalid_field_type", 1},
-		{"missing field", strings.Replace(valid, `,"references_reviewed":1`, "", 1), "uncertain", "missing_field", 1},
-		{"extra field", strings.Replace(valid, `{"verdict"`, `{"description":"PRIVATE","verdict"`, 1), "uncertain", "unexpected_field", 1},
+		{"misreported refs", valid, "matched", "", 2},
+		{"missing frames", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":1`, 1), "matched", "", 1},
+		{"null count", strings.Replace(valid, `"references_reviewed":1`, `"references_reviewed":null`, 1), "matched", "", 0},
+		{"string count", strings.Replace(valid, `"frames_reviewed":6`, `"frames_reviewed":"6"`, 1), "matched", "", 1},
+		{"missing field", strings.Replace(valid, `,"references_reviewed":1`, "", 1), "matched", "", 1},
+		{"extra field", strings.Replace(valid, `{"verdict"`, `{"description":"PRIVATE","verdict"`, 1), "matched", "", 1},
 		{"empty", "", "uncertain", "invalid_json_object", 1},
 		{"refusal", "Cannot assess this video", "uncertain", "invalid_json_object", 1},
-		{"extra data", valid + `{}`, "uncertain", "trailing_content", 1},
-		{"duplicate key", strings.Replace(valid, `"verdict":"matched"`, `"verdict":"uncertain","verdict":"matched"`, 1), "uncertain", "duplicate_field", 1},
-		{"fence with commentary", "Here is the result: \n```json\n" + valid + "\n```", "uncertain", "invalid_json_object", 1},
-		{"multiple fenced objects", "```json\n" + valid + "\n" + mismatch + "\n```", "uncertain", "trailing_content", 1},
-		{"incomplete fence", "```json\n" + valid, "uncertain", "invalid_json_object", 1},
+		{"extra data", valid + `{}`, "uncertain", "missing_verdict", 1},
+		{"duplicate key", strings.Replace(valid, `"verdict":"matched"`, `"verdict":"uncertain","verdict":"matched"`, 1), "uncertain", "conflicting_duplicate_field", 1},
+		{"fence with commentary", "Here is the result: \n```json\n" + valid + "\n```", "matched", "", 1},
+		{"multiple fenced objects", "```json\n" + valid + "\n" + mismatch + "\n```", "uncertain", "conflicting_review_objects", 1},
+		{"incomplete fence", "```json\n" + valid, "matched", "", 1},
 		{"invalid verdict", strings.Replace(valid, "matched", "approved", 1), "uncertain", "invalid_verdict", 1},
-		{"arbitrary reason", strings.Replace(valid, "consistent", "PRIVATE", 1), "uncertain", "invalid_reason", 1},
-		{"oversized reply", strings.Repeat(" ", 4096) + valid, "uncertain", "response_too_long", 1},
+		{"arbitrary reason", strings.Replace(valid, "consistent", "PRIVATE", 1), "matched", "", 1},
+		{"oversized reply", strings.Repeat(" ", maxGrokReviewResponseBytes) + valid, "uncertain", "response_too_long", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := parseVideoVerification(tc.raw, 6, tc.refs)
@@ -149,7 +149,7 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 				}
 			}
 			s.mediaProvider = provider.NewMedia(upstream.Client(), upstream.URL+"/chat", upstream.URL+"/post", upstream.URL, upstream.URL, cfg.RequestTimeout)
-			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "SECRET", "enabled": true, "status": "active"}})
+			_, _, _, err := s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"media_quota": testGrokMediaSnapshot(), "access_token": "SECRET", "enabled": true, "status": "active"}, {"media_quota": testGrokMediaSnapshot(), "access_token": "SECOND", "enabled": true, "status": "active"}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -172,7 +172,11 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			job := &videoJob{ID: "video_fixture", Model: "grok-imagine-video", Prompt: "private prompt", Status: "queued"}
 			s.videoJobs[job.ID] = job
 			s.runVideoJob(job, job.Prompt, "9:16", "720p", 6, "custom", nil)
-			if calls != 1 || reviewed != reviewEnabled {
+			wantCalls := 1
+			if verdict == "mismatch" {
+				wantCalls = 2
+			}
+			if calls != wantCalls || reviewed != reviewEnabled {
 				t.Fatalf("calls=%d reviewed=%v", calls, reviewed)
 			}
 			want := "failed"
@@ -241,7 +245,7 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 	}
 }
 
-func TestUnavailableVideoReviewerPreventsGeneration(t *testing.T) {
+func TestVideoWithoutGenerationAccountDoesNotReserveReviewer(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
 	if _, err := s.store.UpdateConfig("video_review_enabled", true); err != nil {
 		t.Fatal(err)
@@ -249,7 +253,7 @@ func TestUnavailableVideoReviewerPreventsGeneration(t *testing.T) {
 	job := &videoJob{ID: "video_no_reviewer", Model: "grok-imagine-video"}
 	s.videoJobs[job.ID] = job
 	s.runVideoJob(job, "private prompt", "9:16", "720p", 6, "custom", nil)
-	if job.Status != "failed" || job.Error["code"] != "video_review_unavailable" {
+	if job.Status != "failed" || job.Error["code"] != "no_available_account" {
 		t.Fatalf("job=%+v", job)
 	}
 	if len(s.loadCallLogs()) != 1 {
@@ -295,14 +299,14 @@ func TestVideoReviewSettingDefaultsOffAndPersistsThroughSettingsAPI(t *testing.T
 		}
 		job := &videoJob{ID: fmt.Sprintf("video_setting_%d", i), Model: "grok-imagine-video", Status: "queued"}
 		s.runVideoJob(job, "fixture", "9:16", "720p", 6, "normal", nil)
-		if enabled && job.Error["code"] != "video_review_unavailable" {
-			t.Fatal("enabled review did not gate generation")
+		if enabled && job.Error["code"] != "no_available_account" {
+			t.Fatal("generation quota must be checked before lazy reviewer reservation")
 		}
 		if !enabled && job.Error["code"] != "no_available_account" {
 			t.Fatal("disabled review still required a reviewer")
 		}
 	}
-	if reviewerCalls != 1 {
+	if reviewerCalls != 0 {
 		t.Fatal("disabled review consumed reviewer capacity")
 	}
 }
@@ -352,7 +356,7 @@ func TestChatVideoReviewerUploadsEveryReferenceAndDecodedFrame(t *testing.T) {
 		if attachments != 8 || !strings.Contains(stringValue(parts[0]), "animate a paper plane") {
 			t.Errorf("attachments=%d request=%v", attachments, parts[0])
 		}
-		verdict := `{"verdict":"mismatch","frames_reviewed":6,"references_reviewed":2,"reason":"unrelated_scene"}`
+		verdict := `{"verdict":"mismatch","frames_reviewed":6,"references_reviewed":2,"reason":"unrelated_scene","expected":"纸飞机","observed":"人物","basis":"主要内容明显不同"}`
 		event, _ := json.Marshal(map[string]any{"message": map[string]any{"author": map[string]any{"role": "assistant"}, "content": map[string]any{"parts": []string{verdict}}}})
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\ndata: [DONE]\n", event)
@@ -364,7 +368,7 @@ func TestChatVideoReviewerUploadsEveryReferenceAndDecodedFrame(t *testing.T) {
 	refs := []provider.OpenAIImageInput{{Name: "a.png", MIME: "image/png", Data: tinyPNG}, {Name: "b.png", MIME: "image/png", Data: tinyPNG}}
 	verdict := verifier.Verify(ctx, "animate a paper plane", refs, raw, 6)
 	verifier.Close()
-	if verdict.Verdict != "mismatch" || calls != 1 || uploads.Load() != 8 || len(s.videoReviewSlots) != 0 {
+	if verdict.Verdict != "mismatch" || !verdict.confirmed || calls != 2 || uploads.Load() != 16 || len(s.videoReviewSlots) != 0 {
 		t.Fatalf("result=%+v calls=%d uploads=%d", verdict, calls, uploads.Load())
 	}
 }

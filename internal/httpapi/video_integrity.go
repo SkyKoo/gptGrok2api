@@ -209,16 +209,26 @@ func (s *Server) rejectVideoResult(callID, requestHash, hash string, verificatio
 }
 
 func (s *Server) storeVideoResult(callID, requestHash string, raw []byte, mime string, verification ...videoVerification) (string, string, error) {
+	return s.storeVideoResultWithPolicy(callID, requestHash, raw, mime, true, verification...)
+}
+
+// Live Grok tasks use the shared review/cache decision. Disabling review also
+// disables historical content judgements; structural media validation remains.
+func (s *Server) storeVideoResultWithPolicy(callID, requestHash string, raw []byte, mime string, enforceHistory bool, verification ...videoVerification) (string, string, error) {
 	hash, err := videoMediaFingerprint(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
 		return "", "", fmt.Errorf("Grok 返回的视频文件不完整，已停止返回结果")
 	}
 	s.videoResultMu.Lock()
 	defer s.videoResultMu.Unlock()
-	if err := s.loadVideoFingerprints(); err != nil {
-		return "", "", err
+	if enforceHistory {
+		if err := s.loadVideoFingerprints(); err != nil {
+			return "", "", err
+		}
+	} else if s.videoFingerprints == nil {
+		s.videoFingerprints = make(map[string]videoResultRecord)
 	}
-	if err := s.checkVideoFingerprintLocked(hash, requestHash); err != nil {
+	if err := s.checkVideoFingerprintLocked(hash, requestHash); enforceHistory && err != nil {
 		return "", hash, err
 	}
 	if err := os.MkdirAll(s.cfg.VideoDataDir, 0o755); err != nil {

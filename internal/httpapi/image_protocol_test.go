@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"image"
@@ -34,6 +35,11 @@ func TestGPTImageSyncResponseProtocol(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mode := tc.mode
 			s := imageTaskTestServer(t)
+			enableGrokReview(t, s)
+			s.newImageVerifier = func(context.Context, int) (imageResultVerifier, error) {
+				t.Fatal("GPT output entered Grok review")
+				return nil, nil
+			}
 			if _, _, _, err := s.store.AddAccounts(nil, []map[string]any{{"access_token": "jwt.header.payload", "pool": "basic"}}); err != nil {
 				t.Fatal(err)
 			}
@@ -190,7 +196,12 @@ func TestGPTImageRejectsLegacyResponseFormatBeforeGeneration(t *testing.T) {
 	for _, mode := range []string{"generations", "edits"} {
 		for _, format := range []string{"url", "b64_json", "invalid"} {
 			t.Run(mode+"/"+format, func(t *testing.T) {
-				s := imageTaskTestServer(t) // No account: validation must precede any upstream attempt.
+				s := imageTaskTestServer(t)
+				enableGrokReview(t, s)
+				s.newImageVerifier = func(context.Context, int) (imageResultVerifier, error) {
+					t.Fatal("GPT output entered Grok review")
+					return nil, nil
+				} // No account: validation must precede any upstream attempt.
 				body := map[string]any{"model": "gpt-image-2", "prompt": "cat", "response_format": format}
 				if mode == "edits" {
 					body["images"] = []string{"data:image/png;base64," + base64.StdEncoding.EncodeToString(tinyPNG)}

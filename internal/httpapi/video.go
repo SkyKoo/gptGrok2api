@@ -2,10 +2,10 @@ package httpapi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"log"
 	"mime/multipart"
@@ -143,14 +143,30 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	// Capture the setting once so saving settings cannot change an active job.
 	reviewEnabled, _ := settings["video_review_enabled"].(bool)
 	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_review_enabled": reviewEnabled}})
-	var verifier videoResultVerifier
-	if reviewEnabled {
-		verifier, err = s.newVideoVerifier(ctx, len(inputs))
-		if err != nil {
-			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_review_unavailable", "message": "视频内容核对不可用；请检查 FFmpeg 和 ChatGPT 核对账号/模型，本次未向 Grok 提交生成"})
+	for attempt := 1; attempt <= grokMediaGenerationAttempts; attempt++ {
+		if !s.runVideoAttempt(ctx, job, prompt, aspect, resolution, seconds, preset, inputs, requestHash, reviewEnabled, attempt) {
 			return
 		}
-		defer verifier.Close()
+		s.videoMu.Lock()
+		job.Verification = nil
+		s.videoMu.Unlock()
+		s.setVideoStatus(job, "in_progress", 1, nil)
+		if !stage("grok_media_regenerating", map[string]any{"grok_generation_retry": 1}) {
+			return
+		}
+	}
+}
+
+func (s *Server) runVideoAttempt(ctx context.Context, job *videoJob, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput, requestHash string, reviewEnabled bool, attempt int) bool {
+	stage := func(name string, metrics map[string]any) bool {
+		if s.videoStage(job, name, metrics) {
+			return true
+		}
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "无法保存视频诊断，已停止处理"})
+		return false
+	}
+	if !stage("video_generation_attempt", map[string]any{"grok_generation_attempt": attempt}) {
+		return false
 	}
 	s.ensureGrokMediaQuotas(ctx)
 	segments, _ := protocol.VideoSegmentLengths(seconds)
@@ -161,7 +177,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	lease, err := s.grokAccountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units, Uploads: len(inputs)})
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
-		return
+		return false
 	}
 	defer s.grokAccountPool.Release(lease)
 	s.monitor.enrich(job.ID, map[string]any{
@@ -170,7 +186,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	refs := make([]string, 0, len(inputs))
 	for index, input := range inputs {
 		if !stage("video_reference_upload", map[string]any{"video_upload_index": index + 1, "video_upload_completed": index}) {
-			return
+			return false
 		}
 		s.grokAccountPool.MarkSent(lease, "file_upload")
 		fileID, fileURI, uploadErr := s.mediaProvider.Upload(ctx, lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
@@ -184,34 +200,34 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 				}
 			}
 			s.failVideoUpstream(job, lease, code, fmt.Errorf("第 %d 张视频参考图：%w", index+1, uploadErr))
-			return
+			return false
 		}
 		ref := videoReferenceURL(fileID, fileURI, cookieUserID(lease.Account))
 		if ref == "" {
 			s.failVideoUpstream(job, lease, "invalid_reference", &protocol.UpstreamError{Status: 502, Message: fmt.Sprintf("第 %d 张视频参考图未返回有效资源标识；已停止生成", index+1)})
-			return
+			return false
 		}
 		refs = append(refs, ref)
 		if !stage("video_reference_uploaded", map[string]any{"video_upload_completed": index + 1, "video_upload_ref_sha256": videoDigest(ref)}) {
-			return
+			return false
 		}
 	}
 	if !stage("video_create_post", nil) {
-		return
+		return false
 	}
 	post, err := s.mediaProvider.CreatePost(ctx, lease.Account, protocol.VideoPostMediaType, "", prompt)
 	if err != nil {
 		s.failVideoUpstream(job, lease, "create_post_failed", err)
-		return
+		return false
 	}
 	postObject, _ := post["post"].(map[string]any)
 	parentID := stringValue(postObject["id"])
 	if parentID == "" {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "invalid_post", "message": "video create-post returned no post id"})
-		return
+		return false
 	}
 	if !stage("video_post_created", map[string]any{"video_parent_sha256": videoDigest(parentID)}) {
-		return
+		return false
 	}
 	diagnostics := provider.NewVideoDiagnostics(0, "", cookieUserID(lease.Account) != "")
 	videoURL := ""
@@ -220,13 +236,13 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	elapsedSeconds := 0
 	for index, segmentLength := range segments {
 		if !stage("video_generation", map[string]any{"video_segment": index + 1}) {
-			return
+			return false
 		}
 		payload := protocol.BuildVideoPayload(prompt, parentID, aspect, resolution, segmentLength, preset, refs)
 		if index > 0 {
 			if extendPostID == "" {
 				s.failVideoUpstream(job, lease, "missing_extension_source", diagnostics.Err("missing_extension_source"))
-				return
+				return false
 			}
 			payload = protocol.BuildVideoExtendPayload(prompt, parentID, extendPostID, aspect, resolution, segmentLength, preset, float64(elapsedSeconds)+1.0/24.0)
 		}
@@ -235,7 +251,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		response, requestErr := s.mediaProvider.StreamChat(ctx, lease.Account, payload)
 		if requestErr != nil {
 			s.failVideoUpstream(job, lease, "upstream_failed", requestErr)
-			return
+			return false
 		}
 		diagnostics = provider.NewVideoDiagnostics(response.StatusCode, response.Header.Get("Content-Type"), cookieUserID(lease.Account) != "")
 		scanner := bufio.NewScanner(response.Body)
@@ -249,7 +265,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 			if streamErr := diagnostics.Failure(); streamErr != nil {
 				_ = response.Body.Close()
 				s.failVideoUpstream(job, lease, "upstream_stream_error", streamErr)
-				return
+				return false
 			}
 			kind, events := protocol.ParseSSELine(line)
 			if kind == "done" {
@@ -259,7 +275,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 				if err := result.Observe(event); err != nil {
 					_ = response.Body.Close()
 					s.failVideoUpstream(job, lease, "video_result_mismatch", err)
-					return
+					return false
 				}
 				if result.Progress > lastProgress {
 					lastProgress = result.Progress
@@ -267,7 +283,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 					s.setVideoStatus(job, "in_progress", min(scaled, 99), nil)
 					if !stage("video_progress", map[string]any{"video_upstream_progress": result.Progress}) {
 						_ = response.Body.Close()
-						return
+						return false
 					}
 				}
 			}
@@ -275,11 +291,11 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		_ = response.Body.Close()
 		if scanner.Err() != nil {
 			s.failVideoUpstream(job, lease, "stream_failed", diagnostics.Err("stream_read_failed"))
-			return
+			return false
 		}
 		if !result.Complete() {
 			s.failVideoUpstream(job, lease, "incomplete_video", diagnostics.Err("incomplete_video"))
-			return
+			return false
 		}
 		// The final segment must supply its own result. Never report an earlier
 		// shorter segment as a successful extension of the requested duration.
@@ -308,43 +324,35 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 			reason = "user_id_missing"
 		}
 		s.failVideoUpstream(job, lease, "no_video", diagnostics.Err(reason))
-		return
+		return false
 	}
 	if !stage("video_download", nil) {
-		return
+		return false
 	}
 	downloadStarted := time.Now()
 	raw, mimeType, err := s.mediaProvider.Fetch(ctx, lease.Account, videoURL)
 	if err != nil {
 		s.failVideoUpstream(job, lease, "download_failed", err)
-		return
+		return false
 	}
 	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
-	fingerprint, integrityErr := s.checkVideoResult(requestHash, raw)
+	fingerprint, integrityErr := videoMediaFingerprint(bytes.NewReader(raw), int64(len(raw)))
 	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_media_sha256": fingerprint}})
 	if integrityErr != nil {
-		code := "video_integrity_failed"
-		message := "无法确认视频文件完整性或历史关联，已停止交付"
-		if errors.Is(integrityErr, errRepeatedVideo) {
-			code, message = "repeated_video_result", errRepeatedVideo.Error()
-		}
-		if errors.Is(integrityErr, errRejectedVideo) {
-			code, message = "rejected_video_result", errRejectedVideo.Error()
-		}
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": message})
-		return
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_integrity_failed", "message": "无法确认视频文件完整性，已停止交付"})
+		return false
 	}
 	if !stage("video_downloaded", map[string]any{"download_ms": time.Since(downloadStarted).Milliseconds(), "video_bytes": len(raw)}) {
-		return
+		return false
 	}
 	verification := videoVerification{Verdict: "skipped", Reason: "disabled", References: len(inputs)}
 	reviewMetrics := map[string]any{}
 	if reviewEnabled {
 		if !stage("video_content_review", nil) {
-			return
+			return false
 		}
 		reviewStarted := time.Now()
-		verification = verifier.Verify(ctx, prompt, inputs, raw, seconds)
+		verification = s.reviewGrokMedia(ctx, job.ID, "video", requestHash, fingerprint, prompt, inputs, raw, seconds, attempt, 1)
 		reviewMetrics["video_review_ms"] = time.Since(reviewStarted).Milliseconds()
 	}
 	s.videoMu.Lock()
@@ -359,37 +367,26 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		reviewStage = "video_content_reviewed"
 	}
 	if !stage(reviewStage, reviewMetrics) {
-		return
+		return false
 	}
 	if reviewEnabled && verification.Verdict != "matched" {
-		code, message := "video_content_unverified", "无法完成视频相关性核对，已停止交付；未自动重试"
+		if verification.Verdict == "mismatch" && attempt < grokMediaGenerationAttempts {
+			return true
+		}
+		code, message := "video_content_unverified", "视频内容核对未能完成，已保存核对故障；未判定为占位视频"
 		if verification.Verdict == "mismatch" {
-			code, message = "video_content_mismatch", "视频明显偏离提示词或参考图的主要内容，已拦截疑似替代视频；未自动重试"
-			if err := s.rejectVideoResult(job.ID, requestHash, fingerprint, verification); err != nil {
-				s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_rejection_persisted": false}})
-			} else {
-				s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_rejection_persisted": true}})
-			}
+			code, message = "video_content_mismatch", "视频明显无关，重新生成 1 次后仍未通过，已保存核对证据"
 		}
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": message, "verification": verification})
-		return
+		return false
 	}
-	path, fingerprint, err := s.storeVideoResult(job.ID, requestHash, raw, mimeType, verification)
+	path, fingerprint, err := s.storeVideoResultWithPolicy(job.ID, requestHash, raw, mimeType, false, verification)
 	if fingerprint != "" {
 		s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"video_media_sha256": fingerprint}})
 	}
 	if err != nil {
-		code := "storage_failed"
-		if errors.Is(err, errRepeatedVideo) {
-			s.failVideoUpstream(job, lease, "repeated_video_result", &protocol.UpstreamError{Status: 502, Message: err.Error()})
-			return
-		}
-		if errors.Is(err, errRejectedVideo) {
-			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "rejected_video_result", "message": errRejectedVideo.Error()})
-			return
-		}
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": err.Error()})
-		return
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": err.Error()})
+		return false
 	}
 	s.videoMu.Lock()
 	job.CompletedAt = time.Now().Unix()
@@ -397,6 +394,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 	job.VideoURL = videoURL
 	s.videoMu.Unlock()
 	s.setVideoStatus(job, "completed", 100, nil)
+	return false
 }
 
 // Feed body-level SSE failures back through the same status classifier used

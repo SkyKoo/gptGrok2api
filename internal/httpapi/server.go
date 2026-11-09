@@ -96,6 +96,7 @@ type Server struct {
 	videoFingerprints  map[string]videoResultRecord
 	videoJobs          map[string]*videoJob
 	videoLoadErr       error
+	newImageVerifier   func(context.Context, int) (imageResultVerifier, error)
 	newVideoVerifier   func(context.Context, int) (videoResultVerifier, error)
 	videoReviewSlots   chan struct{}
 	imageTaskMu        sync.RWMutex
@@ -235,6 +236,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.initGrokRegistration()
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	server.newVideoVerifier = server.prepareVideoVerifier
+	server.newImageVerifier = server.prepareImageVerifier
 	proxyManager.SetImageNodeResultCallback(server.persistProxyGroupRuntimeResult)
 	server.accountPool.SetInvalidCallback(server.maybeAutoRemoveInvalidAccount)
 	server.loadEditableFileTasks()

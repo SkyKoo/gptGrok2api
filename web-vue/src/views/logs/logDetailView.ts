@@ -81,6 +81,7 @@ const detailTimelineSteps: DetailTimelineStepConfig[] = [
   { key: 'stream_error_ms', label: '上游断流', group: '生成与结果', hint: 'HTTP2 / SSE' },
   { key: 'resolve_ms', label: '解析/轮询', group: '生成与结果', hint: 'conversation / file' },
   { key: 'download_ms', label: '下载媒体', group: '生成与结果', hint: '生成文件下载' },
+  { key: 'grok_media_review_ms', label: '核对 Grok 图片', group: '生成与结果', hint: '核对主要内容；哈希命中时复用结论' },
   { key: 'video_review_ms', label: '核对视频画面', group: '生成与结果', hint: '检查视频是否与提示词、参考图的主要内容相关，识别明显替代视频' },
   { key: 'retry_wait_ms', label: '重试等待', group: '生成与结果', hint: '轮询 / 退避' },
   { key: 'response_ms', label: '响应整理', group: '生成与结果', hint: 'Codex 响应' },
@@ -246,7 +247,7 @@ function timelineStepCategory(key: string, group: string): DetailTimelineCategor
   if (group === 'HTTP 连接') return 'network'
   if (key === 'sse_first_event_ms' || key === 'sse_max_gap_ms' || key === 'sse_last_gap_ms') return 'upstream'
   if (key === 'conversation_stream_ms') return 'upstream'
-  if (key === 'resolve_ms' || key === 'video_review_ms') return 'resolve'
+  if (key === 'resolve_ms' || key === 'video_review_ms' || key === 'grok_media_review_ms') return 'resolve'
   if (key === 'download_ms') return 'download'
   if (key === 'retry_wait_ms') return 'retry'
   return 'response'
@@ -480,7 +481,7 @@ export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailFi
   if (!hasDiagnosticSignal(item) && item.endpoint !== '/v1/videos') return []
   const shouldShowBooleans = isFailed(item) || isLimited(item) || Boolean(item.errorCode || item.error || item.reason)
   return compactDetailFields([
-    review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'skipped' ? '未开启内容核对' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '无法确认，已拦截' } : null,
+    review ? { label: '视频内容核对', value: review.verdict === 'matched' ? '抽帧核对通过' : review.verdict === 'skipped' ? '未开启内容核对' : review.verdict === 'mismatch' ? '内容不符，已拦截' : '核对故障或证据不足（非内容不符）' } : null,
     review ? { label: '核对原因', value: formatInlineValue(review.reason) } : null,
     metrics.video_review_parse_error ? { label: '审核回复解析失败原因', value: formatInlineValue(metrics.video_review_parse_error) } : null,
     review ? { label: '核对模型', value: formatInlineValue(review.model) } : null,

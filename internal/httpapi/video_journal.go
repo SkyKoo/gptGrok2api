@@ -46,8 +46,9 @@ func writeVideoJSON(path string, value any) error {
 	return os.Rename(f.Name(), path)
 }
 
-// Called under videoMu. Prompts, input bytes, account credentials, upstream
-// URLs and raw stream bodies never enter the journal or its diagnostic log.
+// Called under videoMu. Original prompts, input bytes, account credentials,
+// upstream URLs and raw streams are omitted. Grok review evidence includes
+// bounded, redacted reviewer text and admin-only preview references.
 func (s *Server) saveVideoCheckpointLocked(job *videoJob) error {
 	copy := *job
 	copy.Prompt, copy.VideoURL = "", ""

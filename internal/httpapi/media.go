@@ -137,46 +137,15 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, openAIImagesResult(data, request.ImageOutputOptions))
 		return
 	}
-	s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
-	accountStarted := time.Now()
-	s.ensureGrokMediaQuotas(r.Context())
-	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: request.Model, ImageCount: request.N})
-	if err != nil {
-		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
-		return
-	}
-	defer s.grokAccountPool.Release(lease)
-	s.enrichMonitorAccount(r, lease.Account)
-	s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
-	generationStarted := time.Now()
-	s.grokAccountPool.MarkSent(lease, "image_gen")
 	aspect, resolution, _ := protocol.ImagineImageSize(request.Size)
-	images, err := s.mediaProvider.GenerateImagine(r.Context(), lease.Account, request.Prompt, aspect, resolution, request.N, true, true, s.cfg.ImagineWSURL)
+	data, err := s.generateReviewedGrokImages(r, request.Prompt, request.Model, request.Size, request.ResponseFormat, request.N, nil, func(ctx context.Context, lease *accounts.Lease, count int) ([]provider.ImageResult, error) {
+		s.grokAccountPool.MarkSent(lease, "image_gen")
+		return s.mediaProvider.GenerateImagine(ctx, lease.Account, request.Prompt, aspect, resolution, count, true, true, s.cfg.ImagineWSURL)
+	})
 	if err != nil {
-		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 		return
 	}
-	s.stageRequestMonitor(r, "image_generating", 70, map[string]any{"conversation_stream_ms": time.Since(generationStarted).Milliseconds(), "generation_start_ms": time.Since(generationStarted).Milliseconds()})
-	if len(images) > request.N {
-		images = images[:request.N]
-	}
-	data := make([]map[string]string, 0, len(images))
-	for _, image := range images {
-		resolveStarted := time.Now()
-		value, resolveErr := s.mediaProvider.ResolveImage(r.Context(), lease.Account, image, request.ResponseFormat, s.cfg.ImageDataDir, requestPublicBase(r))
-		if resolveErr != nil {
-			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(resolveErr), resolveErr)
-			writeError(w, upstreamStatus(resolveErr), resolveErr.Error(), "upstream_error")
-			return
-		}
-		s.stageRequestMonitor(r, "image_resolving", 85, map[string]any{"resolve_ms": time.Since(resolveStarted).Milliseconds()})
-		s.stageRequestMonitor(r, "image_download_done", 95, map[string]any{"download_ms": time.Since(resolveStarted).Milliseconds()})
-		s.recordGeneratedMedia(r.Context(), value)
-		data = append(data, value)
-	}
-	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
-	s.stageRequestMonitor(r, "image_single_done", 99, map[string]any{"total_ms": s.requestMonitorElapsed(r), "response_ms": s.requestMonitorElapsed(r)})
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 
@@ -876,71 +845,51 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordInputImages(r, inputs)
-	s.ensureGrokMediaQuotas(r.Context())
-	lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: modelName, Uploads: len(inputs), ImageCount: n})
-	if err != nil {
-		writeError(w, http.StatusTooManyRequests, err.Error(), "rate_limit_error")
-		return
-	}
-	defer s.grokAccountPool.Release(lease)
-	refs := make([]string, 0, len(inputs))
-	for _, input := range inputs {
-		s.grokAccountPool.MarkSent(lease, "file_upload")
-		fileID, fileURI, uploadErr := s.mediaProvider.Upload(r.Context(), lease.Account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
-		if uploadErr != nil {
-			if diagnostics := provider.MediaUploadDiagnostics(uploadErr); diagnostics != nil {
-				s.enrichRequestMonitor(r, map[string]any{"metrics": diagnostics})
+	data, err := s.generateReviewedGrokImages(r, prompt, modelName, request.Size, imageEditResponseFormat(request.ResponseFormat), n, inputs, func(ctx context.Context, lease *accounts.Lease, count int) ([]provider.ImageResult, error) {
+		account := lease.Account
+		refs := make([]string, 0, len(inputs))
+		for _, input := range inputs {
+			s.grokAccountPool.MarkSent(lease, "file_upload")
+			fileID, fileURI, err := s.mediaProvider.Upload(ctx, account, input.Name, input.MIME, base64.StdEncoding.EncodeToString(input.Data))
+			if err != nil {
+				if diagnostics := provider.MediaUploadDiagnostics(err); diagnostics != nil {
+					s.enrichRequestMonitor(r, map[string]any{"metrics": diagnostics})
+				}
+				return nil, err
 			}
-			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(uploadErr), uploadErr)
-			writeError(w, upstreamStatus(uploadErr), uploadErr.Error(), "upstream_error")
-			return
+			ref := protocol.ResolveAssetReference(fileID, fileURI, cookieUserID(account))
+			if ref == "" {
+				return nil, fmt.Errorf("uploaded image has no resolvable asset URL")
+			}
+			refs = append(refs, ref)
 		}
-		ref := protocol.ResolveAssetReference(fileID, fileURI, cookieUserID(lease.Account))
-		if ref == "" {
-			writeError(w, http.StatusBadGateway, "uploaded image has no resolvable asset URL", "upstream_error")
-			return
+		post, err := s.mediaProvider.CreatePost(ctx, account, protocol.ImagePostMediaType, "", prompt)
+		if err != nil {
+			return nil, err
 		}
-		refs = append(refs, ref)
-	}
-	post, err := s.mediaProvider.CreatePost(r.Context(), lease.Account, protocol.ImagePostMediaType, "", prompt)
+		postObject, _ := post["post"].(map[string]any)
+		parentID := stringValue(postObject["id"])
+		if parentID == "" {
+			return nil, fmt.Errorf("image edit create-post returned no post id")
+		}
+		payload := protocol.BuildImageEditPayload(prompt, refs, parentID)
+		payload["imageGenerationCount"] = count
+		s.grokAccountPool.MarkSent(lease, "image_gen")
+		response, err := s.mediaProvider.StreamChat(ctx, account, payload)
+		if err != nil {
+			return nil, err
+		}
+		defer response.Body.Close()
+		images := collectImageEvents(response.Body)
+		if len(images) == 0 {
+			return nil, fmt.Errorf("image edit returned no images")
+		}
+		return images, nil
+	})
 	if err != nil {
-		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
 		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 		return
 	}
-	postObject, _ := post["post"].(map[string]any)
-	parentID := stringValue(postObject["id"])
-	if parentID == "" {
-		writeError(w, http.StatusBadGateway, "image edit create-post returned no post id", "upstream_error")
-		return
-	}
-	s.grokAccountPool.MarkSent(lease, "image_gen")
-	payload := protocol.BuildImageEditPayload(prompt, refs, parentID)
-	payload["imageGenerationCount"] = n
-	response, err := s.mediaProvider.StreamChat(r.Context(), lease.Account, payload)
-	if err != nil {
-		s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(err), err)
-		writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
-		return
-	}
-	defer response.Body.Close()
-	images := collectImageEvents(response.Body)
-	if len(images) == 0 {
-		writeError(w, http.StatusBadGateway, "image edit returned no images", "upstream_error")
-		return
-	}
-	data := make([]map[string]string, 0, minInt(n, len(images)))
-	format := imageEditResponseFormat(request.ResponseFormat)
-	for _, image := range images[:minInt(n, len(images))] {
-		value, resolveErr := s.mediaProvider.ResolveImage(r.Context(), lease.Account, image, format, s.cfg.ImageDataDir, requestPublicBase(r))
-		if resolveErr != nil {
-			writeError(w, upstreamStatus(resolveErr), resolveErr.Error(), "upstream_error")
-			return
-		}
-		s.recordGeneratedMedia(r.Context(), value)
-		data = append(data, value)
-	}
-	s.grokAccountPool.FeedbackIntent(lease, http.StatusOK, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,16 @@ func TestGrokImageGenerationUsesProForLegacyAndCanonicalModels(t *testing.T) {
 			defer upstream.Close()
 			s := imageTaskTestServer(t)
 			s.cfg.ImagineWSURL = "ws" + strings.TrimPrefix(upstream.URL, "http")
+			reviewCalls := 0
+			if modelName == "grok-imagine-image-pro" {
+				enableGrokReview(t, s)
+			}
+			s.newImageVerifier = func(context.Context, int) (imageResultVerifier, error) {
+				return imageReviewFunc(func(_ context.Context, _ string, _ []provider.OpenAIImageInput, o provider.OpenAIImageInput) videoVerification {
+					reviewCalls++
+					return reviewFixture("matched", o.Data)
+				}), nil
+			}
 			s.mediaProvider = provider.NewMedia(upstream.Client(), upstream.URL, upstream.URL, upstream.URL, upstream.URL, 3*time.Second)
 			_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{{"access_token": "grok-image-token", "media_quota": testGrokMediaSnapshot()}})
 			req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(`{"model":"`+modelName+`","prompt":"a red cat","size":"2560x1440"}`))
@@ -51,6 +62,9 @@ func TestGrokImageGenerationUsesProForLegacyAndCanonicalModels(t *testing.T) {
 			s.Handler().ServeHTTP(response, req)
 			if response.Code != http.StatusOK {
 				t.Fatalf("response=%d %s", response.Code, response.Body.String())
+			}
+			if (modelName == "grok-imagine-image-pro" && reviewCalls != 1) || (modelName != "grok-imagine-image-pro" && reviewCalls != 0) {
+				t.Fatalf("wrong Grok generation review calls: %d", reviewCalls)
 			}
 			var request map[string]any
 			select {

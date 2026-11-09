@@ -31,6 +31,6 @@ export function logOutputSource(detail: Record<string, any>): unknown {
   if (Array.isArray(detail.output_videos) && detail.output_videos.length) return detail.output_videos
   if (Array.isArray(detail.output_images) && detail.output_images.length) return detail.output_images
   if (Array.isArray(detail.image_urls) && detail.image_urls.length) return detail.image_urls
-  const { input_images, request_meta, request_shape, ...legacy } = detail
+  const { input_images, grok_media_reviews, request_meta, request_shape, ...legacy } = detail
   return legacy
 }

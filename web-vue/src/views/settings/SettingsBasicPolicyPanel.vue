@@ -44,19 +44,19 @@
       </FormField>
     </FormSection>
 
-    <FormSection title="视频内容核对">
+    <FormSection title="Grok 图片与视频内容核对">
       <div class="settings-check-grid settings-check-grid--single">
         <div class="settings-check-item">
           <div class="settings-check-control">
-            <Checkbox v-model="settings.video_review_enabled">视频内容核对与拦截</Checkbox>
+            <Checkbox v-model="settings.video_review_enabled">Grok 图片与视频内容核对</Checkbox>
           </div>
         </div>
       </div>
       <p class="text-xs leading-5 text-muted-foreground">
-        默认关闭。开启后将提示词、全部参考图和 6 张视频采样帧发送至 ChatGPT，额外消耗视觉对话与图片上传额度。仅识别与主要内容明显无关的替代视频，不逐项验收人物、服装、动作或运镜细节；明确无关或核对无法完成时，任务失败且不交付视频。
+        默认关闭，仅作用于 Grok 生成的图片和视频，不审核 GPT 生图。开启后先查内容哈希和请求摘要缓存；未命中时，将提示词、参考图及生成图片或 6 张视频帧发送至 ChatGPT 核对，会消耗视觉对话与图片上传额度。只识别明显无关的替代内容，不逐项检查细节。
       </p>
       <p class="text-xs leading-5 text-muted-foreground">
-        保存后对后续任务生效，无需重启。关闭时不抽帧、不调用核对模型，仍保留视频日志和原有任务关联、上游审核及重复媒体检查。
+        明确不符会先独立复核，确认后自动重新生成 1 次；仍不符则返回失败。核对故障单独记录，不当作内容不符。日志详情保留判断依据、送审画面及回复。相同内容与相同请求可复用核对结论，避免重复消耗额度。保存后对后续任务生效；关闭时图片和视频都跳过内容哈希拦截、抽帧与模型核对，保留文件完整性、任务关联和上游拒绝检查。
       </p>
     </FormSection>
 

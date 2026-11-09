@@ -34,6 +34,16 @@ func (s *Server) recordInputImages(r *http.Request, inputs []provider.OpenAIImag
 	if callID == "" || len(inputs) == 0 || s.monitor == nil {
 		return
 	}
+	previews := s.storeLogImages(callID, inputs)
+	s.monitor.mu.Lock()
+	defer s.monitor.mu.Unlock()
+	if item := s.monitor.active[callID]; item != nil {
+		item.InputImages = previews
+	}
+}
+
+// The same private storage/retention policy applies to review evidence.
+func (s *Server) storeLogImages(scope string, inputs []provider.OpenAIImageInput) []logInputImage {
 	previews := make([]logInputImage, len(inputs))
 	dir := s.logInputImagesDir()
 	dirErr := os.MkdirAll(dir, 0700)
@@ -45,7 +55,7 @@ func (s *Server) recordInputImages(r *http.Request, inputs []provider.OpenAIImag
 			// Names are scoped to this call and position; user-controlled file
 			// names and source URLs are not used as filesystem paths.
 			hash := sha256.New()
-			_, _ = fmt.Fprintf(hash, "%s:%d:", callID, i)
+			_, _ = fmt.Fprintf(hash, "%s:%d:", scope, i)
 			_, _ = hash.Write(input.Data)
 			filename := hex.EncodeToString(hash.Sum(nil)) + "." + format
 			if dirErr == nil && os.WriteFile(filepath.Join(dir, filename), input.Data, 0600) == nil {
@@ -56,11 +66,7 @@ func (s *Server) recordInputImages(r *http.Request, inputs []provider.OpenAIImag
 		}
 		previews[i] = preview
 	}
-	s.monitor.mu.Lock()
-	defer s.monitor.mu.Unlock()
-	if item := s.monitor.active[callID]; item != nil {
-		item.InputImages = previews
-	}
+	return previews
 }
 
 func (s *Server) logInputImage(w http.ResponseWriter, r *http.Request) {
