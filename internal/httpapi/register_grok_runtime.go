@@ -2,13 +2,10 @@ package httpapi
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
 func (s *Server) refreshRegisteredGrokRuntime(w http.ResponseWriter, r *http.Request) {
@@ -112,28 +109,19 @@ func (s *Server) verifyRegisteredGrokRuntime(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		quota, probeErr := s.grokQuota.ProbeFast(ctx, token, item)
+		quota, status, probeErr := s.verifyGrokCredential(ctx, token, item)
 		cancel()
 		if probeErr != nil {
-			status := "unknown"
-			if errors.Is(probeErr, provider.ErrGrokInvalidCredentials) {
-				status = "invalid"
-			}
 			if status == "invalid" {
-				s.recordGrokCredentialFailure(token, probeErr)
 				invalid++
 			} else {
 				unknown++
 			}
-			_, _ = s.registerStore.UpdateRuntime(id, nil, map[string]any{"status": status, "checked_at": time.Now().UTC().Format(time.RFC3339)}, "", safeRefreshError(probeErr))
 			results = append(results, map[string]any{"id": id, "status": status, "error": safeRefreshError(probeErr)})
 			continue
 		}
-		s.restoreVerifiedGrokCredential(token)
 		valid++
-		quotaValue := map[string]any{"remaining": quota.Remaining, "total": quota.Total}
-		_, _ = s.registerStore.UpdateRuntime(id, nil, map[string]any{"status": "valid", "quota": quotaValue, "checked_at": time.Now().UTC().Format(time.RFC3339)}, "", "")
-		results = append(results, map[string]any{"id": id, "status": "valid", "quota": quotaValue})
+		results = append(results, map[string]any{"id": id, "status": "valid", "quota": map[string]any{"remaining": quota.Remaining, "total": quota.Total}})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"summary": map[string]int{"total": len(results), "valid": valid, "invalid": invalid, "unknown": unknown},

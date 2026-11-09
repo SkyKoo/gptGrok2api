@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
@@ -95,5 +96,19 @@ func TestGrokMediaQuotaDoesNotFollowRedirects(t *testing.T) {
 	got := NewGrokQuota(source.URL, source.Client(), nil).RefreshMedia(context.Background(), "secret", nil)
 	if got.Error != "HTTP 302" {
 		t.Fatalf("%#v", got)
+	}
+}
+
+func TestGrokMediaQuotaHonorsRetryAfter(t *testing.T) {
+	for _, value := range []string{"3600", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)} {
+		t.Run(value, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Retry-After", value); w.WriteHeader(429) }))
+			defer server.Close()
+			got := NewGrokQuota(server.URL, server.Client(), nil).RefreshMedia(context.Background(), "test", nil)
+			at, err := time.Parse(time.RFC3339, got.RetryAt)
+			if err != nil || at.Before(time.Now().Add(59*time.Minute)) || got.HTTPStatus != 429 {
+				t.Fatalf("retry lost: %+v", got)
+			}
+		})
 	}
 }

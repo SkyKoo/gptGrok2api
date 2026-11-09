@@ -2,39 +2,30 @@ package httpapi
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/auucoder/gptgrok2api-go/internal/oauth"
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 )
+
+func grokProbeInterval(config map[string]any) time.Duration {
+	interval := intValue(config["interval_minutes"])
+	if interval < 1 {
+		interval = 60
+	}
+	return time.Duration(interval) * time.Minute
+}
 
 func (s *Server) grokProbeScheduler() {
 	for {
 		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); os.IsNotExist(err) && s.beginDeploymentBackground() {
-			func() {
-				defer s.endDeploymentBackground()
-				config := s.registerStore.GrokProbeSchedulerStatus()
-				if !boolValue(config["enabled"], false) {
-					return
-				}
-				interval := intValue(config["interval_minutes"])
-				if interval < 1 {
-					interval = 60
-				}
-				last := stringValue(config["last_finished_at"])
-				due := last == ""
-				if parsed, err := time.Parse(time.RFC3339, last); err == nil {
-					due = time.Since(parsed) >= time.Duration(interval)*time.Minute
-				}
-				if due {
-					s.runGrokProbeCycle()
-				}
-				next := time.Now().UTC().Add(time.Duration(interval) * time.Minute).Format(time.RFC3339)
-				_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, next, stringValue(config["last_finished_at"]), "")
-			}()
+			s.runGrokProbeIfDue(time.Now())
+			s.endDeploymentBackground()
 		}
 		timer := time.NewTimer(30 * time.Second)
 		select {
@@ -48,59 +39,127 @@ func (s *Server) grokProbeScheduler() {
 	}
 }
 
-func (s *Server) runGrokProbeCycle() {
-	_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(true, "", "", "")
-	items, err := s.oauthStore.List()
-	if err != nil {
-		_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, "", time.Now().UTC().Format(time.RFC3339), err.Error())
+// Completion owns the next deadline; do not overwrite it with a pre-run copy.
+func (s *Server) runGrokProbeIfDue(now time.Time) {
+	config := s.registerStore.GrokProbeSchedulerStatus()
+	if !boolValue(config["enabled"], false) {
 		return
 	}
-	sem := make(chan struct{}, 10)
-	var wg sync.WaitGroup
-	for _, account := range items {
-		account := account
-		if strings.EqualFold(account.Status, "disabled") || account.AccessToken == "" {
-			continue
+	last, err := time.Parse(time.RFC3339Nano, stringValue(config["last_finished_at"]))
+	if err == nil && now.Before(last.Add(grokProbeInterval(config))) {
+		next := last.Add(grokProbeInterval(config)).UTC().Format(time.RFC3339)
+		if next != stringValue(config["next_run_at"]) {
+			_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, next, stringValue(config["last_finished_at"]), stringValue(config["error"]))
 		}
-		wg.Add(1)
-		go func() { defer wg.Done(); sem <- struct{}{}; defer func() { <-sem }(); s.probeOAuthAccount(account) }()
+		return
 	}
-	wg.Wait()
-	_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, "", time.Now().UTC().Format(time.RFC3339), "")
+	s.runGrokProbeCycle()
 }
 
-func (s *Server) probeOAuthAccount(account oauth.Account) {
-	if _, busy := s.grokOAuthActions.LoadOrStore(account.ID, true); busy {
+func (s *Server) runGrokProbeCycle() {
+	config := s.registerStore.GrokProbeSchedulerStatus()
+	_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(true, "", stringValue(config["last_finished_at"]), "")
+	var cycleErr error
+	defer func() {
+		finished := time.Now().UTC()
+		message := ""
+		if cycleErr != nil {
+			message = cycleErr.Error()
+		}
+		_ = s.registerStore.UpdateGrokProbeSchedulerRuntime(false, finished.Add(grokProbeInterval(config)).Format(time.RFC3339), finished.Format(time.RFC3339), message)
+	}()
+	archive, err := s.registerStore.ExportAccounts(nil)
+	if err != nil {
+		cycleErr = errors.New("SSO 账号列表读取失败")
 		return
 	}
-	defer s.grokOAuthActions.Delete(account.ID)
-	fresh, found, err := s.oauthStore.Get(account.ID)
-	if err != nil || !found || fresh.Status == "disabled" {
+	rows, _, err := s.grokRuntimeStore.AccountSnapshot()
+	if err != nil {
+		cycleErr = errors.New("SSO 调用池读取失败")
 		return
 	}
-	account = fresh
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	probeClient := *s.xaiProbe
-	if account.TokenEndpoint != "" {
-		probeClient.TokenURL = account.TokenEndpoint
+	credentials, err := s.oauthStore.List()
+	if err != nil {
+		cycleErr = errors.New("OAuth 账号列表读取失败")
+		return
 	}
-	result := probeClient.Probe(ctx, map[string]any{"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt})
-	probe := map[string]any{"status": result.Status, "model": "grok-4.5", "http_status": result.HTTPStatus, "code": result.Code, "error": result.Error, "quota": result.Quota, "probed_at": time.Now().UTC().Format(time.RFC3339)}
-	status := account.Status
-	if result.Status == "valid" {
-		status = "active"
-	} else if result.Status == "invalid" {
-		status = "invalid"
-	} else if result.Status == "limited" {
-		status = "limited"
+	// Prefer the runtime route for accounts already in the request pool. Disabled
+	// archive entries also prevent a background check of their runtime duplicate.
+	byToken := map[string]map[string]any{}
+	disabled := map[string]bool{}
+	for _, item := range archive {
+		if token := strings.TrimSpace(stringValue(item["sso"])); token != "" {
+			byToken[token] = item
+			disabled[token] = grokAccountDisabled(item)
+		}
 	}
-	updated, applied, err := s.oauthStore.UpdateProbe(account, result.AccessToken, result.RefreshToken, result.IDToken, result.ExpiresAt, probe, result.Error)
-	if err == nil && applied && status != account.Status && status != "" {
-		_, _, _ = s.oauthStore.UpdateIfCredential(updated, func(current *oauth.Account) {
-			if current.Status != "disabled" {
-				current.Status = status
-			}
+	for _, row := range rows {
+		if token := accountToken(row); token != "" {
+			byToken[token] = row
+			disabled[token] = disabled[token] || grokAccountDisabled(row)
+		}
+	}
+	var jobs []func(context.Context) error
+	for token, row := range byToken {
+		if disabled[token] {
+			continue
+		}
+		token, row := token, row
+		jobs = append(jobs, func(ctx context.Context) error {
+			_, _, err := s.verifyGrokCredential(ctx, token, row)
+			return err
 		})
+	}
+	for _, account := range credentials {
+		if strings.EqualFold(account.Status, "disabled") || (account.AccessToken == "" && account.RefreshToken == "") {
+			continue
+		}
+		id := account.ID
+		jobs = append(jobs, func(ctx context.Context) error {
+			updated, err := s.refreshOAuthQuota(ctx, id)
+			if err == nil && stringValue(updated.Quota["status"]) == "error" {
+				return errors.New("OAuth check failed")
+			}
+			return err
+		})
+	}
+	queue := make(chan func(context.Context) error)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failures := 0
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range queue {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err := job(ctx)
+				cancel()
+				if err != nil && !errors.Is(err, accounts.ErrRefreshDeferred) {
+					mu.Lock()
+					failures++
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+loop:
+	for _, job := range jobs {
+		if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
+			break
+		}
+		if !boolValue(s.registerStore.GrokProbeSchedulerStatus()["enabled"], false) {
+			break
+		}
+		select {
+		case queue <- job:
+		case <-s.probeStop:
+			break loop
+		}
+	}
+	close(queue)
+	wg.Wait()
+	if failures > 0 {
+		cycleErr = fmt.Errorf("%d 个账号检查未成功，详见账号检测结果", failures)
 	}
 }

@@ -189,7 +189,7 @@ export function useGrokAccountsPage() {
     if (enabled) {
       const confirmed = await confirmDialog.ask({
         title: '开启 Grok 自动轮询',
-        message: '开启后将定时检查 SSO 和 OAuth 账号，包括无额度/无订阅账号，并按当前规则执行自动恢复与未授权回填。是否继续？',
+        message: '开启后将定时验证 SSO 登录态、刷新图片和视频额度，并检查 OAuth 凭据及账单。异常账号复检通过后恢复，手动禁用账号保持禁用。是否继续？',
         confirmText: '开启轮询',
         cancelText: '取消',
       })

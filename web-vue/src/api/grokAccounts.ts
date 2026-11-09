@@ -104,6 +104,12 @@ export type GrokAccount = {
   runtime_status?: GrokRuntimeStatus | null
   quota?: GrokQuota | null
   media_quota?: GrokMediaQuotaSnapshot | null
+  media_quota_last_success?: GrokMediaQuotaSnapshot | null
+  media_quota_history?: Array<{ at: string; changes: Partial<Record<'image_gen' | 'video_gen', { before: number; after: number }>> }>
+  media_quota_next_check_at?: string
+  credential_next_check_at?: string
+  media_scheduling?: Partial<Record<'image' | 'video', { eligible: boolean; reason: string }>>
+  grok_credential_check?: { status: string; checked_at: string; last_success_at?: string; error?: string }
   media_quota_refresh_needed?: boolean
   media_quota_pending?: { image_gen?: number; video_gen?: number }
   use_count?: number

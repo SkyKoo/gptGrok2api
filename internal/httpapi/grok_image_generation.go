@@ -39,8 +39,9 @@ func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size
 		}
 		s.stageRequestMonitor(r, "image_egress_waiting", 30, nil)
 		accountStarted := time.Now()
-		s.ensureGrokMediaQuotas(r.Context())
-		lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "image", Model: model, ImageCount: len(pending), Uploads: len(inputs)})
+		intent := accounts.Intent{Kind: "image", Model: model, ImageCount: len(pending), Uploads: len(inputs)}
+		s.ensureGrokMediaQuotas(r.Context(), intent)
+		lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, intent)
 		if err != nil {
 			return nil, &protocol.UpstreamError{Status: 429, Message: err.Error()}
 		}

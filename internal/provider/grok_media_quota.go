@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +24,12 @@ type GrokMediaQuotaWindow struct {
 }
 
 type GrokMediaQuotaSnapshot struct {
-	Status    string                          `json:"status"`
-	CheckedAt string                          `json:"checked_at"`
-	Error     string                          `json:"error,omitempty"`
-	Quotas    map[string]GrokMediaQuotaWindow `json:"quotas"`
+	Status     string                          `json:"status"`
+	CheckedAt  string                          `json:"checked_at"`
+	Error      string                          `json:"error,omitempty"`
+	HTTPStatus int                             `json:"http_status,omitempty"`
+	RetryAt    string                          `json:"retry_at,omitempty"`
+	Quotas     map[string]GrokMediaQuotaWindow `json:"quotas"`
 }
 
 // RefreshMedia performs one read-only query. Media errors never imply that the
@@ -74,6 +77,14 @@ func (q *GrokQuota) RefreshMedia(parent context.Context, token string, fields ma
 		return fail("network_error")
 	}
 	defer response.Body.Close()
+	result.HTTPStatus = response.StatusCode
+	if retry := strings.TrimSpace(response.Header.Get("Retry-After")); retry != "" {
+		if seconds, e := strconv.ParseInt(retry, 10, 32); e == nil && seconds > 0 {
+			result.RetryAt = time.Now().Add(time.Duration(seconds) * time.Second).UTC().Format(time.RFC3339)
+		} else if at, e := http.ParseTime(retry); e == nil && at.After(time.Now()) {
+			result.RetryAt = at.UTC().Format(time.RFC3339)
+		}
+	}
 	if response.StatusCode != http.StatusOK {
 		return fail(fmt.Sprintf("HTTP %d", response.StatusCode))
 	}

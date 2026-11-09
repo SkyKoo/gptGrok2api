@@ -16,6 +16,11 @@ import (
 )
 
 func (s *Server) refreshGrokMediaQuota(ctx context.Context, token string, fields map[string]any) provider.GrokMediaQuotaSnapshot {
+	snapshot, _ := s.observeGrokMediaQuota(ctx, token, fields)
+	return snapshot
+}
+
+func (s *Server) observeGrokMediaQuota(ctx context.Context, token string, fields map[string]any) (provider.GrokMediaQuotaSnapshot, bool) {
 	rows, _ := s.grokRuntimeStore.AccountList()
 	for _, row := range rows {
 		if accountToken(row) == token {
@@ -24,22 +29,27 @@ func (s *Server) refreshGrokMediaQuota(ctx context.Context, token string, fields
 		}
 	}
 	snapshot := provider.GrokMediaQuotaSnapshot{Status: "deferred", Quotas: map[string]provider.GrokMediaQuotaWindow{}}
+	var queryErr error
+	attempted := false
 	err := s.grokAccountPool.RefreshGrokMedia(accounts.Account{Token: token, Fields: fields}, func(current accounts.Account) (map[string]any, error) {
+		attempted = true
 		snapshot = s.grokQuota.RefreshMedia(ctx, current.Token, current.Fields)
-		var err error
 		if snapshot.Status != "success" {
-			err = fmt.Errorf("media quota query failed")
+			queryErr = fmt.Errorf("media quota query failed")
 		}
-		return map[string]any{"media_quota": snapshot}, err
+		return map[string]any{"media_quota": snapshot}, queryErr
 	})
 	if errors.Is(err, accounts.ErrRefreshDeferred) {
 		// A manual/page refresh must not replace the active generation's observation.
 		raw, _ := json.Marshal(fields["media_quota"])
 		_ = json.Unmarshal(raw, &snapshot)
-		return snapshot
+		return snapshot, false
 	}
 	if snapshot.Status == "deferred" {
-		return snapshot
+		return snapshot, false
+	}
+	if err != nil && err != queryErr {
+		return provider.GrokMediaQuotaSnapshot{Status: "failed", Error: "persistence_failed", Quotas: map[string]provider.GrokMediaQuotaWindow{}}, attempted
 	}
 	// Runtime persistence completed while the pool excluded new media leases.
 	items, loadErr := s.registerStore.ExportAccounts(nil)
@@ -51,15 +61,18 @@ func (s *Server) refreshGrokMediaQuota(ctx context.Context, token string, fields
 			}
 		}
 	}
-	return snapshot
+	return snapshot, attempted
 }
 
-func (s *Server) ensureGrokMediaQuotas(parent context.Context) {
+func (s *Server) ensureGrokMediaQuotas(parent context.Context, intents ...accounts.Intent) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	s.refreshDueGrokMediaQuotas(ctx)
+	s.refreshGrokMediaQuotas(ctx, true, intents...)
 }
 func (s *Server) refreshDueGrokMediaQuotas(ctx context.Context) {
+	s.refreshGrokMediaQuotas(ctx, false)
+}
+func (s *Server) refreshGrokMediaQuotas(ctx context.Context, onDemand bool, intents ...accounts.Intent) {
 	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
 		return
 	}
@@ -69,11 +82,15 @@ func (s *Server) refreshDueGrokMediaQuotas(ctx context.Context) {
 	}
 	// AccountSnapshot shares an immutable slice with Store; sort a copy.
 	rows = append([]map[string]any(nil), rows...)
+	now := time.Now()
 	sort.SliceStable(rows, func(i, j int) bool {
-		return stringValue(rows[i]["media_quota_last_attempt_at"]) < stringValue(rows[j]["media_quota_last_attempt_at"])
+		return accounts.GrokMediaCheckPlan(rows[i], now, onDemand).At.Before(accounts.GrokMediaCheckPlan(rows[j], now, onDemand).At)
 	})
 	count := 0
 	for _, row := range rows {
+		if len(intents) > 0 && s.grokAccountPool.HasGrokMediaCapacity(intents[0]) {
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -88,11 +105,11 @@ func (s *Server) refreshDueGrokMediaQuotas(ctx context.Context) {
 			continue
 		}
 		token := accountToken(row)
-		if token == "" || !accounts.GrokMediaRefreshDue(row, time.Now()) {
+		if token == "" || accounts.GrokMediaCheckPlan(row, time.Now(), onDemand).At.After(time.Now()) {
 			continue
 		}
-		snapshot := s.refreshGrokMediaQuota(ctx, token, row)
-		if snapshot.Status != "deferred" {
+		_, attempted := s.observeGrokMediaQuota(ctx, token, row)
+		if attempted {
 			count++
 		}
 		if count >= 4 {
@@ -112,7 +129,7 @@ func (s *Server) grokMediaQuotaScheduler() {
 	defer ticker.Stop()
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		if s.beginDeploymentBackground() {
+		if boolValue(s.registerStore.GrokProbeSchedulerStatus()["enabled"], false) && s.beginDeploymentBackground() {
 			s.refreshDueGrokMediaQuotas(ctx)
 			s.endDeploymentBackground()
 		}

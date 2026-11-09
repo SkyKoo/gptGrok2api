@@ -446,6 +446,11 @@ func (s *Store) SetOAuthAuthorization(id, status, errorText string) (bool, error
 // UpdateRuntime stores non-secret quota/probe observations next to a
 // registration account. Credentials remain excluded from every public view.
 func (s *Store) UpdateRuntime(id string, runtime, probe map[string]any, status, errorText string) (bool, error) {
+	return s.UpdateRuntimeIf(id, runtime, probe, status, errorText, nil)
+}
+
+// UpdateRuntimeIf rejects observations made before a credential/status change.
+func (s *Store) UpdateRuntimeIf(id string, runtime, probe map[string]any, status, errorText string, allow func(map[string]any) bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items, err := s.loadAccountsLocked()
@@ -455,6 +460,9 @@ func (s *Store) UpdateRuntime(id string, runtime, probe map[string]any, status, 
 	for index, item := range items {
 		if stringValue(item["id"]) != strings.TrimSpace(id) {
 			continue
+		}
+		if allow != nil && !allow(item) {
+			return false, nil
 		}
 		if runtime != nil {
 			item["runtime"] = cloneMap(runtime)

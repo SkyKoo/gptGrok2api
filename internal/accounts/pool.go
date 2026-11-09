@@ -123,7 +123,7 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 			if excluded[account.Token] || (match != nil && !match(account)) || !p.availableForIntent(account, pools, now, intent) {
 				continue
 			}
-			if intent.Kind != "" && p.refreshing[Identity(account)] {
+			if (intent.Kind != "" || p.grokMedia) && p.refreshing[Identity(account)] {
 				capacityBlocked = true
 				continue
 			}

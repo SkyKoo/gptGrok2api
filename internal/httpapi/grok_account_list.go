@@ -64,6 +64,7 @@ func (s *Server) attachGrokAccountRuntime(items []map[string]any, base map[strin
 	for key, value := range base {
 		summary[key] = value
 	}
+	probeConfig := s.registerStore.GrokProbeSchedulerStatus()
 	synced, linked, calls := 0, 0, 0
 	runtimeStatus := map[string]int{"active": 0, "cooling": 0, "invalid": 0, "disabled": 0}
 	for _, row := range rows {
@@ -71,14 +72,31 @@ func (s *Server) attachGrokAccountRuntime(items []map[string]any, base map[strin
 		calls += intValue(row["use_count"]) + intValue(row["fail_count"])
 	}
 	for _, item := range items {
+		delete(item, "media_quota_next_check_at")
+		delete(item, "credential_next_check_at")
+		if boolValue(probeConfig["enabled"], false) && !grokAccountDisabled(item) {
+			item["credential_next_check_at"] = probeConfig["next_run_at"]
+		}
 		if active := byID[stringValue(item["id"])]; active != nil {
 			synced++
 			item["sync_state"] = "synced"
 			item["runtime_status"] = grokListRuntimeStatus(active)
-			for _, key := range []string{"pool", "use_count", "fail_count", "last_used_at", "usage_started_at", "tags", "media_quota"} {
+			for _, key := range []string{"pool", "use_count", "fail_count", "last_used_at", "usage_started_at", "tags", "media_quota", "media_quota_last_success", "media_quota_history", "grok_credential_check"} {
 				if value, ok := active[key]; ok {
 					item[key] = value
 				}
+			}
+			now := time.Now()
+			item["media_scheduling"] = s.grokAccountPool.GrokMediaAvailability(active, now)
+			if !grokAccountDisabled(active) && !accounts.IsAbnormal(active) && active["status"] != "invalid" && active["status"] != "expired" && boolValue(probeConfig["enabled"], false) {
+				at := accounts.GrokMediaCheckPlan(active, now, false).At
+				if at.Before(now) {
+					at = now
+				}
+				item["media_quota_next_check_at"] = at.UTC().Format(time.RFC3339)
+			}
+			if check := mapValue(active["grok_credential_check"]); len(check) > 0 {
+				item["probe_status"], item["probe_at"], item["probe_error"], item["probe_quota"] = check["status"], check["checked_at"], check["error"], check["quota"]
 			}
 			item["media_quota_refresh_needed"] = active["media_quota_refresh_needed"] == true
 			pending := mapValue(active["quota_pending"])

@@ -52,3 +52,34 @@ export function grokMediaQuotaNote(item: Pick<GrokAccount, 'media_quota' | 'medi
 export function grokMediaQuotaCheckedAt(item: Pick<GrokAccount, 'media_quota' | 'media_quota_refresh_needed' | 'media_quota_pending'>): string {
   return displayDate(item.media_quota?.checked_at)
 }
+
+const schedulingReasons: Record<string, string> = {
+  ready: '可调度', disabled: '已禁用', auth_invalid: '登录失效', account_unavailable: '账号暂不可用',
+  quota_unknown: '额度未知，暂停调度', quota_stale: '额度已过期，使用前刷新', settlement: '等待结算刷新',
+  exhausted: '额度耗尽', reserved: '额度已被预占', cooling: '冷却中',
+}
+
+export function grokMediaSchedulingText(item: GrokAccount, kind: 'image' | 'video'): string {
+  const state = item.media_scheduling?.[kind]
+  if (!state) return ''
+  return state.eligible ? '可调度' : schedulingReasons[state.reason] || '暂不可调度'
+}
+
+export function grokMediaLastSuccess(item: GrokAccount): string {
+  const last = item.media_quota_last_success
+  if (!last || item.media_quota?.status === 'success') return ''
+  const counts = grokMediaQuotaEntries({ media_quota: last }).map(x => `${x.key === 'imagePro' ? '图片' : '视频'} ${x.text}`).join('，')
+  return `上次成功：${displayDate(last.checked_at)} · ${counts}（历史记录，不用于调度）`
+}
+
+export function grokMediaHistory(item: GrokAccount) {
+  return [...(item.media_quota_history || [])].reverse().map(event => ({
+    at: displayDate(event.at),
+    text: (['image_gen', 'video_gen'] as const).flatMap(key => {
+      const change = event.changes[key]
+      return change ? [`${key === 'image_gen' ? '图片' : '视频'} ${change.before} → ${change.after}`] : []
+    }).join('，'),
+  }))
+}
+
+export { displayDate as grokQuotaDisplayDate }

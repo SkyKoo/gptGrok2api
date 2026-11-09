@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { grokMediaQuotaEntries, grokMediaQuotaNote } from '../src/views/accounts/grokMediaQuota.ts'
+import { grokMediaQuotaEntries, grokMediaQuotaNote, grokMediaSchedulingText, grokMediaLastSuccess, grokMediaHistory } from '../src/views/accounts/grokMediaQuota.ts'
 const item = (quotas, status = 'success') => ({ media_quota: { status, checked_at: '2026-11-01T12:00:00Z', quotas } })
 
 test('missing media categories remain unknown; explicit zero with recovery is exhausted', () => {
@@ -39,4 +39,22 @@ test('shared reservations and settlement are visible instead of promising stale 
  account.media_quota_refresh_needed=true
  assert.equal(grokMediaQuotaEntries(account)[0].text,'等待结算刷新')
  assert.match(grokMediaQuotaNote(account),/暂停/)
+})
+
+test('failed checks retain history without advertising usable quota', () => {
+ const account = item({}, 'failed')
+ account.media_quota_last_success = item({ imagePro: { remaining: 4 }, video720p: { remaining: 2 } }).media_quota
+ account.media_scheduling = { image: { eligible: false, reason: 'quota_unknown' } }
+ assert.ok(grokMediaQuotaEntries(account).every(x => x.text === '未知'))
+ assert.match(grokMediaLastSuccess(account), /图片 4 次/)
+ assert.match(grokMediaLastSuccess(account), /不用于调度/)
+ assert.match(grokMediaSchedulingText(account, 'image'), /暂停调度/)
+})
+test('image exhaustion and video recovery have independent displays', () => {
+ const account = item({ imagePro: { available: false }, video720p: { remaining: 5 } })
+ account.media_scheduling = { image: { eligible: false, reason: 'exhausted' }, video: { eligible: true, reason: 'ready' } }
+ account.media_quota_history = [{ at: '2026-11-09T12:00:00Z', changes: { video_gen: { before: 0, after: 5 } } }]
+ assert.equal(grokMediaSchedulingText(account, 'image'), '额度耗尽')
+ assert.equal(grokMediaSchedulingText(account, 'video'), '可调度')
+ assert.equal(grokMediaHistory(account)[0].text, '视频 0 → 5')
 })

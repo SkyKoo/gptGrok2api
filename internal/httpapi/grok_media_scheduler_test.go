@@ -113,3 +113,20 @@ func TestGrokMediaRefusalBackoffAndManualRecovery(t *testing.T) {
 	}
 	s.grokAccountPool.Release(lease)
 }
+
+func TestGrokMediaPreflightDoesNotPollIdleAccountsWhenReadyCapacityExists(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(429) }))
+	defer upstream.Close()
+	cfg := adminTestConfig(t.TempDir())
+	cfg.GrokRateLimitsURL = upstream.URL
+	s := New(cfg)
+	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{
+		{"access_token": "cold-account", "status": "active", "enabled": true},
+		{"access_token": "ready-account", "status": "active", "enabled": true, "media_quota": testGrokMediaSnapshot()},
+	})
+	s.ensureGrokMediaQuotas(context.Background(), accounts.Intent{Kind: "image", Model: "grok-imagine-image-pro", ImageCount: 2})
+	if calls.Load() != 0 {
+		t.Fatal("ready pool still polled unrelated cold accounts")
+	}
+}

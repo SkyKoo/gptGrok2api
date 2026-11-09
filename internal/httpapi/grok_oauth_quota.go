@@ -33,6 +33,25 @@ func (s *Server) refreshOAuthQuota(ctx context.Context, id string) (oauth.Accoun
 	result := probe.QueryQuota(ctx, map[string]any{"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt})
 	updated, applied, err := s.oauthStore.UpdateIfCredential(account, func(current *oauth.Account) {
 		current.Quota = result.Quota
+		// Billing validates credentials, not model permissions or media quotas.
+		if current.Status != "disabled" && current.Status == account.Status {
+			switch intValue(result.Quota["http_status"]) {
+			case 200:
+				if stringValue(result.Quota["status"]) == "error" {
+					result.Quota["credential_status"] = "unknown"
+					break
+				}
+				result.Quota["credential_status"] = "valid"
+				if current.Status == "invalid" || current.Status == "expired" {
+					current.Status = "active"
+				}
+			case 401:
+				result.Quota["credential_status"] = "invalid"
+				current.Status = "invalid"
+			default:
+				result.Quota["credential_status"] = "unknown"
+			}
+		}
 		current.AccessToken = result.AccessToken
 		current.RefreshToken = result.RefreshToken
 		current.IDToken = result.IDToken

@@ -168,13 +168,14 @@ func (s *Server) runVideoAttempt(ctx context.Context, job *videoJob, prompt, asp
 	if !stage("video_generation_attempt", map[string]any{"grok_generation_attempt": attempt}) {
 		return false
 	}
-	s.ensureGrokMediaQuotas(ctx)
 	segments, _ := protocol.VideoSegmentLengths(seconds)
 	units := 0
 	for _, length := range segments {
 		units += (length + 5) / 6
 	}
-	lease, err := s.grokAccountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, nil, nil, 0, accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units, Uploads: len(inputs)})
+	intent := accounts.Intent{Kind: "video", Model: job.Model, VideoSegments: len(segments), VideoUnits: units, Uploads: len(inputs)}
+	s.ensureGrokMediaQuotas(ctx, intent)
+	lease, err := s.grokAccountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, nil, nil, 0, intent)
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": err.Error()})
 		return false
