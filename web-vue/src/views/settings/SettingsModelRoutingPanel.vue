@@ -11,10 +11,12 @@
       <Button size="sm" variant="outline" :disabled="busy" @click="load">刷新目录</Button>
       <Button size="sm" variant="primary" :disabled="busy || !loaded || !selected" @click="save">{{ busy ? '处理中…' : '保存模型路由' }}</Button>
     </div>
-    <p class="text-xs text-muted-foreground">此处单独保存。变更对后续开始执行的请求生效；失败重试只切换账号，不自动改成另一个模型。</p>
+    <p class="text-xs text-muted-foreground">此处单独保存。变更对后续开始执行的请求生效；媒体生成选定账号后不自动换号或重新提交。</p>
   </FormSection>
+  <SettingsChannelPriorityPanel />
 </template>
 <script setup lang="ts">
+import SettingsChannelPriorityPanel from './SettingsChannelPriorityPanel.vue'
 import { onMounted, ref } from 'vue'
 import { Button, FormField, FormSection } from 'nanocat-ui'
 import { apiClient } from '@/api/client'

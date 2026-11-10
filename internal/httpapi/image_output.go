@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
@@ -38,7 +40,8 @@ func validateImageOutput(w http.ResponseWriter, model string, options provider.I
 		writeImageOptionError(w, &provider.ImageOptionError{Param: "output_format", Message: "GIF output requires gpt-image-2.6-sunburst or gpt-image-2.6-flare"})
 		return false
 	}
-	if !isOpenAIImageModel(model) && (options.Background != "" || options.OutputFormat != "") {
+	_, adobeModel := modelpkgAdobe(model)
+	if !isOpenAIImageModel(model) && !adobeModel && (options.Background != "" || options.OutputFormat != "") {
 		param := "background"
 		if options.Background == "" {
 			param = "output_format"
@@ -49,8 +52,28 @@ func validateImageOutput(w http.ResponseWriter, model string, options provider.I
 	return true
 }
 
+// Callers select logical models. Routing fields must never be silently accepted.
+func validateCallerChannelFields(providerValue, channelValue any) error {
+	for _, field := range []struct {
+		name  string
+		value any
+	}{{"provider", providerValue}, {"channel", channelValue}} {
+		if field.value == nil {
+			continue
+		}
+		if text, ok := field.value.(string); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		return &provider.ImageOptionError{Param: field.name, Message: "select a logical model; channel routing is managed by CFM"}
+	}
+	return nil
+}
+
 func parseImageOutputJSON(body map[string]any) (provider.ImageOutputOptions, error) {
 	var options provider.ImageOutputOptions
+	if err := validateCallerChannelFields(body["provider"], body["channel"]); err != nil {
+		return options, err
+	}
 	for _, field := range []struct {
 		name string
 		dst  *string
@@ -89,3 +112,5 @@ func validateImageEditOutput(w http.ResponseWriter, model string, options provid
 	}
 	return true
 }
+
+func modelpkgAdobe(id string) (string, bool) { m, ok := model.AdobeModel(id); return m.ID, ok }

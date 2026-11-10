@@ -47,6 +47,29 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(any(name.startswith('data/files/') for name in contents))
         self.assertFalse(any(name.startswith(('tools/', 'backups/', 'backup-state/', 'releases/')) for name in contents))
 
+    def test_adobe_encrypted_state_and_browser_authentication_are_backed_up(self):
+        root = self.fixture()
+        (root / 'data/adobe_accounts.json.enc').write_bytes(b'encrypted-account-fixture')
+        jobs = root / 'data/adobe_jobs'
+        jobs.mkdir()
+        (jobs / 'task.json.enc').write_bytes(b'encrypted-task-fixture')
+        profile = root / 'data/browser-worker/adobe/profile-a'
+        (profile / 'browser/Default/Local Storage/leveldb').mkdir(parents=True)
+        (profile / 'state.json').write_text('{"result":{}}')
+        (profile / 'browser/Local State').write_text('{}')
+        (profile / 'browser/Default/Local Storage/leveldb/000001.log').write_bytes(b'session-data')
+        (profile / 'browser/Default/Local Storage/leveldb/LOCK').touch()
+        (profile / 'browser/Default/Cache').mkdir()
+        (profile / 'browser/Default/Cache/cache.bin').write_bytes(b'not backed up')
+        contents, _, _ = b.capture(root)
+        self.assertIn('data/adobe_accounts.json.enc', contents)
+        self.assertIn('data/adobe_jobs/task.json.enc', contents)
+        self.assertTrue(any(name.endswith('000001.log') for name in contents))
+        self.assertFalse(any('/Cache/' in name or name.endswith('/LOCK') for name in contents))
+        (profile / '.lock').touch()
+        with self.assertRaisesRegex(b.BackupError, 'active'):
+            b.capture(root)
+
     def test_unknown_directory_rejected(self):
         root = self.fixture()
         (root / 'data/new-store').mkdir()

@@ -73,10 +73,11 @@ export const registerModeGroups = [{ options: registerModeOptions }]
 export const registerTargetOptions = [
   { value: 'openai', label: 'OpenAI' },
   { value: 'grok', label: 'Grok（协议）' },
+  { value: 'adobe', label: 'Adobe Firefly' },
 ] as const
 
 export const turnstileProviderOptions = [
-  { value: 'browser', label: 'CFM Grok Browser Worker' },
+  { value: 'browser', label: 'CFM Browser Worker' },
 ] as const
 
 export const turnstileProviderGroups = [{ options: turnstileProviderOptions }]
@@ -151,7 +152,7 @@ export const defaultGrokRegisterConfig: GrokRegisterConfig = {
   browser_flow_enabled: false,
   provider: 'browser',
   api_key: '',
-  api_base: 'http://grok-browser:8899',
+  api_base: 'http://cfm-browser-worker:8899',
   request_timeout: 30,
   captcha_timeout: 180,
   captcha_poll_interval: 3,
@@ -188,6 +189,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
   openai_free: { timeout_seconds: 600, auto_twofa: false },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
+  adobe: { api_base: 'http://cfm-browser-worker:8899', api_key: '', request_timeout: 120, country: 'US', birth_year: 1990, birth_month: 1 },
   checkout: {
     enabled: false,
     channel: 'upi',
@@ -256,7 +258,8 @@ export function providerType(provider: RegisterProvider) {
 }
 
 export function normalizeRegisterTarget(value: unknown): RegisterTarget {
-  return String(value || '').trim().toLowerCase() === 'grok' ? 'grok' : 'openai'
+  const target = String(value || '').trim().toLowerCase()
+  return target === 'grok' || target === 'adobe' ? target : 'openai'
 }
 
 export function normalizeTurnstileProvider(_value: unknown): GrokTurnstileProvider {
@@ -327,14 +330,14 @@ export function providerForRegisterTarget(provider: RegisterProvider, target: Re
   if (!['icloud_api', 'icloud_local'].includes(providerType(provider))) return provider
   return {
     ...provider,
-    project: target === 'grok' ? 'grok' : 'openai',
+    project: target,
     purpose: 'register',
-    keyword: target === 'grok' ? 'xAI' : 'OpenAI',
+    keyword: target === 'adobe' ? 'Adobe' : target === 'grok' ? 'xAI' : 'OpenAI',
   }
 }
 
 export function turnstileApiBasePlaceholder(_provider: unknown) {
-  return 'http://grok-browser:8899'
+  return 'http://cfm-browser-worker:8899'
 }
 
 export function createProviderId(type = 'provider') {
@@ -555,7 +558,8 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     openai_free: { timeout_seconds: raw.openai_free?.timeout_seconds || defaultRegisterConfig.openai_free.timeout_seconds, auto_twofa: raw.openai_free?.auto_twofa === true },
     target,
     grok: normalizeGrokRegisterConfig(raw.grok),
-    mode: target === 'grok' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
+    adobe: { ...defaultRegisterConfig.adobe, ...raw.adobe },
+    mode: target !== 'openai' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
     mail,
     checkout,
     sub2api_sync: sub2apiSync,
@@ -730,6 +734,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     target_settings: registrationTargetSettingsPayload(config),
     openai_free: { timeout_seconds: config.openai_free.timeout_seconds, auto_twofa: Boolean(config.openai_free.auto_twofa) },
     grok,
+    adobe: { ...config.adobe },
     checkout: {
       enabled: Boolean(config.checkout?.enabled),
       channel: checkoutChannel,
@@ -773,7 +778,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     resin_proxy_url: String(config.resin_proxy_url || '').trim(),
     total: Math.max(1, Number(config.total) || 1),
     threads: Math.max(1, Number(config.threads) || 1),
-    mode: target === 'grok' ? 'total' : (config.mode || 'total') as RegisterMode,
+    mode: target !== 'openai' ? 'total' : (config.mode || 'total') as RegisterMode,
     target_quota: Math.max(1, Number(config.target_quota) || 1),
     target_available: Math.max(1, Number(config.target_available) || 1),
     check_interval: Math.max(1, Number(config.check_interval) || 5),
@@ -784,7 +789,7 @@ export function grokRequirementMessages(config: LegacyRegisterConfig | null | un
   if (!config || normalizeRegisterTarget(config.target) !== 'grok') return []
   const grok = normalizeGrokRegisterConfig(config.grok)
   const missing: string[] = []
-  if (!isFilled(grok.api_base)) missing.push('Grok Browser Worker 地址')
+  if (!isFilled(grok.api_base)) missing.push('CFM Browser Worker 地址')
   const sub2api = grok.oauth_delivery.sub2api
   if (sub2api.enabled) {
     if (!isFilled(sub2api.server_id)) missing.push('OAuth 投递 Sub2API 连接')
@@ -1157,14 +1162,14 @@ export function registerMetricItems(
   target: RegisterTarget = 'openai',
 ): RegisterMetricItem[] {
   const common = [
-    { key: 'success', label: target === 'grok' ? 'Grok 账号' : '成功', value: stats.success || 0, meta: `成功率 ${stats.success_rate || 0}%` },
+    { key: 'success', label: target === 'adobe' ? 'Adobe 账号' : target === 'grok' ? 'Grok 账号' : '成功', value: stats.success || 0, meta: `成功率 ${stats.success_rate || 0}%` },
     { key: 'fail', label: '失败', value: stats.fail || 0 },
     { key: 'done', label: '完成', value: stats.done || 0 },
     { key: 'running', label: '运行 / 线程', value: `${stats.running || 0} / ${stats.threads || threads || 0}` },
     { key: 'elapsed', label: '运行时间', value: `${stats.elapsed_seconds || 0}s` },
     { key: 'avg', label: '平均耗时', value: `${stats.avg_seconds || 0}s` },
   ]
-  if (target === 'grok') return common
+  if (target !== 'openai') return common
   return [
     ...common,
     { key: 'quota', label: '当前额度', value: stats.current_quota || 0 },

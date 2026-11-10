@@ -40,7 +40,7 @@ func NewSchedule(path string) *Schedule {
 		return s
 	}
 	var state RegistrationSchedule
-	if json.Unmarshal(raw, &state) != nil || state.IntervalMinutes < 1 || state.IntervalMinutes > 10080 || (state.Target != "" && state.Target != "openai" && state.Target != "grok") {
+	if json.Unmarshal(raw, &state) != nil || state.IntervalMinutes < 1 || state.IntervalMinutes > 10080 || (state.Target != "" && state.Target != "openai" && state.Target != "grok" && state.Target != "adobe") {
 		s.loadError = fail("storage", "schedule_state_invalid")
 		return s
 	}
@@ -65,7 +65,7 @@ func (s *Schedule) BindTarget(target string) error {
 	if s.state.Target != "" {
 		return nil
 	}
-	if target != "openai" && target != "grok" {
+	if target != "openai" && target != "grok" && target != "adobe" {
 		return fail("config", "invalid_registration_target")
 	}
 	next := s.state

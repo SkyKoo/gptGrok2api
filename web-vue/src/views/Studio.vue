@@ -103,8 +103,10 @@
         :video-form="videoForm"
         @update:video-form="Object.assign(videoForm, $event)"
         :chat-model-options="chatModelOptions"
-        :chat-model-labels="modelFormRuntime.chatModelLabels.value"
+        :chat-model-labels="modelFormRuntime.modelLabels.value"
         :image-model-options="imageModelOptions"
+        :video-model-options="modelFormRuntime.videoModelOptions.value"
+        :media-capabilities="modelFormRuntime.catalog.value?.media_capabilities"
         :references="referenceRuntime.references.value"
         :is-sending="isSending"
         :is-streaming="isStreaming"
@@ -159,10 +161,11 @@
 </template>
 
 <script setup lang="ts">
+import { mediaCapability } from '@/lib/mediaCapabilities'
 import { DEFAULT_VIDEO_OPTIONS, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
-import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -227,12 +230,22 @@ const videoForm = reactive({ ...DEFAULT_VIDEO_OPTIONS })
 const referenceRuntime = useStudioReferenceRuntime({
   validateCount: count => validateStudioReferenceCount(
     composerRuntime.composeMode.value === 'search' ? 'image' : composerRuntime.composeMode.value,
-    modelFormRuntime.imageForm.model,
+    composerRuntime.composeMode.value === 'video' ? videoForm.model || 'grok-imagine-video' : modelFormRuntime.imageForm.model,
     count,
   ),
 })
 const persistedConversationState = loadStudioConversationPersistenceState()
 const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0 })
+watch([modelFormRuntime.videoModelOptions, modelFormRuntime.catalog, () => videoForm.model], () => {
+  const models = modelFormRuntime.videoModelOptions.value
+  if (models.length && !models.includes(videoForm.model || '')) videoForm.model = models[0]
+  const capability = mediaCapability(videoForm.model || '')
+  if (!capability) return
+  if (capability.sizes?.length && !capability.sizes.includes(videoForm.size)) videoForm.size = capability.sizes[0]!
+  if (capability.durations?.length && !capability.durations.includes(videoForm.seconds)) videoForm.seconds = capability.durations[0]!
+  if (capability.resolutions?.length && !capability.resolutions.includes(videoForm.resolution)) videoForm.resolution = capability.resolutions[0]!
+  if (!capability.audio) videoForm.audio = false
+}, { immediate: true })
 
 const composeMode = composerRuntime.composeMode
 const composerText = composerRuntime.composerText

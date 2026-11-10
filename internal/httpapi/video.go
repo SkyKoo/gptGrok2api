@@ -22,6 +22,11 @@ import (
 )
 
 type videoJob struct {
+	Route          *mediaRoute `json:"-"`
+	OwnerID        string      `json:"-"`
+	RequestHash    string      `json:"-"`
+	ClientKey      string      `json:"-"`
+	recovering     bool
 	ID             string             `json:"id"`
 	Object         string             `json:"object"`
 	CreatedAt      int64              `json:"created_at"`
@@ -72,7 +77,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if _, ok := model.Find(s.catalog, modelName); !ok || modelName != "grok-imagine-video" {
+	if spec, ok := model.Find(s.catalog, modelName); !ok || spec.Capability&model.Video == 0 {
 		writeError(w, http.StatusBadRequest, "model is not a video model", "invalid_request_error")
 		return
 	}
@@ -81,17 +86,45 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
+	if m, ok := model.AdobeModel(modelName); ok && m.Kind == "video" && len(inputs) > 0 {
+		writeError(w, 400, "this model does not support reference images in the verified Free tier", "invalid_request_error")
+		return
+	}
+	owner := s.authIdentity(r)
+	clientKey := strings.TrimSpace(firstNonEmpty(r.Header.Get("Idempotency-Key"), r.FormValue("client_task_id")))
+	if len(clientKey) > 128 {
+		writeError(w, 400, "idempotency key too long", "invalid_request_error")
+		return
+	}
+	requestHash := videoRequestFingerprint(modelName, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
 	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(options.Seconds), Size: options.Size, Quality: "standard", ResolutionName: options.Resolution, AspectRatio: options.Aspect, Preset: options.Preset}
+	job.OwnerID = owner
+	job.RequestHash = requestHash
+	job.ClientKey = clientKey
+	if clientKey != "" {
+		job.ID = "video_" + imageTaskKey(owner, clientKey)
+	}
 	s.videoMu.Lock()
+	if previous := s.videoJobs[job.ID]; previous != nil {
+		if previous.OwnerID != owner || previous.RequestHash != requestHash {
+			s.videoMu.Unlock()
+			writeError(w, 409, "idempotency key belongs to a different request", "invalid_request_error")
+			return
+		}
+		copy := *previous
+		s.videoMu.Unlock()
+		writeJSON(w, 200, copy)
+		return
+	}
 	if s.videoLoadErr != nil {
 		s.videoMu.Unlock()
 		writeError(w, http.StatusServiceUnavailable, "video task storage requires recovery", "storage_error")
 		return
 	}
-	s.monitor.start(job.ID, "/v1/videos", modelName, "Grok 视频生成")
+	s.monitor.start(job.ID, "/v1/videos", modelName, "视频生成")
 	if err := s.saveVideoCheckpointLocked(job); err != nil {
 		s.videoMu.Unlock()
-		s.monitor.finish(job.ID, "failed", modelName, "Grok 视频生成", "无法保存视频任务")
+		s.monitor.finish(job.ID, "failed", modelName, "视频生成", "无法保存视频任务")
 		writeError(w, http.StatusServiceUnavailable, "could not persist video task", "storage_error")
 		return
 	}
@@ -102,7 +135,11 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	initial := *job
 	s.videoMu.RUnlock()
 	s.launchDeploymentWork(func() {
-		s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
+		if m, ok := model.AdobeModel(job.Model); ok && m.Kind == "video" {
+			s.runAdobeVideoJob(job, prompt, options)
+		} else {
+			s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
+		}
 	})
 	writeJSON(w, http.StatusOK, initial)
 }
@@ -118,7 +155,7 @@ func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, s
 		return false
 	}
 	if _, ok := s.monitor.detail(job.ID); !ok {
-		s.monitor.start(job.ID, "/v1/videos", job.Model, "Grok 视频生成")
+		s.monitor.start(job.ID, "/v1/videos", job.Model, "视频生成")
 	}
 	requestHash := videoRequestFingerprint(job.Model, prompt, aspect, resolution, seconds, preset, inputs)
 	referenceHashes := make([]string, len(inputs))
@@ -181,6 +218,14 @@ func (s *Server) runVideoAttempt(ctx context.Context, job *videoJob, prompt, asp
 		return false
 	}
 	defer s.grokAccountPool.Release(lease)
+	s.videoMu.Lock()
+	job.Route = &mediaRoute{Channel: "grok", AccountID: accounts.Identity(lease.Account), UpstreamModel: job.Model, Stage: "selected"}
+	saveErr := s.saveVideoCheckpointLocked(job)
+	s.videoMu.Unlock()
+	if saveErr != nil {
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "could not persist selected route"})
+		return false
+	}
 	s.monitor.enrich(job.ID, map[string]any{
 		"account_id": "sha256:" + videoDigest(accounts.Identity(lease.Account)),
 	})
@@ -376,7 +421,7 @@ func (s *Server) runVideoAttempt(ctx context.Context, job *videoJob, prompt, asp
 		}
 		code, message := "video_content_unverified", "视频内容核对未能完成，已保存核对故障；未判定为占位视频"
 		if verification.Verdict == "mismatch" {
-			code, message = "video_content_mismatch", "视频明显无关，重新生成 1 次后仍未通过，已保存核对证据"
+			code, message = "video_content_mismatch", "视频明显无关，已停止交付并保存核对证据；未重新生成"
 		}
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": message, "verification": verification})
 		return false
@@ -433,7 +478,12 @@ func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {
 		s.videoContent(w, r, id)
 		return
 	}
-	id := path
+	resume := strings.HasSuffix(path, "/resume-poll")
+	id := strings.TrimSuffix(path, "/resume-poll")
+	if r.Method != http.MethodGet && !(r.Method == http.MethodPost && resume) {
+		writeError(w, 405, "method not allowed", "invalid_request_error")
+		return
+	}
 	s.videoMu.RLock()
 	job, ok := s.videoJobs[id]
 	var copy videoJob
@@ -441,8 +491,12 @@ func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {
 		copy = *job
 	}
 	s.videoMu.RUnlock()
-	if !ok {
+	if !ok || (copy.OwnerID != "" && copy.OwnerID != s.authIdentity(r)) {
 		writeError(w, http.StatusNotFound, "video not found", "not_found")
+		return
+	}
+	if resume && r.Method == http.MethodPost && s.resumeAdobeVideoJob(job) {
+		writeJSON(w, 202, map[string]any{"id": job.ID, "status": "in_progress"})
 		return
 	}
 	writeJSON(w, http.StatusOK, &copy)
@@ -456,7 +510,7 @@ func (s *Server) videoContent(w http.ResponseWriter, r *http.Request, id string)
 		path = job.ContentPath
 	}
 	s.videoMu.RUnlock()
-	if !ok {
+	if !ok || (job.OwnerID != "" && job.OwnerID != s.authIdentity(r)) {
 		writeError(w, http.StatusNotFound, "video not found", "not_found")
 		return
 	}
@@ -499,13 +553,13 @@ func (s *Server) setVideoStatus(job *videoJob, status string, progress int, fail
 				record.OutputVideos = []map[string]string{{"url": "/images/video/" + filepath.Base(job.ContentPath), "filename": filepath.Base(job.ContentPath)}}
 			}
 			s.monitor.mu.Unlock()
-			s.monitor.finish(job.ID, "success", job.Model, "Grok 视频生成", "")
+			s.monitor.finish(job.ID, "success", job.Model, "视频生成", "")
 		} else if status == "failed" {
 			message := "video job failed"
 			if value, ok := failure["message"].(string); ok && value != "" {
 				message = value
 			}
-			s.monitor.finish(job.ID, "failed", job.Model, "Grok 视频生成", message)
+			s.monitor.finish(job.ID, "failed", job.Model, "视频生成", message)
 		} else {
 			s.monitor.update(job.ID, status, progress, "")
 		}

@@ -70,7 +70,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
   function validReferences(mode: StudioComposeMode, files: File[]) {
     try {
-      validateStudioReferenceCount(mode, imageForm.model, files.length)
+      validateStudioReferenceCount(mode, mode === 'video' ? videoForm.model || 'grok-imagine-video' : imageForm.model, files.length)
       return true
     } catch (error) {
       toast.error(studioErrorMessage(error, '参考图数量超出限制'))
@@ -342,7 +342,7 @@ export function useStudioSendRuntime(input: StudioSendRuntimeInput) {
 
   async function sendVideoMessage(conversation: StudioConversation, prompt: string, files: File[]) {
     const assistantMessage = messageRuntime.addMessage(conversation, {
-      role: 'assistant', mode: 'video', content: '视频任务已提交', status: 'queued', model: 'grok-imagine-video',
+      role: 'assistant', mode: 'video', content: '视频任务已提交', status: 'queued', model: videoForm.model || 'grok-imagine-video',
     })
     try {
       const task = await videosApi.create(prompt, { ...videoForm }, files)

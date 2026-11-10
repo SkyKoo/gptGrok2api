@@ -161,7 +161,12 @@ func (s *Server) publicImage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "image not found", "not_found")
 		return
 	}
-	if contentType := mime.TypeByExtension(filepath.Ext(filePath)); contentType != "" {
+	// Minimal container images may not have a system mime.types database.
+	if strings.EqualFold(filepath.Ext(filePath), ".mp4") {
+		w.Header().Set("Content-Type", "video/mp4")
+	} else if strings.EqualFold(filepath.Ext(filePath), ".webm") {
+		w.Header().Set("Content-Type", "video/webm")
+	} else if contentType := mime.TypeByExtension(filepath.Ext(filePath)); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
 	}
 	http.ServeFile(w, r, filePath)

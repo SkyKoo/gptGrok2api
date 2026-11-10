@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/agentidentity"
 	"github.com/auucoder/gptgrok2api-go/internal/auth"
 	"github.com/auucoder/gptgrok2api-go/internal/config"
@@ -38,87 +39,92 @@ import (
 )
 
 type Server struct {
-	deploySealed       bool
-	deployStopOnce     sync.Once
-	deployDetached     int
-	deployMu           sync.Mutex
-	deployPaused       bool
-	deployBackground   int
-	workersOnce        sync.Once
-	proxyBindingMu     sync.Mutex
-	authStartMu        sync.Mutex
-	cpaSyncing         sync.Map
-	grokOAuthActions   sync.Map
-	twofaMu            sync.Mutex
-	twofaTasks         map[string]*accountTwoFATask
-	cfg                config.Config
-	auth               *auth.Validator
-	store              *store.Store
-	mailboxStore       *mailboxstore.Store
-	mailboxManager     *mailboxstore.ResourceManager
-	mailboxInitErr     error
-	catalog            []model.Spec
-	discovery          *model.Registry
-	modelRefreshMu     sync.Mutex
-	modelRefreshing    map[string]bool
-	client             *http.Client
-	requestClient      *http.Client
-	accountPool        *accounts.Pool
-	grokRuntimeStore   *store.Store
-	grokAccountPool    *accounts.Pool
-	grokRuntimePath    string
-	chatProvider       *provider.GrokChat
-	consoleProvider    *provider.ConsoleChat
-	mediaProvider      *provider.Media
-	openAIImage        *provider.OpenAIImage
-	openAIChat         *provider.OpenAIChat
-	gptMail            *provider.GPTMail
-	xaiProbe           *provider.XAIProbe
-	grokQuota          *provider.GrokQuota
-	proxyManager       *proxyruntime.Manager
-	oauthStore         *oauth.Store
-	openAILogin        *oauth.OpenAILogin
-	codexLogin         *oauth.CodexLogin
-	codexProtocolLogin *oauth.CodexProtocolLogin
-	agentIdentityStore *agentidentity.Store
-	deviceOAuth        *oauth.DeviceService
-	taskQueue          tasks.QueueAPI
-	grokOAuthRuns      sync.Map
-	registerStore      *registerruntime.Store
-	registerRuntime    *registerruntime.Runtime
-	freeRegister       *registerruntime.FreeEngine
-	grokRegister       *registerruntime.GrokEngine
-	registrationMu     sync.Mutex
-	monitor            *runtimeMonitor
-	logMu              sync.Mutex
-	videoMu            sync.RWMutex
-	videoResultMu      sync.Mutex
-	videoFingerprints  map[string]videoResultRecord
-	videoJobs          map[string]*videoJob
-	videoLoadErr       error
-	newImageVerifier   func(context.Context, int) (imageResultVerifier, error)
-	newVideoVerifier   func(context.Context, int) (videoResultVerifier, error)
-	videoReviewSlots   chan struct{}
-	imageTaskMu        sync.RWMutex
-	imageTasks         map[string]*imageTaskState
-	imageTaskLoadErr   error
-	imageSlots         chan struct{}
-	fileTaskMu         sync.RWMutex
-	fileTasks          map[string]*editableFileTaskState
-	schedulerMu        sync.Mutex
-	schedulerLeases    map[string]map[string]any
-	external           *externalManager
-	refreshMu          sync.RWMutex
-	refreshProgress    map[string]*accountRefreshProgress
-	reloginMu          sync.RWMutex
-	reloginProgress    map[string]*accountReloginProgress
-	survivalMu         sync.RWMutex
-	survivalStatus     map[string]any
-	survivalRunning    bool
-	survivalWake       chan struct{}
-	probeStop          chan struct{}
-	probeWake          chan struct{}
-	proxyProbeURL      string
+	mediaRecoveryOnce         sync.Once
+	adobeStore                *adobe.Store
+	adobeClient               *adobe.Client
+	adobeRegister             *registerruntime.AdobeEngine
+	adobeRegistrationSchedule *registerruntime.Schedule
+	deploySealed              bool
+	deployStopOnce            sync.Once
+	deployDetached            int
+	deployMu                  sync.Mutex
+	deployPaused              bool
+	deployBackground          int
+	workersOnce               sync.Once
+	proxyBindingMu            sync.Mutex
+	authStartMu               sync.Mutex
+	cpaSyncing                sync.Map
+	grokOAuthActions          sync.Map
+	twofaMu                   sync.Mutex
+	twofaTasks                map[string]*accountTwoFATask
+	cfg                       config.Config
+	auth                      *auth.Validator
+	store                     *store.Store
+	mailboxStore              *mailboxstore.Store
+	mailboxManager            *mailboxstore.ResourceManager
+	mailboxInitErr            error
+	catalog                   []model.Spec
+	discovery                 *model.Registry
+	modelRefreshMu            sync.Mutex
+	modelRefreshing           map[string]bool
+	client                    *http.Client
+	requestClient             *http.Client
+	accountPool               *accounts.Pool
+	grokRuntimeStore          *store.Store
+	grokAccountPool           *accounts.Pool
+	grokRuntimePath           string
+	chatProvider              *provider.GrokChat
+	consoleProvider           *provider.ConsoleChat
+	mediaProvider             *provider.Media
+	openAIImage               *provider.OpenAIImage
+	openAIChat                *provider.OpenAIChat
+	gptMail                   *provider.GPTMail
+	xaiProbe                  *provider.XAIProbe
+	grokQuota                 *provider.GrokQuota
+	proxyManager              *proxyruntime.Manager
+	oauthStore                *oauth.Store
+	openAILogin               *oauth.OpenAILogin
+	codexLogin                *oauth.CodexLogin
+	codexProtocolLogin        *oauth.CodexProtocolLogin
+	agentIdentityStore        *agentidentity.Store
+	deviceOAuth               *oauth.DeviceService
+	taskQueue                 tasks.QueueAPI
+	grokOAuthRuns             sync.Map
+	registerStore             *registerruntime.Store
+	registerRuntime           *registerruntime.Runtime
+	freeRegister              *registerruntime.FreeEngine
+	grokRegister              *registerruntime.GrokEngine
+	registrationMu            sync.Mutex
+	monitor                   *runtimeMonitor
+	logMu                     sync.Mutex
+	videoMu                   sync.RWMutex
+	videoResultMu             sync.Mutex
+	videoFingerprints         map[string]videoResultRecord
+	videoJobs                 map[string]*videoJob
+	videoLoadErr              error
+	newImageVerifier          func(context.Context, int) (imageResultVerifier, error)
+	newVideoVerifier          func(context.Context, int) (videoResultVerifier, error)
+	videoReviewSlots          chan struct{}
+	imageTaskMu               sync.RWMutex
+	imageTasks                map[string]*imageTaskState
+	imageTaskLoadErr          error
+	imageSlots                chan struct{}
+	fileTaskMu                sync.RWMutex
+	fileTasks                 map[string]*editableFileTaskState
+	schedulerMu               sync.Mutex
+	schedulerLeases           map[string]map[string]any
+	external                  *externalManager
+	refreshMu                 sync.RWMutex
+	refreshProgress           map[string]*accountRefreshProgress
+	reloginMu                 sync.RWMutex
+	reloginProgress           map[string]*accountReloginProgress
+	survivalMu                sync.RWMutex
+	survivalStatus            map[string]any
+	survivalRunning           bool
+	survivalWake              chan struct{}
+	probeStop                 chan struct{}
+	probeWake                 chan struct{}
+	proxyProbeURL             string
 
 	registrationSchedule      *registerruntime.Schedule
 	registrationExtraSchedule *registerruntime.Schedule
@@ -167,6 +173,8 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 		}
 	}
 	server := &Server{
+		adobeStore:         adobe.NewStore(filepath.Join(cfg.DataDir, "adobe_accounts.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
+		adobeClient:        adobe.NewClient(requestClient),
 		cfg:                cfg,
 		deployPaused:       !startWorkers,
 		auth:               auth.New(cfg.APIKey, cfg.AdminKey, cfg.AuthKeysPath, cfg.AllowAnonymous, repository),
@@ -234,6 +242,8 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.refreshRegistrationResinChannel()
 	server.initFreeRegistration()
 	server.initGrokRegistration()
+	server.initAdobeRegistration()
+	server.adobeStore.SetBrowserRefresher(server.refreshAdobeBrowserAccount)
 	server.openAIChat = provider.NewOpenAIChat(server.openAIImage)
 	server.newVideoVerifier = server.prepareVideoVerifier
 	server.newImageVerifier = server.prepareImageVerifier
@@ -249,7 +259,6 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
 	server.PauseDeployment(!startWorkers)
 	if startWorkers {
-		server.recoverVideoTasks()
 		server.StartWorkers()
 	}
 
@@ -397,6 +406,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/users", s.userKeys)
 	mux.HandleFunc("/api/auth/users/", s.userKeyByID)
 	mux.HandleFunc("/api/accounts", s.accounts)
+	mux.HandleFunc("/api/adobe/accounts", s.adobeAccountsAPI)
+	mux.HandleFunc("/api/adobe/accounts/", s.adobeAccountsAPI)
 	mux.HandleFunc("/api/accounts/history", s.accountHistory)
 	mux.HandleFunc("/api/accounts/token", s.accountToken)
 	mux.HandleFunc("/api/accounts/quotas/refresh", s.refreshQuotasAPI)
@@ -436,6 +447,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/model-catalog", s.modelCatalog)
 	mux.HandleFunc("/api/accounts/models/refresh", s.refreshModelsAPI)
 	mux.HandleFunc("/api/openai/routing", s.openAIRoutingAPI)
+	mux.HandleFunc("/api/model-routing", s.modelRoutingAPI)
 	mux.HandleFunc("/api/logs", s.logsAPI)
 	mux.HandleFunc("/api/logs/input-images/", s.logInputImage)
 	mux.HandleFunc("/api/logs/delete", s.deleteLogs)
@@ -2742,11 +2754,11 @@ func isWithin(root, candidate string) bool {
 }
 
 func (s *Server) StartWorkers() {
+	s.mediaRecoveryOnce.Do(func() { s.recoverVideoTasks(); s.recoverAdobeImageTasks(); s.reconcileAdobeMediaReservations() })
 	if s.cfg.Version == "test" {
 		return
 	}
 	s.workersOnce.Do(func() {
-		s.recoverVideoTasks()
 		s.taskQueue.Start(2)
 		go s.imageRetentionScheduler()
 		go s.grokProbeScheduler()
@@ -2754,6 +2766,7 @@ func (s *Server) StartWorkers() {
 		go s.capabilityScheduler()
 		go s.modelCapabilityScheduler()
 		go s.grokMediaQuotaScheduler()
+		go s.adobeMaintenanceScheduler()
 		go s.registrationScheduler()
 	})
 }

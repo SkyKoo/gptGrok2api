@@ -57,6 +57,9 @@ func (s *Server) DeploymentStatus() map[string]int {
 	if s.freeRegister.Snapshot()["running"] == true {
 		counts["openai_registration"]++
 	}
+	if s.adobeRegister != nil && s.adobeRegister.Snapshot()["running"] == true {
+		counts["adobe_registration"]++
+	}
 	if s.grokRegister.Snapshot()["running"] == true {
 		counts["grok_registration"]++
 	}
@@ -151,6 +154,14 @@ func (s *Server) DeploymentReady() error {
 	}
 	if _, err := s.grokRuntimeStore.AccountList(); err != nil {
 		return errors.New("Grok runtime storage unavailable")
+	}
+	if s.adobeStore != nil {
+		if _, err := s.adobeStore.List(); err != nil {
+			return errors.New("Adobe account storage unavailable")
+		}
+	}
+	if s.adobeRegister != nil && s.adobeRegister.Snapshot()["error"] != nil {
+		return errors.New("Adobe registration journal unavailable")
 	}
 	if s.freeRegister.Snapshot()["error"] != nil || s.grokRegister.Snapshot()["error"] != nil {
 		return errors.New("registration journal unavailable")

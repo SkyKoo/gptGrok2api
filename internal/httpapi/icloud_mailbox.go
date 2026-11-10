@@ -27,9 +27,9 @@ func mailboxSourceFromProvider(raw map[string]any, index int) mailboxstore.Sourc
 		provider["id"] = id
 	}
 	label := firstNonEmpty(stringValue(provider["label"]), fmt.Sprintf("邮箱来源 %d", index+1))
-	capabilities := map[string]any{"openai": false, "grok": false, "create": false, "status": "config_only"}
+	capabilities := map[string]any{"openai": false, "grok": false, "adobe": false, "create": false, "status": "config_only"}
 	if typeName == "icloud_hme" && strings.TrimSpace(stringValue(provider["api_base"])) != "" && strings.TrimSpace(stringValue(provider["admin_password"])) != "" && strings.TrimSpace(stringValue(provider["account_id"])) != "" {
-		capabilities = map[string]any{"openai": true, "grok": true, "create": true, "status": "available"}
+		capabilities = map[string]any{"openai": true, "grok": true, "adobe": true, "create": true, "status": "available"}
 	}
 	return mailboxstore.Source{ID: id, Type: typeName, Label: label, Enabled: boolValue(provider["enable"], true), Config: provider, Capabilities: capabilities, Status: stringValue(capabilities["status"])}
 }
@@ -238,10 +238,10 @@ func (s *Server) iCloudMailboxes(w http.ResponseWriter, r *http.Request) {
 			"id": view.ID, "email": view.Email, "source_id": view.SourceID, "source_type": view.SourceType,
 			"source_account_id": view.SourceAccountID, "source_mailbox_id": view.SourceMailboxID,
 			"status": view.Status, "api_active": true, "icloud_active": true,
-			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed,
-			"openai_reserved": view.OpenAIReserved, "grok_reserved": view.GrokReserved,
-			"openai_disabled": view.OpenAIDisabled, "grok_disabled": view.GrokDisabled,
-			"openai_retired": view.OpenAIRetired, "grok_retired": view.GrokRetired,
+			"openai_claimed": view.OpenAIClaimed, "grok_claimed": view.GrokClaimed, "adobe_claimed": view.AdobeClaimed,
+			"openai_reserved": view.OpenAIReserved, "grok_reserved": view.GrokReserved, "adobe_reserved": view.AdobeReserved,
+			"openai_disabled": view.OpenAIDisabled, "grok_disabled": view.GrokDisabled, "adobe_disabled": view.AdobeDisabled,
+			"openai_retired": view.OpenAIRetired, "grok_retired": view.GrokRetired, "adobe_retired": view.AdobeRetired,
 			"last_error": view.LastError, "created_at": view.CreatedAt, "updated_at": view.UpdatedAt,
 		})
 	}
@@ -380,7 +380,7 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
-	result := map[string]any{"aliases": 0, "openai_claims": 0, "grok_claims": 0, "missing": []string{}, "errors": []string{}}
+	result := map[string]any{"aliases": 0, "openai_claims": 0, "grok_claims": 0, "adobe_claims": 0, "missing": []string{}, "errors": []string{}}
 	if s.mailboxManager != nil && s.mailboxManager.HasEnabledSourceType(ctx, "icloud_hme") {
 		session, err := s.mailboxManager.Open(ctx, "", time.Second)
 		if err != nil {
@@ -445,6 +445,18 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 		result["errors"] = append(result["errors"].([]string), err.Error())
 	} else {
 		reconcile("grok", grok, "grok_claims")
+	}
+	if s.adobeStore != nil {
+		accounts, err := s.adobeStore.List()
+		if err != nil {
+			result["errors"] = append(result["errors"].([]string), "Adobe 账号读取失败")
+		} else {
+			rows := []map[string]any{}
+			for _, a := range accounts {
+				rows = append(rows, map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "registration_job_id": a.RegistrationJobID, "registration_mailbox": a.RegistrationMailbox})
+			}
+			reconcile("adobe", rows, "adobe_claims")
+		}
 	}
 	if s.grokRegister != nil {
 		if err := s.grokRegister.ReconcileMailboxReservations(ctx); err != nil {

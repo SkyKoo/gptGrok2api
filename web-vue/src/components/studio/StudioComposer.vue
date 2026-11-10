@@ -71,7 +71,7 @@
                 size="sm"
                 variant="outline"
                 root-class="chat-vision-button"
-                :disabled="isSending"
+                :disabled="isSending || referenceLimit === 0"
                 aria-label="上传图片"
                 title="上传图片"
                 @click.stop="handleAttachReferenceClick"
@@ -127,7 +127,11 @@
                 <Icon icon="lucide:chevron-down" class="h-3.5 w-3.5" />
               </StudioToolbarSelectButton>
               <div v-if="settingsOpen" class="studio-size-popover studio-video-popover" @click.stop>
-                <div class="studio-video-heading">视频设置 · Grok Imagine Video</div>
+                <div class="studio-video-heading">视频设置 · {{ chatModelLabels?.[videoForm.model || ''] || videoForm.model }}</div>
+                <div class="studio-size-section">
+                  <div class="studio-size-label">模型</div>
+                  <GroupedSelectMenu v-model="videoModelValue" :options="videoModelSelectOptions" selected-indicator="none" block />
+                </div>
                 <div class="studio-video-field">
                   <span class="studio-video-label">时长</span>
                   <span class="studio-video-value">{{ videoForm.seconds }} 秒</span>
@@ -146,13 +150,14 @@
                     >{{ option.label }}</Button>
                   </div>
                 </div>
-                <p class="studio-size-current">当前免费 Web 通道支持 1～6 秒，具体账号权限由上游返回。分辨率为请求档位，实际输出以上游结果为准。</p>
+                <p class="studio-size-current">选项按模型可用能力显示；分辨率为请求档位，实际输出以上游结果为准。</p>
               </div>
             </div>
             <template v-else-if="mode === 'image'">
               <div ref="settingsAnchorRef" class="chat-settings-anchor">
                 <StudioToolbarSelectButton
                   class="chat-summary-button justify-between gap-1.5"
+                  aria-label="图片设置"
                   :expanded="settingsOpen"
                   @click.stop="toggleSettings"
                 >
@@ -180,9 +185,10 @@
                     <p v-if="imageForm.model.startsWith('grok-imagine-image')" class="studio-size-current">
                       {{ imageForm.model === 'grok-imagine-image-edit' ? '图片编辑（共用 Pro 额度）' : 'Pro（固定）' }}
                     </p>
+                    <p v-else-if="imageCapabilities?.qualities?.length === 1" class="studio-size-current">模型默认画质</p>
                     <div v-else class="studio-choice-grid is-quality">
                       <Button
-                        v-for="option in IMAGE_QUALITY_OPTIONS"
+                        v-for="option in imageQualityOptions"
                         :key="option.value"
                         size="sm"
                         :variant="imageForm.quality === option.value ? 'primary' : 'outline'"
@@ -198,7 +204,7 @@
                     <div class="studio-size-label">数量</div>
                     <div class="studio-choice-grid is-count">
                       <Button
-                        v-for="option in IMAGE_COUNT_OPTIONS"
+                        v-for="option in imageCountOptions"
                         :key="option.value"
                         size="sm"
                         :variant="imageForm.n === option.value ? 'primary' : 'outline'"
@@ -302,6 +308,7 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
+import { type MediaCapability } from '@/lib/mediaCapabilities'
 import { studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
@@ -320,14 +327,16 @@ const props = defineProps<{
   chatModelOptions: string[]
   chatModelLabels?: Record<string, string>
   imageModelOptions: string[]
+  videoModelOptions?: string[]
+  mediaCapabilities?: Record<string, MediaCapability>
   references: StudioReference[]
   isSending: boolean
   isStreaming: boolean
   isEditing: boolean
 }>()
 
-const referenceLimit = computed(() => studioReferenceLimit(props.mode, props.imageForm.model))
-const referenceError = computed(() => studioReferenceCountError(props.mode, props.imageForm.model, props.references.length))
+const referenceLimit = computed(() => studioReferenceLimit(props.mode, props.mode === 'video' ? props.videoForm.model || 'grok-imagine-video' : props.imageForm.model))
+const referenceError = computed(() => studioReferenceCountError(props.mode, props.mode === 'video' ? props.videoForm.model || 'grok-imagine-video' : props.imageForm.model, props.references.length))
 
 const emit = defineEmits<{
   'update:mode': [mode: StudioComposeMode]
@@ -413,22 +422,36 @@ const chatReasoningEffortOptions = [
 ]
 
 const imageModelSelectOptions = computed(() => props.imageModelOptions.map((model) => ({
-  label: model,
+  label: props.chatModelLabels?.[model] || model,
   value: model,
 })))
 
-const videoSettingGroups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
-  { key: 'seconds', label: '时长', options: VIDEO_DURATION_OPTIONS },
-  { key: 'size', label: '宽高比', options: VIDEO_SIZE_OPTIONS },
-  { key: 'resolution', label: '分辨率', options: ['480p', '720p'].map(value => ({ label: value, value })) },
-  { key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS },
-]
-const videoSummaryLabel = computed(() => `${props.videoForm.seconds} 秒 · ${props.videoForm.resolution} · ${VIDEO_SIZE_OPTIONS.find(option => option.value === props.videoForm.size)?.label || '9:16 竖屏'}`)
+const videoModelValue = computed({
+  get: () => props.videoForm.model || 'grok-imagine-video',
+  set: (value: string | string[]) => emit('update:videoForm', { ...props.videoForm, model: String(Array.isArray(value) ? value[0] : value) }),
+})
+const videoModelSelectOptions = computed(() => (props.videoModelOptions || []).map(model => ({ label: props.chatModelLabels?.[model] || model, value: model })))
+const videoCapabilities = computed(() => props.mediaCapabilities?.[videoModelValue.value])
+const imageCapabilities = computed(() => props.mediaCapabilities?.[props.imageForm.model])
+const imageQualityOptions = computed(() => IMAGE_QUALITY_OPTIONS.filter(option => !imageCapabilities.value?.qualities?.length || imageCapabilities.value.qualities.includes(option.value)))
+const imageCountOptions = computed(() => IMAGE_COUNT_OPTIONS.filter(option => option.value <= Math.min(props.references.length ? 2 : 10, imageCapabilities.value?.max_count ?? (Math.max(0, ...(imageCapabilities.value?.variants || []).map(item => item.max_count || 0)) || 10))))
+const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }>>(() => {
+  const capability = videoCapabilities.value
+  const groups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
+    { key: 'seconds', label: '时长', options: capability?.durations?.map(value => ({ label: `${value} 秒`, value: String(value) })) || VIDEO_DURATION_OPTIONS },
+    { key: 'size', label: '尺寸', options: capability?.sizes?.map(value => ({ label: value, value })) || VIDEO_SIZE_OPTIONS },
+    { key: 'resolution', label: '分辨率', options: (capability?.resolutions || ['480p', '720p']).map(value => ({ label: value, value })) },
+  ]
+  if (videoModelValue.value.startsWith('grok-')) groups.push({ key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS })
+  if (capability?.audio) groups.push({ key: 'audio', label: '音频', options: [{ label: '无音频', value: 'false' }, { label: '生成音频', value: 'true' }] })
+  return groups
+})
+const videoSummaryLabel = computed(() => `${props.chatModelLabels?.[videoModelValue.value] || videoModelValue.value} · ${props.videoForm.seconds} 秒 · ${props.videoForm.resolution}`)
 function selectVideoSetting(key: keyof StudioVideoOptions, value: string) {
-  emit('update:videoForm', { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : value })
+  emit('update:videoForm', { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : key === 'audio' ? value === 'true' : value })
 }
 
-const sizePresets = computed(() => resolveImageSizePresets(props.imageForm.model))
+const sizePresets = computed(() => { void props.mediaCapabilities; return resolveImageSizePresets(props.imageForm.model) })
 const selectedPreset = computed(() => sizePresets.value.find((preset) => preset.value === props.imageForm.size))
 const selectedRatio = computed(() => selectedPreset.value?.ratio || 'auto')
 const selectedResolution = computed(() => selectedPreset.value?.resolution || 'auto')
@@ -499,7 +522,7 @@ const imagePlaceholder = computed(() => props.references.length ? '描述你想�
 const chatPlaceholder = computed(() => props.references.length ? '描述你想让模型识别或分析的图片' : '输入消息，Enter 发送，Shift+Enter 换行')
 const placeholderText = computed(() => {
   if (props.mode === 'image') return imagePlaceholder.value
-  if (props.mode === 'video') return '描述你想生成的视频，也可以添加参考图'
+  if (props.mode === 'video') return referenceLimit.value > 0 ? '描述你想生成的视频，也可以添加参考图' : '描述你想生成的视频'
   if (props.mode === 'search') return '输入搜索问题，Enter 搜索，Shift+Enter 换行'
   return chatPlaceholder.value
 })

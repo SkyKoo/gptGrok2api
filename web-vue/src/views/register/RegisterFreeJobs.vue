@@ -15,7 +15,7 @@
       </p>
       <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
       <p v-if="registrationCompensationText(job.auto_retry, running, now, target)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target) }}</p>
-      <Button v-if="job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
+      <Button v-if="target !== 'adobe' && job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
     <div v-if="totalCount > pageSize" class="flex flex-wrap items-center justify-between gap-3 pt-4 text-sm">
@@ -36,7 +36,7 @@ import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationProxyFailureText } from '@/lib/registrationProxy'
 import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText } from '@/lib/registrationCompensation'
-const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' }>()
+const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' | 'adobe' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
 const clock = setInterval(() => { now.value = Date.now() }, 1000)
@@ -57,7 +57,7 @@ async function loadPage(next: number) {
   }
   loading.value = true
   try {
-    const result = props.target === 'grok' ? await registerApi.getGrokJobs(next) : await registerApi.getFreeJobs(next)
+    const result = props.target === 'adobe' ? await registerApi.getAdobeJobs(next) : props.target === 'grok' ? await registerApi.getGrokJobs(next) : await registerApi.getFreeJobs(next)
     if (sequence !== loadSequence) return
     historyJobs.value = result.jobs
     page.value = result.jobs_page
@@ -77,7 +77,7 @@ const twoFALabels: Record<string, string> = { running: '进行中', completed: '
 const stages: Record<string, string> = { twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 async function retry(id: string) {
   busy.value = true; error.value = ''
-  try { if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
+  try { if (props.target === 'adobe') await registerApi.retryAdobeResult(id); else if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
   catch (e: any) { error.value = e?.message || '重试失败' }
   finally { busy.value = false }
 }

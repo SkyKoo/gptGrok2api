@@ -31,6 +31,9 @@ func (i Intent) Costs() map[string]int {
 	}
 	if i.Kind == "image" {
 		c["image_gen"] = max(1, i.ImageCount)
+		if !strings.HasPrefix(i.Model, "grok-imagine-") {
+			c["reason"] = max(1, i.ImageCount)
+		}
 	}
 	if i.Kind == "video" {
 		segments := i.VideoSegments

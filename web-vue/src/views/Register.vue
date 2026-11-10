@@ -130,7 +130,7 @@
                 </template>
               </div>
 
-              <div v-if="registerConfig.target === 'openai' || registerConfig.target === 'grok'" v-show="activeTaskRecord === 'register'" role="region" aria-label="注册任务记录">
+              <div v-if="['openai', 'grok', 'adobe'].includes(registerConfig.target)" v-show="activeTaskRecord === 'register'" role="region" aria-label="注册任务记录">
                 <RegisterFreeJobs :key="registerTarget" :jobs="registerConfig.jobs" :total="registerConfig.jobs_total" :page-size="registerConfig.jobs_page_size" :running="registerConfig.enabled" :compensation-error="registerConfig.compensation_error" :target="registerTarget" @changed="refreshFreeJobs" />
               </div>
               <div v-if="hasCheckoutRuntime" v-show="activeTaskRecord === 'checkout'" id="checkout-runtime" class="register-link-tasks" role="region" aria-label="提链任务记录">
@@ -344,7 +344,7 @@ const checkoutRetriesActive = computed(hasActiveCheckoutRetries)
 const hasCheckoutRuntime = computed(() => registerTarget.value === 'openai')
 const activeTaskRecord = ref<'register' | 'checkout'>('register')
 const taskRecordTabs = computed(() => [
-  ...(registerTarget.value === 'openai' || registerTarget.value === 'grok' ? [{ value: 'register', label: '注册任务' }] : []),
+  ...(['openai', 'grok', 'adobe'].includes(registerTarget.value) ? [{ value: 'register', label: '注册任务' }] : []),
   ...(hasCheckoutRuntime.value ? [{ value: 'checkout', label: '提链任务' }] : []),
 ])
 

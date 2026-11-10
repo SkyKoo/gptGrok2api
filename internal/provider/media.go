@@ -198,7 +198,11 @@ func (m *Media) doJSON(ctx context.Context, method, endpoint string, account acc
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 	}
-	response, err := m.Client.Do(req)
+	// A redirect or replayable body must never duplicate a generation POST.
+	req.GetBody = nil
+	client := *m.Client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

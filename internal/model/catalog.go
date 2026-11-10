@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
+	"time"
+)
 
 type Capability uint8
 
@@ -22,13 +25,17 @@ type Spec struct {
 }
 
 func (s Spec) Public() map[string]any {
-	return map[string]any{
+	value := map[string]any{
 		"id":       s.ID,
 		"object":   "model",
 		"created":  s.Created,
 		"owned_by": s.OwnedBy,
 		"name":     s.Name,
 	}
+	if len(MediaChannels(s.ID)) > 0 {
+		value["media_capabilities"] = MediaCapability(s.ID)
+	}
+	return value
 }
 
 func Catalog() []Spec {
@@ -59,6 +66,22 @@ func Catalog() []Spec {
 		{"grok-4.20-multi-agent-xhigh", "Grok 4.20 Multi-Agent XHigh", "xai", created, ConsoleChat, true},
 		{"grok-4.20-0309-non-reasoning-console", "Grok 4.20 0309 Non-Reasoning (Console)", "xai", created, ConsoleChat, true},
 		{"grok-build-console", "Grok Build 0.1 (Console)", "xai", created, ConsoleChat, true},
+	}
+	for _, m := range adobe.FreeModels() {
+		found := false
+		for _, item := range items {
+			if item.ID == m.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			capability := Image
+			if m.Kind == "video" {
+				capability = Video
+			}
+			items = append(items, Spec{m.ID, m.Name, "google", created, capability, true})
+		}
 	}
 	return items
 }

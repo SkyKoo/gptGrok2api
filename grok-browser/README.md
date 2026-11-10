@@ -1,6 +1,6 @@
-# CFM Grok Browser Worker
+# CFM Browser Worker
 
-这是 CFM 的内部浏览器 worker，负责在隔离的 Chromium/Xvfb 进程中运行 xAI 原生邮箱注册页面。CFM 主进程继续负责邮箱收码、任务、日志、重试和账号保存。
+这是 CFM 的共享浏览器 Worker，运行 Grok 原生注册、xAI 授权和 Adobe Firefly 注册/会话维护。Go 主进程负责邮箱收码、任务、日志和账号保存。Compose 服务与容器默认名为 `cfm-browser-worker`；源码目录保留 `grok-browser/`，旧 DNS 名作为兼容别名。
 
 `POST /v1/session/start` 启动持久页面；`/send-email` 点击原生邮箱注册并发起验证码；`/verify-email` 填写验证码；`/signup` 在同一页面完成 Turnstile、Castle 和账号创建并返回 SSO；`/v1/session/close` 释放会话。
 
@@ -8,7 +8,7 @@ Turnstile 和 Castle 只使用目标注册页的真实状态；worker 不提供 
 
 worker 只应通过 Docker 内网访问，注册任务和邮箱验证码仍由 CFM 管理；密码只在最终页面操作时短暂传给 worker，不写入 worker 日志或持久状态。
 
-本服务只应通过 Docker 内网访问，可用 `GROK_BROWSER_TOKEN` 增加 Bearer 认证。`TURNSTILE_HEADLESS=0` 时通过 Xvfb 运行 headed Chromium，用户不会看到窗口。
+本服务只应通过 Docker 内网访问，可用 `CFM_BROWSER_WORKER_TOKEN` 增加 Bearer 认证（兼容 `GROK_BROWSER_TOKEN`）。`TURNSTILE_HEADLESS=0` 时通过 Xvfb 运行 headed Chromium，用户不会看到窗口。
 
 每个 Grok 注册任务都有自己的浏览器环境记录；它不会复用 GPT 的 Cookie、登录会话或页面状态，但会使用相同的 profile 数据结构保持浏览器身份字段一致。CFM 会把该任务的非敏感字段（UA、语言、时区、窗口尺寸和 DPR）传给 worker，worker 只应用经过筛选的字段，不接收账号密码、Cookie 或验证码。
 
@@ -55,3 +55,43 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 离线测试：`python3 grok-browser/test_oauth_device.py -v`（从仓库根执行）；使用模拟页面，无需真实 SSO。Go 的 `internal/oauth` 与 `internal/httpapi` 测试覆盖 Token 身份校验、队列去重、恢复、取消和秘密字段不泄漏。实际 xAI 登录态与授权页的端到端验收需单独授权真实测试账号。
 
 HTTP(S) 代理网关允许空路径或根路径 `/`。Go 的 Resin 出口和 Worker 浏览器启动入口会在使用时去掉根路径，避免 Chromium 的认证代理参数触发 `ERR_NO_SUPPORTED_PROXIES`；保存的配置和既有任务 endpoint_hash 不迁移。Worker 拒绝带子路径、查询参数或片段的 HTTP(S) 代理，返回脱敏的 `proxy_configuration_invalid`（HTTP422）；CFM 将该错误归为需要人工修正，不自动补偿。此修复只保证代理参数可被浏览器接受，不代表 Resin 上游节点或完整注册流程已经通过验证。
+
+
+## Adobe 注册和会话维护
+
+Python/FastAPI 与 Node/CloakBrowser 驱动处于同一个镜像，统一由 `BrowserQueue`
+创建和关闭浏览器；当前许可并发保持 1。Adobe 不另起独立 Worker 容器，Grok 与
+Adobe 不共享登录 Cookie 或账号目录。Node 子进程失去应答后禁止继续发送业务动作，
+浏览器及子进程关闭确认前不释放队列容量。
+
+`POST /v1/browser/reservations` 通过 `provider=adobe` 创建会话，`profile_id` 是受校验的
+任务标识；`POST /v1/adobe/run` 只接受 `run`、`verify` 和 `refresh`。注册的创建和
+邮箱验证分别有持久提交标记，结果未知不再次提交。遇到可见人机验证、手机号或未识别
+表单时返回人工处理状态。CFM 使用 Adobe 发件人域过滤邮箱验证码。
+
+账号刷新先用 IMS Cookie 协议；浏览器回退读取同账号的持久 profile。SDK 就绪采用
+有界只读轮询，核对邮箱、上游账号 ID 及邮件验证状态后才返回 Token。若没有登录态且
+保存了密码，回退只提交已有账号登录表单，各表单至多一次；出现 OTP/MFA/人机验证
+则停止，不跳到创建账号。完整身份核对仍是返回凭据的必要条件。
+
+私密资料位于挂载的 `./data/browser-worker/adobe/<profile_id>/`：`state.json` 保存
+注册恢复状态和必要凭据（0600），`browser/` 保存浏览器登录资料（0700）。Worker 模式
+不写独立导入文件或账号截图。目录必须纳入加密备份且不可公开；浏览器缓存、临时
+Singleton 锁不属于恢复资料。复制离线 profile 时只能清除复制副本中的陈旧 Singleton
+锁，不能操作仍被浏览器使用的原目录。许可/二进制缓存使用 `/data/cloakbrowser`，
+不得把许可文件提交到 Git。Go 注册恢复日志为 `adobe_registration_tasks.enc.json`，
+其 JSON envelope 中的 `data` 使用 AES-GCM 加密。
+
+2026-11-11 本机验证：共享 Worker 镜像由已有浏览器基础镜像构建；对已注册账号的
+离线 profile 副本，通过显式本机代理进行一次成功会话刷新，取得身份匹配的新 Token
+和 IMS Cookie，未进行新注册或生成。该次首页 Sherlock 仅包含 sid/ftr，不能视为
+完整媒体会话已刷新；后续只读编辑页初始化未完成。实现会返回
+`media_session_refreshed=false` 和空媒体 Cookie，保留账户原有完整媒体 Cookie。
+已有账号密码登录回退仅离线验证，最后一次实际准备在浏览器启动阶段即失败，未进入
+登录表单。刷新后队列容量恢复为 1。这证明当前会话可恢复，
+不代表可以无限期免登录，也不能据此推断免费模型额度。
+
+离线验证应在 Docker 内执行，例如挂载源码后运行 `python -m unittest discover -s
+/tests -p 'test_*.py'`，以及在 Adobe 目录执行 `node --test *.test.mjs`。测试不需要真实
+账号或公网访问。镜像构建可使用 `GROK_BROWSER_BASE_IMAGE` 指定已有兼容 Python
+Playwright 镜像以复用缓存；Node 层使用 Playwright 1.65 的 Node 26 运行时。

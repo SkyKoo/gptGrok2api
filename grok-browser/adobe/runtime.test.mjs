@@ -1,0 +1,124 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { launchPersistentBrowser, browserProxy } from './browser-runtime.mjs';
+
+test('proxy root slash is normalized and credentials remain separate from the server', () => {
+  assert.equal(browserProxy(''), undefined);
+  assert.deepEqual(browserProxy('http://host.docker.internal:7897/'), { server: 'http://host.docker.internal:7897' });
+  assert.deepEqual(browserProxy('http://fixture:p%40ss@proxy.example.test:8080/'), {
+    server: 'http://proxy.example.test:8080', username: 'fixture', password: 'p@ss',
+  });
+  for (const raw of ['http://proxy.test/path', 'http://proxy.test/?secret=fixture',
+    'http://proxy.test/#fragment', 'socks5://proxy.test:1080', 'not-a-url', 'http://proxy.test/\n']) {
+    assert.throws(() => browserProxy(raw), error => error.code === 'browser_proxy_invalid' && !error.message.includes(raw));
+  }
+});
+
+test('both browser backends receive only the explicit normalized proxy', async () => {
+  for (const backend of ['playwright', 'cloakbrowser']) {
+    let captured;
+    await launchPersistentBrowser('/fixture/browser', {}, {
+      env: { ADOBE_BROWSER_BACKEND: backend, ADOBE_BROWSER_PROXY: 'http://host.docker.internal:7897/' },
+      importer: async () => backend === 'cloakbrowser'
+        ? { launchPersistentContext: async options => { captured = options; } }
+        : { chromium: { launchPersistentContext: async (_path, options) => { captured = options; } } },
+    });
+    assert.deepEqual(captured.proxy, { server: 'http://host.docker.internal:7897' });
+    assert.equal(captured.viewport, null);
+  }
+  await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
+    env: { ADOBE_BROWSER_PROXY: 'http://proxy.test/bad-path' },
+    importer: async () => assert.fail('invalid proxy must fail before launching'),
+  }), error => error.code === 'browser_proxy_invalid');
+});
+
+test('container Chromium retains the requested disk profile and native context lifecycle', async () => {
+  let closed = false;
+  const context = { close: async () => { closed = true; } };
+  const calls = [];
+  const result = await launchPersistentBrowser('/private-fixture/browser', { headless: false }, {
+    env: { ADOBE_BROWSER_CHANNEL: 'chromium' },
+    importer: async name => {
+      assert.equal(name, 'playwright');
+      return { chromium: { launchPersistentContext: async (...args) => { calls.push(args); return context; } } };
+    },
+  });
+  assert.equal(result, context);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], '/private-fixture/browser');
+  const options = calls[0][1];
+  assert.equal(options.channel, 'chromium');
+  assert.equal(options.viewport, null);
+  assert.equal(options.headless, false);
+  assert.equal(options.timeout, 30_000);
+  assert.ok(options.args.includes('--restore-last-session'));
+  for (const key of ['userAgent', 'locale', 'timezoneId', 'deviceScaleFactor']) {
+    assert.equal(Object.hasOwn(options, key), false);
+  }
+  await result.close();
+  assert.equal(closed, true);
+});
+
+test('existing host usage still selects installed Chrome', async () => {
+  await launchPersistentBrowser('/fixture/browser', { headless: true }, {
+    env: {},
+    importer: async () => ({ chromium: { launchPersistentContext: async (_directory, options) => {
+      assert.equal(options.channel, 'chrome');
+      assert.equal(options.headless, true);
+    } } }),
+  });
+});
+
+test('CloakBrowser uses its persistent API without passing a Chrome channel or protocol identity', async () => {
+  let calls = 0;
+  const context = {};
+  const result = await launchPersistentBrowser('/fixture/retained-profile', {}, {
+    env: { ADOBE_BROWSER_BACKEND: 'cloakbrowser', ADOBE_BROWSER_CHANNEL: 'chromium' },
+    importer: async name => {
+      assert.equal(name, 'cloakbrowser');
+      return { launchPersistentContext: async options => {
+        calls++;
+        assert.equal(options.userDataDir, '/fixture/retained-profile');
+        assert.equal(options.viewport, null);
+        assert.equal(options.headless, false);
+        assert.equal(options.humanize, true);
+        assert.deepEqual(options.launchOptions, { timeout: 30_000 });
+        assert.deepEqual(options.args, ['--restore-last-session', '--window-size=1440,900']);
+        for (const key of ['channel', 'contextOptions', 'userAgent', 'locale', 'timezone', 'deviceScaleFactor']) {
+          assert.equal(Object.hasOwn(options, key), false);
+        }
+        return context;
+      } };
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result, context);
+});
+
+test('unknown backends and channels stop before importing or launching any browser', async () => {
+  for (const [env, code] of [
+    [{ ADOBE_BROWSER_BACKEND: 'unknown' }, 'browser_backend_invalid'],
+    [{ ADOBE_BROWSER_CHANNEL: 'unknown' }, 'browser_channel_invalid'],
+  ]) {
+    await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
+      env, importer: async () => { assert.fail('must not load invalid runtime'); },
+    }), error => error.code === code);
+  }
+});
+
+test('missing or failed CloakBrowser never silently falls back to another backend', async () => {
+  const imported = [];
+  await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
+    env: { ADOBE_BROWSER_BACKEND: 'cloakbrowser' },
+    importer: async name => { imported.push(name); throw new Error('private implementation details'); },
+  }), error => error.code === 'browser_backend_unavailable' && !error.message.includes('private'));
+  assert.deepEqual(imported, ['cloakbrowser']);
+
+  const launchError = new Error('simulated browser launch failure');
+  let launches = 0;
+  await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
+    env: { ADOBE_BROWSER_BACKEND: 'cloakbrowser' },
+    importer: async () => ({ launchPersistentContext: async () => { launches++; throw launchError; } }),
+  }), error => error === launchError);
+  assert.equal(launches, 1);
+});

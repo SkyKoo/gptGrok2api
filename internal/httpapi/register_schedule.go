@@ -10,7 +10,7 @@ import (
 )
 
 func (s *Server) registrationScheduleForTarget(target string) *registerruntime.Schedule {
-	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule} {
+	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule, s.adobeRegistrationSchedule} {
 		if schedule != nil && schedule.Snapshot().Target == target {
 			return schedule
 		}
@@ -60,6 +60,8 @@ func (s *Server) registrationScheduleAPI(w http.ResponseWriter, r *http.Request)
 			var err error
 			if target == "grok" {
 				_, err = registerruntime.ParseGrokConfig(config)
+			} else if target == "adobe" {
+				_, err = registerruntime.ParseAdobeConfig(config)
 			} else {
 				_, err = registerruntime.ParseFreeConfig(config)
 			}
@@ -103,12 +105,12 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 	if s.registrationClosing {
 		return
 	}
-	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule} {
+	for _, schedule := range []*registerruntime.Schedule{s.registrationSchedule, s.registrationExtraSchedule, s.adobeRegistrationSchedule} {
 		if schedule == nil {
 			continue
 		}
 		target := schedule.Snapshot().Target
-		if target != "openai" && target != "grok" {
+		if target != "openai" && target != "grok" && target != "adobe" {
 			continue
 		}
 		_ = schedule.RunDue(now, func() error {
@@ -119,6 +121,8 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 			var err error
 			if target == "grok" {
 				_, err = s.grokRegister.Start(config)
+			} else if target == "adobe" {
+				_, err = s.adobeRegister.Start(config)
 			} else {
 				_, err = s.freeRegister.Start(config)
 			}

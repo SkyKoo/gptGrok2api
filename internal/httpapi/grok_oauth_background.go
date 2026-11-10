@@ -176,7 +176,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 		}
 	}
 	config := mapValue(s.registerStore.Get()["grok"])
-	base := firstNonEmpty(stringValue(config["api_base"]), os.Getenv("CFM_GROK_BROWSER_URL"), "http://grok-browser:8899")
+	base := firstNonEmpty(stringValue(config["api_base"]), os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"), "http://cfm-browser-worker:8899")
 	setStage := func(stage string) error {
 		if err := guard(); err != nil {
 			return err

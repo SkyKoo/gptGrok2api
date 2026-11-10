@@ -30,6 +30,8 @@ import (
 // in the same volume layout and do not need an additional database.
 
 type imageTaskState struct {
+	Route      *mediaRoute `json:"route,omitempty"`
+	recovering bool
 	provider.ImageOutputOptions
 	ID                   string           `json:"id"`
 	OwnerID              string           `json:"owner_id"`
@@ -112,7 +114,7 @@ func (s *Server) modelCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"object": "model_catalog", "chat_models": chat, "image_models": images,
+		"object": "model_catalog", "chat_models": chat, "image_models": images, "media_capabilities": s.mediaCapabilities(),
 		"image_edit_models": edits, "video_models": videos, "models": public,
 		"discovery":              s.discovery.Summary(s.openAIAccountIDs()),
 		"all_models":             all,
@@ -648,8 +650,14 @@ func (s *Server) imageTasksAPI(w http.ResponseWriter, r *http.Request) {
 			N            int    `json:"n"`
 			Size         string `json:"size"`
 			Quality      string `json:"quality"`
+			Provider     any    `json:"provider"`
+			Channel      any    `json:"channel"`
 		}
 		if !decodeJSON(w, r, &body) {
+			return
+		}
+		if err := validateCallerChannelFields(body.Provider, body.Channel); err != nil {
+			writeImageOptionError(w, err)
 			return
 		}
 		if strings.TrimSpace(body.ClientTaskID) == "" || strings.TrimSpace(body.Prompt) == "" {
@@ -700,6 +708,15 @@ func (s *Server) imageTaskByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "image task not found", "not_found")
 		return
 	}
+	if r.Method == http.MethodPost {
+		if s.resumeAdobeImageTask(task) {
+			s.imageTaskMu.RLock()
+			value := imageTaskPublic(task)
+			s.imageTaskMu.RUnlock()
+			writeJSON(w, 202, value)
+			return
+		}
+	}
 	writeJSON(w, 200, imageTaskPublic(copyTask))
 }
 
@@ -731,6 +748,20 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.MultipartForm.RemoveAll()
+	for _, field := range []string{"provider", "channel"} {
+		for _, value := range r.MultipartForm.Value[field] {
+			var err error
+			if field == "provider" {
+				err = validateCallerChannelFields(value, nil)
+			} else {
+				err = validateCallerChannelFields(nil, value)
+			}
+			if err != nil {
+				writeImageOptionError(w, err)
+				return
+			}
+		}
+	}
 	clientID := strings.TrimSpace(r.FormValue("client_task_id"))
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
 	if clientID == "" || prompt == "" {
@@ -780,7 +811,8 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if isOpenAIImageModel(modelName) && len(files) > 7 {
-		files = files[len(files)-7:]
+		writeError(w, 400, "at most 7 reference images are supported", "invalid_request_error")
+		return
 	}
 	images := make([][]byte, 0, len(files))
 	names := make([]string, 0, len(files))
@@ -806,6 +838,11 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHeader, apiKey string) {
+	s.imageTaskMu.Lock()
+	task.recovering = true
+	s.imageTaskMu.Unlock()
+	defer func() { s.imageTaskMu.Lock(); task.recovering = false; s.imageTaskMu.Unlock() }()
+
 	defer func() {
 		if recover() != nil {
 			s.finishImageTaskError(task, "image task execution failed")
@@ -877,6 +914,7 @@ func (s *Server) runImageTask(ctx context.Context, task *imageTaskState, authHea
 	if apiKey != "" {
 		req.Header.Set("X-API-Key", apiKey)
 	}
+	ctx = context.WithValue(ctx, mediaTaskContextKey{}, task)
 	req = req.WithContext(context.WithValue(ctx, imageTaskLogContextKey{}, imageTaskLogContext{
 		CallID: "image-task-" + imageTaskKey(task.OwnerID, task.ID),
 		TaskID: task.ID,

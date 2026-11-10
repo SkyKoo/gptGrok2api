@@ -39,7 +39,7 @@ func (s *Store) SetPlatformStatus(ctx context.Context, id, platform, requested s
 		return Mailbox{}, ErrMailboxNotFound
 	}
 	id, platform, requested = strings.TrimSpace(id), strings.ToLower(strings.TrimSpace(platform)), strings.ToLower(strings.TrimSpace(requested))
-	if platform != "" && platform != "openai" && platform != "grok" {
+	if platform != "" && platform != "openai" && platform != "grok" && platform != "adobe" {
 		return Mailbox{}, ErrInvalidMailboxPlatform
 	}
 	if requested != "available" && requested != "disabled" {
@@ -68,7 +68,7 @@ func (s *Store) SetPlatformStatus(ctx context.Context, id, platform, requested s
 	}
 	if current.Status == "disabled" {
 		// Preserve the other channel when enabling one channel of a legacy asset.
-		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_registration_blocks(mailbox_id,platform) VALUES ($1,'openai'),($1,'grok') ON CONFLICT DO NOTHING`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO mailbox_registration_blocks(mailbox_id,platform) VALUES ($1,'openai'),($1,'grok'),($1,'adobe') ON CONFLICT DO NOTHING`, id); err != nil {
 			return Mailbox{}, err
 		}
 	}
@@ -92,7 +92,7 @@ func (s *Store) SetPlatformStatus(ctx context.Context, id, platform, requested s
 		return Mailbox{}, err
 	}
 	if requested == "disabled" {
-		_, err = tx.ExecContext(ctx, `INSERT INTO mailbox_registration_blocks(mailbox_id,platform) SELECT $1,p FROM (VALUES ('openai'),('grok')) channels(p) WHERE $2='' OR p=$2 ON CONFLICT DO NOTHING`, id, platform)
+		_, err = tx.ExecContext(ctx, `INSERT INTO mailbox_registration_blocks(mailbox_id,platform) SELECT $1,p FROM (VALUES ('openai'),('grok'),('adobe')) channels(p) WHERE $2='' OR p=$2 ON CONFLICT DO NOTHING`, id, platform)
 	} else {
 		_, err = tx.ExecContext(ctx, `DELETE FROM mailbox_registration_blocks WHERE mailbox_id=$1 AND ($2='' OR platform=$2)`, id, platform)
 	}
@@ -100,7 +100,7 @@ func (s *Store) SetPlatformStatus(ctx context.Context, id, platform, requested s
 		return Mailbox{}, err
 	}
 	updated, err := scanMailbox(tx.QueryRowContext(ctx, `UPDATE mailboxes SET status=CASE
-  WHEN (SELECT count(*) FROM mailbox_registration_blocks WHERE mailbox_id=$1)=2 THEN 'disabled'
+  WHEN (SELECT count(*) FROM mailbox_registration_blocks WHERE mailbox_id=$1)=3 THEN 'disabled'
   WHEN EXISTS(SELECT 1 FROM mailbox_claims WHERE mailbox_id=$1 AND status IN ('reserved','active')) THEN 'active'
   ELSE 'available' END,updated_at=now() WHERE id=$1 RETURNING `+mailboxColumns, id))
 	if err != nil {

@@ -329,7 +329,7 @@ func TestAsyncImageEditUsesEditHandler(t *testing.T) {
 	s := imageTaskTestServer(t)
 	task := &imageTaskState{ID: "edit-one", OwnerID: "api", Mode: "edit", Model: "gpt-image-2", N: 1, Prompt: "edit", Images: [][]byte{[]byte("invalid-image")}, Status: "queued"}
 	s.runImageTask(context.Background(), task, "Bearer api-secret", "")
-	if task.Status != "error" || task.Error != "no available accounts" {
+	if task.Status != "error" || !strings.Contains(task.Error, "no eligible account") {
 		t.Fatalf("edit did not reach image validation: %+v", task)
 	}
 	assertImageTaskCallLog(t, s, "edit-one", "failed", "/v1/images/edits")

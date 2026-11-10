@@ -62,12 +62,18 @@ func mailboxPlatform(account map[string]any) string {
 	mailbox := mapValue(account["registration_mailbox"])
 	for _, key := range []string{"platform", "source_type", "type"} {
 		value := strings.ToLower(strings.TrimSpace(stringValue(mailbox[key])))
+		if value == "adobe" {
+			return "adobe"
+		}
 		if value == "grok" || value == "xai" {
 			return "grok"
 		}
 	}
 	for _, key := range []string{"platform", "source_type", "type"} {
 		value := strings.ToLower(strings.TrimSpace(stringValue(account[key])))
+		if value == "adobe" || strings.HasPrefix(value, "adobe_") {
+			return "adobe"
+		}
 		if value == "grok" || value == "xai" || strings.Contains(value, "grok") {
 			return "grok"
 		}

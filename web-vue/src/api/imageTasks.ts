@@ -1,3 +1,4 @@
+import { mediaCapability } from '@/lib/mediaCapabilities'
 import apiClient from './client'
 
 export type ImageTaskStatus = 'queued' | 'running' | 'success' | 'error'
@@ -203,6 +204,14 @@ export function supportsHighResolutionImageSizes(model: string) {
 
 export function resolveImageSizePresets(model: string): ImageSizePreset[] {
   const value = String(model || '').toLowerCase()
+  const sizes = mediaCapability(model)?.sizes
+  if (sizes?.length) return sizes.map(size => {
+    if (size === 'auto') return AUTO_IMAGE_SIZE_PRESET[0]!
+    const [width = 1024, height = 1024] = size.split('x').map(Number)
+    const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a
+    const divisor = gcd(width, height)
+    return { value: size, label: size, ratio: `${width / divisor}:${height / divisor}`, resolution: (Math.max(width, height) > 2048 ? '4K' : Math.max(width, height) > 1792 ? '2K' : '1K') as ImageSizeResolution }
+  })
   if (value === 'grok-imagine-image-lite') return AUTO_IMAGE_SIZE_PRESET
   if (value === 'grok-imagine-image-edit') return GROK_IMAGE_SIZE_PRESETS.slice(0, 2)
   if (value.startsWith('grok-imagine-image')) return GROK_IMAGE_SIZE_PRESETS

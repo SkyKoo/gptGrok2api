@@ -61,6 +61,10 @@ type MailboxView struct {
 	Mailbox
 	OpenAIRetired  bool       `json:"openai_retired"`
 	GrokRetired    bool       `json:"grok_retired"`
+	AdobeRetired   bool       `json:"adobe_retired"`
+	AdobeDisabled  bool       `json:"adobe_disabled"`
+	AdobeClaimed   bool       `json:"adobe_claimed"`
+	AdobeReserved  bool       `json:"adobe_reserved"`
 	OpenAIDisabled bool       `json:"openai_disabled"`
 	GrokDisabled   bool       `json:"grok_disabled"`
 	OpenAIClaimed  bool       `json:"openai_claimed"`
@@ -99,7 +103,7 @@ var (
 	ErrMailboxRegistrationRetired  = errors.New("邮箱已使用该平台注册且账号已删除，不可再次注册，请同步清理上游邮箱")
 	ErrMailboxNotFound             = errors.New("mailbox not found")
 	ErrMailboxRegistrationDisabled = errors.New("邮箱已禁用该渠道注册")
-	ErrInvalidMailboxPlatform      = errors.New("mailbox platform must be openai or grok")
+	ErrInvalidMailboxPlatform      = errors.New("mailbox platform must be openai, grok or adobe")
 	ErrInvalidMailboxStatus        = errors.New("mailbox status must be available or disabled")
 	ErrMailboxStateImmutable       = errors.New("mailbox is pending cleanup or deleted")
 	ErrMailboxInUse                = errors.New("邮箱仍被平台占用，请先删除关联账号或结束注册任务")
@@ -191,7 +195,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS mailboxes_status_idx ON mailboxes (status, updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_registration_blocks (
 			mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-			platform text NOT NULL CHECK (platform IN ('openai','grok')),
+			platform text NOT NULL CHECK (platform IN ('openai','grok','adobe')),
 			PRIMARY KEY (mailbox_id, platform)
 		)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_claims (
@@ -231,15 +235,22 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS mailbox_events_mailbox_idx ON mailbox_events (mailbox_id, created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_registration_retirements (
             mailbox_id text NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-            platform text NOT NULL CHECK (platform IN ('openai','grok')),
+            platform text NOT NULL CHECK (platform IN ('openai','grok','adobe')),
             retired_at timestamptz NOT NULL DEFAULT now(),
             PRIMARY KEY (mailbox_id, platform)
         )`,
+		// Extend existing CHECK constraints as well as new-table definitions.
+		`ALTER TABLE mailbox_registration_blocks DROP CONSTRAINT IF EXISTS mailbox_registration_blocks_platform_check`,
+		`ALTER TABLE mailbox_registration_blocks ADD CONSTRAINT mailbox_registration_blocks_platform_check CHECK (platform IN ('openai','grok','adobe'))`,
+		`ALTER TABLE mailbox_registration_retirements DROP CONSTRAINT IF EXISTS mailbox_registration_retirements_platform_check`,
+		`ALTER TABLE mailbox_registration_retirements ADD CONSTRAINT mailbox_registration_retirements_platform_check CHECK (platform IN ('openai','grok','adobe'))`,
+		// Preserve legacy globally disabled assets across the third-channel migration.
+		`INSERT INTO mailbox_registration_blocks(mailbox_id,platform) SELECT id,p FROM mailboxes CROSS JOIN (VALUES ('openai'),('grok'),('adobe')) channels(p) WHERE status='disabled' ON CONFLICT DO NOTHING`,
 		// Only account-deletion events prove historical use; ordinary failed
 		// reservation releases must remain eligible for registration retries.
 		`INSERT INTO mailbox_registration_retirements(mailbox_id,platform,retired_at)
          SELECT mailbox_id,platform,min(created_at) FROM mailbox_events
-         WHERE event_type='account_claim_released' AND platform IN ('openai','grok')
+         WHERE event_type='account_claim_released' AND platform IN ('openai','grok','adobe')
          GROUP BY mailbox_id,platform ON CONFLICT DO NOTHING`,
 		`CREATE INDEX IF NOT EXISTS mailbox_events_created_idx ON mailbox_events (created_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS mailbox_sources (
@@ -863,11 +874,11 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 			conditions = append(conditions, "m.status NOT IN ('disabled','cleanup_pending','deleted') AND NOT EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='active') AND EXISTS (SELECT 1 FROM mailbox_claims c WHERE c.mailbox_id=m.id AND c.status='reserved')")
 		case "retired":
 			conditions = append(conditions, "(m.status<>'deleted' AND EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id))")
-		case "retired_openai", "retired_grok":
+		case "retired_openai", "retired_grok", "retired_adobe":
 			conditions = append(conditions, "(m.status<>'deleted' AND EXISTS (SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform="+addArg(strings.TrimPrefix(status, "retired_"))+"))")
 		case "disabled":
 			conditions = append(conditions, "(m.status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id))")
-		case "disabled_openai", "disabled_grok":
+		case "disabled_openai", "disabled_grok", "disabled_adobe":
 			conditions = append(conditions, "(m.status='disabled' OR EXISTS (SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform="+addArg(strings.TrimPrefix(status, "disabled_"))+"))")
 		default:
 			conditions = append(conditions, "m.status="+addArg(status))
@@ -877,7 +888,7 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 		conditions = append(conditions, "m.source_id="+addArg(sourceID))
 	}
 	switch platform := strings.TrimSpace(strings.ToLower(filter.Platform)); platform {
-	case "openai", "grok":
+	case "openai", "grok", "adobe":
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.platform="+addArg(platform)+" AND fp.status='active')")
 	case "reserved":
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM mailbox_claims fp WHERE fp.mailbox_id=m.id AND fp.status='reserved')")
@@ -897,7 +908,10 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 		EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='openai'),
         EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='grok'),
 		COALESCE(bool_or(c.platform='openai' AND c.status='active'),false), COALESCE(bool_or(c.platform='grok' AND c.status='active'),false),
-		COALESCE(bool_or(c.platform='openai' AND c.status='reserved'),false), COALESCE(bool_or(c.platform='grok' AND c.status='reserved'),false)
+		COALESCE(bool_or(c.platform='openai' AND c.status='reserved'),false), COALESCE(bool_or(c.platform='grok' AND c.status='reserved'),false),
+        (m.status='disabled' OR EXISTS(SELECT 1 FROM mailbox_registration_blocks b WHERE b.mailbox_id=m.id AND b.platform='adobe')),
+        EXISTS(SELECT 1 FROM mailbox_registration_retirements r WHERE r.mailbox_id=m.id AND r.platform='adobe'),
+        COALESCE(bool_or(c.platform='adobe' AND c.status='active'),false), COALESCE(bool_or(c.platform='adobe' AND c.status='reserved'),false)
 		FROM mailboxes m LEFT JOIN mailbox_claims c ON c.mailbox_id=m.id `+where+` GROUP BY m.id ORDER BY m.updated_at DESC LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder, args...)
 	if err != nil {
 		return nil, 0, err
@@ -906,14 +920,14 @@ func (s *Store) List(ctx context.Context, page, pageSize int, filter MailboxList
 	views := []MailboxView{}
 	for rows.Next() {
 		var view MailboxView
-		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIRetired, &view.GrokRetired, &view.OpenAIClaimed, &view.GrokClaimed, &view.OpenAIReserved, &view.GrokReserved); err != nil {
+		if err := rows.Scan(&view.ID, &view.SourceID, &view.SourceType, &view.SourceAccountID, &view.SourceMailboxID, &view.Email, &view.Status, &view.LastError, &view.CreatedAt, &view.UpdatedAt, &view.LastSyncAt, &view.OpenAIDisabled, &view.GrokDisabled, &view.OpenAIRetired, &view.GrokRetired, &view.OpenAIClaimed, &view.GrokClaimed, &view.OpenAIReserved, &view.GrokReserved, &view.AdobeDisabled, &view.AdobeRetired, &view.AdobeClaimed, &view.AdobeReserved); err != nil {
 			return nil, 0, err
 		}
 		if view.Status != "disabled" && view.Status != "cleanup_pending" && view.Status != "deleted" {
 			switch {
-			case view.OpenAIClaimed || view.GrokClaimed:
+			case view.OpenAIClaimed || view.GrokClaimed || view.AdobeClaimed:
 				view.Status = "active"
-			case view.OpenAIReserved || view.GrokReserved:
+			case view.OpenAIReserved || view.GrokReserved || view.AdobeReserved:
 				view.Status = "reserved"
 			default:
 				view.Status = "available"

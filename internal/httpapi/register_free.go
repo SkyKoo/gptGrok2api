@@ -124,7 +124,7 @@ func (s *Server) registrationSnapshot() map[string]any {
 func (s *Server) registrationSnapshotForTarget(target string) map[string]any {
 	value := s.registerStore.ConfigForTarget(target)
 	states := map[string]any{}
-	for name, state := range map[string]map[string]any{"openai": s.freeRegister.Snapshot(), "grok": s.grokRegister.Snapshot()} {
+	for name, state := range map[string]map[string]any{"openai": s.freeRegister.Snapshot(), "grok": s.grokRegister.Snapshot(), "adobe": s.adobeRegistrationSnapshot()} {
 		runtime := map[string]any{"enabled": state["running"], "runtime_error": state["error"], "registration_schedule": s.registrationScheduleSnapshot(name)}
 		for _, key := range []string{"stats", "logs", "jobs", "compensation_error", "jobs_total", "jobs_page", "jobs_page_size"} {
 			runtime[key] = state[key]
@@ -242,6 +242,11 @@ func (s *Server) ShutdownRegistration(ctx context.Context) error {
 	if err := s.grokRegister.Shutdown(ctx); err != nil {
 		return err
 	}
+	if s.adobeRegister != nil {
+		if err := s.adobeRegister.Shutdown(ctx); err != nil {
+			return err
+		}
+	}
 	if s.mailboxStore != nil {
 		return s.mailboxStore.Close()
 	}
@@ -258,6 +263,10 @@ func writeRegistrationJSON(w http.ResponseWriter, status int, value any) {
 func redactHMECredentials(value any) {
 	switch v := value.(type) {
 	case map[string]any:
+		if a, ok := v["adobe"].(map[string]any); ok {
+			a["api_key_set"] = stringValue(a["api_key"]) != ""
+			delete(a, "api_key")
+		}
 		if stringValue(v["type"]) == "icloud_hme" {
 			if password, exists := v["admin_password"]; exists {
 				v["admin_password_set"] = stringValue(password) != ""
@@ -272,4 +281,11 @@ func redactHMECredentials(value any) {
 			redactHMECredentials(child)
 		}
 	}
+}
+
+func (s *Server) adobeRegistrationSnapshot() map[string]any {
+	if s.adobeRegister == nil {
+		return map[string]any{"running": false, "jobs": []any{}, "logs": []any{}}
+	}
+	return s.adobeRegister.Snapshot()
 }

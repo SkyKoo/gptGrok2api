@@ -1,7 +1,10 @@
+import { mediaCapability, mediaReferenceLimit, validateMediaCombination } from './mediaCapabilities.ts'
 export const GROK_IMAGE_REFERENCE_LIMIT = 5
 export const GROK_VIDEO_REFERENCE_LIMIT = 7
 
 export function studioReferenceLimit(mode: string, imageModel: string) {
+  const confirmed = mediaReferenceLimit(imageModel)
+  if ((mode === 'video' || mode === 'image') && confirmed !== undefined) return confirmed
   if (mode === 'video') return GROK_VIDEO_REFERENCE_LIMIT
   if (mode === 'image' && imageModel.startsWith('grok-')) return GROK_IMAGE_REFERENCE_LIMIT
   return 8
@@ -10,7 +13,7 @@ export function studioReferenceLimit(mode: string, imageModel: string) {
 export function studioReferenceCountError(mode: string, imageModel: string, count: number) {
   const limit = studioReferenceLimit(mode, imageModel)
   if (count <= limit) return ''
-  const label = mode === 'video' ? 'Grok 视频' : mode === 'image' && imageModel.startsWith('grok-') ? 'Grok 生图' : '当前模式'
+  const label = mode === 'video' ? '当前视频模型' : mode === 'image' && imageModel.startsWith('grok-') ? 'Grok 生图' : '当前模式'
   return `${label}最多支持 ${limit} 张参考图，当前 ${count} 张，请减少参考图数量`
 }
 
@@ -40,6 +43,8 @@ export function validateStudioImageModel(model: string, hasReferences: boolean) 
 }
 
 export interface StudioVideoOptions {
+  model?: string
+  audio?: boolean
   seconds: number
   size: string
   resolution: string
@@ -57,22 +62,27 @@ export const VIDEO_PRESET_OPTIONS = [
   { label: '自定义', value: 'custom' }, { label: '普通', value: 'normal' },
   { label: '趣味', value: 'fun' }, { label: '大胆', value: 'spicy' },
 ]
-export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
+export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { model: 'grok-imagine-video', audio: false, seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
 
 export function buildVideoForm(prompt: string, options: StudioVideoOptions, files: File[]) {
-  if (!VIDEO_DURATION_OPTIONS.some(option => Number(option.value) === options.seconds)) throw new Error('请选择 1～6 秒的视频时长')
-  if (!VIDEO_SIZE_OPTIONS.some(option => option.value === options.size)) throw new Error('请选择支持的视频比例')
-  if (!['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
+  const model = options.model || 'grok-imagine-video'
+  const capability = mediaCapability(model)
+  if (!capability && model !== 'grok-imagine-video') throw new Error('视频模型能力尚未加载，请刷新模型目录')
+  validateMediaCombination(model, { size: options.size, seconds: options.seconds, resolution: options.resolution, audio: options.audio, references: files.length })
+  if (!capability && !VIDEO_DURATION_OPTIONS.some(option => Number(option.value) === options.seconds)) throw new Error('请选择 1～6 秒的视频时长')
+  if (!capability && !VIDEO_SIZE_OPTIONS.some(option => option.value === options.size)) throw new Error('请选择支持的视频比例')
+  if (!capability && !['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
   const preset = options.preset || 'custom'
-  if (!VIDEO_PRESET_OPTIONS.some(option => option.value === preset)) throw new Error('请选择支持的视频风格')
-  validateStudioReferenceCount('video', '', files.length)
+  if (model.startsWith('grok-') && !VIDEO_PRESET_OPTIONS.some(option => option.value === preset)) throw new Error('请选择支持的视频风格')
+  validateStudioReferenceCount('video', model, files.length)
   const form = new FormData()
-  form.set('model', 'grok-imagine-video')
+  form.set('model', model)
   form.set('prompt', prompt)
   form.set('seconds', String(options.seconds))
   form.set('size', options.size)
   form.set('resolution_name', options.resolution)
-  form.set('preset', preset)
+  if (model.startsWith('grok-')) form.set('preset', preset)
+  if (!model.startsWith('grok-') && options.audio !== undefined) form.set('generate_audio', String(options.audio))
   files.forEach(file => form.append('input_reference', file))
   return form
 }

@@ -1,12 +1,22 @@
 ARG GROK_BROWSER_BASE_IMAGE=mcr.microsoft.com/playwright/python:v1.61.0-noble
+FROM mcr.microsoft.com/playwright:v1.65.0-noble AS adobe-node
 FROM ${GROK_BROWSER_BASE_IMAGE}
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TURNSTILE_HEADLESS=0 \
-    TURNSTILE_CONCURRENCY=1
+    TURNSTILE_CONCURRENCY=1 \
+    CLOAKBROWSER_CACHE_DIR=/data/cloakbrowser \
+    CLOAKBROWSER_AUTO_UPDATE=false
 
+COPY --from=adobe-node /usr/bin/node /usr/local/bin/node
+COPY --from=adobe-node /usr/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 WORKDIR /app
+COPY grok-browser/adobe/package*.json ./adobe/
+RUN cd adobe && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --omit=dev --ignore-scripts
+COPY grok-browser/adobe ./adobe
+COPY grok-browser/adobe_flow.py ./adobe_flow.py
 COPY grok-browser/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY grok-browser/server.py ./server.py

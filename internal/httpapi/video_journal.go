@@ -12,6 +12,10 @@ import (
 )
 
 type videoCheckpoint struct {
+	Route       *mediaRoute   `json:"route,omitempty"`
+	OwnerID     string        `json:"owner_id,omitempty"`
+	RequestHash string        `json:"request_hash,omitempty"`
+	ClientKey   string        `json:"client_key,omitempty"`
 	Job         videoJob      `json:"job"`
 	ContentFile string        `json:"content_file,omitempty"`
 	Record      monitorRecord `json:"record"`
@@ -56,7 +60,7 @@ func (s *Server) saveVideoCheckpointLocked(job *videoJob) error {
 	if job.savedRecord != nil && (!ok || job.Status == "completed" || job.Status == "failed") {
 		record = *job.savedRecord
 	}
-	checkpoint := videoCheckpoint{Job: copy, Record: record, LogWritten: job.logWritten}
+	checkpoint := videoCheckpoint{Route: job.Route, OwnerID: job.OwnerID, RequestHash: job.RequestHash, ClientKey: job.ClientKey, Job: copy, Record: record, LogWritten: job.logWritten}
 	if job.ContentPath != "" {
 		checkpoint.ContentFile = filepath.Base(job.ContentPath)
 	}
@@ -83,6 +87,10 @@ func (s *Server) loadVideoTasks() {
 			continue
 		}
 		job := saved.Job
+		job.Route = saved.Route
+		job.OwnerID = saved.OwnerID
+		job.RequestHash = saved.RequestHash
+		job.ClientKey = saved.ClientKey
 		job.logWritten = saved.LogWritten
 		if saved.ContentFile != "" && filepath.Base(saved.ContentFile) == saved.ContentFile {
 			job.ContentPath = filepath.Join(s.cfg.VideoDataDir, saved.ContentFile)
@@ -150,7 +158,7 @@ func (s *Server) recoverVideoTasks() {
 	s.videoMu.Lock()
 	pending := []*videoJob{}
 	for _, job := range s.videoJobs {
-		if job.Status != "completed" && job.Status != "failed" {
+		if job.Status != "completed" && job.Status != "failed" && !job.recovering {
 			pending = append(pending, job)
 		} else if !job.logWritten && job.savedRecord != nil {
 			s.writeVideoLogLocked(job, *job.savedRecord)
@@ -158,6 +166,9 @@ func (s *Server) recoverVideoTasks() {
 	}
 	s.videoMu.Unlock()
 	for _, job := range pending {
+		if s.resumeAdobeVideoJob(job) {
+			continue
+		}
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "video_interrupted", "message": "服务重启前视频任务未完成，结果未知；未自动重发生成请求"})
 	}
 }

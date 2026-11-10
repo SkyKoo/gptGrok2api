@@ -117,7 +117,7 @@ func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 		c.Turnstile.Provider = "browser"
 	}
 	c.Turnstile.APIBase = strings.TrimRight(strings.TrimSpace(stringValue(grok["api_base"])), "/")
-	c.Turnstile.APIKey = strings.TrimSpace(stringValue(grok["api_key"]))
+	c.Turnstile.APIKey = firstNonEmpty(strings.TrimSpace(stringValue(grok["api_key"])), os.Getenv("CFM_BROWSER_WORKER_TOKEN"), os.Getenv("GROK_BROWSER_TOKEN"))
 	c.Turnstile.CreatePath = stringValue(grok["create_path"])
 	c.Turnstile.ResultPath = stringValue(grok["result_path"])
 	if c.Turnstile.CreatePath == "" {
@@ -133,9 +133,9 @@ func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 		return c, fail("config", "grok_browser_provider_required")
 	}
 	if c.Turnstile.APIBase == "" {
-		c.Turnstile.APIBase = strings.TrimRight(strings.TrimSpace(os.Getenv("CFM_GROK_BROWSER_URL")), "/")
+		c.Turnstile.APIBase = strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"))), "/")
 		if c.Turnstile.APIBase == "" {
-			c.Turnstile.APIBase = "http://grok-browser:8899"
+			c.Turnstile.APIBase = "http://cfm-browser-worker:8899"
 		}
 	}
 	if c.Turnstile.APIBase == "" {

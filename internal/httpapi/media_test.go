@@ -248,7 +248,7 @@ func TestParseImageEditRequestReportsMissingMultipartBoundary(t *testing.T) {
 	}
 }
 
-func TestImageGenerationsRunsOpenAIBatchesConcurrently(t *testing.T) {
+func TestImageGenerationsPinsBatchToOneAccount(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig()
 	cfg.RootDir = root
@@ -268,6 +268,7 @@ func TestImageGenerationsRunsOpenAIBatchesConcurrently(t *testing.T) {
 
 	var inflight atomic.Int32
 	var peak atomic.Int32
+	var pinnedToken atomic.Value
 	fileID := "file_000000001234567890abcdef12345678"
 	var upstream *httptest.Server
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -285,6 +286,10 @@ func TestImageGenerationsRunsOpenAIBatchesConcurrently(t *testing.T) {
 		case "/backend-api/f/conversation/prepare":
 			_ = json.NewEncoder(w).Encode(map[string]any{"conduit_token": "conduit-token"})
 		case "/backend-api/f/conversation":
+			if previous := pinnedToken.Load(); previous != nil && previous.(string) != r.Header.Get("Authorization") {
+				t.Error("batch switched selected account")
+			}
+			pinnedToken.Store(r.Header.Get("Authorization"))
 			current := inflight.Add(1)
 			for {
 				prev := peak.Load()
@@ -335,8 +340,8 @@ func TestImageGenerationsRunsOpenAIBatchesConcurrently(t *testing.T) {
 	if len(decoded.Data) != 2 {
 		t.Fatalf("expected 2 images, got %d", len(decoded.Data))
 	}
-	if peak.Load() < 2 {
-		t.Fatalf("expected concurrent OpenAI image requests, peak=%d", peak.Load())
+	if peak.Load() != 1 {
+		t.Fatalf("batch exceeded selected-account concurrency, peak=%d", peak.Load())
 	}
 }
 

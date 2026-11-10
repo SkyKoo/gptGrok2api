@@ -20,10 +20,10 @@ export type RegisterConfigRuntimeInput = {
   notifyError: (message: string) => void
   startLiveUpdates?: () => void
 }
-const TARGETS: RegisterTarget[] = ['openai', 'grok']
+const TARGETS: RegisterTarget[] = ['openai', 'grok', 'adobe']
 const RUNTIME_KEYS = ['enabled', 'stats', 'logs', 'jobs', 'jobs_total', 'jobs_page', 'jobs_page_size', 'runtime_error', 'compensation_error', 'registration_schedule'] as const
 const PROVIDER_RUNTIME_KEYS = ['mailboxes_count', 'mailboxes_base_count', 'mailboxes_alias_count', 'mailboxes_preview', 'mailboxes_stats', 'mailboxes_parse_stats', 'mailboxes_failed'] as const
-const label = (target: RegisterTarget) => target === 'grok' ? 'Grok' : 'OpenAI'
+const label = (target: RegisterTarget) => target === 'adobe' ? 'Adobe' : target === 'grok' ? 'Grok' : 'OpenAI'
 const emptyRuntime = () => ({ enabled: false, stats: {}, logs: [], jobs: [], jobs_total: 0, jobs_page: 1, jobs_page_size: 50, runtime_error: '', compensation_error: '' })
 const newControls = () => ({
   saving: false, actionBusy: false,
@@ -39,15 +39,15 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
   // legacy default target or the destination of an in-flight action.
   const selectedTarget = ref<RegisterTarget>('openai')
   const configurations = ref<Partial<Record<RegisterTarget, LegacyRegisterConfig>>>({})
-  const controls = reactive({ openai: newControls(), grok: newControls() })
+  const controls = reactive({ openai: newControls(), grok: newControls(), adobe: newControls() })
   const savedSnapshots = ref<Partial<Record<RegisterTarget, string>>>({})
   const observedDrafts: Partial<Record<RegisterTarget, string>> = {}
   const timers: Partial<Record<RegisterTarget, ReturnType<typeof setTimeout>>> = {}
   const saves: Partial<Record<RegisterTarget, Promise<boolean>>> = {}
   const applyListeners = new Set<() => void>()
   let responseSequence = 0
-  const appliedRuntimeSequence: Record<RegisterTarget, number> = { openai: 0, grok: 0 }
-  const saveRevision: Record<RegisterTarget, number> = { openai: 0, grok: 0 }
+  const appliedRuntimeSequence: Record<RegisterTarget, number> = { openai: 0, grok: 0, adobe: 0 }
+  const saveRevision: Record<RegisterTarget, number> = { openai: 0, grok: 0, adobe: 0 }
   const config = computed({
     get: () => configurations.value[selectedTarget.value] || null,
     set: (value) => { if (value) configurations.value[selectedTarget.value] = value },
@@ -74,7 +74,8 @@ export function useRegisterConfigRuntime(input: RegisterConfigRuntimeInput) {
       target_settings: { [target]: raw.target_settings?.[target] },
       mail: { source_id: String(current.mail.source_id || '').trim() },
     }
-    if (target === 'grok') result.grok = raw.grok
+    if (target === 'adobe') result.adobe = raw.adobe
+    else if (target === 'grok') result.grok = raw.grok
     else {
       result.openai_free = raw.openai_free
       result.checkout = raw.checkout

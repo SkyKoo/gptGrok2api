@@ -111,6 +111,7 @@
               <div class="mt-3 flex flex-wrap gap-1.5">
                 <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailboxOccupancyLabel(mailbox, 'openai') }}</MetaChip>
                 <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailboxOccupancyLabel(mailbox, 'grok') }}</MetaChip>
+                <MetaChip size="xs" :tone="mailbox.adobe_claimed ? 'info' : 'muted'">Adobe {{ mailboxOccupancyLabel(mailbox, 'adobe') }}</MetaChip>
               </div>
               <div class="mt-2 flex flex-wrap gap-1.5">
                 <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'openai') || mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationLabel(mailbox, 'openai') }}</MetaChip>
@@ -317,7 +318,7 @@ function mailboxStatusLabel(mailbox: ICloudMailbox) {
     available: '可用',
     active: '已占用',
     reserved: '注册预留',
-    disabled: '两渠道均禁用',
+    disabled: '全部渠道均禁用',
     cleanup_pending: '待清理',
     deleted: '已删除',
   } as Record<string, string>)[mailbox.status || ''] || mailbox.status || '未知'
@@ -332,13 +333,13 @@ function mailboxEventLabel(event: ICloudMailboxEvent) {
 }
 
 function mailboxLabel(mailbox: ICloudMailbox) {
-  if (mailbox.status === 'disabled') return '两渠道均禁用'
+  if (mailbox.status === 'disabled') return '全部渠道均禁用'
   if (mailbox.status === 'cleanup_pending') return '待清理'
   if (mailbox.status === 'deleted') return '已删除'
-  if (mailbox.openai_claimed && mailbox.grok_claimed) return '两平台均占用'
-  if (mailbox.openai_claimed || mailbox.grok_claimed) return '部分占用'
+  if (mailbox.openai_claimed && mailbox.grok_claimed && mailbox.adobe_claimed) return '全部平台均占用'
+  if (mailbox.openai_claimed || mailbox.grok_claimed || mailbox.adobe_claimed) return '部分占用'
   if (mailboxHasReservation(mailbox)) return '注册预留'
-  if (mailbox.openai_retired || mailbox.grok_retired) return '已使用，待清理'
+  if (mailbox.openai_retired || mailbox.grok_retired || mailbox.adobe_retired) return '已使用，待清理'
   return '可用'
 }
 
@@ -346,10 +347,10 @@ function mailboxTone(mailbox: ICloudMailbox): 'success' | 'info' | 'warning' | '
   if (mailbox.status === 'disabled') return 'muted'
   if (mailbox.status === 'cleanup_pending') return 'warning'
   if (mailbox.status === 'deleted') return 'danger'
-  if (mailbox.openai_claimed && mailbox.grok_claimed) return 'warning'
-  if (mailbox.openai_claimed || mailbox.grok_claimed) return 'info'
+  if (mailbox.openai_claimed && mailbox.grok_claimed && mailbox.adobe_claimed) return 'warning'
+  if (mailbox.openai_claimed || mailbox.grok_claimed || mailbox.adobe_claimed) return 'info'
   if (mailboxHasReservation(mailbox)) return 'warning'
-  if (mailbox.openai_retired || mailbox.grok_retired) return 'warning'
+  if (mailbox.openai_retired || mailbox.grok_retired || mailbox.adobe_retired) return 'warning'
   return 'success'
 }
 

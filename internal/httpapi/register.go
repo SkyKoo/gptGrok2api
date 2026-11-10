@@ -38,9 +38,13 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/reset" && r.Method == http.MethodPost:
 		s.resetRegister(w, r)
 	case path == "/runtime" && r.Method == http.MethodGet:
-		s.registerRuntimeStatus(w)
+		s.registerRuntimeStatus(w, r)
 	case path == "/openai/jobs" && r.Method == http.MethodGet:
 		writeRegistrationJSON(w, http.StatusOK, s.freeRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
+	case path == "/adobe/jobs" && r.Method == http.MethodGet:
+		writeRegistrationJSON(w, http.StatusOK, s.adobeRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
+	case path == "/adobe/retry-result" && r.Method == http.MethodPost:
+		s.retryAdobeRegistration(w, r)
 	case path == "/grok/jobs" && r.Method == http.MethodGet:
 		writeRegistrationJSON(w, http.StatusOK, s.grokRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
 	case path == "/openai/retry-result" && r.Method == http.MethodPost:
@@ -112,7 +116,7 @@ func (s *Server) refreshRegistrationResinChannel() {
 	if s.proxyManager != nil {
 		value := s.registerStore.Get()
 		profiles := mapValue(value["target_settings"])
-		for _, target := range []string{"openai", "grok"} {
+		for _, target := range []string{"openai", "grok", "adobe"} {
 			s.proxyManager.ConfigureResinChannel(proxyruntime.RegistrationResinChannel+":"+target, stringValue(mapValue(profiles[target])["resin_proxy_url"]))
 		}
 		legacy := mapValue(profiles[stringValue(value["legacy_resin_target"])])
@@ -130,7 +134,7 @@ func (s *Server) registrationRequestTarget(w http.ResponseWriter, r *http.Reques
 		}
 		target = strings.ToLower(strings.TrimSpace(values[0]))
 	}
-	if target != "openai" && target != "grok" {
+	if target != "openai" && target != "grok" && target != "adobe" {
 		writeError(w, 400, "不支持的注册渠道", "invalid_request_error")
 		return "", false
 	}
@@ -160,14 +164,17 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 	running := s.freeRegister.Snapshot()["running"] == true
 	if target == "grok" {
 		running = s.grokRegister.Snapshot()["running"] == true
+	} else if target == "adobe" {
+		running = s.adobeRegistrationSnapshot()["running"] == true
 	}
-	if (!scoped && (s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true)) || (scoped && running) {
+	if (!scoped && (s.freeRegister.Snapshot()["running"] == true || s.grokRegister.Snapshot()["running"] == true || s.adobeRegistrationSnapshot()["running"] == true)) || (scoped && running) {
 		writeError(w, http.StatusConflict, "请先停止本渠道注册，再修改该渠道配置", "registration_running")
 		return
 	}
 	for _, key := range []string{"target_runtime", "enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
 		delete(updates, key)
 	}
+	s.mergeAdobeWorkerKey(updates)
 	var err error
 	if scoped {
 		_, err = s.registerStore.UpdateForTarget(target, updates)
@@ -203,6 +210,12 @@ func (s *Server) setRegisterEnabled(w http.ResponseWriter, r *http.Request, enab
 		} else {
 			s.freeRegister.Stop()
 		}
+	} else if target == "adobe" {
+		if enabled {
+			_, err = s.adobeRegister.Start(config)
+		} else {
+			s.adobeRegister.Stop()
+		}
 	} else {
 		if enabled {
 			_, err = s.grokRegister.Start(config)
@@ -231,6 +244,15 @@ func (s *Server) resetRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeRegistrationJSON(w, http.StatusOK, map[string]any{"register": s.registrationSnapshotForTarget(target), "removed": removed})
+		return
+	}
+	if target == "adobe" {
+		removed, err := s.adobeRegister.ClearFinished()
+		if err != nil {
+			registrationError(w, err)
+			return
+		}
+		writeRegistrationJSON(w, 200, map[string]any{"register": s.registrationSnapshotForTarget(target), "removed": removed})
 		return
 	}
 	if target == "grok" {
@@ -471,8 +493,12 @@ func (s *Server) refreshGrokRuntimeSnapshot(w http.ResponseWriter) {
 	})
 }
 
-func (s *Server) registerRuntimeStatus(w http.ResponseWriter) {
-	config := s.registerStore.Get()
+func (s *Server) registerRuntimeStatus(w http.ResponseWriter, r *http.Request) {
+	selected, ok := s.registrationRequestTarget(w, r)
+	if !ok {
+		return
+	}
+	config := s.registerStore.ConfigForTarget(selected)
 	target := stringValue(config["target"])
 	if target == "" {
 		target = "openai"
@@ -497,6 +523,17 @@ func (s *Server) registerRuntimeStatus(w http.ResponseWriter) {
 			state["configuration_error"] = err.Error()
 		}
 		writeRegistrationJSON(w, http.StatusOK, map[string]any{"runtime": state})
+		return
+	}
+	if target == "adobe" {
+		state := s.adobeRegister.Snapshot()
+		_, err := registerruntime.ParseAdobeConfig(config)
+		state["ready"] = err == nil && state["error"] == nil
+		state["target"], state["driver"] = "adobe", "cloakbrowser_adobe"
+		if err != nil {
+			state["configuration_error"] = err.Error()
+		}
+		writeRegistrationJSON(w, 200, map[string]any{"runtime": state})
 		return
 	}
 	writeRegistrationJSON(w, http.StatusOK, map[string]any{"runtime": s.registerRuntime.Status(target)})

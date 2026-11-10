@@ -31,19 +31,19 @@ func taskSettings(raw map[string]any) map[string]any {
 	return result
 }
 
-// 旧配置仅有一套参数；首次读取时复制到两套独立配置，不改变已有渠道的出口。
+// 旧配置仅有一套参数；首次读取时复制到各渠道独立配置，不改变已有渠道的出口。
 func normalizeTargetSettings(value map[string]any) {
 	target := registrationTarget(value["target"])
 	profiles := object(value["target_settings"])
 	normalized := map[string]any{}
-	for _, name := range []string{"openai", "grok"} {
+	for _, name := range []string{"openai", "grok", "adobe"} {
 		profile := taskSettings(value)
 		for _, key := range targetSettingKeys {
 			if v, ok := object(profiles[name])[key]; ok {
 				profile[key] = v
 			}
 		}
-		if name == "grok" {
+		if name == "grok" || name == "adobe" {
 			profile["mode"] = "total"
 		}
 		normalized[name] = profile
@@ -69,7 +69,7 @@ func applyTargetSettings(value map[string]any, target string) {
 
 func updateTargetSettings(current, updates map[string]any) {
 	profiles := object(current["target_settings"])
-	for _, target := range []string{"openai", "grok"} {
+	for _, target := range []string{"openai", "grok", "adobe"} {
 		profile := object(profiles[target])
 		for _, key := range targetSettingKeys {
 			if v, ok := object(object(updates["target_settings"])[target])[key]; ok {
@@ -93,7 +93,7 @@ func updateTargetSettings(current, updates map[string]any) {
 	if source, ok := object(updates["mail"])["source_id"]; ok {
 		current["mail_source_id"] = source
 	}
-	if target == "openai" || target == "grok" {
+	if target == "openai" || target == "grok" || target == "adobe" {
 		profiles[target] = taskSettings(current)
 	}
 	normalizeTargetSettings(current)
@@ -117,7 +117,7 @@ func registrationProxyForTarget(raw map[string]any, target, selection string) st
 // routing switch; stale forms must not overwrite another channel's settings.
 func (s *Store) UpdateForTarget(target string, updates map[string]any) (map[string]any, error) {
 	target = strings.ToLower(strings.TrimSpace(target))
-	if target != "openai" && target != "grok" {
+	if target != "openai" && target != "grok" && target != "adobe" {
 		return nil, fail("config", "invalid_registration_target")
 	}
 	s.mu.Lock()
@@ -137,7 +137,7 @@ func (s *Store) UpdateForTarget(target string, updates map[string]any) (map[stri
 	if source, ok := object(updates["mail"])["source_id"]; ok {
 		scoped["mail_source_id"] = source
 	}
-	keys := []string{"grok"}
+	keys := []string{target}
 	if target == "openai" {
 		keys = []string{"openai_free", "checkout", "sub2api_sync", "cpa_sync", "agent_identity_archive"}
 	}

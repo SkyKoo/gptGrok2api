@@ -35,7 +35,7 @@ MAX_BYTES = 64 * 1024 * 1024
 MAX_FILES = 5000
 TOP = ('.env', 'compose.yaml', 'current.json', 'access.json', 'slot-blue.json',
        'slot-green.json', 'secrets')
-DATA_DIRS = {'image_tasks', 'video_tasks', 'grok_media_reviews'}
+DATA_DIRS = {'image_tasks', 'video_tasks', 'grok_media_reviews', 'adobe_jobs'}
 EXCLUDED = {'files', 'log_input_images', 'logs.jsonl', 'video_logs', 'backups',
             '.cfm-writer.lock', '.cfm-gateway.json', '.cfm-legacy-instance.json'}
 
@@ -162,6 +162,47 @@ def signature(path):
             info.st_mode, info.st_uid, info.st_gid)
 
 
+def browser_profile_paths(root):
+    """Include authentication storage; exclude caches, history and live locks."""
+    paths = []
+    if not root.exists():
+        return paths
+    require(not root.is_symlink(), 'linked browser worker storage')
+    for provider in sorted(root.iterdir()):
+        require(provider.name == 'adobe' and provider.is_dir() and not provider.is_symlink(),
+                'unknown browser worker state needs scope review')
+        for profile in sorted(provider.iterdir()):
+            require(profile.is_dir() and not profile.is_symlink(), 'invalid browser profile')
+            require(not (profile / '.lock').exists(), 'browser profile is active; retry backup after it closes')
+            state = profile / 'state.json'
+            if state.exists():
+                require(not state.is_symlink(), 'linked browser state')
+                paths.append(state)
+            browser = profile / 'browser'
+            if not browser.exists():
+                continue
+            require(not browser.is_symlink(), 'linked browser profile')
+            # Local State contains OS-cookie encryption metadata. Local/Session
+            # Storage and IndexedDB are session data even when filenames end .log.
+            for relative in ('Local State', 'Default/Preferences', 'Default/Secure Preferences',
+                             'Default/Cookies', 'Default/Cookies-journal',
+                             'Default/Network/Cookies', 'Default/Network/Cookies-journal',
+                             'Default/Web Data', 'Default/Web Data-journal',
+                             'Default/Local Storage', 'Default/Session Storage', 'Default/IndexedDB'):
+                target = browser / relative
+                require(not target.is_symlink(), 'linked browser authentication state')
+                if not target.exists():
+                    continue
+                children = sorted(target.rglob('*')) if target.is_dir() else [target]
+                for child in children:
+                    if child.name in ('LOCK', 'lockfile') or child.name.startswith('Singleton'):
+                        continue
+                    require(not child.is_symlink(), 'linked browser authentication state')
+                    if not child.is_dir():
+                        paths.append(child)
+    return paths
+
+
 def source_paths(root):
     require(not (root / 'data/cfm-maintenance').exists(), 'CFM is under maintenance')
     paths = []
@@ -178,13 +219,16 @@ def source_paths(root):
     for path in sorted((root / 'data').iterdir()):
         if path.name in EXCLUDED:
             continue
+        if path.name == 'browser-worker':
+            paths.extend(browser_profile_paths(path))
+            continue
         require(not path.is_symlink(), 'symlink in business tree')
         if path.is_dir():
             require(path.name in DATA_DIRS, 'new business directory needs scope review')
             for child in sorted(path.rglob('*')):
                 require(not child.is_symlink(), 'symlink in business tree')
                 if not child.is_dir():
-                    require(child.suffix == '.json', 'unexpected task file format')
+                    require(child.name.endswith(('.json', '.json.enc')), 'unexpected task file format')
                     paths.append(child)
         else:
             require(path.name.endswith(('.json', '.json.enc')), 'new business file needs scope review')

@@ -65,10 +65,10 @@ func grokTestAccounts(t *testing.T, s *Server) {
 		}
 	}
 }
-func TestGrokImageReviewRetryBatchAndFailure(t *testing.T) {
+func TestGrokImageReviewNeverRegeneratesRejectedBatch(t *testing.T) {
 	good := coloredPNG(t, color.White, png.DefaultCompression)
 	bad := coloredPNG(t, color.Black, png.DefaultCompression)
-	for _, scenario := range []string{"mixed-retry-success", "retry-exhausted", "uncertain", "disabled"} {
+	for _, scenario := range []string{"mixed-mismatch", "all-mismatch", "uncertain", "disabled"} {
 		t.Run(scenario, func(t *testing.T) {
 			s := New(adminTestConfig(t.TempDir()))
 			grokTestAccounts(t, s)
@@ -98,7 +98,7 @@ func TestGrokImageReviewRetryBatchAndFailure(t *testing.T) {
 				outputs := []provider.ImageResult{}
 				for i := 0; i < n; i++ {
 					raw := good
-					if len(counts) == 1 && i == 1 || scenario == "retry-exhausted" {
+					if len(counts) == 1 && i == 1 || scenario == "all-mismatch" {
 						raw = bad
 					}
 					outputs = append(outputs, provider.ImageResult{Base64: base64.StdEncoding.EncodeToString(raw), MIME: "image/png"})
@@ -106,31 +106,29 @@ func TestGrokImageReviewRetryBatchAndFailure(t *testing.T) {
 				return outputs, nil
 			})
 			record, _ := s.monitor.detail(callID)
-			if scenario == "mixed-retry-success" {
-				if err != nil || len(result) != 2 || fmt.Sprint(counts) != "[2 1]" || reviews != 2 {
-					t.Fatalf("err=%v result=%d counts=%v reviews=%d", err, len(result), counts, reviews)
-				}
-				// Retried identical good content reuses the same-intent positive hash cache.
-				if len(record.GrokMediaReviews) != 3 || !record.GrokMediaReviews[2].CacheHit {
-					t.Fatalf("evidence=%+v", record.GrokMediaReviews)
-				}
-			} else if scenario == "disabled" {
-				if err != nil || len(result) != 2 || reviews != 0 || len(record.GrokMediaReviews) != 0 || len(counts) != 1 {
+			if len(counts) != 1 || counts[0] != 2 {
+				t.Fatalf("generation was replayed: counts=%v", counts)
+			}
+			if scenario == "disabled" {
+				if err != nil || len(result) != 2 || reviews != 0 || len(record.GrokMediaReviews) != 0 {
 					t.Fatalf("disabled: %v %d %d %v", err, len(result), reviews, counts)
 				}
 			} else {
 				if err == nil || len(result) != 0 || len(listMediaItems(s.cfg.ImageDataDir, "image", "image/")) != 0 {
-					t.Fatal("failed output published")
+					t.Fatal("failed or partial output published")
 				}
-				want := 1
-				if scenario == "retry-exhausted" {
-					want = 2
+				code := "image_content_mismatch"
+				if scenario == "uncertain" {
+					code = "image_content_unverified"
 				}
-				if len(counts) != want {
-					t.Fatalf("generation count=%v", counts)
+				if !strings.Contains(err.Error(), code) {
+					t.Fatalf("wrong terminal failure: %v", err)
 				}
 				if len(record.GrokMediaReviews) == 0 || len(record.GrokMediaReviews[0].Images) == 0 {
 					t.Fatal("missing failed output evidence")
+				}
+				if scenario == "mixed-mismatch" && (reviews != 2 || len(record.GrokMediaReviews) != 2) {
+					t.Fatalf("mixed batch evidence lost: reviews=%d evidence=%+v", reviews, record.GrokMediaReviews)
 				}
 			}
 			for _, review := range record.GrokMediaReviews {
@@ -302,8 +300,8 @@ func (f videoReviewFunc) Verify(c context.Context, p string, refs []provider.Ope
 }
 func (f videoReviewFunc) Close() {}
 
-func TestGrokVideoRegenerationRetainsOneTaskAndBothAttempts(t *testing.T) {
-	for _, scenario := range []string{"retry-success", "same-placeholder", "review-unavailable", "disabled-known-hash"} {
+func TestGrokVideoReviewRetainsOneTaskWithoutRegeneration(t *testing.T) {
+	for _, scenario := range []string{"would-succeed-on-retry", "same-placeholder", "review-unavailable", "disabled-known-hash"} {
 		t.Run(scenario, func(t *testing.T) {
 			chats := 0
 			bad := videoTestMP4("unrelated market", "metadata")
@@ -318,7 +316,7 @@ func TestGrokVideoRegenerationRetainsOneTaskAndBothAttempts(t *testing.T) {
 					fmt.Fprintln(w, "data: [DONE]")
 				case "/video.mp4":
 					w.Header().Set("Content-Type", "video/mp4")
-					if scenario == "retry-success" && chats == 2 {
+					if scenario == "would-succeed-on-retry" && chats == 2 {
 						w.Write(good)
 					} else {
 						w.Write(bad)
@@ -362,15 +360,9 @@ func TestGrokVideoRegenerationRetainsOneTaskAndBothAttempts(t *testing.T) {
 			job := &videoJob{ID: "video_retry", Model: "grok-imagine-video", Status: "queued"}
 			s.videoJobs[job.ID] = job
 			s.runVideoJob(job, "portrait", "9:16", "720p", 6, "custom", nil)
-			wantStatus, wantCalls := "failed", 2
-			if scenario == "retry-success" {
-				wantStatus = "completed"
-			}
+			wantStatus, wantCalls := "failed", 1
 			if scenario == "disabled-known-hash" {
-				wantStatus, wantCalls = "completed", 1
-			}
-			if scenario == "review-unavailable" {
-				wantCalls = 1
+				wantStatus = "completed"
 			}
 			if job.Status != wantStatus || chats != wantCalls {
 				t.Fatalf("job=%+v calls=%d", job, chats)
@@ -380,15 +372,15 @@ func TestGrokVideoRegenerationRetainsOneTaskAndBothAttempts(t *testing.T) {
 				t.Fatalf("duplicate terminal logs: %d", len(logs))
 			}
 			entries := anyList(mapValue(logs[0]["detail"])["grok_media_reviews"])
-			if scenario == "same-placeholder" && (reviews != 1 || len(entries) != 2 || mapValue(entries[1])["cache_hit"] != true) {
-				t.Fatalf("hash did not prevent repeated review: reviews=%d entries=%v", reviews, entries)
-			}
-			if scenario == "retry-success" {
-				if reviews != 2 || len(entries) != 2 || job.Error != nil || job.Verification.Verdict != "matched" {
-					t.Fatal("retry leaked first failure")
+			if scenario == "same-placeholder" || scenario == "would-succeed-on-retry" {
+				if reviews != 1 || len(entries) != 1 || mapValue(entries[0])["verdict"] != "mismatch" {
+					t.Fatalf("single-attempt evidence lost: reviews=%d entries=%v", reviews, entries)
 				}
-				if mapValue(entries[0])["verdict"] != "mismatch" || mapValue(entries[1])["verdict"] != "matched" {
-					t.Fatal("attempt history overwritten")
+				if job.Error["code"] != "video_content_mismatch" || job.Verification.Verdict != "mismatch" {
+					t.Fatal("content mismatch did not remain terminal")
+				}
+				if len(listMediaItems(s.cfg.ImageDataDir, "video", "video/")) != 0 {
+					t.Fatal("rejected video published")
 				}
 			}
 			if scenario == "review-unavailable" && (job.Error["code"] != "video_content_unverified" || len(entries) != 1) {
@@ -398,7 +390,7 @@ func TestGrokVideoRegenerationRetainsOneTaskAndBothAttempts(t *testing.T) {
 	}
 }
 
-func TestGrokAsyncImageRetryTerminalAndEvidence(t *testing.T) {
+func TestGrokAsyncImageRejectionIsTerminalAndRetainsEvidence(t *testing.T) {
 	for _, success := range []bool{true, false} {
 		t.Run(fmt.Sprint(success), func(t *testing.T) {
 			good := coloredPNG(t, color.White, png.DefaultCompression)
@@ -444,19 +436,15 @@ func TestGrokAsyncImageRetryTerminalAndEvidence(t *testing.T) {
 			}
 			task := &imageTaskState{ID: "retry-task", OwnerID: "owner", Mode: "edit", Model: "grok-imagine-image-edit", Prompt: "portrait", N: 1, Size: "1024x1024", Images: [][]byte{tinyPNG}, ImageNames: []string{"ref.png"}}
 			s.runImageTask(context.Background(), task, "Bearer api-secret", "")
-			want := "error"
-			if success {
-				want = "success"
+			if task.Status != "error" || generations != 1 {
+				t.Fatalf("rejected task regenerated: task=%+v calls=%d", task, generations)
 			}
-			if task.Status != want || generations != 2 {
-				t.Fatalf("task=%+v calls=%d", task, generations)
-			}
-			if !success && (len(task.Data) != 0 || !strings.Contains(task.Error, "image_content_mismatch")) {
-				t.Fatal("wrong terminal failure")
+			if len(task.Data) != 0 || !strings.Contains(task.Error, "image_content_mismatch") {
+				t.Fatal("wrong terminal failure or rejected output published")
 			}
 			logs := s.loadCallLogs()
-			if len(logs) != 1 || len(anyList(mapValue(logs[0]["detail"])["grok_media_reviews"])) != 2 {
-				t.Fatalf("lost retry evidence: %v", logs)
+			if len(logs) != 1 || len(anyList(mapValue(logs[0]["detail"])["grok_media_reviews"])) != 1 {
+				t.Fatalf("lost single-attempt evidence: %v", logs)
 			}
 			restarted := New(s.cfg)
 			if len(restarted.loadCallLogs()) != 1 {

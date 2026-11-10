@@ -239,7 +239,13 @@ func (s *Server) storeVideoResultWithPolicy(callID, requestHash string, raw []by
 		ext = ".webm"
 	}
 	path := filepath.Join(s.cfg.VideoDataDir, strings.TrimPrefix(callID, "video_")+ext)
-	record := videoResultRecord{RequestHash: requestHash, MediaHash: hash, CallID: callID, Model: "grok-imagine-video", Endpoint: "/v1/videos", SourceType: "generated_output", GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
+	modelID := "grok-imagine-video"
+	s.videoMu.RLock()
+	if job := s.videoJobs[callID]; job != nil {
+		modelID = job.Model
+	}
+	s.videoMu.RUnlock()
+	record := videoResultRecord{RequestHash: requestHash, MediaHash: hash, CallID: callID, Model: modelID, Endpoint: "/v1/videos", SourceType: "generated_output", GeneratedAt: time.Now().UTC().Format(time.RFC3339)}
 	if len(verification) > 0 {
 		record.Verification = &verification[0]
 	}

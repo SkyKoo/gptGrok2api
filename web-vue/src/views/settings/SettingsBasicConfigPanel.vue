@@ -121,7 +121,7 @@
 
       <FormField label="图片任务总超时">
         <template #label-extra>
-          <HelpTip text="单位秒，范围 60–900，默认 600（10 分钟）。包含排队、生成、重试和下载；保存后仅对新任务生效。" />
+          <HelpTip text="单位秒，范围 60–900，默认 600（10 分钟）。包含排队、生成、轮询和下载；保存后仅对新任务生效。" />
         </template>
         <Input
           :model-value="imageTaskTimeoutField.input.value"

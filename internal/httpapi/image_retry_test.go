@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -116,7 +115,7 @@ func newImageRetryTestServer(t *testing.T, upstream *imageRetryTestUpstream) *Se
 	return s
 }
 
-func TestImageGenerationRetrySyncAndAsync(t *testing.T) {
+func TestImageGenerationFailureNeverReplaysSyncAndAsync(t *testing.T) {
 	for _, mode := range []string{"generations", "edits"} {
 		for _, async := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/async=%t", mode, async), func(t *testing.T) {
@@ -128,7 +127,7 @@ func TestImageGenerationRetrySyncAndAsync(t *testing.T) {
 					return ""
 				}}
 				s := newImageRetryTestServer(t, upstream)
-				s.cfg.ChatMaxRetries = 0 // The new budget is independent of chat retries.
+				s.cfg.ChatMaxRetries = 9 // Chat retries must never replay media generation.
 				body := `{"model":"gpt-image-2","prompt":"retry test","n":1}`
 				if mode == "edits" {
 					body = `{"model":"gpt-image-2","prompt":"retry test","n":1,"images":[{"image_url":"data:image/png;base64,` + base64.StdEncoding.EncodeToString(tinyPNG) + `"}]}`
@@ -140,45 +139,45 @@ func TestImageGenerationRetrySyncAndAsync(t *testing.T) {
 						task.Images = [][]byte{tinyPNG}
 					}
 					s.runImageTask(context.Background(), task, "Bearer api-secret", "")
-					if task.Status != "success" || task.ErrorDetail != "" {
+					if task.Status != "error" || !strings.Contains(task.ErrorDetail, retryTestFailure) || len(task.Data) != 0 {
 						t.Fatalf("task status=%s detail=%s", task.Status, task.ErrorDetail)
 					}
 				} else {
 					w := imageTaskCall(s, "POST", "/v1/images/"+mode, "api-secret", body)
-					if w.Code != 200 || !strings.Contains(w.Body.String(), "b64_json") {
+					if w.Code < 400 || strings.Contains(w.Body.String(), "b64_json") {
 						t.Fatalf("response %d: %s", w.Code, w.Body.String())
 					}
 				}
-				if upstream.starts.Load() != 2 {
+				if upstream.starts.Load() != 1 {
 					t.Fatalf("attempts=%d", upstream.starts.Load())
 				}
-				if mode == "edits" && upstream.uploads.Load() != 2 {
+				if mode == "edits" && upstream.uploads.Load() != 1 {
 					t.Fatalf("uploads=%d", upstream.uploads.Load())
 				}
-				assertImageRetryQuota(t, s, 2, mode == "edits")
+				assertImageRetryQuota(t, s, 1, mode == "edits")
 				raw, err := os.ReadFile(filepath.Join(s.cfg.DataDir, "logs.jsonl"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !bytes.Contains(raw, []byte("upstream_image_generation_retry")) || bytes.Contains(raw, []byte(`"raw_error"`)) {
-					t.Fatalf("retry trace missing or transient failure leaked into final log: %s", raw)
+				if bytes.Contains(raw, []byte("upstream_image_generation_retry")) || !bytes.Contains(raw, []byte(retryTestFailure)) {
+					t.Fatalf("unexpected replay or terminal diagnostic lost: %s", raw)
 				}
 			})
 		}
 	}
 }
 
-func TestImageGenerationRetryCapAndEarlyStop(t *testing.T) {
+func TestImageGenerationNoReplayRegardlessOfChatBudgetOrQuota(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		chatRetries, quota int
 		stopReason         string
 		want               int
 	}{
-		{"cap-default", 2, 20, "", 4},
-		{"cap-high-chat-setting", 9, 20, "", 4},
+		{"default-chat-setting", 2, 20, "", 1},
+		{"high-chat-setting", 9, 20, "", 1},
 		{"quota-exhausted", 2, 1, "", 1},
-		{"policy-after-retry", 2, 20, "Cannot generate this image due to content policy.", 2},
+		{"later-policy-result-never-reached", 2, 20, "Cannot generate this image due to content policy.", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -200,9 +199,6 @@ func TestImageGenerationRetryCapAndEarlyStop(t *testing.T) {
 				t.Fatalf("status=%s starts=%d error=%s", task.Status, upstream.starts.Load(), task.Error)
 			}
 			wantReason := retryTestFailure
-			if tc.stopReason != "" {
-				wantReason = tc.stopReason
-			}
 			if !strings.Contains(task.ErrorDetail, wantReason) {
 				t.Fatalf("final diagnostic lost: %s", task.ErrorDetail)
 			}
@@ -216,7 +212,7 @@ func TestImageGenerationRetryCapAndEarlyStop(t *testing.T) {
 	}
 }
 
-func TestImageGenerationRetryDoesNotReplaySuccessfulOutput(t *testing.T) {
+func TestImageGenerationPartialBatchFailsWithoutReplayingAnyOutput(t *testing.T) {
 	upstream := &imageRetryTestUpstream{reason: func(n int) string {
 		if n == 2 {
 			return retryTestFailure
@@ -225,25 +221,30 @@ func TestImageGenerationRetryDoesNotReplaySuccessfulOutput(t *testing.T) {
 	}}
 	s := newImageRetryTestServer(t, upstream)
 	w := imageTaskCall(s, "POST", "/v1/images/generations", "api-secret", `{"model":"gpt-image-2","prompt":"retry test","n":2}`)
-	if w.Code != 200 || upstream.starts.Load() != 3 {
+	if w.Code < 400 || upstream.starts.Load() != 2 {
 		t.Fatalf("status=%d attempts=%d body=%s", w.Code, upstream.starts.Load(), w.Body.String())
 	}
 	var result struct {
 		Data []map[string]string `json:"data"`
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || len(result.Data) != 2 {
-		t.Fatal("expected exactly two outputs")
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || len(result.Data) != 0 {
+		t.Fatal("partial failed batch leaked output")
 	}
-	assertImageRetryQuota(t, s, 3, false)
+	assertImageRetryQuota(t, s, 2, false)
 }
 
-func TestImageGenerationRetryCancellation(t *testing.T) {
+func TestImageGenerationReturnsOriginalFailureWithoutWaitingForRetry(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	upstream := &imageRetryTestUpstream{reason: func(n int) string { time.AfterFunc(50*time.Millisecond, cancel); return retryTestFailure }}
+	upstream := &imageRetryTestUpstream{reason: func(n int) string {
+		if n > 1 {
+			cancel()
+		}
+		return retryTestFailure
+	}}
 	s := newImageRetryTestServer(t, upstream)
 	_, err := s.generateOpenAIImageData(nil, ctx, "retry test", "gpt-image-2", "auto", "auto", nil, "b64_json", "", 1, provider.ImageOutputOptions{})
-	if !errors.Is(err, context.Canceled) || upstream.starts.Load() != 1 {
+	if err == nil || !strings.Contains(provider.ImageErrorDetails(err).Message, retryTestFailure) || upstream.starts.Load() != 1 {
 		t.Fatalf("err=%v attempts=%d", err, upstream.starts.Load())
 	}
 	assertImageRetryQuota(t, s, 1, false)

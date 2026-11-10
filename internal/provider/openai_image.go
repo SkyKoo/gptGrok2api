@@ -136,6 +136,8 @@ func (o *OpenAIImage) Generate(ctx context.Context, account accounts.Account, pr
 }
 
 func (o *OpenAIImage) GenerateWithOptions(ctx context.Context, account accounts.Account, prompt, model, size, quality string, inputs []OpenAIImageInput, options ImageOutputOptions, masks ...*ImageMask) (results []ImageResult, err error) {
+	ctx = context.WithValue(ctx, mediaNoReplayContextKey{}, true)
+
 	var mask *ImageMask
 	if len(masks) > 1 {
 		return nil, &ImageOptionError{Param: "mask", Message: "only one mask is supported"}
@@ -1308,6 +1310,12 @@ func (o *OpenAIImage) doRequest(ctx context.Context, method, endpoint, targetPat
 		request.Header.Set("Accept", "text/event-stream")
 	}
 	client := o.Client
+	if noReplay, _ := ctx.Value(mediaNoReplayContextKey{}).(bool); noReplay && method != http.MethodGet && method != http.MethodHead {
+		request.GetBody = nil
+		fixed := *client
+		fixed.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		client = &fixed
+	}
 	var response *http.Response
 	if browserEligible(o.BaseURL) && authenticated {
 		browser, browserErr := o.browserFor(proxyURL, account)
@@ -1771,3 +1779,6 @@ func isRetryableOpenAIError(err error) bool {
 	}
 	return true
 }
+
+// Scoped to image generation; chat retry policy remains independent.
+type mediaNoReplayContextKey struct{}

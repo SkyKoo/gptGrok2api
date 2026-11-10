@@ -1,4 +1,4 @@
-"""CFM-owned Grok browser worker.
+"""CFM shared browser worker for Grok and Adobe.
 
 CFM owns registration state, mailbox polling and account storage, while this
 process owns the persistent Chromium page required by xAI's native signup
@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 import cloakbrowser
 from browser_sessions import queue, launch_browser, BrowserQueueError
+from adobe_flow import launch_adobe, adobe_command, AdobeCommandRequest
 from contextlib import asynccontextmanager
 
 from common.browser import browser_context_kwargs, browser_kwargs, InvalidBrowserProxy, is_proxy_configuration_error
@@ -38,7 +39,7 @@ from xai_flow import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("grok-browser")
+log = logging.getLogger("cfm-browser-worker")
 
 async def _cleanup_sessions():
     while True:
@@ -52,7 +53,7 @@ async def _cleanup_sessions():
 
 @asynccontextmanager
 async def lifespan(_app):
-    queue.capacity = max(1, int(os.getenv("GROK_BROWSER_CONCURRENCY", "1")))
+    queue.capacity = max(1, int(os.getenv("CFM_BROWSER_WORKER_CONCURRENCY", os.getenv("GROK_BROWSER_CONCURRENCY", "1"))))
     queue.start()
     cleanup = asyncio.create_task(_cleanup_sessions())
     try:
@@ -63,8 +64,8 @@ async def lifespan(_app):
         await queue.shutdown()
 
 
-app = FastAPI(title="CFM Grok Browser Worker", version="1.0.0", lifespan=lifespan)
-_auth_token = os.getenv("GROK_BROWSER_TOKEN", "").strip()
+app = FastAPI(title="CFM Browser Worker", version="1.0.0", lifespan=lifespan)
+_auth_token = os.getenv("CFM_BROWSER_WORKER_TOKEN", os.getenv("GROK_BROWSER_TOKEN", "")).strip()
 _allowed_hosts = {"accounts.x.ai", "grok.com", "www.grok.com"}
 _sessions: dict[str, dict] = {}
 _sessions_lock = asyncio.Lock()
@@ -441,7 +442,7 @@ async def _materialize_in_browser(wrapper: str, proxy: str, cookies: list[dict])
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "service": "grok-browser", "capacity": queue.available}
+    return {"status": "ok", "service": "cfm-browser-worker", "capacity": queue.available}
 
 
 @app.post("/v1/sso/materialize")
@@ -511,6 +512,13 @@ async def turnstile_session(req: SessionRequest, authorization: str | None = Hea
 
 
 class BrowserReservationRequest(BaseModel):
+    provider: str = Field(default="grok", pattern=r"^(grok|adobe)$")
+    profile_id: str = Field(default="", max_length=80, pattern=r"^[a-zA-Z0-9_-]*$")
+    email: str = Field(default="", max_length=320)
+    adobe_profile: dict[str, Any] = Field(default_factory=dict)
+    adobe_mode: str = Field(default="registration", pattern=r"^(registration|refresh)$")
+    account_id: str = Field(default="", max_length=256)
+    password: str = Field(default="", max_length=256)
     id: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     proxy: str = Field(default="", max_length=2048)
     timezone: str = Field(default="", max_length=128)
@@ -525,6 +533,11 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
         raise HTTPException(status_code=401, detail="invalid worker token")
     try:
         proxy = _normalize_proxy(req.proxy)
+        if req.provider == "adobe":
+            if not req.profile_id or not req.email:
+                raise HTTPException(status_code=422, detail="adobe_identity_required")
+            return queue.enqueue(req.id, {"profile_id":req.profile_id, "email":req.email,
+                "profile":req.adobe_profile, "proxy":proxy, "mode":req.adobe_mode, "account_id":req.account_id, "password":req.password}, launch_adobe)
         options = browser_kwargs("TURNSTILE", "direct" if req.daily_direct and not proxy else proxy or None,
             timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
         if req.daily_direct and not proxy:
@@ -556,3 +569,16 @@ async def release_browser_reservation(key: str, authorization: str | None = Head
         # Accepted cleanup; the slot remains occupied until closure completes.
         return {"status": "closing"}
     return {"status": "released"}
+
+
+@app.post("/v1/adobe/run")
+async def run_adobe(req: AdobeCommandRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        return await adobe_command(req)
+    except BrowserQueueError:
+        raise HTTPException(status_code=409, detail="adobe_session_unavailable") from None
+    except (TimeoutError, RuntimeError):
+        # A lost reply is never retried; the durable Node journal owns its outcome.
+        return {"stage":"outcome_unknown", "code":"adobe_worker_result_unknown", "submission_started":True}

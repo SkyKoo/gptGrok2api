@@ -110,7 +110,8 @@ export type RegisterMailboxConfig = {
   providers?: RegisterProvider[]
 }
 
-export type RegisterTarget = 'openai' | 'grok'
+export type RegisterTarget = 'openai' | 'grok' | 'adobe'
+export type AdobeRegisterConfig = { api_base: string; api_key: string; api_key_set?: boolean; request_timeout: number; country: string; birth_year: number; birth_month: number }
 
 export type GrokTurnstileProvider = 'browser'
 
@@ -237,6 +238,7 @@ export type LegacyRegisterConfig = {
   jobs_page?: number
   jobs_page_size?: number
   target: RegisterTarget | string
+  adobe: AdobeRegisterConfig
   grok: GrokRegisterConfig
   checkout: OpenAICheckoutConfig
   sub2api_sync: OpenAISub2APISyncConfig
@@ -340,6 +342,12 @@ export type RegistrationHistoryPage = {
 }
 
 export const registerApi = {
+  getAdobeJobs(page: number) {
+    return apiClient.get<any, RegistrationHistoryPage>('/api/register/adobe/jobs', { params: { page } })
+  },
+  retryAdobeResult(id: string) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/adobe/retry-result', { id })
+  },
   getFreeJobs(page: number) {
     return apiClient.get<any, RegistrationHistoryPage>('/api/register/openai/jobs', { params: { page } })
   },

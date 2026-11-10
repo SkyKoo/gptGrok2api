@@ -48,10 +48,11 @@ function harness(t) {
  const incoming = (target = 'openai', enabled = {}) => ({
   ...clone(view.defaultRegisterConfig), target,
   target_settings: {
+   adobe: { mode: 'total', total: 2, threads: 1, proxy: 'direct', resin_proxy_url: '', mail_source_id: 'adobe-mail' },
    openai: { mode: 'total', total: 3, threads: 2, proxy: 'http://openai.example.test:8080', resin_proxy_url: '', mail_source_id: 'openai-mail' },
    grok: { mode: 'total', total: 1, threads: 1, proxy: 'direct', resin_proxy_url: '', mail_source_id: 'grok-mail' },
   },
-  target_runtime: Object.fromEntries(['openai', 'grok'].map(name => [name, {
+  target_runtime: Object.fromEntries(['openai', 'grok', 'adobe'].map(name => [name, {
    enabled: Boolean(enabled[name]), stats: {}, logs: [{ message: name + '-log' }], jobs: [{ id: name + '-job' }], jobs_total: 1,
    registration_schedule: { enabled: false, interval_minutes: 60 },
   }])),
@@ -165,7 +166,7 @@ test('rendered running-task settings leave channel fieldset enabled', async t =>
  const stub = vue.defineComponent({ inheritAttrs: false, setup(_, { slots, attrs }) { return () => vue.h('div', attrs, slots.default?.()) } })
  for (const name of ['@/views/proxy/ResinProxyFields.vue', '@/components/ai/FormSection.vue', '@/components/ui/GroupedSelectMenu.vue']) h.overrides[name] = { default: stub }
  h.overrides['@iconify/vue'] = { Icon: stub }
- h.overrides['nanocat-ui'] = { Button: stub, Checkbox: stub, Input: stub, SegmentedTabs: stub }
+ h.overrides['nanocat-ui'] = { FormField: stub, Button: stub, Checkbox: stub, Input: stub, SegmentedTabs: stub }
  h.overrides['@/api/accountImports'] = { accountImportsApi: {} }
  const filename = path.join(root, 'views/register/RegisterTaskSettingsPanel.vue')
  const { descriptor } = parse(fs.readFileSync(filename, 'utf8'), { filename })
@@ -206,4 +207,33 @@ test('schedule confirmation saves and emits its captured channel after a tab swi
  props.target = 'grok'; prepared.resolve(true); await request
  assert.equal(sent[0][1], 'openai')
  assert.equal(emitted[0][2], 'openai')
+})
+
+
+test('Adobe drafts and late saves stay isolated from both existing channels', async t => {
+ const h = harness(t), s = h.state, pending = deferred()
+ const save = h.api.updateConfig
+ h.api.updateConfig = async (payload, target) => target === 'adobe' ? pending.promise : save(payload, target)
+ s.setTarget('adobe')
+ assert.equal(s.config.value.mail.source_id, 'adobe-mail')
+ assert.equal(s.config.value.logs[0].message, 'adobe-log')
+ s.config.value.total = 7
+ const saving = s.flushAutosave()
+ s.setTarget('grok'); s.config.value.total = 4; await s.flushAutosave()
+ const updated = h.incoming('adobe'); updated.target_settings.adobe.total = 7
+ pending.resolve({ register: updated }); await saving
+ assert.equal(s.config.value.target, 'grok'); assert.equal(s.config.value.total, 4)
+ s.setTarget('adobe'); assert.equal(s.config.value.total, 7)
+ s.setTarget('openai'); assert.equal(s.config.value.total, 3)
+})
+
+test('Adobe save sends only its own config, task settings and mail source', async t => {
+ const h = harness(t), s = h.state
+ s.setTarget('adobe'); s.config.value.adobe.country = 'US'; s.config.value.total = 8
+ await s.flushAutosave()
+ const [action, target, payload] = h.calls[0]
+ assert.equal(action, 'save'); assert.equal(target, 'adobe')
+ assert.ok(payload.adobe); assert.equal(payload.grok, undefined); assert.equal(payload.openai_free, undefined)
+ assert.deepEqual(Object.keys(payload.target_settings), ['adobe'])
+ assert.equal(payload.mail.source_id, 'adobe-mail')
 })

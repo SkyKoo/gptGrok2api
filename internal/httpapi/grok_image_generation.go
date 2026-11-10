@@ -15,7 +15,7 @@ import (
 type grokImageGenerator func(context.Context, *accounts.Lease, int) ([]provider.ImageResult, error)
 
 // Only called after both handlers have returned from their GPT branches.
-// Keep successful members private while regenerating rejected members once.
+// Keep successful members private until all outputs pass review; never regenerate.
 func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size, format string, n int, inputs []provider.OpenAIImageInput, generate grokImageGenerator) ([]map[string]string, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
@@ -44,6 +44,10 @@ func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size
 		lease, err := s.grokAccountPool.ReserveIntent(r.Context(), []string{"basic", "super", "heavy"}, nil, nil, 0, intent)
 		if err != nil {
 			return nil, &protocol.UpstreamError{Status: 429, Message: err.Error()}
+		}
+		if err := s.pinImageRoute(r.Context(), mediaRoute{Channel: "grok", AccountID: accounts.Identity(lease.Account), UpstreamModel: model, Stage: "selected"}); err != nil {
+			s.grokAccountPool.Release(lease)
+			return nil, err
 		}
 		defer s.grokAccountPool.Release(lease) // Release is idempotent; also cover panic/cancellation paths.
 		s.enrichMonitorAccount(r, lease.Account)
@@ -107,7 +111,7 @@ func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size
 			break
 		}
 		if attempt == grokMediaGenerationAttempts {
-			return nil, &protocol.UpstreamError{Status: 502, Message: "image_content_mismatch: Grok 图片明显无关，重新生成 1 次后仍未通过，已保存核对证据"}
+			return nil, &protocol.UpstreamError{Status: 502, Message: "image_content_mismatch: Grok 图片明显无关，已停止交付并保存核对证据；未重新生成"}
 		}
 		pending = retry
 		s.stageRequestMonitor(r, "grok_media_regenerating", 35, map[string]any{"grok_generation_retry": 1, "grok_retry_outputs": len(pending)})

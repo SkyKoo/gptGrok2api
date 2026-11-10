@@ -13,7 +13,7 @@ export function registrationTaskSettings(raw: Partial<RegistrationTaskSettings>,
     resin_proxy_url: String(raw.resin_proxy_url || '').trim(),
     total: Math.max(1, Number(raw.total) || 1),
     threads: Math.max(1, Number(raw.threads) || 1),
-    mode: target === 'grok' ? 'total' : raw.mode || 'total',
+    mode: target !== 'openai' ? 'total' : raw.mode || 'total',
     target_quota: Math.max(1, Number(raw.target_quota) || 1),
     target_available: Math.max(1, Number(raw.target_available) || 1),
     check_interval: Math.max(1, Number(raw.check_interval) || 5),
@@ -23,6 +23,7 @@ export function registrationTaskSettings(raw: Partial<RegistrationTaskSettings>,
 export function normalizeRegistrationTargetSettings(raw: TaskConfig): Record<RegisterTarget, RegistrationTaskSettings> {
   return {
     openai: registrationTaskSettings({ ...raw, mail_source_id: raw.mail_source_id ?? raw.mail?.source_id, ...raw.target_settings?.openai }, 'openai'),
+    adobe: registrationTaskSettings({ ...raw, mail_source_id: raw.mail_source_id ?? raw.mail?.source_id, ...raw.target_settings?.adobe }, 'adobe'),
     grok: registrationTaskSettings({ ...raw, mail_source_id: raw.mail_source_id ?? raw.mail?.source_id, ...raw.target_settings?.grok }, 'grok'),
   }
 }
@@ -30,7 +31,7 @@ export function normalizeRegistrationTargetSettings(raw: TaskConfig): Record<Reg
 // 当前表单可能有尚未提交的修改，切换或保存前先写回所属渠道的草稿。
 export function registrationTargetSettingsPayload(config: TaskConfig): Record<RegisterTarget, RegistrationTaskSettings> {
   const profiles = normalizeRegistrationTargetSettings(config)
-  const target = config.target === 'grok' ? 'grok' : 'openai'
+  const target = config.target === 'grok' || config.target === 'adobe' ? config.target : 'openai'
   profiles[target] = registrationTaskSettings({ ...config, mail_source_id: config.mail?.source_id ?? config.mail_source_id }, target)
   return profiles
 }

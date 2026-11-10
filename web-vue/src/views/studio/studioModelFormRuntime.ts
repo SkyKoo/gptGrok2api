@@ -1,3 +1,4 @@
+import { mediaCapability } from '@/lib/mediaCapabilities'
 import { resolveStudioImageModel } from '@/lib/studioMedia'
 import { computed, reactive, ref, watch } from 'vue'
 import {
@@ -5,6 +6,7 @@ import {
   DEFAULT_IMAGE_QUALITY,
   DEFAULT_IMAGE_SIZE,
   isImageSizeSupportedByModel,
+  resolveImageSizePresets,
 } from '@/api/imageTasks'
 import { useModelCatalog } from '@/composables/useModelCatalog'
 import {
@@ -21,7 +23,7 @@ export type StudioModelFormRuntimeInput = {
 }
 
 export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
-  const { chatModels, chatModelLabels, modelAliases, imageModels, imageEditModels, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
+  const { chatModels, chatModelLabels, modelLabels, modelAliases, imageModels, imageEditModels, videoModels, catalog, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
   const imageForm = reactive<StudioImageForm>({
@@ -38,15 +40,20 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     const fallbackModels = hasReferences
       ? ['gpt-image-2', 'grok-imagine-image-edit']
       : [DEFAULT_IMAGE_MODEL, 'grok-imagine-image-pro']
-    return uniqueStrings([...catalogModels, ...fallbackModels])
+    return uniqueStrings(catalog.value ? catalogModels : fallbackModels)
       .filter(model => !['grok-imagine-image', 'grok-imagine-image-lite'].includes(model))
       .filter(model => hasReferences
-        ? !model.startsWith('grok-') || model === 'grok-imagine-image-edit'
+        ? (mediaCapability(model)?.max_reference_images ?? 8) > 0 && (!model.startsWith('grok-') || model === 'grok-imagine-image-edit')
         : model !== 'grok-imagine-image-edit')
   })
   watch([imageModelOptions, () => input.hasReferences(), () => imageForm.model], () => {
     imageForm.model = resolveStudioImageModel(imageForm.model, input.hasReferences(), imageModelOptions.value)
-    if (imageForm.model === 'grok-imagine-image-edit') imageForm.n = Math.min(2, imageForm.n)
+    const capability = mediaCapability(imageForm.model)
+    if (capability?.qualities?.length && !capability.qualities.includes(imageForm.quality)) imageForm.quality = capability.qualities[0]!
+    const maxCount = capability?.max_count ?? (Math.max(0, ...(capability?.variants || []).map(item => item.max_count || 0)) || (imageForm.model === 'grok-imagine-image-edit' ? 2 : 10))
+    imageForm.n = Math.min(input.hasReferences() ? Math.min(maxCount, 2) : maxCount, imageForm.n)
+    const sizes = resolveImageSizePresets(imageForm.model)
+    if (!sizes.some(item => item.value === imageForm.size)) imageForm.size = sizes[0]?.value || DEFAULT_IMAGE_SIZE
   }, { immediate: true, flush: 'sync' })
 
   watch(modelAliases, (aliases) => {
@@ -67,8 +74,11 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
     chatModel,
     chatModelOptions,
     chatModelLabels,
+    modelLabels,
     chatReasoningEffort,
     imageForm,
+    catalog,
+    videoModelOptions: videoModels,
     imageModelOptions,
     loadModelCatalog,
   }

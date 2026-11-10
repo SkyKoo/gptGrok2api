@@ -246,7 +246,7 @@
       />
     </PagePanel>
 
-    <PagePanel v-else class="space-y-5">
+    <PagePanel v-else-if="activeAccountPlatform === 'grok'" class="space-y-5">
       <MetricStrip
         :items="grokMetricItems"
         columns-class="grid-cols-2 md:grid-cols-3 xl:grid-cols-4"
@@ -460,6 +460,8 @@
         :disabled="grokLoading"
       />
     </PagePanel>
+
+    <AdobeAccountsPanel v-if="activeAccountPlatform === 'adobe'" @total="adobeAccountTotal = $event" />
 
     <AccountBulkBar
       v-if="activeAccountPlatform === 'gpt'"
@@ -1127,6 +1129,7 @@
 </template>
 
 <script setup lang="ts">
+import AdobeAccountsPanel from './accounts/AdobeAccountsPanel.vue'
 import { computed, defineAsyncComponent, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Icon } from '@iconify/vue'
@@ -1416,13 +1419,15 @@ const {
   exportSsoAccounts: grokExportSsoAccounts,
 } = useGrokAccountsPage()
 
-type AccountPlatformView = 'gpt' | 'grok'
+const adobeAccountTotal = ref<number | null>(null)
+type AccountPlatformView = 'gpt' | 'grok' | 'adobe'
 
 const route = useRoute()
 const router = useRouter()
 
 function accountPlatformFromQuery(value: unknown): AccountPlatformView {
-  return String(value || '').trim().toLowerCase() === 'grok' ? 'grok' : 'gpt'
+  const platform = String(value || '').trim().toLowerCase()
+  return platform === 'grok' || platform === 'adobe' ? platform : 'gpt'
 }
 
 const activeAccountPlatform = ref<AccountPlatformView>(accountPlatformFromQuery(route.query.platform))
@@ -1443,6 +1448,7 @@ const grokOAuthRowAction = reactive<{ accountId: string; action: GrokOAuthRowAct
 const accountPlatformOptions = computed(() => [
   { value: 'gpt', label: `GPT (${accountAllTotal.value})` },
   { value: 'grok', label: `Grok (${grokAccountAllTotal.value})` },
+  { value: 'adobe', label: adobeAccountTotal.value === null ? 'Adobe' : `Adobe (${adobeAccountTotal.value})` },
 ])
 
 const grokExportMenuItems = computed(() => [
@@ -1582,13 +1588,13 @@ function applyActiveAccountPlatform(value: AccountPlatformView) {
 }
 
 function setActiveAccountPlatform(value: string) {
-  if (value !== 'gpt' && value !== 'grok') return
+  if (value !== 'gpt' && value !== 'grok' && value !== 'adobe') return
   applyActiveAccountPlatform(value)
 
   const current = accountPlatformFromQuery(route.query.platform)
   if (current === value) return
   const query = { ...route.query }
-  if (value === 'grok') query.platform = 'grok'
+  if (value !== 'gpt') query.platform = value
   else delete query.platform
   void router.replace({ name: 'accounts', query })
 }

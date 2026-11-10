@@ -173,9 +173,6 @@ func TestVideoDeliveryRequiresReviewAndPersistsTerminalEvidence(t *testing.T) {
 			s.videoJobs[job.ID] = job
 			s.runVideoJob(job, job.Prompt, "9:16", "720p", 6, "custom", nil)
 			wantCalls := 1
-			if verdict == "mismatch" {
-				wantCalls = 2
-			}
 			if calls != wantCalls || reviewed != reviewEnabled {
 				t.Fatalf("calls=%d reviewed=%v", calls, reviewed)
 			}

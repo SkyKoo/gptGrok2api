@@ -23,7 +23,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
@@ -78,8 +77,14 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		Size           string `json:"size"`
 		Quality        string `json:"quality"`
 		ResponseFormat string `json:"response_format"`
+		Provider       string `json:"provider"`
+		Channel        string `json:"channel"`
 	}
 	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if err := validateCallerChannelFields(request.Provider, request.Channel); err != nil {
+		writeImageOptionError(w, err)
 		return
 	}
 	if !validateImageOutput(w, request.Model, request.ImageOutputOptions) {
@@ -114,6 +119,26 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.Model = spec.ID
+	if m, ok := model.AdobeModel(request.Model); ok && !isOpenAIImageModel(request.Model) && m.Kind == "image" {
+		releaseSlot, err := s.acquireImageSlot(ctx, r)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		defer releaseSlot()
+		selection, err := s.selectImageImplementation(r.Context(), request.Model, "", request.Size, request.Quality, request.N, 0, request.ImageOutputOptions, false, nil)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		data, err := s.generateAdobeImageData(r, r.Context(), selection, request.Prompt, request.Model, request.ResponseFormat, requestPublicBase(r))
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		writeJSON(w, 200, openAIImagesResult(data, request.ImageOutputOptions))
+		return
+	}
 	if !isOpenAIImageModel(request.Model) {
 		if _, _, ok := protocol.ImagineImageSize(request.Size); !ok {
 			writeError(w, http.StatusBadRequest, "invalid image size", "invalid_request_error")
@@ -149,7 +174,15 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"created": time.Now().Unix(), "data": data})
 }
 
-func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int, options provider.ImageOutputOptions, masks ...*provider.ImageMask) ([]map[string]string, error) {
+func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, prompt, model, size, quality string, inputs []provider.OpenAIImageInput, responseFormat, publicBase string, count int, options provider.ImageOutputOptions, masks ...*provider.ImageMask) (result []map[string]string, resultErr error) {
+	defer func() {
+		if resultErr != nil && r != nil {
+			if outcome, ok := r.Context().Value(monitorOutcomeKey{}).(*monitorOutcome); ok {
+				outcome.imageError = provider.ImageErrorDetails(resultErr)
+			}
+		}
+	}()
+
 	if count < 1 {
 		count = 1
 	}
@@ -165,160 +198,66 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		}
 		eligible = s.supportsChatModel(conversationModel)
 	}
+	releaseSlot, err := s.acquireImageSlot(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseSlot()
+	selection, err := s.selectImageImplementation(ctx, model, conversationModel, size, quality, count, len(inputs), options, maskCount(masks) > 0, eligible)
+	if err != nil {
+		return nil, err
+	}
+	if selection.Channel == "adobe" {
+		return s.generateAdobeImageData(r, ctx, selection, prompt, model, responseFormat, publicBase)
+	}
+	lease := selection.Lease
+	defer s.accountPool.Release(lease)
+	s.enrichMonitorAccount(r, lease.Account)
+	s.enrichRequestMonitor(r, map[string]any{"media_channel": "chatgpt"})
 	trace := s.newRoutingTrace(r, model, conversationModel)
-	results := make([][]map[string]string, count)
-	sizeMeta := imageSizeRequestMetadata(size, inputs)
-	s.enrichRequestMonitor(r, map[string]any{"image_size": sizeMeta})
-	// Each worker owns one entry. Publish only after all workers have joined.
-	outputDimensions := make([]imagePixelSize, count)
-	ctx, timeoutCancel := s.imageTaskContext(ctx)
-	defer timeoutCancel()
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := s.imageTaskContext(ctx)
 	defer cancel()
 	ctx = s.monitorOpenAIImageContext(r, ctx)
-	var (
-		wg    sync.WaitGroup
-		errCh = make(chan error, 1)
-	)
-	sendErr := func(err error) {
-		if err == nil {
-			return
-		}
-		select {
-		case errCh <- err:
-		default:
-		}
-	}
+	data := []map[string]string{}
+	dimensions := []imagePixelSize{}
 	for index := 0; index < count; index++ {
-		index := index
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			releaseSlot, slotErr := s.acquireImageSlot(ctx, r)
-			if slotErr != nil {
-				sendErr(slotErr)
-				cancel()
-				return
-			}
-			defer releaseSlot()
-			excluded := map[string]bool{}
-			var lastAttemptErr error
-			for attempt := 0; ; attempt++ {
-				accountStarted := time.Now()
-				s.stageRequestMonitor(r, "image_egress_waiting", 30, map[string]any{"egress_wait_ms": 0})
-				lease, reserveErr := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, excluded, eligible, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversationModel, Uploads: len(inputs) + maskCount(masks)})
-				if reserveErr != nil {
-					if lastAttemptErr != nil && ctx.Err() == nil {
-						reserveErr = lastAttemptErr
-					}
-					sendErr(reserveErr)
-					cancel()
-					return
-				}
-				s.enrichMonitorAccount(r, lease.Account)
-				s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
-
-				attemptCtx, finish := trace.begin(s.quotaContext(ctx, lease), lease, index, attempt)
-				generated, generateErr := s.openAIImage.GenerateWithOptions(attemptCtx, lease.Account, prompt, conversationModel, size, quality, inputs, options, masks...)
-				if generateErr != nil {
-					toolFailure := provider.IsRetryableImageGenerationError(generateErr)
-					retry := ctx.Err() == nil && attempt < imageGenerationMaxRetries && (toolFailure || (s.routingRetry(lease, generateErr, attempt) && !provider.IsImageDownloadError(generateErr) && !provider.IsImageTerminalError(generateErr) && !provider.IsImageOutputError(generateErr)))
-					if provider.IsDirectOpenAIImageModel(model) {
-						retry = false
-					} // Explicit image routes never trigger speculative regeneration.
-					finish(generateErr, retry)
-					s.accountPool.Release(lease)
-					if !provider.IsImageOutputError(generateErr) && !(toolFailure && retry) {
-						s.routingFeedback(lease, generateErr)
-					}
-					// A transient tool failure does not invalidate the account. Let
-					// the pool rotate normally, or reuse it if it is the only eligible
-					// account. Every retry reserves and accounts for quota again.
-					if !toolFailure {
-						excluded[lease.Account.Token] = true
-					}
-					if retry {
-						lastAttemptErr = generateErr
-						if toolFailure {
-							if err := waitImageGenerationRetry(ctx, attempt); err != nil {
-								sendErr(err)
-								cancel()
-								return
-							}
-						}
-						continue
-					}
-					sendErr(generateErr)
-					cancel()
-					return
-				}
-
-				items := make([]map[string]string, 0, len(generated))
-				var resolveErr error
-				for _, image := range generated {
-					value, localURL, err := s.openAIImage.Resolve(ctx, lease.Account, image, responseFormat, s.cfg.ImageDataDir, publicBase)
-					if err != nil {
-						resolveErr = err
-						break
-					}
-					s.recordGeneratedMedia(ctx, map[string]string{"url": localURL})
-					items = append(items, value)
-					if raw, err := base64.StdEncoding.DecodeString(image.Base64); err == nil {
-						outputDimensions[index] = decodeImagePixelSize(raw, index+1)
-					}
-					// Each worker represents exactly one requested output. Upstream can
-					// expose that output through multiple references, so resolving the
-					// remaining entries would only persist files that are later discarded.
-					break
-				}
-				if resolveErr != nil {
-					finish(resolveErr, false)
-					s.accountPool.Release(lease)
-					s.accountPool.FeedbackIntent(lease, upstreamStatus(resolveErr), resolveErr)
-					excluded[lease.Account.Token] = true
-					sendErr(resolveErr)
-					cancel()
-					return
-				}
-				s.accountPool.Release(lease)
-				finish(nil, false)
-				if !provider.IsDirectOpenAIImageModel(model) {
-					_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
-				}
-				s.stageRequestMonitor(r, "image_response_ready", 95, map[string]any{"response_ms": time.Since(accountStarted).Milliseconds()})
-				s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
-				results[index] = items
-				return
-			}
-		}()
-	}
-	wg.Wait()
-	// Replace, rather than mutate, metadata already shared with the live monitor.
-	completedSizeMeta := imageSizeRequestMetadata(size, inputs)
-	completedSizeMeta["output_dimensions"] = knownImagePixelSizes(outputDimensions)
-	s.enrichRequestMonitor(r, map[string]any{"image_size": completedSizeMeta})
-	select {
-	case err := <-errCh:
-		// Record only the final failure after all workers stop, never a transient
-		// attempt or a later cancellation from another worker.
-		if r != nil {
-			if outcome, ok := r.Context().Value(monitorOutcomeKey{}).(*monitorOutcome); ok {
-				outcome.imageError = provider.ImageErrorDetails(err)
-			}
+		if err := s.imageRouteStage(ctx, "submitted"); err != nil {
+			return nil, err
 		}
-		return nil, err
-	default:
+		attemptCtx, finish := trace.begin(s.quotaContext(ctx, lease), lease, index, 0)
+		generated, err := s.openAIImage.GenerateWithOptions(attemptCtx, lease.Account, prompt, conversationModel, size, quality, inputs, options, masks...)
+		if err != nil {
+			finish(err, false)
+			s.routingFeedback(lease, err)
+			return nil, err
+		}
+		if len(generated) == 0 {
+			err = fmt.Errorf("OpenAI image generation returned no downloadable files")
+			finish(err, false)
+			return nil, err
+		}
+		image := generated[0]
+		value, localURL, err := s.openAIImage.Resolve(ctx, lease.Account, image, responseFormat, s.cfg.ImageDataDir, publicBase)
+		if err != nil {
+			finish(err, false)
+			s.accountPool.FeedbackIntent(lease, upstreamStatus(err), err)
+			return nil, err
+		}
+		s.recordGeneratedMedia(ctx, map[string]string{"url": localURL})
+		data = append(data, value)
+		if raw, e := base64.StdEncoding.DecodeString(image.Base64); e == nil {
+			dimensions = append(dimensions, decodeImagePixelSize(raw, index+1))
+		}
+		finish(nil, false)
 	}
-	data := make([]map[string]string, 0)
-	for _, items := range results {
-		data = append(data, items...)
+	if !provider.IsDirectOpenAIImageModel(model) {
+		_ = s.discovery.RecordOutcome(accounts.Identity(lease.Account), conversationModel, true, false)
 	}
-	if len(data) == 0 {
-		return nil, fmt.Errorf("OpenAI image generation returned no downloadable files")
-	}
-	if len(data) > count {
-		data = data[:count]
-	}
+	s.accountPool.FeedbackIntent(lease, http.StatusOK, nil)
+	meta := imageSizeRequestMetadata(size, inputs)
+	meta["output_dimensions"] = knownImagePixelSizes(dimensions)
+	s.enrichRequestMonitor(r, map[string]any{"image_size": meta})
+	s.stageRequestMonitor(r, "image_response_ready", 99, nil)
 	return data, nil
 }
 
@@ -338,6 +277,19 @@ func (s *Server) parseImageEditRequest(r *http.Request) (imageEditRequest, error
 		return imageEditRequest{}, imageEditParseError{Message: message}
 	}
 	values := r.MultipartForm.Value
+	for _, field := range []string{"provider", "channel"} {
+		for _, value := range values[field] {
+			var providerValue, channelValue any
+			if field == "provider" {
+				providerValue = value
+			} else {
+				channelValue = value
+			}
+			if err := validateCallerChannelFields(providerValue, channelValue); err != nil {
+				return imageEditRequest{}, err
+			}
+		}
+	}
 	request := imageEditRequest{
 		ImageOutputOptions: provider.ImageOutputOptions{Background: firstFormValue(values, "background"), OutputFormat: firstFormValue(values, "output_format")},
 		Model:              firstFormValue(values, "model"),
@@ -824,7 +776,8 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if isOpenAIImageModel(modelName) {
 		if len(inputs) > 7 {
-			inputs = inputs[len(inputs)-7:]
+			writeError(w, 400, "at most 7 reference images are supported", "invalid_request_error")
+			return
 		}
 		size := openAIImageRequestedSize(request.Size)
 		if !validOpenAIImageSize(size) {

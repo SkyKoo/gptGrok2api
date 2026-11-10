@@ -11,7 +11,7 @@
       </fieldset>
     </FormSection>
 
-    <FormSection :title="`${config.target === 'grok' ? 'Grok' : 'OpenAI'} 任务参数`" density="roomy">
+    <FormSection :title="`${config.target === 'adobe' ? 'Adobe' : config.target === 'grok' ? 'Grok' : 'OpenAI'} 任务参数`" density="roomy">
       <p class="register-proxy-hint">参数按渠道独立自动保存，运行中也可切换渠道；切换不会停止任务。</p>
       <div class="register-form-grid">
         <label class="register-field">
@@ -20,7 +20,7 @@
             v-model="config.mode"
             :groups="registerModeGroups"
             selected-indicator="none"
-            :disabled="config.enabled || config.target === 'grok'"
+            :disabled="config.enabled || config.target !== 'openai'"
             block
           />
         </label>
@@ -482,14 +482,26 @@
       </div>
     </FormSection>
 
+    <FormSection v-if="config.target === 'adobe'" title="Adobe Firefly 注册" density="roomy">
+      <div class="register-form-grid">
+        <FormField label="浏览器服务地址"><Input v-model.trim="config.adobe.api_base" block placeholder="http://cfm-browser-worker:8899" :disabled="config.enabled" /></FormField>
+        <FormField label="浏览器服务密钥"><Input v-model.trim="config.adobe.api_key" :placeholder="config.adobe.api_key_set ? '已配置，留空保留' : '服务密钥'" type="password" block autocomplete="new-password" :disabled="config.enabled" /></FormField>
+        <FormField label="请求超时（秒）"><Input v-model.number="config.adobe.request_timeout" type="number" min="30" max="180" block :disabled="config.enabled" /></FormField>
+        <FormField label="国家 / 地区代码"><Input v-model.trim="config.adobe.country" block placeholder="US" :disabled="config.enabled" /></FormField>
+        <FormField label="出生年份"><Input v-model.number="config.adobe.birth_year" type="number" min="1900" :max="new Date().getFullYear() - 18" block :disabled="config.enabled" /></FormField>
+        <FormField label="出生月份"><Input v-model.number="config.adobe.birth_month" type="number" min="1" max="12" block :disabled="config.enabled" /></FormField>
+      </div>
+      <p class="text-xs text-muted-foreground">邮箱来源、代理和批次参数独立保存。注册完成后核对账号并加入 Adobe 账号池；提交结果不明确时保留任务供核查。</p>
+    </FormSection>
+
     <FormSection v-if="config.target === 'grok'" title="Grok 注册协议" density="roomy">
       <div class="register-form-grid register-form-grid--grok">
         <p class="register-proxy-hint register-field--full">
-          注册链路：CFM 后端执行 Grok 纯协议请求，Turnstile 由独立的 Grok Browser Worker 在隔离 Chromium 中完成。
+          注册链路：CFM 后端执行 Grok 纯协议请求，Turnstile 由独立的 CFM Browser Worker 在隔离 Chromium 中完成。
         </p>
 
         <label class="register-field">
-          <span class="register-label">Grok Browser Worker</span>
+          <span class="register-label">CFM Browser Worker</span>
           <GroupedSelectMenu
             v-model="config.grok.provider"
             :groups="turnstileProviderGroups"
@@ -825,7 +837,7 @@
 import ResinProxyFields from '@/views/proxy/ResinProxyFields.vue'
 import { computed, ref, watch } from 'vue'
 import { Icon } from '@iconify/vue'
-import { Button, Checkbox, Input, SegmentedTabs } from 'nanocat-ui'
+import { FormField, Button, Checkbox, Input, SegmentedTabs } from 'nanocat-ui'
 
 import FormSection from '@/components/ai/FormSection.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'

@@ -8,6 +8,7 @@ export type RegistrationCompensation = {
 }
 
 export function registrationCompensationHelp(target?: string): string {
+  if (target === 'adobe') return 'Adobe 注册提交后结果未知时保留邮箱和任务，不自动重复注册；已保存凭据可继续入库或校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'

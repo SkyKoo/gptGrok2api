@@ -1,3 +1,4 @@
+import type { MediaCapability } from '@/lib/mediaCapabilities'
 import apiClient from './client'
 
 export interface OpenAIModel {
@@ -8,6 +9,8 @@ export interface OpenAIModel {
   owned_by?: string
   root?: string
   parent?: string | null
+  capability?: string
+  media_capabilities?: MediaCapability
 }
 
 export interface ModelListResponse {
@@ -16,6 +19,7 @@ export interface ModelListResponse {
 }
 
 export interface ModelCatalogResponse {
+  media_capabilities?: Record<string, MediaCapability>
   object?: 'model_catalog' | string
   chat_models: string[]
   image_models: string[]

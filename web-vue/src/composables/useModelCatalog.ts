@@ -1,3 +1,4 @@
+import { setMediaCapabilities } from '@/lib/mediaCapabilities'
 import { computed, ref } from 'vue'
 import { modelsApi } from '@/api/models'
 import type { ModelCatalogResponse, ModelListResponse } from '@/api/models'
@@ -46,20 +47,22 @@ function normalizeCatalog(payload: ModelCatalogResponse | null | undefined): Mod
 }
 
 function catalogFromOpenAIModels(response: ModelListResponse): ModelCatalogResponse | null {
-  const ids = normalizeList((Array.isArray(response.data) ? response.data : []).map(item => item?.id))
+  const rows = Array.isArray(response.data) ? response.data : []
+  const ids = normalizeList(rows.map(item => item?.id))
   if (ids.length === 0) return null
+  const capabilities = Object.fromEntries(rows.filter(item => item.media_capabilities).map(item => [item.id, item.media_capabilities!]))
+  const isImage = (id: string) => capabilities[id]?.kind === 'image' || isImageModelId(id)
+  const isVideo = (id: string) => capabilities[id]?.kind === 'video' || id.toLowerCase().includes('video') || id.startsWith('veo-')
   return {
     object: 'model_catalog',
-    chat_models: ids.filter(model => !isImageModelId(model) && !model.toLowerCase().includes('video')),
-    image_models: ids.filter(model => isImageModelId(model) && model !== 'grok-imagine-image-edit'),
-    image_edit_models: ids.filter(model => isImageModelId(model) && (!model.startsWith('grok-') || model.includes('edit'))),
-    video_models: ids.filter(model => model.toLowerCase().includes('video')),
+    chat_models: ids.filter(model => !isImage(model) && !isVideo(model)),
+    image_models: ids.filter(model => isImage(model) && model !== 'grok-imagine-image-edit'),
+    image_edit_models: ids.filter(model => isImage(model) && (capabilities[model]?.max_reference_images ?? 8) > 0 && (!model.startsWith('grok-') || model.includes('edit'))),
+    video_models: ids.filter(isVideo),
+    media_capabilities: capabilities,
     all_models: ids,
     models: response.data,
-    source: {
-      chat: 'openai_models_endpoint',
-      image: 'openai_models_endpoint',
-    },
+    source: { chat: 'openai_models_endpoint', image: 'openai_models_endpoint' },
     openai_models_endpoint: '/v1/models',
   }
 }
@@ -70,17 +73,18 @@ export function useModelCatalog(resolveSettings: SettingsResolver) {
     return fromCatalog
   })
 
-  const chatModelLabels = computed(() => Object.fromEntries((sharedCatalog.value?.models || []).filter(item => item.id.startsWith('grok-web-') && item.name).map(item => [item.id, item.name!])))
+  const modelLabels = computed(() => Object.fromEntries((sharedCatalog.value?.models || []).filter(item => item.name).map(item => [item.id, item.name!])))
+  const chatModelLabels = computed(() => Object.fromEntries(Object.entries(modelLabels.value).filter(([id]) => id.startsWith('grok-web-'))))
   const modelAliases = computed(() => sharedCatalog.value?.model_aliases || {})
 
   const imageModels = computed(() => {
     const fromCatalog = normalizeList(sharedCatalog.value?.image_models)
-    return fromCatalog.length > 0 ? fromCatalog : resolveImageModels(resolveSettings())
+    return sharedCatalog.value ? fromCatalog : resolveImageModels(resolveSettings())
   })
 
   const imageEditModels = computed(() => {
     const fromCatalog = normalizeList(sharedCatalog.value?.image_edit_models)
-    return fromCatalog.length > 0
+    return sharedCatalog.value?.image_edit_models !== undefined
       ? fromCatalog
       : imageModels.value.filter(model => !model.startsWith('grok-') || model.includes('edit'))
   })
@@ -96,16 +100,19 @@ export function useModelCatalog(resolveSettings: SettingsResolver) {
       hasLoaded = true
       try {
         const catalog = normalizeCatalog(await modelsApi.catalog())
+        setMediaCapabilities(catalog?.media_capabilities)
         sharedCatalog.value = catalog
         loadError.value = null
         return catalog
       } catch (catalogError) {
         try {
           const fallback = normalizeCatalog(catalogFromOpenAIModels(await modelsApi.list()))
+          setMediaCapabilities(fallback?.media_capabilities)
           sharedCatalog.value = fallback
           loadError.value = null
           return fallback
         } catch (listError) {
+          setMediaCapabilities()
           sharedCatalog.value = null
           loadError.value = listError instanceof Error ? listError : new Error('Failed to load model catalog')
           console.error('Failed to load model catalog:', catalogError, listError)
@@ -124,6 +131,7 @@ export function useModelCatalog(resolveSettings: SettingsResolver) {
     catalog: sharedCatalog,
     chatModels,
     chatModelLabels,
+    modelLabels,
     modelAliases,
     imageModels,
     imageEditModels,

@@ -14,7 +14,8 @@ Python 语法，成功切换后原子替换；备份与发布共用 maintenance.
 ## 范围
 
 - `.env`、Compose、版本/槽位配置、access.json 和 secrets。
-- data 顶层 JSON/加密 JSON，以及 image_tasks、video_tasks、grok_media_reviews。
+- data 顶层 JSON/加密 JSON，以及 image_tasks、video_tasks、grok_media_reviews、adobe_jobs。
+- Adobe 注册恢复记录、加密账号与上游任务句柄，以及 browser-worker/adobe 中的私有 state.json 和浏览器认证存储（Cookies、Local State、Local/Session Storage、IndexedDB）。缓存、历史、锁文件与截图不入备份；活跃 profile 拒绝采集。
 - 同批 PostgreSQL 自定义格式导出/全局角色，以及 Redis BGSAVE 的 RDB 副本。
 - 排除图片、参考图日志、大日志、历史备份和运行锁；这不是完整媒体灾备。
 
@@ -36,7 +37,7 @@ Redis、外部服务之间的事务原子快照。生产服务不会被暂停或
 
 ## 恢复
 
-需要云端加密归档和独立保存的恢复密码；先解密再解压。保留 `.env` 中的 OAuth 解密密钥。
+需要云端加密归档和独立保存的恢复密码；先解密再解压。保留 `.env` 中的 OAuth/Adobe 解密密钥。Adobe 账号和任务使用相同的应用密钥派生加密密钥，丢失密钥无法恢复。浏览器认证文件只进入已加密的备份归档，保持原目录权限。
 在无外部网络的隔离环境先恢复 PostgreSQL 与 Redis，并核对 manifest.json；不要直接覆盖
 生产卷。检查注册、生成和授权任务是否已在上游完成，决定如何处置待执行队列后再启动应用
 和工作者，不能盲目重放。图片/参考文件需另从媒体备份恢复。
@@ -47,3 +48,8 @@ Redis、外部服务之间的事务原子快照。生产服务不会被暂停或
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/backup -p 'test_*.py'
 ```
+
+Adobe 恢复时先核对主任务记录和 adobe_jobs 加密句柄；已提交任务只能恢复轮询与下载。
+没有持久化句柄且提交结果未知的账号保留占用，不能根据余额未变化释放并重新生成。
+浏览器 profile 文件恢复到共享 Worker 的 `/data/adobe`，不可让 Grok/Adobe 同时打开同一 profile。
+此分支仅更新备份实现和离线测试，未改动 1Panel 任务或线上备份入口。

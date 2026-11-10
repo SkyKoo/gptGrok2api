@@ -15,8 +15,9 @@ function harness() {
   vue,
   '@/api/models': { modelsApi: { catalog: async () => { if (state.fallback) throw new Error('old endpoint'); return state.payload }, list: async () => ({ data: state.payload.models }) } },
   '@/config/modelCatalog': { isImageModelId: id => id.includes('image'), resolveImageModels: () => ['gpt-image-2'] },
+  '@/lib/mediaCapabilities': { setMediaCapabilities() {}, mediaCapability: () => undefined },
   '@/lib/studioMedia': { resolveStudioImageModel: model => model },
-  '@/api/imageTasks': { DEFAULT_IMAGE_MODEL: 'gpt-image-2', DEFAULT_IMAGE_QUALITY: 'high', DEFAULT_IMAGE_SIZE: '1024x1024', isImageSizeSupportedByModel: () => true },
+  '@/api/imageTasks': { DEFAULT_IMAGE_MODEL: 'gpt-image-2', DEFAULT_IMAGE_QUALITY: 'high', DEFAULT_IMAGE_SIZE: '1024x1024', resolveImageSizePresets: () => [{ value: '1024x1024' }], isImageSizeSupportedByModel: () => true },
   '@/lib/preferences': { getStringPreference: (key, fallback) => state.saved.get(key) || fallback, setStringPreference: (key, value) => state.saved.set(key, value), preferenceKeys: { studioChatModel: 'chat-model' } },
  }
  function evaluate(file) {

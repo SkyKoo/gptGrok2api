@@ -1,8 +1,8 @@
+import { validateMediaCombination } from '@/lib/mediaCapabilities'
 import { validateStudioImageModel, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { streamChatCompletion } from '@/api/chatStream'
 import { debugApi, type DebugChatContentPart, type DebugChatMessage } from '@/api/debug'
 import {
-  DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_QUALITY,
   imageTasksApi,
   normalizeImageCount,
@@ -96,12 +96,13 @@ export async function runStudioSearchRequest(prompt: string, ownerId: string): P
 }
 
 export async function createStudioImageTask(input: StudioImageTaskInput): Promise<ImageTask> {
-  const model = input.imageForm.model || DEFAULT_IMAGE_MODEL
+  const model = input.imageForm.model.trim()
   validateStudioReferenceCount('image', model, input.files.length)
   validateStudioImageModel(model, input.files.length > 0)
   const n = normalizeImageCount(input.imageForm.n)
   const size = input.imageForm.size
   const quality = input.imageForm.quality || DEFAULT_IMAGE_QUALITY
+  validateMediaCombination(model, { size, quality, count: n, references: input.files.length })
 
   return input.files.length
     ? imageTasksApi.createEdit({

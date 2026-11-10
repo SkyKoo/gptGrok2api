@@ -1,15 +1,18 @@
 services:
-  grok-browser:
+  cfm-browser-worker:
+    init: true
     build:
       context: .
       dockerfile: grok-browser/Dockerfile
-    image: ${GROK_BROWSER_IMAGE:-gptgrok2api-grok-browser:local}
-    container_name: ${GROK_BROWSER_CONTAINER_NAME:-gptgrok2api-grok-browser}
+    image: ${CFM_BROWSER_WORKER_IMAGE:-${GROK_BROWSER_IMAGE:-cfm-browser-worker:local}}
+    container_name: ${CFM_BROWSER_WORKER_CONTAINER_NAME:-cfm-browser-worker}
     restart: unless-stopped
     environment:
       TURNSTILE_HEADLESS: ${GROK_BROWSER_HEADLESS:-0}
-      GROK_BROWSER_CONCURRENCY: ${GROK_BROWSER_CONCURRENCY:-1}
-      GROK_BROWSER_TOKEN: ${GROK_BROWSER_TOKEN:-}
+      CFM_BROWSER_WORKER_CONCURRENCY: ${CFM_BROWSER_WORKER_CONCURRENCY:-${GROK_BROWSER_CONCURRENCY:-1}}
+      CFM_BROWSER_WORKER_TOKEN: ${CFM_BROWSER_WORKER_TOKEN:-${GROK_BROWSER_TOKEN:-}}
+    volumes:
+      - ./data/browser-worker:/data
     expose:
       - "8899"
     healthcheck:
@@ -20,6 +23,7 @@ services:
       start_period: 30s
     networks:
       default:
+        aliases: [grok-browser]
       cfm_warp: {}
 
   redis:
@@ -89,7 +93,8 @@ services:
       CHATGPT2API_ADMIN_KEY: ${CHATGPT2API_ADMIN_KEY:-}
       CHATGPT2API_WEBUI_KEY: ${CHATGPT2API_WEBUI_KEY:-}
       GO_CONFIG_PATH: ${GO_CONFIG_PATH:-/app/data/config.json}
-      CFM_GROK_BROWSER_URL: ${CFM_GROK_BROWSER_URL:-http://grok-browser:8899}
+      CFM_BROWSER_WORKER_URL: ${CFM_BROWSER_WORKER_URL:-${CFM_GROK_BROWSER_URL:-http://cfm-browser-worker:8899}}
+      CFM_BROWSER_WORKER_TOKEN: ${CFM_BROWSER_WORKER_TOKEN:-${GROK_BROWSER_TOKEN:-}}
       GO_PUBLIC_BASE_URL: ${GO_PUBLIC_BASE_URL:-}
       GO_TRUST_REQUEST_PUBLIC_BASE: ${GO_TRUST_REQUEST_PUBLIC_BASE:-false}
       GO_REQUEST_TIMEOUT_SECONDS: ${GO_REQUEST_TIMEOUT_SECONDS:-600}
@@ -120,7 +125,7 @@ services:
         condition: service_started
       postgres:
         condition: service_healthy
-      grok-browser:
+      cfm-browser-worker:
         condition: service_started
     networks:
       default:

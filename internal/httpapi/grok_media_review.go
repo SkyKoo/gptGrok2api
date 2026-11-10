@@ -15,7 +15,8 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
-const grokMediaGenerationAttempts = 2
+// A failed content review is terminal. Generation is never replayed.
+const grokMediaGenerationAttempts = 1
 const grokReviewPolicyVersion = 2
 
 // Evidence belongs to the administrator log, never a public task/result response.

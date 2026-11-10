@@ -198,7 +198,7 @@ func (s *Server) loadImageTasks() {
 			log.Printf("load image task record: %v", err)
 			continue
 		}
-		if task.Status == "queued" || task.Status == "running" {
+		if (task.Status == "queued" || task.Status == "running") && !(s.adobeRouteCanResume(task.Route, task.Model, "image")) {
 			// The provider has no resumable execution handle. Replaying a prompt
 			// after restart could generate and charge twice; report interruption.
 			task.Status = "error"
@@ -247,8 +247,14 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		Images       []string `json:"images"`
 		ImageURL     string   `json:"image_url"`
 		Mask         any      `json:"mask"`
+		Provider     any      `json:"provider"`
+		Channel      any      `json:"channel"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if err := validateCallerChannelFields(body.Provider, body.Channel); err != nil {
+		writeImageOptionError(w, err)
 		return
 	}
 	if strings.TrimSpace(body.ClientTaskID) == "" || strings.TrimSpace(body.Prompt) == "" {

@@ -1,25 +1,26 @@
-export type RegistrationChannel = 'openai' | 'grok'
+export type RegistrationChannel = 'openai' | 'grok' | 'adobe'
 export const registrationChannels: { value: RegistrationChannel; label: string }[] = [
   { value: 'openai', label: 'GPT' },
   { value: 'grok', label: 'Grok' },
+  { value: 'adobe', label: 'Adobe' },
 ]
 
 export function mailboxRegistrationDisabled(
-  mailbox: { status?: string; openai_disabled?: boolean; grok_disabled?: boolean },
+  mailbox: { status?: string; openai_disabled?: boolean; grok_disabled?: boolean; adobe_disabled?: boolean },
   platform: RegistrationChannel,
 ): boolean {
   return mailbox.status === 'disabled' || mailbox[`${platform}_disabled`] === true
 }
 
 export function mailboxRegistrationRetired(
-  mailbox: { openai_retired?: boolean; grok_retired?: boolean },
+  mailbox: { openai_retired?: boolean; grok_retired?: boolean; adobe_retired?: boolean },
   platform: RegistrationChannel,
 ): boolean {
   return mailbox[`${platform}_retired`] === true
 }
 
 export function mailboxRegistrationLabel(
-  mailbox: { status?: string; openai_disabled?: boolean; grok_disabled?: boolean; openai_retired?: boolean; grok_retired?: boolean } & MailboxClaimState,
+  mailbox: { status?: string; openai_disabled?: boolean; grok_disabled?: boolean; adobe_disabled?: boolean; openai_retired?: boolean; grok_retired?: boolean; adobe_retired?: boolean } & MailboxClaimState,
   platform: RegistrationChannel,
 ): string {
   if (mailbox.status === 'deleted') return '已删除'
@@ -31,8 +32,8 @@ export function mailboxRegistrationLabel(
 }
 
 export type MailboxClaimState = {
-  openai_claimed?: boolean; grok_claimed?: boolean
-  openai_reserved?: boolean; grok_reserved?: boolean
+  openai_claimed?: boolean; grok_claimed?: boolean; adobe_claimed?: boolean
+  openai_reserved?: boolean; grok_reserved?: boolean; adobe_reserved?: boolean
 }
 
 export function mailboxOccupancyLabel(mailbox: MailboxClaimState, platform: RegistrationChannel): string {
@@ -42,9 +43,9 @@ export function mailboxOccupancyLabel(mailbox: MailboxClaimState, platform: Regi
 }
 
 export function mailboxHasReservation(mailbox: MailboxClaimState): boolean {
-  return Boolean(mailbox.openai_reserved || mailbox.grok_reserved)
+  return Boolean(mailbox.openai_reserved || mailbox.grok_reserved || mailbox.adobe_reserved)
 }
 
 export function mailboxDeletionBlocked(mailbox: MailboxClaimState): boolean {
-  return Boolean(mailbox.openai_claimed || mailbox.grok_claimed || mailboxHasReservation(mailbox))
+  return Boolean(mailbox.openai_claimed || mailbox.grok_claimed || mailbox.adobe_claimed || mailboxHasReservation(mailbox))
 }
