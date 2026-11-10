@@ -36,41 +36,49 @@
       <PageLoadingState v-if="loading && !accounts.length" title="正在加载 Codex 账号" description="读取账号和 Codex 授权状态。" compact dashed />
       <EmptyState v-else-if="!filteredAccounts.length" plain title="暂无可授权账号" description="请先注册账号并入库，或在账号管理中将远程 CPA 凭据绑定到已有账号。" />
       <div v-else class="overflow-x-auto">
-        <table class="min-w-[900px] w-full text-left text-sm">
-          <thead class="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+        <table class="min-w-[1040px] w-full table-fixed text-left text-sm">
+          <colgroup>
+            <col class="w-[24%]" />
+            <col class="w-28" />
+            <col class="w-[20%]" />
+            <col />
+            <col class="w-36" />
+            <col class="w-52" />
+          </colgroup>
+          <thead class="whitespace-nowrap text-xs uppercase tracking-[0.14em] text-muted-foreground">
             <tr>
               <th class="py-3 pr-5">ChatGPT 账号</th>
               <th class="py-3 pr-5">Web 登录状态</th>
               <th class="py-3 pr-5">Codex OAuth</th>
               <th class="py-3 pr-5">CPA 同步</th>
               <th class="py-3 pr-5">最近更新</th>
-              <th class="py-3 text-right">操作</th>
+              <th class="py-3 pl-4 text-right">操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="account in filteredAccounts" :key="account.id" class="border-t border-border/60 align-top">
               <td class="py-4 pr-5">
-                <div class="font-medium">{{ account.email || account.name }}</div>
-                <div class="mt-1 text-xs text-muted-foreground">{{ account.id }} · {{ account.type || 'free' }} / {{ account.source_type || 'chatgpt_web' }}</div>
+                <div class="break-all font-medium">{{ account.email || account.name }}</div>
+                <div class="mt-1 break-all text-xs text-muted-foreground">{{ account.id }} · {{ account.type || 'free' }} / {{ account.source_type || 'chatgpt_web' }}</div>
               </td>
               <td class="py-4 pr-5">
                 <StateBadge :tone="accountStatusTone(account)" shape="rounded" size="sm">{{ account.status_label || accountStatusLabel(account) }}</StateBadge>
-                <div v-if="account.status_reason" class="mt-1 max-w-[16rem] text-xs text-muted-foreground">{{ account.status_reason }}</div>
+                <div v-if="account.status_reason" class="mt-1 break-words text-xs text-muted-foreground">{{ account.status_reason }}</div>
               </td>
               <td class="py-4 pr-5">
                 <StateBadge :tone="codexStatusTone(account)" shape="rounded" size="sm">{{ codexStatusLabel(account) }}</StateBadge>
-                <div v-if="account.codex_credential?.email" class="mt-1 text-xs text-muted-foreground">{{ account.codex_credential.email }}</div>
+                <div v-if="account.codex_credential?.email" class="mt-1 break-all text-xs text-muted-foreground">{{ account.codex_credential.email }}</div>
               </td>
               <td class="py-4 pr-5">
                 <StateBadge :tone="cpaStatusTone(account)" shape="rounded" size="sm">{{ cpaStatusLabel(account) }}</StateBadge>
                 <div v-if="account.codex_credential?.cpa_file_name" class="mt-1 max-w-[16rem] truncate text-xs text-muted-foreground">{{ account.codex_credential.cpa_file_name }}</div>
-                <div v-else-if="account.codex_credential?.cpa_last_error" class="mt-1 max-w-[16rem] text-xs text-rose-600">{{ account.codex_credential.cpa_last_error }}</div>
+                <div v-else-if="account.codex_credential?.cpa_last_error" class="mt-1 break-words text-xs text-rose-600">{{ account.codex_credential.cpa_last_error }}</div>
               </td>
               <td class="py-4 pr-5 text-xs text-muted-foreground">{{ formatDate(account.codex_credential?.updated_at || account.updated_at) }}</td>
-              <td class="py-4 text-right">
-                <div class="flex flex-wrap justify-end gap-2">
-                  <Button size="xs" variant="outline" :disabled="busy" @click="openAuthorize(account)">{{ account.codex_credential?.has_access_token ? '重新授权' : '开始授权' }}</Button>
-                  <Button v-if="account.codex_credential?.has_access_token" size="xs" variant="outline" :disabled="busy" @click="syncCPA(account)">同步 CPA</Button>
+              <td class="py-4 pl-4 align-middle text-right">
+                <div class="flex items-center justify-end gap-2">
+                  <Button size="sm" variant="outline" class="w-[5.5rem] shrink-0 whitespace-nowrap" :disabled="busy" @click="openAuthorize(account)">{{ account.codex_credential?.has_access_token ? '重新授权' : '开始授权' }}</Button>
+                  <Button v-if="account.codex_credential?.has_access_token" size="sm" variant="outline" class="w-[5.5rem] shrink-0 whitespace-nowrap" :disabled="busy" @click="syncCPA(account)">同步 CPA</Button>
                 </div>
               </td>
             </tr>
@@ -319,5 +327,5 @@ onUnmounted(stopPolling)
 
 <style scoped>
 .codex-oauth-page :deep(.metric-strip-card) { min-height: 92px; }
-.codex-oauth-page table th, .codex-oauth-page table td { vertical-align: top; }
+.codex-oauth-page table th, .codex-oauth-page table td:not(:last-child) { vertical-align: top; }
 </style>
