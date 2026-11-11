@@ -50,6 +50,7 @@ class BackupTests(unittest.TestCase):
     def test_adobe_encrypted_state_and_browser_authentication_are_backed_up(self):
         root = self.fixture()
         (root / 'data/adobe_accounts.json.enc').write_bytes(b'encrypted-account-fixture')
+        (root / 'data/adobe_relogin_tasks.json.enc').write_bytes(b'encrypted-relogin-fixture')
         jobs = root / 'data/adobe_jobs'
         jobs.mkdir()
         (jobs / 'task.json.enc').write_bytes(b'encrypted-task-fixture')
@@ -63,6 +64,7 @@ class BackupTests(unittest.TestCase):
         (profile / 'browser/Default/Cache/cache.bin').write_bytes(b'not backed up')
         contents, _, _ = b.capture(root)
         self.assertIn('data/adobe_accounts.json.enc', contents)
+        self.assertIn('data/adobe_relogin_tasks.json.enc', contents)
         self.assertIn('data/adobe_jobs/task.json.enc', contents)
         self.assertTrue(any(name.endswith('000001.log') for name in contents))
         self.assertFalse(any('/Cache/' in name or name.endswith('/LOCK') for name in contents))

@@ -182,3 +182,37 @@ test('account landing uses the existing Firefly navigation and only completes af
     });
   }
 });
+
+
+async function workerExportFixture(t,{omitted=true,mismatched=false,invalid=false}={}) {
+ const fixture=await setup(t,{cookies:[]});
+ const {browser,calls}=fixture;browser.workerMode=true;let url='https://firefly.adobe.com/',identities=0;
+ browser.page={url:()=>url,goto:async next=>{assert.equal(next,'https://firefly.adobe.com/generate/image');url=next;calls.push('editor')},
+  evaluate:async fn=>{
+   if(fn.name==='identityInPage'){
+    identities++;calls.push('identity');return {email:'person@example.test',account_id:mismatched&&identities>1?'different-id':'synthetic-id',token:'synthetic-token',user_agent:'fixture-agent',emailVerified:true};
+   }
+   assert.equal(fn.name,'runtimeARPInPage');calls.push('arp');
+   return invalid?{state:'invalid',source:'spl_runtime'}:omitted?{state:'empty',value_kind:'null',source:'spl_runtime'}:{state:'ready',token:'runtime-token',source:'spl_runtime'};
+  }};
+ return fixture;
+}
+test('worker registration exports explicit SPL omission after checking the editor identity and resumes it offline',async t=>{
+ const {browser,store,calls}=await workerExportFixture(t);
+ assert.equal((await browser.exportSession()).stage,'completed');
+ assert.deepEqual(calls,['identity','editor','arp','cookies','identity','refresh_cookies']);
+ const account=(await store.load()).result.account;
+ assert.equal(account.cookie,'');assert.equal(account.media_session_arp_mode,'omitted');assert.equal(account.media_session_arp_source,'spl_runtime');
+ browser.page=null;browser.context=null;assert.equal((await browser.exportSession()).stage,'completed');
+});
+test('worker registration preserves a present runtime value with its explicit SPL source',async t=>{
+ const {browser,store}=await workerExportFixture(t,{omitted:false});await browser.exportSession();
+ const account=(await store.load()).result.account;
+ assert.equal(account.cookie,'sherlockToken=runtime-token');assert.equal(account.media_session_arp_mode,'present');assert.equal(account.media_session_arp_source,'spl_runtime');
+});
+test('worker registration refuses identity changes and invalid runtime values without saving credentials',async t=>{
+ for(const [options,code] of [[{mismatched:true},'identity_not_verified'],[{invalid:true},'media_session_incomplete']]){
+  const {browser,store}=await workerExportFixture(t,options);
+  await assert.rejects(browser.exportSession(),codeIs(code));assert.equal((await store.load()).result?.account,undefined);
+ }
+});

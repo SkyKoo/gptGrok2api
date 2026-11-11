@@ -14,7 +14,7 @@ Python 语法，成功切换后原子替换；备份与发布共用 maintenance.
 ## 范围
 
 - `.env`、Compose、版本/槽位配置、access.json 和 secrets。
-- data 顶层 JSON/加密 JSON，以及 image_tasks、video_tasks、grok_media_reviews、adobe_jobs。
+- data 顶层 JSON/加密 JSON（含 Adobe 重新登录任务元数据 adobe_relogin_tasks.json.enc），以及 image_tasks、video_tasks、grok_media_reviews、adobe_jobs。
 - Adobe 注册恢复记录、加密账号与上游任务句柄，以及 browser-worker/adobe 中的私有 state.json 和浏览器认证存储（Cookies、Local State、Local/Session Storage、IndexedDB）。缓存、历史、锁文件与截图不入备份；活跃 profile 拒绝采集。
 - 同批 PostgreSQL 自定义格式导出/全局角色，以及 Redis BGSAVE 的 RDB 副本。
 - 排除图片、参考图日志、大日志、历史备份和运行锁；这不是完整媒体灾备。

@@ -1,4 +1,5 @@
 import apiClient from './client'
+import type { AdobeReloginTask } from '@/lib/adobeRelogin'
 
 export interface AdobeGenerationQuotaPool {
   id: string
@@ -48,6 +49,8 @@ export interface AdobeAccount {
   quota?: AdobeQuota
   pending?: boolean
   in_flight?: boolean
+  submission_unknown?: boolean
+  has_profile?: boolean
   has_token?: boolean
   has_cookie?: boolean
   credential_revision?: number
@@ -64,7 +67,7 @@ export interface AdobeAccountsResponse {
 }
 export interface AdobeMutationResponse {
   summary?: { total: number; ok: number; fail: number }
-  results?: Array<{ id: string; ok: boolean; error?: string }>
+  results?: Array<{ id: string; ok: boolean; error?: string; account?: AdobeAccount }>
   error?: string
   hme_cleanup?: { failed: number; results?: Array<{status:string; message?:string}> }
 }
@@ -90,6 +93,8 @@ export const adobeAccountsApi = {
     }
     return { results }
   },
+  relogin: (ids: string[], requestId: string) => apiClient.post<unknown, { request_id: string; items: AdobeReloginTask[] }>(`${path}/relogin`, { request_id: requestId, ids }, { timeout: 15000 }),
+  listRelogins: (requestId?: string) => apiClient.get<never, { request_id?: string; items: AdobeReloginTask[] }>(`${path}/relogin`, { params: requestId ? { request_id: requestId } : undefined, timeout: 15000 }),
   setDisabled: (ids: string[], disabled: boolean) => apiClient.post<unknown, AdobeMutationResponse>(`${path}/disabled`, { ids, disabled }),
   linkMailboxes: (ids: string[]) => apiClient.post<unknown, AdobeMailboxLinkResponse>(`${path}/link-mailboxes`, { ids }),
   remove: (ids: string[]) => apiClient.delete<never, AdobeMutationResponse>(path, { data: { ids } }),

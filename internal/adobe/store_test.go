@@ -192,7 +192,7 @@ func TestBrowserRefreshFallbackUsesSameIdentityAndMaintenanceGuard(t *testing.T)
 		if _, e := s.Reserve("parallel-request"); !errors.Is(e, ErrNoAccount) {
 			t.Error("browser refresh allowed parallel media")
 		}
-		return current, nil
+		return verifiedBrowserAccount(current), nil
 	})
 	c := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
 		if !strings.Contains(r.URL.Path, "credits/balance") {

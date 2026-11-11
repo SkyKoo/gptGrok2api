@@ -160,6 +160,11 @@ func (s *Server) DeploymentReady() error {
 			return errors.New("Adobe account storage unavailable")
 		}
 	}
+	if s.adobeReloginJobs != nil {
+		if _, err := s.adobeReloginJobs.List(""); err != nil {
+			return errors.New("Adobe relogin journal unavailable")
+		}
+	}
 	if s.adobeRegister != nil && s.adobeRegister.Snapshot()["error"] != nil {
 		return errors.New("Adobe registration journal unavailable")
 	}
