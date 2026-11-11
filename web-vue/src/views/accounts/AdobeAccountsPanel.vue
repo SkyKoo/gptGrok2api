@@ -4,16 +4,20 @@
       <div><h2 class="font-semibold">Adobe 账号</h2><p class="text-xs text-muted-foreground">Web Free 图片与视频共用账号额度。未知或过期数据不代表可用次数。</p></div>
       <Button variant="outline" size="sm" :disabled="loading || busy" @click="load">刷新列表</Button>
     </div>
-    <div class="flex flex-wrap gap-3">
-      <Input v-model="keyword" placeholder="搜索邮箱 / 账号 ID" aria-label="搜索 Adobe 账号" />
-      <select v-model="status" class="ui-input" aria-label="Adobe 账号状态">
-        <option value="">全部状态</option><option value="active">可用</option><option value="disabled">已禁用</option><option value="expired">凭据过期</option><option value="invalid">凭据异常</option><option value="pending">待验证 / 额度待查询</option><option value="exhausted">额度耗尽</option><option value="busy">生成中</option><option value="submission_unknown">提交结果待核对</option>
-      </select>
-      <Button size="sm" variant="outline" :disabled="busy" @click="showImport = !showImport">导入会话 JSON</Button>
+    <div class="flex flex-wrap items-center gap-3">
+      <Input v-model="keyword" placeholder="搜索邮箱 / 账号 ID" aria-label="搜索 Adobe 账号" block root-class="min-w-[14rem] flex-1 md:max-w-sm" />
+      <GroupedSelectMenu
+        v-model="status"
+        :options="statusOptions"
+        selected-indicator="none"
+        aria-label="Adobe 账号状态"
+      />
+      <Button size="sm" variant="outline" :disabled="busy" @click="showImport ? closeImport() : showImport = true">导入已有账号</Button>
     </div>
     <form v-if="showImport" class="space-y-3" @submit.prevent="importAccounts">
-      <label class="block text-sm" for="adobe-session-import">账号会话 JSON</label>
-      <textarea id="adobe-session-import" v-model="importText" class="ui-input w-full min-h-32 font-mono text-xs" placeholder='{"accounts":[{"email":"","account_id":"","token":"","cookie":""}]}' autocomplete="off" spellcheck="false" />
+      <label class="block text-sm" for="adobe-session-import">账号登录会话 JSON</label>
+      <p id="adobe-session-import-help" class="text-xs leading-relaxed text-muted-foreground">导入已有 Adobe 账号的登录凭据，包含邮箱、账号 ID、Token 和 Cookie。通过 CFM 注册成功的账号会自动入库，无需手动导入。</p>
+      <textarea id="adobe-session-import" v-model="importText" class="ui-textarea-sm font-mono" rows="8" aria-describedby="adobe-session-import-help" placeholder='{"accounts":[{"email":"","account_id":"","token":"","cookie":""}]}' autocomplete="off" spellcheck="false" />
       <div class="flex gap-2"><Button type="submit" size="sm" :disabled="busy || !importText.trim()">导入</Button><Button size="sm" variant="outline" @click="closeImport">取消</Button></div>
     </form>
     <div class="flex flex-wrap gap-2">
@@ -44,7 +48,7 @@
           <td class="p-3"><div>{{ quotaLabel(account.quota) }}</div><div v-if="account.quota?.total !== undefined" class="text-xs text-muted-foreground">总额 {{ account.quota.total }} · 已用 {{ account.quota.used ?? '未知' }}</div><p v-if="account.quota?.error" class="text-xs text-rose-500">{{ account.quota.error }}</p></td>
           <td class="p-3 text-xs">{{ time(account.quota?.checked_at) }}</td>
           <td class="p-3 text-xs"><div>{{ time(account.expires_at ? account.expires_at * 1000 : undefined) }}</div><div class="mt-1 max-w-52 text-muted-foreground">{{ mediaSessionLabel(account.media_session_status) }}</div><div v-if="account.media_session_updated_at" class="mt-1 text-muted-foreground" :title="`最近保存完整媒体会话：${time(account.media_session_updated_at * 1000)}`">会话保存：{{ time(account.media_session_updated_at * 1000) }}</div></td>
-        </tr><tr v-if="!accounts.length"><td colspan="6" class="p-8 text-center text-muted-foreground">{{ loading ? '正在加载…' : '暂无 Adobe 账号，可在注册页创建或导入已有会话。' }}</td></tr></tbody>
+        </tr><tr v-if="!accounts.length"><td colspan="6" class="p-8 text-center text-muted-foreground">{{ loading ? '正在加载…' : '暂无 Adobe 账号，可在注册页创建或导入已有账号。' }}</td></tr></tbody>
       </table>
     </div>
     <div class="flex items-center justify-between gap-3 text-sm"><span>共 {{ total }} 个账号</span><div class="flex items-center gap-3"><Button size="sm" variant="outline" :disabled="loading || page <= 1" @click="page--">上一页</Button><span>{{ page }} / {{ Math.max(1, Math.ceil(total / pageSize)) }}</span><Button size="sm" variant="outline" :disabled="loading || page * pageSize >= total" @click="page++">下一页</Button></div></div>
@@ -54,10 +58,23 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import PagePanel from '@/components/ai/PagePanel.vue'
+import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { adobeAccountsApi, type AdobeAccount, type AdobeQuota, type AdobeMutationResponse } from '@/api/adobeAccounts'
 const emit = defineEmits<{ (e: 'total', value: number): void }>()
 const accounts = ref<AdobeAccount[]>([]), total = ref(0), page = ref(1), pageSize = 25
 const keyword = ref(''), status = ref(''), selected = ref<string[]>([]), loading = ref(false), busy = ref(false)
+const statusOptions = [
+  { value: '', label: '全部状态' },
+  { value: 'active', label: '可用' },
+  { value: 'disabled', label: '已禁用' },
+  { value: 'expired', label: '凭据过期' },
+  { value: 'invalid', label: '凭据异常' },
+  { value: 'pending', label: '待验证 / 额度待查询' },
+  { value: 'exhausted', label: '额度耗尽' },
+  { value: 'busy', label: '生成中' },
+  { value: 'submission_unknown', label: '提交结果待核对' },
+]
+
 const error = ref(''), message = ref(''), showImport = ref(false), importText = ref(''), confirmDelete = ref(false)
 let sequence = 0, searchTimer: ReturnType<typeof setTimeout> | undefined
 const allSelected = computed(() => accounts.value.length > 0 && accounts.value.every(item => selected.value.includes(item.id)))
