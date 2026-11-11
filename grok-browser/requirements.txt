@@ -2,3 +2,5 @@ fastapi
 uvicorn
 pydantic
 cloakbrowser==0.6.4
+# CloakBrowser 0.6.4 imports Playwright internals removed in 1.65.
+playwright==1.64.1
