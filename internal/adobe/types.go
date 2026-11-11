@@ -41,6 +41,8 @@ type Account struct {
 	MediaSessionUpdatedAt int64                 `json:"media_session_updated_at,omitempty"`
 	Proxy                 string                `json:"proxy,omitempty"`
 	ProxyBinding          *proxyruntime.Binding `json:"proxy_binding,omitempty"`
+	ProxyPolicy           string                `json:"proxy_policy,omitempty"`
+	ProxyBindingHistory   []map[string]any      `json:"proxy_binding_history,omitempty"`
 	ID                    string                `json:"id"`
 	AccountID             string                `json:"account_id"`
 	Email                 string                `json:"email"`
@@ -65,6 +67,26 @@ type Account struct {
 	NextRefreshAt         int64                 `json:"next_refresh_at,omitempty"`
 	InFlight              string                `json:"in_flight,omitempty"`
 	SettlementUntil       int64                 `json:"settlement_until,omitempty"`
+}
+
+// RoutingFields exposes only daily egress metadata to the shared proxy manager.
+// The registration task's original route remains in its separate journal.
+func (a Account) RoutingFields() map[string]any {
+	fields := map[string]any{
+		"proxy": a.Proxy, "proxy_policy": a.ProxyPolicy,
+		"platform": "adobe", "registration_job_id": a.RegistrationJobID,
+	}
+	if a.ProxyBinding != nil {
+		fields["proxy_binding"] = a.ProxyBinding
+	}
+	if a.ProxyBindingHistory != nil {
+		history := make([]any, len(a.ProxyBindingHistory))
+		for i, entry := range a.ProxyBindingHistory {
+			history[i] = entry
+		}
+		fields["proxy_binding_history"] = history
+	}
+	return fields
 }
 
 type ImageRequest struct {

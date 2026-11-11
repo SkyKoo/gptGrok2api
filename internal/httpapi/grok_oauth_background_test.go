@@ -250,6 +250,56 @@ func TestGrokBackgroundConcurrentStartsAndReload(t *testing.T) {
 	}
 }
 
+func TestGrokOAuthBrowserUsesCurrentDailyDefaultOrManualOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name, override, expected string
+	}{
+		{name: "inherits", expected: "http://default.invalid:8080"},
+		{name: "manual_direct", override: "direct"},
+		{name: "manual_proxy", override: "http://account.invalid:8080", expected: "http://account.invalid:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var admissions atomic.Int32
+			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					w.Write([]byte(`{"status":"released"}`))
+					return
+				}
+				if r.URL.Path != "/v1/browser/reservations" {
+					t.Error("unexpected worker operation")
+					w.WriteHeader(404)
+					return
+				}
+				admissions.Add(1)
+				var body map[string]any
+				if json.NewDecoder(r.Body).Decode(&body) != nil || body["proxy"] != tc.expected || body["daily_direct"] != (tc.expected == "") {
+					t.Error("browser reservation did not receive the daily account route")
+				}
+				// Stop at browser admission: no device-code or upstream auth call.
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer worker.Close()
+			cfg := adminTestConfig(t.TempDir())
+			cfg.ProxyURL = "http://default.invalid:8080"
+			s := NewWithWorkers(cfg, false)
+			_, _, err := s.registerStore.AddAccount(map[string]any{"id": "selected", "email": "selected@example.test", "sso": "SSO-SECRET", "proxy": tc.override})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.registerStore.Update(map[string]any{"grok": map[string]any{"api_base": worker.URL}, "proxy": "http://registration.invalid:8080"}); err != nil {
+				t.Fatal(err)
+			}
+			task, _, err := s.startGrokOAuth("selected")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.runGrokOAuthTask(task); err == nil || admissions.Load() != 1 {
+				t.Fatal("expected one bounded browser admission before failure")
+			}
+		})
+	}
+}
+
 func TestGrokOAuthWaitingCancelsBeforeAnyDeviceGrant(t *testing.T) {
 	var admissions, grants, released atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

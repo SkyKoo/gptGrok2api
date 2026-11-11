@@ -123,8 +123,9 @@ export function proxyReferenceLabel(value: unknown): string {
 }
 
 export interface AccountProxyBinding {
-  platform: 'openai' | 'grok'
+  platform: 'openai' | 'grok' | 'adobe'
   account_id: string
+  policy: 'inherit' | 'explicit'
   label: string
   available: boolean
   binding: { reference: string; bound_at: string; resin_platform?: string; resin_account?: string } | null

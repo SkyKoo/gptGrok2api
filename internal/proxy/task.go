@@ -75,6 +75,9 @@ func NodeReference(group, node string) string {
 	return "node:" + url.PathEscape(group) + "/" + url.PathEscape(node)
 }
 func (b Binding) Label() string {
+	if b.Reference == AccountProxyInherit {
+		return "跟随默认出口"
+	}
 	if b.ResinAccount != "" {
 		prefix := ""
 		if b.GroupID != "" {
@@ -358,6 +361,7 @@ func (m *Manager) resolveBinding(b Binding) (string, error) {
 // ResolveBound is checked by all request families before their legacy routing.
 // An unresolved binding is an error, never permission to use a random/default exit.
 func (m *Manager) ResolveBound(fields map[string]any) (string, bool, error) {
+	fields = AccountRoutingFields(fields)
 	if fields == nil {
 		return "", false, nil
 	}
@@ -405,15 +409,23 @@ func (m *Manager) BlockTaskScope(b Binding, until time.Time) {
 func RebindFields(current map[string]any, next Binding, reason string) map[string]any {
 	old := ParseBinding(current["proxy_binding"])
 	oldLabel := "legacy/default"
-	if old != nil {
+	if AccountInheritsDefault(current) {
+		oldLabel = Binding{Reference: AccountProxyInherit}.Label()
+	} else if old != nil {
 		oldLabel = old.Label()
 	}
-	history := []any{}
-	if entries, ok := current["proxy_binding_history"].([]any); ok {
-		history = append(history, entries...)
+	history, valid := accountBindingHistory(current["proxy_binding_history"])
+	if !valid {
+		// Preserve unrecognized old audit data when an administrator explicitly
+		// replaces its route rather than silently dropping it.
+		history = []any{current["proxy_binding_history"]}
 	}
 	history = append(history, map[string]any{"at": next.BoundAt, "from": oldLabel, "to": next.Label(), "reason": reason, "actor": "admin"})
-	return map[string]any{"proxy": next.Reference, "proxy_binding": next, "proxy_binding_history": history}
+	updates := map[string]any{"proxy": next.Reference, "proxy_url": "", "proxyUrl": "", "proxy_binding": next, "proxy_policy": AccountProxyExplicit, "proxy_binding_history": history}
+	if next.Reference == AccountProxyInherit {
+		updates["proxy"], updates["proxy_binding"], updates["proxy_policy"] = "", nil, AccountProxyInherit
+	}
+	return updates
 }
 
 func (m *Manager) TaskSnapshot() map[string]any {
@@ -434,6 +446,7 @@ func (m *Manager) TaskSnapshot() map[string]any {
 
 // withExplicitDefault applies global direct/group only when no account route exists.
 func (m *Manager) withExplicitDefault(fields map[string]any) map[string]any {
+	fields = AccountRoutingFields(fields)
 	if m == nil || fields["proxy_binding"] != nil {
 		return fields
 	}

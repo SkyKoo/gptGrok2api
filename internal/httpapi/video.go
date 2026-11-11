@@ -222,6 +222,7 @@ func (s *Server) runVideoAttempt(ctx context.Context, job *videoJob, prompt, asp
 		return false
 	}
 	defer s.grokAccountPool.Release(lease)
+	ctx = s.proxyManager.WithAccountEgress(ctx, lease.Account.Fields)
 	s.videoMu.Lock()
 	job.Route = &mediaRoute{Channel: "grok", AccountID: accounts.Identity(lease.Account), UpstreamModel: job.Model, Stage: "selected"}
 	saveErr := s.saveVideoCheckpointLocked(job)

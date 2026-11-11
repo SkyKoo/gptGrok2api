@@ -50,11 +50,12 @@ func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size
 			return nil, err
 		}
 		defer s.grokAccountPool.Release(lease) // Release is idempotent; also cover panic/cancellation paths.
+		attemptCtx := s.proxyManager.WithAccountEgress(r.Context(), lease.Account.Fields)
 		s.enrichMonitorAccount(r, lease.Account)
 		s.stageRequestMonitor(r, "image_getting_account", 35, map[string]any{"account_wait_ms": time.Since(accountStarted).Milliseconds()})
 		s.stageRequestMonitor(r, "image_generating", 35, map[string]any{"grok_generation_attempt": attempt, "grok_requested_outputs": len(pending)})
 		started := time.Now()
-		images, generateErr := generate(r.Context(), lease, len(pending))
+		images, generateErr := generate(attemptCtx, lease, len(pending))
 		if generateErr != nil {
 			s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(generateErr), generateErr)
 			s.grokAccountPool.Release(lease)
@@ -69,7 +70,7 @@ func (s *Server) generateReviewedGrokImages(r *http.Request, prompt, model, size
 		// Resolve into memory only; failed content must never enter public files/gallery.
 		downloadStarted := time.Now()
 		for i := range pending {
-			resolved, resolveErr := s.mediaProvider.ResolveImage(r.Context(), lease.Account, images[i], "b64_json", "", "")
+			resolved, resolveErr := s.mediaProvider.ResolveImage(attemptCtx, lease.Account, images[i], "b64_json", "", "")
 			if resolveErr != nil {
 				s.grokAccountPool.FeedbackIntent(lease, upstreamStatus(resolveErr), resolveErr)
 				s.grokAccountPool.Release(lease)

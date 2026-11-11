@@ -22,7 +22,8 @@
     "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs",
     "test:registration-channel-isolation": "node --experimental-strip-types --test scripts/registration-channel-isolation.test.mjs",
     "test:adobe-media": "node --experimental-strip-types --test scripts/adobe-media-capabilities.test.mjs scripts/adobe-account-quotas.test.mjs",
-    "test:adobe-ui": "node scripts/adobe-ui-smoke.mjs"
+    "test:adobe-ui": "node scripts/adobe-ui-smoke.mjs",
+    "test:proxy-binding-ui": "node scripts/proxy-binding-ui-smoke.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",

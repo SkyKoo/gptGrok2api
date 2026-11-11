@@ -19,6 +19,26 @@ func routingFixture() *ProxyRouting {
 	return &ProxyRouting{Manager: m}
 }
 
+func assertRegisteredAccountInheritsDefault(t *testing.T, account map[string]any) {
+	t.Helper()
+	if account["proxy_policy"] != "inherit" {
+		t.Fatal("registered account does not follow the daily default")
+	}
+	for _, key := range []string{"proxy", "proxy_url", "proxyUrl", "proxy_binding"} {
+		if _, exists := account[key]; exists {
+			t.Fatalf("registration route leaked into account field %s", key)
+		}
+	}
+	manager := proxyruntime.NewManager("http://daily-default.invalid:8080", nil)
+	if manager.Resolve(account, false) != "http://daily-default.invalid:8080" {
+		t.Fatal("daily request retained the registration route")
+	}
+	manager.SetDefault("http://new-daily-default.invalid:8080", nil)
+	if manager.Resolve(account, false) != "http://new-daily-default.invalid:8080" {
+		t.Fatal("account did not follow a changed default")
+	}
+}
+
 type routedFreeFlow struct {
 	t        *testing.T
 	selected string
@@ -75,10 +95,12 @@ func testRegistrationRoutesBothPlatforms(t *testing.T, channel bool) {
 		}
 		return mail, &routedFreeFlow{t: t, selected: c.Proxy, get: func() RegistrationJob { v, _ := free.getJob(j.ID); return v }}, nil
 	}, func(ctx context.Context, id string, a map[string]any) error {
-		b := proxyruntime.ParseBinding(a["proxy_binding"])
+		job, _ := free.getJob(id)
+		b := job.ProxyBinding
 		if b == nil || (channel && (b.Reference != selection || b.ResinAccount == "")) || (!channel && b.NodeID != "a") {
-			t.Error("GPT import lost binding")
+			t.Error("GPT task lost registration binding")
 		}
+		assertRegisteredAccountInheritsDefault(t, a)
 		return nil
 	}, nil)
 	free.SetProxyRouting(routing)
@@ -104,10 +126,12 @@ func testRegistrationRoutesBothPlatforms(t *testing.T, channel bool) {
 		grok.mu.Unlock()
 		return &fakeMail{}, &routedGrokFlow{t: t, selected: c.Proxy, get: func() RegistrationJob { v, _ := grok.getJob(job.ID); return v }}, nil
 	}, func(ctx context.Context, id string, a map[string]any) error {
-		b := proxyruntime.ParseBinding(a["proxy_binding"])
+		job, _ := grok.getJob(id)
+		b := job.ProxyBinding
 		if b == nil || (channel && (b.Reference != selection || b.ResinAccount == "")) || (!channel && b.NodeID != "b") {
-			t.Error("Grok import lost binding or shared pool cursor")
+			t.Error("Grok task lost registration binding or shared pool cursor")
 		}
+		assertRegisteredAccountInheritsDefault(t, a)
 		return nil
 	}, nil)
 	grok.SetProxyRouting(routing)
@@ -260,7 +284,7 @@ func TestCompensationEnginesUseCurrentProxySelection(t *testing.T) {
 						t.Fatal("missing binding allowed upstream work", saved.Error)
 					}
 				} else {
-					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil {
+					if calls != 1 || mail.prepared.Load() != 1 || saved.ProxyBinding == nil || saved.Account["proxy_policy"] != "inherit" {
 						t.Fatal("child registration lost route or mailbox", saved.Error)
 					}
 				}
@@ -371,7 +395,7 @@ func testSavedResinRegistrationEngines(t *testing.T, channel bool) {
 						t.Fatal("missing binding allowed upstream work", saved.Error)
 					}
 				} else {
-					if calls != 1 || mail.prepared.Load() != 1 || proxyruntime.ParseBinding(saved.Account["proxy_binding"]) == nil || saved.ProxyBinding.ResinAccount == lease.Binding.ResinAccount {
+					if calls != 1 || mail.prepared.Load() != 1 || saved.ProxyBinding == nil || saved.Account["proxy_policy"] != "inherit" || saved.ProxyBinding.ResinAccount == lease.Binding.ResinAccount {
 						t.Fatal("child registration lost route or mailbox", saved.Error)
 					}
 				}

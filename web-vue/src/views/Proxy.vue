@@ -5,7 +5,7 @@
       <PanelHeader title="代理管理" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            已绑定账号优先使用固定节点；未绑定账号沿用个人代理、账号组和默认出口配置。注册任务从所选代理组依次分配节点。
+            GPT、Grok 和 Adobe 的日常请求优先使用手动设置的账号出口，否则跟随这里的默认出口。注册代理单独配置，只用于注册任务。
           </p>
         </template>
         <template #actions>

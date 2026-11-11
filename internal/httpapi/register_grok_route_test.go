@@ -8,14 +8,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
-func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
+func TestRegisteredGrokDailyRouteFollowsDefaultAndSurvivesSync(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Egress") != "default" {
+			t.Error("daily request bypassed the configured default proxy")
+		}
 		if !strings.Contains(r.Header.Get("Cookie"), "sso=route-test-session") {
 			t.Error("daily request lost account credentials")
 		}
@@ -34,10 +38,32 @@ func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
 		}
 	}))
 	defer up.Close()
+	var firstCalls, secondCalls atomic.Int32
+	forward := func(counter *atomic.Int32) *httptest.Server {
+		proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			counter.Add(1)
+			req := r.Clone(r.Context())
+			req.RequestURI = ""
+			req.Header.Set("X-Test-Egress", "default")
+			resp, err := http.DefaultTransport.RoundTrip(req)
+			if err != nil {
+				t.Error(err)
+				w.WriteHeader(502)
+				return
+			}
+			defer resp.Body.Close()
+			for key, values := range resp.Header {
+				w.Header()[key] = values
+			}
+			w.WriteHeader(resp.StatusCode)
+			_, _ = io.Copy(w, resp.Body)
+		}))
+		t.Cleanup(proxy.Close)
+		return proxy
+	}
+	first, second := forward(&firstCalls), forward(&secondCalls)
 	cfg := adminTestConfig(t.TempDir())
-	// A forgotten override would hit an unreachable proxy instead of upstream.
-	cfg.ProxyURL = "http://127.0.0.1:1"
-	cfg.ResourceProxyURL = "http://127.0.0.1:2"
+	cfg.ProxyURL = first.URL
 	cfg.GrokRateLimitsURL = up.URL + "/rate-limits"
 	cfg.MediaChatURL = up.URL + "/chat"
 	s := New(cfg)
@@ -48,7 +74,7 @@ func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
 		"browser_profile": map[string]any{"user-agent": "registration-profile"},
 	}
 	original, _ := json.Marshal(signup)
-	if err := s.importRegisteredGrokAccount(context.Background(), "job-direct", signup); err != nil {
+	if err := s.importRegisteredGrokAccount(context.Background(), "job-inherit", signup); err != nil {
 		t.Fatal(err)
 	}
 	unchanged, _ := json.Marshal(signup)
@@ -56,19 +82,23 @@ func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
 		t.Fatal("import changed registration task route or credentials")
 	}
 	archive, _ := s.registerStore.ExportAccounts(nil)
-	if len(archive) != 1 || archive[0]["proxy"] != "direct" || boolValue(archive[0]["enabled"], true) {
-		t.Fatal("new account must be direct and still await verification")
+	if len(archive) != 1 || archive[0]["proxy_policy"] != "inherit" || archive[0]["proxy_binding"] != nil || boolValue(archive[0]["enabled"], true) {
+		t.Fatal("new account must follow the default and still await verification")
 	}
-	if err := s.verifyRegisteredGrokAccount(context.Background(), "job-direct", signup); err != nil {
+	if err := s.verifyRegisteredGrokAccount(context.Background(), "job-inherit", signup); err != nil {
 		t.Fatal(err)
 	}
 	runtime, _ := s.grokRuntimeStore.AccountList()
-	if len(runtime) != 1 || runtime[0]["proxy"] != "direct" || !boolValue(runtime[0]["enabled"], false) {
-		t.Fatal("verified account did not enter runtime with direct route")
+	if len(runtime) != 1 || runtime[0]["proxy_policy"] != "inherit" || runtime[0]["proxy_binding"] != nil || !boolValue(runtime[0]["enabled"], false) {
+		t.Fatal("verified account did not enter runtime with inherited route")
 	}
+	if firstCalls.Load() != 1 {
+		t.Fatal("registration verification did not use the daily default")
+	}
+	s.proxyManager.SetDefault(second.URL, nil)
 	for _, resource := range []bool{false, true} {
-		if s.proxyManager.Resolve(runtime[0], resource) != "" {
-			t.Fatal("daily request inherited signup or default/resource proxy")
+		if s.proxyManager.Resolve(runtime[0], resource) != second.URL {
+			t.Fatal("daily request did not follow the changed default")
 		}
 	}
 	a := accounts.Account{Token: "route-test-session", Fields: runtime[0]}
@@ -80,7 +110,10 @@ func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
 	_ = response.Body.Close()
 	body, mime, err := s.mediaProvider.Fetch(context.Background(), a, up.URL+"/video.mp4")
 	if err != nil || mime != "video/mp4" || string(body) != "fixture-video" {
-		t.Fatalf("direct resource fetch failed: mime=%s err=%v", mime, err)
+		t.Fatalf("proxied resource fetch failed: mime=%s err=%v", mime, err)
+	}
+	if secondCalls.Load() != 2 {
+		t.Fatal("media generation or download did not use the changed default")
 	}
 	// A later explicit choice remains authoritative during registration recovery.
 	id := stringValue(archive[0]["id"])
@@ -92,7 +125,7 @@ func TestRegisteredGrokDailyRouteIsDirectAndSurvivesSync(t *testing.T) {
 	if res.Code != 200 {
 		t.Fatalf("rebind status %d", res.Code)
 	}
-	if err := s.importRegisteredGrokAccount(context.Background(), "job-direct", signup); err != nil {
+	if err := s.importRegisteredGrokAccount(context.Background(), "job-inherit", signup); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.syncRegisteredGrokRuntimeAccount(archive[0], "route-test-session"); err != nil {

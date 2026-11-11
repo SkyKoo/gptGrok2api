@@ -270,7 +270,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	account["platform"], account["registration_job_id"], account["enabled"] = "adobe", id, false
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "platform": "adobe", "source_id": box.SourceID, "source_type": box.SourceType, "source_mailbox_id": box.SourceMailboxID, "id": box.ID, "account_id": box.AccountID, "email": box.Email}
 	if err = e.change(id, func(j *RegistrationJob) {
-		attachProxyBinding(j, account)
+		UseDefaultAccountProxy(account)
 		j.Account = account
 		j.Status = "import_pending"
 		j.Stage = "import"

@@ -270,7 +270,7 @@ func (e *GrokEngine) run(ctx context.Context, id string, cfg GrokConfig, mail Ma
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(j *RegistrationJob) {
-		attachProxyBinding(j, account)
+		UseDefaultAccountProxy(account)
 		j.Account = account
 		j.Stage = "import"
 		j.Status = "import_pending"
@@ -690,7 +690,7 @@ func (e *GrokEngine) registerSaved(ctx context.Context, id string, job Registrat
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err := e.change(id, func(current *RegistrationJob) {
-		attachProxyBinding(current, account)
+		UseDefaultAccountProxy(account)
 		current.Account = account
 		current.Stage = "import"
 		current.Status = "import_pending"

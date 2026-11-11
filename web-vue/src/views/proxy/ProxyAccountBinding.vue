@@ -1,10 +1,10 @@
 <template>
   <PagePanel class="space-y-4">
-    <PanelHeader title="账号固定出口" />
-    <p class="text-xs text-muted-foreground">注册任务会保存代理绑定，后续操作继续使用该节点。手动切换需填写原因；正在执行的任务仍使用启动时的出口。</p>
+    <PanelHeader title="账号日常出口" />
+    <p class="text-xs text-muted-foreground">账号未单独设置出口时，日常请求跟随下方默认出口。注册代理仅用于注册任务；手动切换需填写原因，正在执行的任务保持本次出口。</p>
     <div class="grid gap-3 md:grid-cols-3">
       <label class="text-xs"><span class="ui-field-label">平台</span>
-        <select v-model="platform" class="w-full rounded border border-border bg-background p-2" :disabled="busy" @change="clearSelection"><option value="openai">GPT</option><option value="grok">Grok</option></select>
+        <select v-model="platform" aria-label="平台" class="w-full rounded border border-border bg-background p-2" :disabled="busy" @change="clearSelection"><option value="openai">GPT</option><option value="grok">Grok</option><option value="adobe">Adobe</option></select>
       </label>
       <label class="text-xs"><span class="ui-field-label">账号 ID（账号列表中的 ID）</span><Input v-model="accountId" :disabled="busy" block @update:model-value="clearSelection" /></label>
       <Button class="self-end" variant="outline" :disabled="busy || !accountId.trim()" @click="load">查询绑定</Button>
@@ -13,7 +13,7 @@
       <p class="text-sm">当前出口：{{ current.label }} · {{ current.available ? '配置可用' : '配置不可用' }}</p>
       <div class="grid gap-3 md:grid-cols-3">
         <label class="text-xs"><span class="ui-field-label">新出口</span>
-          <select v-model="reference" :disabled="busy" class="w-full rounded border border-border bg-background p-2"><option value="">请选择节点</option><option value="direct">直连</option><option value="custom">单个代理 URL</option><optgroup v-for="group in groups.filter(g => g.enabled)" :key="group.id" :label="group.name"><option v-for="node in group.nodes.filter(n => n.enabled)" :key="node.id" :value="nodeRef(group.id, node.id)">{{ node.name || node.id }}</option></optgroup></select>
+          <select v-model="reference" aria-label="新出口" :disabled="busy" class="w-full rounded border border-border bg-background p-2"><option value="">请选择出口</option><option value="inherit">跟随默认出口</option><option value="direct">直连</option><option value="custom">单个代理 URL</option><optgroup v-for="group in groups.filter(g => g.enabled)" :key="group.id" :label="group.name"><option v-for="node in group.nodes.filter(n => n.enabled)" :key="node.id" :value="nodeRef(group.id, node.id)">{{ node.name || node.id }}</option></optgroup></select>
           <Input v-if="reference === 'custom'" v-model="customURL" :disabled="busy" block placeholder="http://host:port 或 socks5://host:port" />
         </label>
         <label class="text-xs"><span class="ui-field-label">切换原因</span><Input v-model="reason" :disabled="busy" block placeholder="例如：原节点已停用" /></label>
@@ -31,7 +31,7 @@ import PagePanel from '@/components/ai/PagePanel.vue'
 import PanelHeader from '@/components/ai/PanelHeader.vue'
 import { proxyApi, type AccountProxyBinding, type ProxyGroup } from '@/api/proxy'
 defineProps<{ groups: ProxyGroup[] }>()
-const platform = ref<'openai' | 'grok'>('openai')
+const platform = ref<'openai' | 'grok' | 'adobe'>('openai')
 const accountId = ref('')
 const reference = ref('')
 const reason = ref('')

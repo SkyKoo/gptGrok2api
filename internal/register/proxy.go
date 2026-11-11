@@ -59,13 +59,14 @@ func (r *ProxyRouting) acquire(ctx context.Context, id, platform string, selecti
 	return lease.Release, nil
 }
 
-func attachProxyBinding(job *RegistrationJob, account map[string]any) {
-	if job.ProxyBinding == nil {
-		return
+// UseDefaultAccountProxy separates a completed registration from its daily
+// account route. The registration journal keeps its own fixed proxy binding.
+// Callers recovering an old saved result must apply the same rule before import.
+func UseDefaultAccountProxy(account map[string]any) {
+	for _, key := range []string{"proxy", "proxy_url", "proxyUrl", "proxy_binding"} {
+		delete(account, key)
 	}
-	b := *job.ProxyBinding
-	account["proxy_binding"] = b
-	account["proxy"] = b.Reference
+	account["proxy_policy"] = "inherit"
 }
 
 func (r *ProxyRouting) recordFailure(job *RegistrationJob, err error) {

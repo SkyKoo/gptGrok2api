@@ -22,6 +22,7 @@ import (
 
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 type adobeMediaCapture struct {
@@ -32,6 +33,8 @@ type adobeMediaCapture struct {
 	uploadDenied                        bool
 	preflightPaid                       bool
 	video                               bool
+	expectedProxy                       string
+	afterSubmit                         func()
 }
 
 func adobeMediaPNG(t *testing.T, width, height int) []byte {
@@ -48,6 +51,12 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 	return adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.expectedProxy != "" {
+			endpoint, selected := proxyruntime.URLSelectionFromContext(r.Context())
+			if !selected || endpoint != f.expectedProxy {
+				t.Errorf("Adobe request %s did not use the selected daily proxy", r.URL.Path)
+			}
+		}
 		status, body, mime := 200, `{}`, "application/json"
 		switch {
 		case r.URL.Path == "/v2/models/generation-preflight":
@@ -97,9 +106,14 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 				t.Error(err)
 			}
 			body = `{"links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/fixture"}}}`
+			if f.afterSubmit != nil {
+				f.afterSubmit()
+			}
 		case strings.Contains(r.URL.Path, "/v2/jobs/result/"):
 			f.polls++
-			if f.video {
+			if f.video && len(f.output) > 0 {
+				body = `{"status":"COMPLETED","outputs":[{"video":{"presignedUrl":"https://pre-signed-firefly-prod.s3-accelerate.amazonaws.com/fixture.mp4"}}]}`
+			} else if f.video {
 				body = `{"status":"FAILED"}`
 			} else {
 				body = `{"status":"COMPLETED","outputs":[{"image":{"presignedUrl":"https://pre-signed-firefly-prod.s3-accelerate.amazonaws.com/fixture.png"}}]}`
@@ -109,6 +123,9 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 				t.Error("credentials sent to result storage")
 			}
 			body, mime = string(f.output), "image/png"
+			if f.video {
+				mime = "video/mp4"
+			}
 		default:
 			t.Errorf("unexpected Adobe request path %s", r.URL.Path)
 		}
@@ -128,7 +145,9 @@ func TestAdobeImageSizeAndReferencesReachProtocol(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			adobeFixtureAccount(t, s)
-			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1200, 896)}
+			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1200, 896), expectedProxy: "http://daily-default.invalid:8080"}
+			s.proxyManager.SetDefault(fixture.expectedProxy, nil)
+			fixture.afterSubmit = func() { s.proxyManager.SetDefault("http://next-default.invalid:8080", nil) }
 			s.adobeClient = fixture.client(t)
 			request := map[string]any{"model": "gemini-3.1-flash-image", "prompt": "a paper boat", "size": "1200x896", "n": 1, "response_format": "url"}
 			if tc.edit {
@@ -239,8 +258,11 @@ func adobeVideoMediaRequest(t *testing.T, audio bool, refs [][]byte) *http.Reque
 
 func TestAdobeVideoAudioReferencesAndIdempotency(t *testing.T) {
 	s := imageTaskTestServer(t)
+	s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
 	adobeFixtureAccount(t, s)
-	fixture := &adobeMediaCapture{video: true}
+	fixture := &adobeMediaCapture{video: true, output: videoTestMP4("adobe-video", "fixture"), expectedProxy: "http://daily-default.invalid:8080"}
+	s.proxyManager.SetDefault(fixture.expectedProxy, nil)
+	fixture.afterSubmit = func() { s.proxyManager.SetDefault("http://next-default.invalid:8080", nil) }
 	s.adobeClient = fixture.client(t)
 	refs := [][]byte{adobeMediaPNG(t, 40, 30)}
 	w := httptest.NewRecorder()
@@ -253,8 +275,8 @@ func TestAdobeVideoAudioReferencesAndIdempotency(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := waitAdobeVideoIdle(t, s, created.ID)
-	if !got.GenerateAudio || got.ReferenceCount != 1 {
-		t.Fatal("audio/reference settings lost")
+	if !got.GenerateAudio || got.ReferenceCount != 1 || got.Status != "completed" {
+		t.Fatalf("audio/reference settings lost or proxied video flow did not complete: %s %v", got.Status, got.Error)
 	}
 	fresh := NewWithWorkers(s.cfg, false)
 	saved := fresh.videoJobs[created.ID]

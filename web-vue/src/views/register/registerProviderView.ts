@@ -580,13 +580,13 @@ export function providerTypeLabel(type: string) {
   return providerTypeOptions.find(item => item.value === type)?.label || type
 }
 
-export function registerProxyHint(mode: RegisterProxyMode, target: RegisterTarget = 'openai') {
-  const account = target === 'grok' ? '注册成功后日常调用默认直连。' : '注册成功后账号继续使用该出口。'
-  if (mode === 'direct') return '本渠道注册任务强制直连，不读取默认代理。'
+export function registerProxyHint(mode: RegisterProxyMode, _target: RegisterTarget = 'openai') {
+  const account = '此配置仅用于注册任务；账号日常请求跟随默认出口，可在代理管理中单独设置。'
+  if (mode === 'direct') return `本渠道注册任务强制直连，不读取默认代理。${account}`
   if (mode === 'group') return `本渠道按所选代理组轮询可用节点，单次任务全程固定；补偿按本渠道配置重新分配。${account}无可用节点时停止。`
   if (mode === 'resin') return `本渠道使用独立的 Resin 配置，Account 按任务自动生成；补偿子任务使用新身份，新身份不保证节点不同。${account}`
   if (mode === 'custom') return `本渠道单次任务全程使用该地址；补偿子任务按本渠道当前配置选择出口。${account}`
-  return '本渠道使用系统设置里的默认代理；默认代理设为直连时不使用代理。'
+  return `本渠道注册任务使用默认出口，并在单次任务中保持固定。${account}`
 }
 
 export function registerProxyGroupOptions(groups: readonly ProxyGroup[], selectedId = '') {

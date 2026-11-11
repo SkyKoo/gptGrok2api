@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 func readyStore(t *testing.T) (*Store, Account) {
@@ -49,6 +52,36 @@ func TestEncryptedStorePublicProjectionAndWrongKey(t *testing.T) {
 	wrong := NewStore(s.path, "wrong-key")
 	if _, e = wrong.List(); e == nil {
 		t.Fatal("wrong encryption key accepted")
+	}
+}
+
+func TestAccountProxyChangesPreserveCredentialsAndSurviveImport(t *testing.T) {
+	s, before := readyStore(t)
+	binding := proxyruntime.Binding{Reference: "http://account.invalid:8080", Platform: "adobe", Purpose: "account", BoundAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	bound, err := s.BindProxy(before.ID, binding, "operator chooses a daily proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ProxyPolicy != "explicit" || bound.Proxy != binding.Reference || bound.ProxyBinding == nil || len(bound.ProxyBindingHistory) != 1 {
+		t.Fatal("manual proxy or audit was not saved")
+	}
+	protected := bound
+	protected.Proxy, protected.ProxyBinding, protected.ProxyPolicy, protected.ProxyBindingHistory = before.Proxy, before.ProxyBinding, before.ProxyPolicy, before.ProxyBindingHistory
+	if !reflect.DeepEqual(before, protected) {
+		t.Fatal("proxy update changed credentials, account status or quota")
+	}
+	imported, err := s.Import([]Account{before})
+	if err != nil || len(imported) != 1 || imported[0].ProxyPolicy != "explicit" || imported[0].Proxy != binding.Reference || len(imported[0].ProxyBindingHistory) != 1 {
+		t.Fatal("credential reimport replaced the operator's daily proxy")
+	}
+	binding.Reference = "inherit"
+	restored, err := s.BindProxy(before.ID, binding, "follow the default again")
+	if err != nil || restored.ProxyPolicy != "inherit" || restored.Proxy != "" || restored.ProxyBinding != nil || len(restored.ProxyBindingHistory) != 2 {
+		t.Fatal("returning to the default did not clear the override and retain history")
+	}
+	fresh, err := NewStore(s.path, s.secret).Get(before.ID)
+	if err != nil || fresh.ProxyPolicy != "inherit" || len(fresh.ProxyBindingHistory) != 2 {
+		t.Fatal("default inheritance did not survive restart")
 	}
 }
 func TestReservationSharedAcrossModelsAndSurvivesRestart(t *testing.T) {

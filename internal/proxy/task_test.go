@@ -45,7 +45,7 @@ func TestTasksSharePoolAndPersistAffinityAcrossRestart(t *testing.T) {
 	if retry.URL != a.URL {
 		t.Fatal("retry changed proxy")
 	}
-	fields := map[string]any{"proxy_binding": a.Binding, "proxy": "http://other.invalid:8080"}
+	fields := map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": a.Binding, "proxy": "http://other.invalid:8080"}
 	for _, resource := range []bool{false, true} {
 		if got := restored.Resolve(fields, resource); got != a.URL {
 			t.Fatal("account route changed", got)
@@ -110,7 +110,7 @@ func TestBindingsFailClosedForDisabledDeletedChangedNodes(t *testing.T) {
 			if _, e := m.AcquireTask(context.Background(), "group:shared", "grok", "registration", &l.Binding); !errors.Is(e, ErrBindingUnavailable) {
 				t.Fatal(e)
 			}
-			fields := map[string]any{"proxy_binding": l.Binding}
+			fields := map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": l.Binding}
 			if got := m.Resolve(fields, false); got != blockedProxyURL {
 				t.Fatal("fallback used", got)
 			}
@@ -137,7 +137,7 @@ func TestTaskCooldownScopedAndRestored(t *testing.T) {
 	}
 	other := acquireTest(t, m, "node:shared/a", "openai", nil)
 	other.Release()
-	if got := m.Resolve(map[string]any{"proxy_binding": a.Binding}, false); got != a.URL {
+	if got := m.Resolve(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": a.Binding}, false); got != a.URL {
 		t.Fatal("signup restriction blocked normal account use")
 	}
 	restarted := taskManager()
@@ -157,11 +157,11 @@ func TestTaskDefaultBindingAndDirect(t *testing.T) {
 		t.Fatal("default binding lost")
 	}
 	m.SetDefault("http://new.invalid:8080", nil)
-	if _, _, e := m.ResolveBound(map[string]any{"proxy_binding": l.Binding}); e == nil {
+	if _, _, e := m.ResolveBound(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": l.Binding}); e == nil {
 		t.Fatal("removed default fell back")
 	}
 	direct := acquireTest(t, m, "direct", "openai", nil)
-	if direct.URL != "" || m.Resolve(map[string]any{"proxy_binding": direct.Binding}, true) != "" {
+	if direct.URL != "" || m.Resolve(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": direct.Binding}, true) != "" {
 		t.Fatal("direct ignored")
 	}
 }
@@ -177,7 +177,7 @@ func TestBoundTransportRoutesAndFailsWithoutContactingFallback(t *testing.T) {
 	l.Release()
 	client := &http.Client{Transport: NewTransport(nil)}
 	req, _ := http.NewRequest("GET", "http://upstream.invalid/test", nil)
-	req = req.WithContext(WithURL(req.Context(), m.Resolve(map[string]any{"proxy_binding": l.Binding}, false)))
+	req = req.WithContext(WithURL(req.Context(), m.Resolve(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": l.Binding}, false)))
 	res, e := client.Do(req)
 	if e != nil {
 		t.Fatal(e)
@@ -187,7 +187,7 @@ func TestBoundTransportRoutesAndFailsWithoutContactingFallback(t *testing.T) {
 		t.Fatal("proxy not used")
 	}
 	m.ConfigureTaskGroups(nil)
-	req = req.WithContext(WithURL(req.Context(), m.Resolve(map[string]any{"proxy_binding": l.Binding}, false)))
+	req = req.WithContext(WithURL(req.Context(), m.Resolve(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": l.Binding}, false)))
 	if res, e = client.Do(req); e == nil {
 		res.Body.Close()
 		t.Fatal("invalid binding allowed request")

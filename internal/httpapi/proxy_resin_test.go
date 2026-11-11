@@ -75,7 +75,8 @@ func TestRegistrationResinChannelPersistsAcrossRestartWithoutGroup(t *testing.T)
 	}
 	s = New(cfg)
 	defer s.ShutdownRegistration(context.Background())
-	// Choosing direct for new jobs preserves the channel for existing accounts.
+	// Choosing direct for new jobs preserves the channel for saved registration
+	// tasks, without carrying that channel into daily account requests.
 	response = adminRequest(s.Handler(), "POST", "/api/register", strings.NewReader(`{"proxy":"direct"}`))
 	if response.Code != 200 {
 		t.Fatal(response.Code)
@@ -84,9 +85,14 @@ func TestRegistrationResinChannelPersistsAcrossRestartWithoutGroup(t *testing.T)
 	if err != nil || again.URL != lease.URL {
 		t.Fatal("restarted channel lost account", err)
 	}
+	again.Release()
 	got, bound, err := s.proxyManager.ResolveBound(map[string]any{"proxy_binding": lease.Binding})
+	if err != nil || bound || got != "" {
+		t.Fatal("saved registration channel became a daily account override", err)
+	}
+	got, bound, err = s.proxyManager.ResolveBound(map[string]any{"proxy_binding": lease.Binding, "proxy_policy": "explicit"})
 	if err != nil || !bound || got != lease.URL {
-		t.Fatal("account lost saved channel", err)
+		t.Fatal("explicit account override lost saved channel", err)
 	}
 	unauth := httptest.NewRecorder()
 	s.Handler().ServeHTTP(unauth, httptest.NewRequest("GET", "/api/register", nil))

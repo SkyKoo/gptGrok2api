@@ -80,7 +80,8 @@ func TestRegisteredAccountRemainsDisabledUntilVerification(t *testing.T) {
 	cfg := adminTestConfig(t.TempDir())
 	cfg.OpenAIBaseURL = upstream.URL
 	s := New(cfg)
-	account := map[string]any{"access_token": "test-token", "email": "alias@example.test", "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "registration_job_id": "job-test"}
+	account := map[string]any{"access_token": "test-token", "email": "alias@example.test", "source_type": "chatgpt_web", "enabled": false, "status": "待验证", "registration_job_id": "job-test",
+		"proxy": "http://127.0.0.1:1", "proxy_binding": map[string]any{"reference": "http://127.0.0.1:1", "purpose": "registration", "platform": "openai"}}
 	for i := 0; i < 2; i++ {
 		if err := s.importRegisteredAccount(context.Background(), "job-test", account); err != nil {
 			t.Fatal(err)
@@ -89,6 +90,9 @@ func TestRegisteredAccountRemainsDisabledUntilVerification(t *testing.T) {
 	items, _ := s.store.AccountList()
 	if len(items) != 1 || items[0]["enabled"] != false {
 		t.Fatal("duplicate import or premature enabling")
+	}
+	if items[0]["proxy_policy"] != "inherit" || items[0]["proxy_binding"] != nil || account["proxy_binding"] == nil {
+		t.Fatal("saved result recovery copied the registration route or changed its journal")
 	}
 	if err := s.verifyRegisteredAccount(context.Background(), "job-test", account); err == nil {
 		t.Fatal("invalid account verified")

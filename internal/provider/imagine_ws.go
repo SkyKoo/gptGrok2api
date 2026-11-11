@@ -244,10 +244,8 @@ func (i *ImagineSocket) dial(ctx context.Context, account accounts.Account) (*ws
 			address += ":80"
 		}
 	}
-	proxyURL := ""
-	if i.Proxy != nil {
-		proxyURL = i.Proxy.Resolve(account.Fields, false)
-	}
+	ctx = i.Proxy.RequestContext(ctx, account.Fields, false)
+	proxyURL := proxyruntime.URLFromContext(ctx)
 	network, err := proxyruntime.DialContext(ctx, address, proxyURL)
 	if err != nil {
 		return nil, err

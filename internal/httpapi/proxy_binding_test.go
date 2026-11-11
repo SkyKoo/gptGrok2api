@@ -102,3 +102,131 @@ func TestAccountProxyBindingAPIAuditAndRuntime(t *testing.T) {
 		t.Fatal("Grok binding/history did not survive restart")
 	}
 }
+
+func TestAccountProxyBindingInheritanceAcrossPlatforms(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig()
+	cfg.RootDir, cfg.DataDir = root, root
+	cfg.ConfigPath = filepath.Join(root, "config.json")
+	cfg.AccountsPath = filepath.Join(root, "accounts.json")
+	cfg.AuthKeysPath = filepath.Join(root, "keys.json")
+	cfg.RegisterPath = filepath.Join(root, "register.json")
+	cfg.GrokAccountsPath = filepath.Join(root, "grok_accounts.json")
+	cfg.GrokRuntimeAccountsPath = filepath.Join(root, "grok_runtime_accounts.json")
+	s := New(cfg)
+	s.proxyManager.SetDefault("http://default-one.invalid:8080", nil)
+	_, _, gptRows, err := s.store.AddAccounts(nil, []map[string]any{{
+		"access_token": "inherit-gpt", "email": "inherit@example.test", "proxy": "direct", "proxy_url": "http://obsolete.invalid:8080",
+		"proxy_binding": proxyruntime.Binding{Reference: "direct", Platform: "openai", Purpose: "registration"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, _, err := s.registerStore.AddAccount(map[string]any{"sso": "inherit-grok", "email": "grok-inherit@example.test", "proxy": "direct", "registration_job_id": "saved-registration", "proxy_binding": proxyruntime.Binding{Reference: "direct", Platform: "grok", Purpose: "account"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.syncRegisteredGrokRuntimeAccount(grok, "inherit-grok"); err != nil {
+		t.Fatal(err)
+	}
+	adobeAccount := adobeFixtureAccount(t, s)
+	getFields := func(platform string) map[string]any {
+		t.Helper()
+		switch platform {
+		case "openai":
+			rows, err := s.store.AccountList()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rows[0]
+		case "grok":
+			rows, err := s.grokRuntimeStore.AccountList()
+			if err != nil {
+				t.Fatal(err)
+			}
+			return rows[0]
+		default:
+			a, err := s.adobeStore.Get(adobeAccount.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return a.RoutingFields()
+		}
+	}
+	call := func(method, platform, id, reference string) map[string]any {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"platform": platform, "account_id": id, "reference": reference, "reason": "fixture account route"})
+		path := "/api/proxy/binding"
+		if method == "GET" {
+			path += "?platform=" + platform + "&account_id=" + id
+		}
+		req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
+		req.Header.Set("Authorization", "Bearer admin-secret")
+		res := httptest.NewRecorder()
+		s.Handler().ServeHTTP(res, req)
+		if res.Code != 200 {
+			t.Fatalf("%s %s: %d %s", method, platform, res.Code, res.Body.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(res.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	for _, target := range []struct{ platform, id string }{{"openai", accountPublicRef(gptRows[0])}, {"grok", stringValue(grok["id"])}, {"adobe", adobeAccount.ID}} {
+		t.Run(target.platform, func(t *testing.T) {
+			initial := call("GET", target.platform, target.id, "")
+			if initial["policy"] != "inherit" || initial["label"] != "跟随默认出口" || initial["binding"] != nil {
+				t.Fatalf("automatic/empty account route was displayed as an override: %#v", initial)
+			}
+			call("POST", target.platform, target.id, "direct")
+			if got := s.proxyManager.Resolve(getFields(target.platform), false); got != "" {
+				t.Fatalf("explicit direct was ignored: %q", got)
+			}
+			result := call("POST", target.platform, target.id, "inherit")
+			if result["policy"] != "inherit" || result["binding"] != nil {
+				t.Fatalf("inherit was saved as fixed binding: %#v", result)
+			}
+			if got := s.proxyManager.Resolve(getFields(target.platform), false); got != "http://default-one.invalid:8080" {
+				t.Fatalf("did not inherit current default: %q", got)
+			}
+			s.proxyManager.SetDefault("http://default-two.invalid:8080", nil)
+			if got := s.proxyManager.Resolve(getFields(target.platform), false); got != "http://default-two.invalid:8080" {
+				t.Fatalf("default change did not reach inherited account: %q", got)
+			}
+			s.proxyManager.SetDefault("http://default-one.invalid:8080", nil)
+			loaded := call("GET", target.platform, target.id, "")
+			if loaded["policy"] != "inherit" || len(loaded["history"].([]any)) != 2 {
+				t.Fatal("inherit or audit history missing after reload")
+			}
+		})
+	}
+	// Background observations must preserve the latest inherited account policy.
+	if _, _, err = s.syncRegisteredGrokRuntimeAccount(grok, "inherit-grok"); err != nil {
+		t.Fatal(err)
+	}
+	if fields := getFields("grok"); fields["proxy_policy"] != "inherit" || s.proxyManager.Resolve(fields, false) != "http://default-one.invalid:8080" {
+		t.Fatal("stale Grok sync resurrected the old automatic direct route")
+	}
+	updatedAdobe, err := s.adobeStore.Get(adobeAccount.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedAdobe.Token != adobeAccount.Token || updatedAdobe.Cookie != adobeAccount.Cookie || updatedAdobe.Revision != adobeAccount.Revision {
+		t.Fatal("Adobe binding update changed credentials")
+	}
+	reopened := New(cfg)
+	rows, _ := reopened.store.AccountList()
+	if rows[0]["proxy_policy"] != "inherit" || rows[0]["proxy_binding"] != nil || stringValue(rows[0]["proxy_url"]) != "" {
+		t.Fatal("GPT inherited policy did not survive restart or clear old alias")
+	}
+	runtime, _ := reopened.grokRuntimeStore.AccountList()
+	archive, _ := reopened.registerStore.ExportAccounts([]string{stringValue(grok["id"])})
+	if runtime[0]["proxy_policy"] != "inherit" || archive[0]["proxy_policy"] != "inherit" {
+		t.Fatal("Grok inherited policy did not persist in both stores")
+	}
+	a, err := reopened.adobeStore.Get(adobeAccount.ID)
+	if err != nil || a.ProxyPolicy != "inherit" || a.ProxyBinding != nil || len(a.ProxyBindingHistory) != 2 {
+		t.Fatal("Adobe inherited policy or audit did not survive restart")
+	}
+}

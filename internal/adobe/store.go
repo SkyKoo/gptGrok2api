@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 type diskState struct {
@@ -154,6 +156,40 @@ func (s *Store) Get(id string) (Account, error) {
 	}
 	return Account{}, ErrNotFound
 }
+
+// BindProxy changes only daily egress metadata and its audit trail. In-flight
+// requests retain the account snapshot they acquired before this update.
+func (s *Store) BindProxy(id string, binding proxyruntime.Binding, reason string) (Account, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return Account{}, err
+	}
+	for i := range d.Accounts {
+		a := &d.Accounts[i]
+		if a.ID != id {
+			continue
+		}
+		updates := proxyruntime.RebindFields(a.RoutingFields(), binding, reason)
+		raw, err := json.Marshal(updates)
+		if err != nil {
+			return Account{}, err
+		}
+		var route Account
+		if err := json.Unmarshal(raw, &route); err != nil {
+			return Account{}, err
+		}
+		a.Proxy, a.ProxyBinding = route.Proxy, route.ProxyBinding
+		a.ProxyPolicy, a.ProxyBindingHistory = route.ProxyPolicy, route.ProxyBindingHistory
+		if err := s.save(d); err != nil {
+			return Account{}, err
+		}
+		return *a, nil
+	}
+	return Account{}, ErrNotFound
+}
+
 func (s *Store) Import(items []Account) ([]Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -200,6 +236,8 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 				a.Enabled = v.Enabled
 				a.Proxy = v.Proxy
 				a.ProxyBinding = v.ProxyBinding
+				a.ProxyPolicy = v.ProxyPolicy
+				a.ProxyBindingHistory = v.ProxyBindingHistory
 				a.SettlementUntil = v.SettlementUntil
 				if a.RegistrationJobID == "" {
 					a.RegistrationJobID = v.RegistrationJobID

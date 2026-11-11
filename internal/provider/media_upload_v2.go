@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
-	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 // Imagine's current web client uses init -> signed PUT -> complete -> status.
@@ -26,9 +25,7 @@ func (m *Media) uploadV2(ctx context.Context, account accounts.Account, filename
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// Resolve once so all steps retain the account's daily route, including direct.
-	if m.Proxy != nil {
-		ctx = proxyruntime.WithURL(ctx, m.Proxy.Resolve(account.Fields, false))
-	}
+	ctx = m.Proxy.RequestContext(ctx, account.Fields, false)
 	base := m.AssetUploadURL
 	init, err := m.uploadJSON(ctx, account, "init", http.MethodPost, base+"/init", map[string]any{
 		"fileName": filename, "fileMimeType": mime, "fileSource": "IMAGINE_SELF_UPLOAD_FILE_SOURCE",

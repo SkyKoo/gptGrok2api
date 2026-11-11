@@ -45,7 +45,7 @@ func TestResinChannelTaskAndAccountRecoveryWithoutGroups(t *testing.T) {
 			t.Fatal("task identity reused", err)
 		}
 	}
-	fields := map[string]any{"proxy_binding": saved}
+	fields := map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": saved}
 	got, bound, err := restarted.ResolveBound(fields)
 	if err != nil || !bound || got != first.URL {
 		t.Fatal("account lost channel binding", err)
@@ -126,7 +126,7 @@ func TestLegacyResinRootPathBindingKeepsIdentityAcrossRestart(t *testing.T) {
 	if string(before) != string(after) {
 		t.Fatal("caller binding was mutated")
 	}
-	resolved, bound, err := manager.ResolveBound(map[string]any{"proxy_binding": saved})
+	resolved, bound, err := manager.ResolveBound(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": saved})
 	if err != nil || !bound || resolved != want {
 		t.Fatal("persisted account lost its normalized proxy", err)
 	}

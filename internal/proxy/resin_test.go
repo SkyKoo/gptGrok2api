@@ -52,7 +52,7 @@ func TestResinTaskAffinitySurvivesRestartAndAccountUse(t *testing.T) {
 	if retry.URL != first.URL {
 		t.Fatal("restart/retry changed identity")
 	}
-	fields := map[string]any{"proxy_binding": saved}
+	fields := map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": saved}
 	for _, resource := range []bool{false, true} {
 		if restored.Resolve(fields, resource) != first.URL {
 			t.Fatal("account request changed identity")
@@ -140,7 +140,7 @@ func TestResinBindingFailsClosedWhenConfigurationChanges(t *testing.T) {
 		if _, err := m.AcquireTask(context.Background(), "direct", "grok", "registration", &lease.Binding, "job"); err == nil {
 			t.Fatal("retry changed route")
 		}
-		if _, _, err := m.ResolveBound(map[string]any{"proxy_binding": lease.Binding}); err == nil {
+		if _, _, err := m.ResolveBound(map[string]any{"proxy_policy": AccountProxyExplicit, "proxy_binding": lease.Binding}); err == nil {
 			t.Fatal("account changed route")
 		}
 	}

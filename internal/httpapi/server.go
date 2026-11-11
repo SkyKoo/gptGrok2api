@@ -729,8 +729,9 @@ func (s *Server) enrichMonitorAccount(r *http.Request, account accounts.Account)
 			break
 		}
 	}
+	routingFields := proxyruntime.AccountRoutingFields(account.Fields)
 	for _, key := range []string{"proxy", "proxy_url", "proxyUrl"} {
-		proxyURL := strings.TrimSpace(accountFieldValue(account.Fields, key))
+		proxyURL := strings.TrimSpace(accountFieldValue(routingFields, key))
 		if proxyURL == "" || strings.HasPrefix(strings.ToLower(proxyURL), "group:") {
 			continue
 		}
@@ -1839,6 +1840,10 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "access_token is required", "invalid_request_error")
 		return
 	}
+	// Serialize route edits with the dedicated binding API so a stale account
+	// form cannot replace an administrator's newer fixed outlet.
+	s.proxyBindingMu.Lock()
+	defer s.proxyBindingMu.Unlock()
 	current, err := s.store.AccountList()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -1857,19 +1862,48 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	proxyUpdates := map[string]any{}
 	if next, changing := body["proxy"]; changing {
 		for _, row := range current {
-			if accountToken(row) == token && row["proxy_binding"] != nil && stringValue(next) != stringValue(row["proxy"]) {
+			if accountToken(row) != token {
+				continue
+			}
+			effective := proxyruntime.AccountRoutingFields(row)
+			value := strings.TrimSpace(stringValue(next))
+			if value == firstNonEmpty(stringValue(effective["proxy"]), stringValue(effective["proxy_url"]), stringValue(effective["proxyUrl"])) {
+				break
+			}
+			if !proxyruntime.AccountInheritsDefault(row) && row["proxy_binding"] != nil {
 				writeError(w, 409, "该账号已绑定出口，请在代理管理中填写原因后切换节点", "proxy_binding_required")
 				return
 			}
+			policy, label := proxyruntime.AccountProxyExplicit, "指定代理"
+			if value == "" {
+				policy, label = proxyruntime.AccountProxyInherit, "inherit"
+			} else if value == "direct" {
+				label = "direct"
+			}
+			from := "inherit"
+			if !proxyruntime.AccountInheritsDefault(row) {
+				from = "指定代理"
+				if stringValue(effective["proxy"]) == "direct" {
+					from = "direct"
+				}
+			}
+			history := append([]map[string]any{}, mapList(row["proxy_binding_history"])...)
+			history = append(history, map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano), "from": from, "to": label, "reason": "账号编辑页面调整日常出口", "actor": "admin"})
+			proxyUpdates = map[string]any{"proxy": value, "proxy_url": "", "proxyUrl": "", "proxy_binding": nil, "proxy_policy": policy, "proxy_binding_history": history}
+			break
 		}
 	}
 	updates := map[string]any{}
-	for _, key := range []string{"type", "source_type", "status", "quota", "proxy", "group_id", "enabled", "email", "user_id", "login_password", "two_factor_secret"} {
+	for _, key := range []string{"type", "source_type", "status", "quota", "group_id", "enabled", "email", "user_id", "login_password", "two_factor_secret"} {
 		if value, ok := body[key]; ok {
 			updates[key] = value
 		}
+	}
+	for key, value := range proxyUpdates {
+		updates[key] = value
 	}
 	if key := strings.TrimSpace(stringValue(updates["two_factor_secret"])); key != "" {
 		for _, row := range current {
@@ -1884,6 +1918,14 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(updates) == 0 {
+		if _, present := body["proxy"]; present {
+			for _, row := range current {
+				if accountToken(row) == token {
+					writeJSON(w, http.StatusOK, map[string]any{"item": accountForAPI(row), "items": accountsForAPI(current)})
+					return
+				}
+			}
+		}
 		writeError(w, http.StatusBadRequest, "no updates provided", "invalid_request_error")
 		return
 	}
@@ -2260,7 +2302,12 @@ func positiveInt(raw string, fallback int) int {
 }
 
 func accountForAPI(account map[string]any) map[string]any {
-	item := cloneMap(account)
+	item := cloneMap(proxyruntime.AccountRoutingFields(account))
+	if proxyruntime.AccountInheritsDefault(account) {
+		item["proxy"], item["proxy_policy"] = "", proxyruntime.AccountProxyInherit
+	} else {
+		item["proxy"] = firstNonEmpty(stringValue(item["proxy"]), stringValue(item["proxy_url"]), stringValue(item["proxyUrl"]))
+	}
 	item["has_two_factor_secret"] = firstNonEmpty(stringValue(account["two_factor_secret"]), stringValue(account["totp_secret"])) != ""
 	item["twofa_pending_activation"] = len(mapValue(account["twofa_pending"])) > 0
 	delete(item, "twofa_pending")

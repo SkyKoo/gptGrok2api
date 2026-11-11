@@ -149,3 +149,32 @@ func TestAdobeSenderAndIndependentConfiguration(t *testing.T) {
 		t.Fatal("target settings crossed channels")
 	}
 }
+
+func TestAdobeRegistrationKeepsTaskProxyButAccountFollowsDefault(t *testing.T) {
+	var calls atomic.Int32
+	routing := routingFixture()
+	var engine *AdobeEngine
+	engine = NewAdobeEngine(filepath.Join(t.TempDir(), "adobe.enc.json"), "test", func(cfg AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
+		if cfg.Proxy != "http://a.invalid:8080" {
+			t.Errorf("registration selected wrong proxy: %s", cfg.Proxy)
+		}
+		return adobeTestMail{}, adobeTestFlow{calls: &calls}, nil
+	}, func(_ context.Context, id string, account map[string]any) error {
+		assertRegisteredAccountInheritsDefault(t, account)
+		job, err := engine.getJob(id)
+		if err != nil || job.ProxyBinding == nil || job.ProxyBinding.NodeID != "a" {
+			t.Fatal("registration journal lost its independent proxy")
+		}
+		return nil
+	}, nil)
+	engine.SetProxyRouting(routing)
+	cfg := adobeTestConfig()
+	cfg["proxy"] = "group:shared"
+	if _, err := engine.Start(cfg); err != nil {
+		t.Fatal(err)
+	}
+	waitAdobe(t, engine)
+	if calls.Load() != 1 {
+		t.Fatal("registration was not completed once")
+	}
+}

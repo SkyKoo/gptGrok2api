@@ -712,7 +712,7 @@ func (s *Server) syncRegisteredGrokRuntimeAccountLocked(item map[string]any, tok
 		"status":       "正常",
 		"enabled":      true,
 	}
-	for _, key := range []string{"proxy", "proxy_binding", "proxy_binding_history", "browser_profile", "fp", "web_cookies", "registration_job_id"} {
+	for _, key := range []string{"proxy", "proxy_url", "proxyUrl", "proxy_policy", "proxy_binding", "proxy_binding_history", "browser_profile", "fp", "web_cookies", "registration_job_id"} {
 		if value, ok := item[key]; ok {
 			fields[key] = value
 		}

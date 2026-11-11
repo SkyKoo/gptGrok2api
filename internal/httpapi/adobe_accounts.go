@@ -237,6 +237,8 @@ func (s *Server) importRegisteredAdobeAccount(ctx context.Context, jobID string,
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	fields = cloneMap(fields)
+	registerruntime.UseDefaultAccountProxy(fields)
 	a, err := adobeAccountFromMap(fields)
 	if err != nil {
 		return err
@@ -282,10 +284,12 @@ func (s *Server) verifyRegisteredAdobeAccount(ctx context.Context, jobID string,
 // adobeAccountContext preserves the account egress for quota, submission,
 // polling and download; unavailable bindings never fall through to defaults.
 func (s *Server) adobeAccountContext(ctx context.Context, a adobe.Account) (context.Context, error) {
-	fields := map[string]any{"proxy": a.Proxy}
-	if a.ProxyBinding != nil {
-		fields["proxy_binding"] = a.ProxyBinding
+	// Submission, polling and download belong to one flow. A settings change
+	// affects the next flow, never an already selected egress (including direct).
+	if _, selected := proxyruntime.URLSelectionFromContext(ctx); selected {
+		return ctx, nil
 	}
+	fields := a.RoutingFields()
 	if s.proxyManager == nil {
 		return ctx, nil
 	}
@@ -294,9 +298,6 @@ func (s *Server) adobeAccountContext(ctx context.Context, a adobe.Account) (cont
 			return ctx, &adobe.Error{Stage: "routing", Code: "proxy_unavailable"}
 		}
 		return proxyruntime.WithURL(ctx, endpoint), nil
-	}
-	if a.Proxy == "" {
-		fields["proxy"] = "direct"
 	}
 	return proxyruntime.WithURL(ctx, s.proxyManager.Resolve(fields, false)), nil
 }

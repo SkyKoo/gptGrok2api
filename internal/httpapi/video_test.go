@@ -19,12 +19,16 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	videoBytes := []byte("fake-mp4")
 	var sawVideoPayload map[string]any
 	var upstream *httptest.Server
+	var server *Server
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/post":
 			if r.Header.Get("Cookie") == "" {
 				t.Error("video post request is missing cookies")
 			}
+			// Saving a different default during a generation must not move its
+			// subsequent stream and resource download off the selected proxy.
+			server.proxyManager.SetDefault("http://127.0.0.1:1", nil)
 			_ = json.NewEncoder(w).Encode(map[string]any{"post": map[string]any{"id": "parent-1"}})
 		case "/chat":
 			if err := json.NewDecoder(r.Body).Decode(&sawVideoPayload); err != nil {
@@ -52,13 +56,14 @@ func TestRunVideoJobResolvesGeneratedPostAsset(t *testing.T) {
 	cfg.GrokRuntimeAccountsPath = filepath.Join(root, "data", "grok_runtime_accounts.json")
 	cfg.AuthKeysPath = filepath.Join(root, "data", "auth_keys.json")
 	cfg.ConfigPath = filepath.Join(root, "data", "config.json")
-	cfg.MediaChatURL = upstream.URL + "/chat"
-	cfg.MediaPostURL = upstream.URL + "/post"
-	cfg.AssetUploadURL = upstream.URL + "/upload"
-	cfg.AssetsBaseURL = upstream.URL
+	cfg.ProxyURL = upstream.URL
+	cfg.MediaChatURL = "http://grok-fixture.invalid/chat"
+	cfg.MediaPostURL = "http://grok-fixture.invalid/post"
+	cfg.AssetUploadURL = "http://grok-fixture.invalid/upload"
+	cfg.AssetsBaseURL = "http://grok-fixture.invalid"
 	cfg.Version = "test"
 	cfg.RequestTimeout = 3 * time.Second
-	server := newVideoTestServer(cfg)
+	server = newVideoTestServer(cfg)
 	if _, _, _, err := server.grokRuntimeStore.AddAccounts(nil, []map[string]any{{
 		"media_quota":   testGrokMediaSnapshot(),
 		"access_token":  "video-token",

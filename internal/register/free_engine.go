@@ -496,7 +496,7 @@ func (e *FreeEngine) runWithMailbox(ctx context.Context, id string, cfg FreeConf
 	account["enabled"] = false
 	account["status"] = "待验证"
 	if err = e.change(id, func(j *RegistrationJob) {
-		attachProxyBinding(j, account)
+		UseDefaultAccountProxy(account)
 		j.Account = account
 		j.Stage = "import"
 		j.Status = "import_pending"

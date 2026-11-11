@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 	"io"
 	"net/http"
@@ -73,17 +74,11 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	base := strings.TrimRight(firstNonEmpty(stringValue(raw["api_base"]), os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"), "http://cfm-browser-worker:8899"), "/")
 	key := firstNonEmpty(stringValue(raw["api_key"]), os.Getenv("CFM_BROWSER_WORKER_TOKEN"), os.Getenv("GROK_BROWSER_TOKEN"))
 	client := &http.Client{Timeout: 160 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	fields := map[string]any{"proxy": account.Proxy}
-	if account.ProxyBinding != nil {
-		fields["proxy_binding"] = account.ProxyBinding
-	}
-	proxyURL, bound, err := s.proxyManager.ResolveBound(fields)
+	ctx, err := s.adobeAccountContext(ctx, account)
 	if err != nil {
 		return adobe.Account{}, errors.New("adobe_proxy_binding_unavailable")
 	}
-	if !bound {
-		proxyURL = s.proxyManager.Resolve(fields, false)
-	}
+	proxyURL := proxyruntime.URLFromContext(ctx)
 	if proxyURL == "" {
 		proxyURL = "direct"
 	}

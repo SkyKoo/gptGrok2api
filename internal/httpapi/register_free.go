@@ -78,6 +78,8 @@ func (s *Server) importRegisteredAccount(ctx context.Context, id string, account
 			return errors.New("account already belongs to another source")
 		}
 	}
+	account = cloneMap(account)
+	registerruntime.UseDefaultAccountProxy(account)
 	_, _, _, err = s.store.AddAccountsWithAction("registered", nil, []map[string]any{account})
 	return err
 }

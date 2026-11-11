@@ -89,9 +89,7 @@ func (m *Media) Fetch(ctx context.Context, account accounts.Account, filePath st
 }
 
 func (m *Media) fetch(ctx context.Context, account accounts.Account, filePath string, maxBytes int64) ([]byte, string, error) {
-	if m.Proxy != nil {
-		ctx = proxyruntime.WithURL(ctx, m.Proxy.Resolve(account.Fields, true))
-	}
+	ctx = m.Proxy.RequestContext(ctx, account.Fields, true)
 	urlValue, origin := protocol.ResolveDownloadURL(filePath)
 	if strings.HasPrefix(urlValue, "https://assets.grok.com/") && m.AssetsBaseURL != "" {
 		urlValue = m.AssetsBaseURL + strings.TrimPrefix(urlValue, "https://assets.grok.com")
@@ -182,9 +180,7 @@ func (m *Media) doJSONMap(ctx context.Context, method, endpoint string, account 
 }
 
 func (m *Media) doJSON(ctx context.Context, method, endpoint string, account accounts.Account, payload map[string]any, stream bool) (*http.Response, error) {
-	if m.Proxy != nil {
-		ctx = proxyruntime.WithURL(ctx, m.Proxy.Resolve(account.Fields, false))
-	}
+	ctx = m.Proxy.RequestContext(ctx, account.Fields, false)
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err

@@ -68,6 +68,7 @@ docs/*.md
 !docs/image-mask.md
 !docs/gpt-quota-checks.md
 !docs/image-web-models.md
+!docs/account-egress.md
 scripts/test_*.py
 scripts/probe_*.py
 scripts/pix_browser_capture.py

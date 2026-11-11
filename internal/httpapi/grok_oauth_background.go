@@ -171,7 +171,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 		}
 		if bound {
 			proxyURL = raw
-		} else if firstNonEmpty(stringValue(account["proxy"]), stringValue(account["proxy_url"])) != "" {
+		} else {
 			proxyURL = s.proxyManager.Resolve(account, false)
 		}
 	}
@@ -186,7 +186,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 		}
 		return nil
 	}
-	lease, err := browserqueue.Acquire(ctx, s.requestClient, base, stringValue(config["api_key"]), map[string]any{"proxy": proxyURL, "daily_direct": true}, setStage)
+	lease, err := browserqueue.Acquire(ctx, s.requestClient, base, stringValue(config["api_key"]), map[string]any{"proxy": proxyURL, "daily_direct": proxyURL == ""}, setStage)
 	if err != nil {
 		if guardErr := guard(); guardErr != nil {
 			return nil, guardErr

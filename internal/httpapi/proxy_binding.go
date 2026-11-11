@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
@@ -34,8 +35,8 @@ func (s *Server) proxyBindingAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 405, "method not allowed", "invalid_request_error")
 		return
 	}
-	if input.Platform != "openai" && input.Platform != "grok" {
-		writeError(w, 400, "platform must be openai or grok", "invalid_request_error")
+	if input.Platform != "openai" && input.Platform != "grok" && input.Platform != "adobe" {
+		writeError(w, 400, "platform must be openai, grok or adobe", "invalid_request_error")
 		return
 	}
 	if strings.TrimSpace(input.AccountID) == "" {
@@ -51,6 +52,18 @@ func (s *Server) proxyBindingAPI(w http.ResponseWriter, r *http.Request) {
 		rows, err = s.registerStore.ExportAccounts([]string{input.AccountID})
 		if len(rows) > 0 {
 			account = rows[0]
+		}
+	} else if input.Platform == "adobe" {
+		if s.adobeStore == nil {
+			writeError(w, 503, "Adobe 账号服务不可用", "not_configured")
+			return
+		}
+		var saved adobe.Account
+		saved, err = s.adobeStore.Get(input.AccountID)
+		if err == nil {
+			account = saved.RoutingFields()
+		} else if errors.Is(err, adobe.ErrNotFound) {
+			err = nil
 		}
 	} else {
 		var rows []map[string]any
@@ -71,53 +84,74 @@ func (s *Server) proxyBindingAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
+		input.Reference = strings.TrimSpace(input.Reference)
 		input.Reason = strings.TrimSpace(input.Reason)
 		if input.Reason == "" || len(input.Reason) > 500 {
 			writeError(w, 400, "填写切换原因（1–500 字节）", "invalid_request_error")
 			return
 		}
-		if input.Reference != "direct" && !strings.HasPrefix(input.Reference, "node:") {
+		if input.Reference != "inherit" && input.Reference != "direct" && !strings.HasPrefix(input.Reference, "node:") {
 			u, parseErr := url.Parse(input.Reference)
 			if parseErr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
-				writeError(w, 400, "请选择明确的代理节点、单个代理 URL 或直连", "invalid_request_error")
+				writeError(w, 400, "请选择跟随默认出口、代理节点、单个代理 URL 或直连", "invalid_request_error")
 				return
 			}
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		lease, leaseErr := s.proxyManager.AcquireTask(ctx, input.Reference, input.Platform, "account", nil)
-		if leaseErr != nil {
-			writeError(w, 409, "所选代理节点不可用，绑定未修改", "proxy_unavailable")
-			return
+		binding := proxyruntime.Binding{Reference: "inherit", Platform: input.Platform, Purpose: "account", BoundAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		if input.Reference != "inherit" {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			lease, leaseErr := s.proxyManager.AcquireTask(ctx, input.Reference, input.Platform, "account", nil)
+			if leaseErr != nil {
+				writeError(w, 409, "所选代理节点不可用，绑定未修改", "proxy_unavailable")
+				return
+			}
+			binding = lease.Binding
+			lease.Release()
 		}
-		lease.Release()
 		if input.Platform == "grok" {
-			account, err = s.registerStore.BindProxy(input.AccountID, lease.Binding, input.Reason)
+			account, err = s.registerStore.BindProxy(input.AccountID, binding, input.Reason)
 			if err == nil {
 				token := stringValue(account["sso"])
 				if token != "" {
-					updates := map[string]any{"proxy": account["proxy"], "proxy_binding": account["proxy_binding"], "proxy_binding_history": account["proxy_binding_history"]}
+					updates := map[string]any{}
+					for _, key := range []string{"proxy", "proxy_url", "proxyUrl", "proxy_policy", "proxy_binding", "proxy_binding_history"} {
+						updates[key] = account[key]
+					}
 					_, _, err = s.grokRuntimeStore.UpdateAccount(token, updates)
 					if errors.Is(err, os.ErrNotExist) {
 						err = nil
 					}
 				}
 			}
+		} else if input.Platform == "adobe" {
+			var saved adobe.Account
+			saved, err = s.adobeStore.BindProxy(input.AccountID, binding, input.Reason)
+			if err == nil {
+				account = saved.RoutingFields()
+			}
 		} else {
-			account, err = s.store.BindProxy(accountToken(account), lease.Binding, input.Reason)
+			account, err = s.store.BindProxy(accountToken(account), binding, input.Reason)
 		}
 		if err != nil {
 			writeError(w, 500, "绑定保存或运行时同步失败，请刷新查询当前绑定后再处理", "server_error")
 			return
 		}
 	}
-	binding := proxyruntime.ParseBinding(account["proxy_binding"])
-	label := "未绑定"
-	if binding != nil {
+	effective := proxyruntime.AccountRoutingFields(account)
+	binding := proxyruntime.ParseBinding(effective["proxy_binding"])
+	policy, label := "explicit", "自定义代理"
+	if proxyruntime.AccountInheritsDefault(account) {
+		policy, label = "inherit", "跟随默认出口"
+	} else if binding != nil {
 		label = binding.Label()
+	} else if ref := firstNonEmpty(stringValue(effective["proxy"]), stringValue(effective["proxy_url"]), stringValue(effective["proxyUrl"])); ref == "direct" {
+		label = "direct"
+	} else if strings.HasPrefix(ref, "group:") {
+		label = "代理组 " + strings.TrimPrefix(ref, "group:")
 	}
-	_, _, resolveErr := s.proxyManager.ResolveBound(account)
-	writeJSON(w, 200, map[string]any{"platform": input.Platform, "account_id": input.AccountID, "binding": publicProxyBinding(binding), "label": label, "available": !errors.Is(resolveErr, proxyruntime.ErrBindingUnavailable), "history": account["proxy_binding_history"]})
+	_, _, resolveErr := s.proxyManager.ResolveBound(effective)
+	writeJSON(w, 200, map[string]any{"platform": input.Platform, "account_id": input.AccountID, "policy": policy, "binding": publicProxyBinding(binding), "label": label, "available": resolveErr == nil, "history": account["proxy_binding_history"]})
 }
 func publicProxyBinding(b *proxyruntime.Binding) any {
 	if b == nil {

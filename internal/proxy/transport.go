@@ -602,6 +602,7 @@ func (m *Manager) acquireGroup(groupID string) *Lease {
 // completed several real image requests. It never falls back to direct mode
 // or the default proxy.
 func (m *Manager) AcquireStableImage(fields map[string]any, excludedURL string) *Lease {
+	fields = AccountRoutingFields(fields)
 	if _, bound, _ := m.ResolveBound(fields); bound {
 		return nil
 	}
@@ -770,6 +771,7 @@ func (m *Manager) SetUpstreamsFile(path string) {
 }
 
 func (m *Manager) Resolve(fields map[string]any, resource bool) string {
+	fields = AccountRoutingFields(fields)
 	if raw, bound, err := m.ResolveBound(fields); bound {
 		if err != nil {
 			return blockedProxyURL
@@ -798,6 +800,10 @@ func (m *Manager) Resolve(fields map[string]any, resource bool) string {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.resolveDefaultLocked(resource)
+}
+
+func (m *Manager) resolveDefaultLocked(resource bool) string {
 	selection := m.defaultSelection
 	if resource && (m.resourceSelection != "" || len(m.resourcePool) > 0) {
 		selection = m.resourceSelection
@@ -810,7 +816,7 @@ func (m *Manager) Resolve(fields map[string]any, resource bool) string {
 	}
 	pool := m.pool
 	baseURL := m.url
-	if resource && len(m.resourcePool) > 0 {
+	if resource && (len(m.resourcePool) > 0 || m.resourceURL != "") {
 		pool = m.resourcePool
 		baseURL = m.resourceURL
 	}
