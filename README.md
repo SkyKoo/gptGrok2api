@@ -373,10 +373,11 @@ Grok 图片和视频的内容核对共用“系统设置 → 基础配置 → Gr
 支持稳定入口后的蓝绿槽位与 JSON 单写入租约：旧业务自然排空，新请求在交接时有限排队，候选取得租约后加载最终数据，发布不会改写用户调度开关。首次从无协议版本迁移仍需一次维护升级；默认启动方式保持兼容。环境变量、状态与失败边界见 [发布交接协议](docs/rolling-deployment.md)。
 
 
-## Adobe Firefly Web Free（独立开发分支）
+## Adobe Firefly Web Free
 
 Adobe 账号注册、账号管理和共享浏览器维护已作为第三渠道接入。使用说明、免费模型范围、
-内部渠道路由与已知验证边界见 [Adobe 接入](docs/adobe/README.md)。本分支未合并、未发布线上。
+内部渠道路由与已知验证边界见 [Adobe 接入](docs/adobe/README.md)。Adobe 基线 `d8c5829`
+已于 2026-11-11 上线；该基线及账号默认出口修复现已纳入 `main`，默认出口修复尚未发布。
 
 共享浏览器服务现在名为 `cfm-browser-worker`，Grok 与 Adobe 共用单会话队列、分别保存资料。
 `CFM_BROWSER_WORKER_URL` 优先于旧 `CFM_GROK_BROWSER_URL`；Compose 保留旧 DNS 别名，源码目录
