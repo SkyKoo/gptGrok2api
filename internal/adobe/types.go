@@ -37,6 +37,10 @@ type Quota struct {
 
 // Account is private. HTTP responses must use Public, never marshal Account.
 type Account struct {
+	// Worker evidence is checked only on a new browser relogin result.
+	MediaSessionRefreshed bool                  `json:"media_session_refreshed,omitempty"`
+	MediaSessionARPMode   string                `json:"media_session_arp_mode,omitempty"`
+	MediaSessionARPSource string                `json:"media_session_arp_source,omitempty"`
 	MediaSessionStatus    string                `json:"media_session_status,omitempty"`
 	MediaSessionUpdatedAt int64                 `json:"media_session_updated_at,omitempty"`
 	Proxy                 string                `json:"proxy,omitempty"`
@@ -235,6 +239,42 @@ func Sherlock(cookie string) (string, error) {
 	}
 	return "", errors.New("adobe_sherlock_session_incomplete")
 }
+
+// MediaSessionARP distinguishes an explicit decision by the current official
+// SPL authentication runtime from an incomplete legacy session. Missing fields
+// are never evidence that Adobe chose to omit its optional generation header.
+func MediaSessionARP(a Account) (value string, present bool, err error) {
+	mode, source := a.MediaSessionARPMode, a.MediaSessionARPSource
+	if mode == "" && source == "" {
+		value, err = Sherlock(a.Cookie)
+		return value, err == nil, err
+	}
+	if source != "spl_runtime" || (mode != "present" && mode != "omitted") {
+		return "", false, &Error{Stage: "session", Code: "arp_mode_invalid"}
+	}
+	count := 0
+	for _, part := range strings.Split(a.Cookie, ";") {
+		name := strings.TrimSpace(strings.SplitN(strings.TrimSpace(part), "=", 2)[0])
+		if name == "sherlockToken" {
+			count++
+		}
+	}
+	if mode == "omitted" {
+		if count != 0 {
+			return "", false, &Error{Stage: "session", Code: "arp_omission_conflict"}
+		}
+		return "", false, nil
+	}
+	if count != 1 {
+		return "", false, &Error{Stage: "session", Code: "arp_value_invalid"}
+	}
+	value, err = Sherlock(a.Cookie)
+	if err == nil && strings.Contains(value, ",") {
+		return "", false, &Error{Stage: "session", Code: "arp_value_invalid"}
+	}
+	return value, err == nil, err
+}
+
 func Public(a Account) map[string]any {
 	q := a.Quota
 	now := time.Now()
@@ -271,5 +311,5 @@ func Public(a Account) map[string]any {
 	} else if q.Status == "known" && q.Generation != nil && q.Generation.Exhausted() {
 		status = "exhausted"
 	}
-	return map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != ""}
+	return map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "media_session_arp_mode": a.MediaSessionARPMode, "media_session_arp_source": a.MediaSessionARPSource, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != "", "submission_unknown": a.Status == "submission_unknown"}
 }

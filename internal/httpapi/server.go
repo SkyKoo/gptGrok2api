@@ -41,6 +41,9 @@ import (
 type Server struct {
 	mediaRecoveryOnce         sync.Once
 	adobeStore                *adobe.Store
+	adobeReloginJobs          *adobe.ReloginJobs
+	adobeReloginMu            sync.Mutex
+	adobeReloginRunning       bool
 	adobeClient               *adobe.Client
 	adobeRegister             *registerruntime.AdobeEngine
 	adobeRegistrationSchedule *registerruntime.Schedule
@@ -174,6 +177,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	}
 	server := &Server{
 		adobeStore:         adobe.NewStore(filepath.Join(cfg.DataDir, "adobe_accounts.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
+		adobeReloginJobs:   adobe.NewReloginJobs(filepath.Join(cfg.DataDir, "adobe_relogin_tasks.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
 		adobeClient:        adobe.NewClient(requestClient),
 		cfg:                cfg,
 		deployPaused:       !startWorkers,
@@ -2801,7 +2805,14 @@ func isWithin(root, candidate string) bool {
 }
 
 func (s *Server) StartWorkers() {
-	s.mediaRecoveryOnce.Do(func() { s.recoverVideoTasks(); s.recoverAdobeImageTasks(); s.reconcileAdobeMediaReservations() })
+	s.mediaRecoveryOnce.Do(func() {
+		if err := s.adobeReloginJobs.RecoverInterrupted(); err != nil {
+			log.Printf("Adobe relogin journal recovery unavailable")
+		}
+		s.recoverVideoTasks()
+		s.recoverAdobeImageTasks()
+		s.reconcileAdobeMediaReservations()
+	})
 	if s.cfg.Version == "test" {
 		return
 	}

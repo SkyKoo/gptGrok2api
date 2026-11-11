@@ -67,8 +67,11 @@ func (s *Server) retryAdobeRegistration(w http.ResponseWriter, r *http.Request) 
 // Browser fallback uses the existing account profile and checks identity before
 // returning credentials. It never starts signup or accepts a different account.
 func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.Account) (adobe.Account, error) {
+	failure := func(code string) (adobe.Account, error) {
+		return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: code}
+	}
 	if account.ProfileID == "" {
-		return adobe.Account{}, errors.New("adobe_profile_required")
+		return failure("profile_required")
 	}
 	raw := mapValue(s.registerStore.ConfigForTarget("adobe")["adobe"])
 	base := strings.TrimRight(firstNonEmpty(stringValue(raw["api_base"]), os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"), "http://cfm-browser-worker:8899"), "/")
@@ -76,7 +79,7 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	client := &http.Client{Timeout: 160 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	ctx, err := s.adobeAccountContext(ctx, account)
 	if err != nil {
-		return adobe.Account{}, errors.New("adobe_proxy_binding_unavailable")
+		return failure("proxy_binding_unavailable")
 	}
 	proxyURL := proxyruntime.URLFromContext(ctx)
 	if proxyURL == "" {
@@ -84,13 +87,13 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	}
 	lease, err := browserqueue.Acquire(ctx, client, base, key, map[string]any{"provider": "adobe", "profile_id": account.ProfileID, "email": account.Email, "adobe_mode": "refresh", "account_id": account.AccountID, "password": account.Password, "proxy": proxyURL}, nil)
 	if err != nil {
-		return adobe.Account{}, errors.New("adobe_browser_unavailable")
+		return failure("browser_unavailable")
 	}
 	defer lease.Release()
 	payload, _ := json.Marshal(map[string]any{"browser_lease": lease.ID, "action": "refresh"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/adobe/run", bytes.NewReader(payload))
 	if err != nil {
-		return adobe.Account{}, errors.New("adobe_browser_request_invalid")
+		return failure("request_invalid")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
@@ -98,20 +101,48 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return adobe.Account{}, errors.New("adobe_browser_refresh_unknown")
+		return failure("result_unknown")
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return adobe.Account{}, errors.New("adobe_browser_refresh_failed")
-	}
 	var result struct {
 		Stage   string        `json:"stage"`
+		Code    string        `json:"code"`
 		Account adobe.Account `json:"account"`
 	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil || result.Stage != "completed" {
-		return adobe.Account{}, errors.New("adobe_browser_refresh_failed")
+	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil {
+		return failure("browser_failed")
 	}
-	if result.Account.AccountID != account.AccountID || !strings.EqualFold(result.Account.Email, account.Email) {
+	if resp.StatusCode != http.StatusOK || result.Stage != "completed" {
+		// Only known machine codes may leave the Worker. Raw diagnostics, URLs,
+		// page text and credentials are deliberately excluded from the API error.
+		switch result.Code {
+		case "refresh_login_required":
+			return failure("login_required")
+		case "refresh_verification_required", "challenge_required", "refresh_challenge_required":
+			return failure("verification_required")
+		case "refresh_otp_required", "otp_required", "verification_code_required", "refresh_email_unverified":
+			return failure("email_verification_required")
+		case "refresh_account_mismatch", "refresh_email_mismatch":
+			return adobe.Account{}, adobe.ErrIdentity
+		case "media_session_incomplete":
+			return failure("media_session_incomplete")
+		case "media_session_cancelled":
+			return failure("cancelled")
+		case "refresh_login_form_unrecognized":
+			return failure("login_form_unrecognized")
+		case "refresh_login_entry_unrecognized":
+			return failure("login_entry_unrecognized")
+		case "refresh_login_form_unavailable":
+			return failure("login_form_unavailable")
+		case "refresh_password_form_unavailable":
+			return failure("password_form_unavailable")
+		case "refresh_login_pending", "refresh_login_completion_unconfirmed":
+			return failure("login_pending")
+		default:
+			return failure("browser_failed")
+		}
+	}
+	if result.Account.AccountID != account.AccountID || !strings.EqualFold(strings.TrimSpace(result.Account.Email), strings.TrimSpace(account.Email)) {
 		return adobe.Account{}, adobe.ErrIdentity
 	}
 	return result.Account, nil

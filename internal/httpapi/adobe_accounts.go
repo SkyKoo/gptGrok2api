@@ -93,6 +93,8 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"items": out, "imported": len(out)})
 	case path == "link-mailboxes" && r.Method == http.MethodPost:
 		s.adobeLinkMailboxes(w, r)
+	case path == "relogin" && (r.Method == http.MethodPost || r.Method == http.MethodGet):
+		s.adobeReloginAPI(w, r)
 	case path == "refresh" && r.Method == http.MethodPost:
 		var b struct {
 			IDs         []string `json:"ids"`

@@ -28,11 +28,23 @@ func mailboxSourceFromProvider(raw map[string]any, index int) mailboxstore.Sourc
 		provider["id"] = id
 	}
 	label := firstNonEmpty(stringValue(provider["label"]), fmt.Sprintf("邮箱来源 %d", index+1))
-	capabilities := map[string]any{"openai": false, "grok": false, "adobe": false, "create": false, "status": "config_only"}
-	if typeName == "icloud_hme" && strings.TrimSpace(stringValue(provider["api_base"])) != "" && strings.TrimSpace(stringValue(provider["admin_password"])) != "" && strings.TrimSpace(stringValue(provider["account_id"])) != "" {
-		capabilities = map[string]any{"openai": true, "grok": true, "adobe": true, "create": true, "status": "available"}
-	}
+	capabilities := mailboxSourceCapabilities(typeName, provider)
 	return mailboxstore.Source{ID: id, Type: typeName, Label: label, Enabled: boolValue(provider["enable"], true), Config: provider, Capabilities: capabilities, Status: stringValue(capabilities["status"])}
+}
+
+// Source capabilities describe the current adapter, not an administrator
+// setting. Derive them from the saved source config so sources created before
+// a new registration target do not retain an obsolete capability snapshot.
+func mailboxSourceCapabilities(sourceType string, config map[string]any) map[string]any {
+	ready := strings.EqualFold(strings.TrimSpace(sourceType), "icloud_hme") &&
+		strings.TrimSpace(stringValue(config["api_base"])) != "" &&
+		strings.TrimSpace(stringValue(config["admin_password"])) != "" &&
+		strings.TrimSpace(stringValue(config["account_id"])) != ""
+	status := "config_only"
+	if ready {
+		status = "available"
+	}
+	return map[string]any{"openai": ready, "grok": ready, "adobe": ready, "create": ready, "status": status}
 }
 
 func (s *Server) syncMailboxSources(ctx context.Context) error {
@@ -76,6 +88,7 @@ func (s *Server) syncMailboxSources(ctx context.Context) error {
 }
 
 func mailboxSourcePublic(source mailboxstore.Source) map[string]any {
+	capabilities := mailboxSourceCapabilities(source.Type, source.Config)
 	config := cloneMap(source.Config)
 	if _, ok := config["admin_password"]; ok {
 		config["admin_password_set"] = stringValue(config["admin_password"]) != ""
@@ -83,7 +96,7 @@ func mailboxSourcePublic(source mailboxstore.Source) map[string]any {
 	}
 	return map[string]any{
 		"id": source.ID, "type": source.Type, "label": source.Label, "enable": source.Enabled,
-		"status": source.Status, "last_error": source.LastError, "capabilities": source.Capabilities,
+		"status": capabilities["status"], "last_error": source.LastError, "capabilities": capabilities,
 		"config": config, "last_sync_at": source.LastSyncAt, "created_at": source.CreatedAt, "updated_at": source.UpdatedAt,
 	}
 }

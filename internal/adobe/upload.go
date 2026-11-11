@@ -18,7 +18,7 @@ func generationSession(a Account) (string, error) {
 	if err != nil || id != a.AccountID {
 		return "", ErrIdentity
 	}
-	sherlock, err := Sherlock(a.Cookie)
+	sherlock, _, err := MediaSessionARP(a)
 	if err != nil {
 		return "", &Error{Stage: "submit", Code: "session_incomplete"}
 	}

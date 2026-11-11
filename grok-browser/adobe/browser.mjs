@@ -1,5 +1,6 @@
 import { launchPersistentBrowser } from './browser-runtime.mjs';
-import { ensureMediaSession } from './media-session.mjs';
+import { ensureMediaSession, isCompleteMediaSession } from './media-session.mjs';
+import { waitForIdentity } from './session-refresh.mjs';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -602,7 +603,7 @@ export class BrowserRegistration {
     let result = state.result;
     if (result?.account) {
       // 恢复只复用已核对的原始快照，避免新 Token/Cookie 改变已落地文件的字节。
-      if (result.fireflySessionVerified !== true || !matchingIdentity(result.account) || !nonempty(result.account.cookie)) {
+      if (result.fireflySessionVerified !== true || !matchingIdentity(result.account) || (!nonempty(result.account.cookie) && !isCompleteMediaSession(result.account))) {
         throw new RegistrationError('saved_identity_not_verified');
       }
       if (result.emailVerified === false) throw new RegistrationError('email_verification_required');
@@ -612,7 +613,7 @@ export class BrowserRegistration {
       if (!isTrustedAdobeURL(pageURL) || new URL(pageURL).hostname !== 'firefly.adobe.com') {
         throw new RegistrationError('firefly_session_not_ready');
       }
-      const identity = await this.page.evaluate(async () => {
+      let identity = this.workerMode ? await waitForIdentity(this.page,{timeoutMs:10000}) : await this.page.evaluate(async () => {
         const ims = window.adobeIMS;
         if (!ims || typeof ims.isSignedInUser !== 'function' || !await ims.isSignedInUser() ||
             typeof ims.getProfile !== 'function' || typeof ims.getAccessToken !== 'function') return null;
@@ -626,14 +627,24 @@ export class BrowserRegistration {
       });
       if (!matchingIdentity(identity)) throw new RegistrationError('identity_not_verified');
       if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
-      const mediaCookie = this.workerMode ? await ensureMediaSession(this.page,this.context) : '';
-      const cookies = await this.context.cookies('https://firefly.adobe.com/');
-      const cookie = mediaCookie || cookies.filter(c => nonempty(c.name) && typeof c.value === 'string')
-        .map(c => `${c.name}=${c.value}`).join('; ');
-      if (!cookie) throw new RegistrationError('firefly_cookie_missing');
+      let media, cookie;
+      if (this.workerMode) {
+        const expectedAccountID = identity.account_id;
+        media = await ensureMediaSession(this.page,this.context);
+        if (!isCompleteMediaSession(media)) throw new RegistrationError('media_session_incomplete');
+        identity = await waitForIdentity(this.page,{timeoutMs:10000});
+        if (!matchingIdentity(identity) || identity.account_id !== expectedAccountID) throw new RegistrationError('identity_not_verified');
+        if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
+        cookie = media.cookie;
+      } else {
+        const cookies = await this.context.cookies('https://firefly.adobe.com/');
+        cookie = cookies.filter(c => nonempty(c.name) && typeof c.value === 'string').map(c => `${c.name}=${c.value}`).join('; ');
+        if (!cookie) throw new RegistrationError('firefly_cookie_missing');
+      }
       const refreshCookies = await this.context.cookies("https://adobeid-na1.services.adobe.com/ims/check/v6/token");
       const refresh_cookie = refreshCookies.map(c => `${c.name}=${c.value}`).join("; ");
-      const account = { email: identity.email, account_id: identity.account_id, token: identity.token, cookie, refresh_cookie, user_agent:identity.user_agent };
+      const account = { email: identity.email, account_id: identity.account_id, token: identity.token, cookie, refresh_cookie, user_agent:identity.user_agent,
+        ...(media?{media_session_arp_mode:media.media_session_arp_mode,media_session_arp_source:media.media_session_arp_source}:{}) };
       result = { ...result, account, fireflySessionVerified: true, emailVerified: identity.emailVerified, generationVerified: false };
       await this.store.save({ stage: 'credentials_saved', result });
     }
@@ -647,7 +658,7 @@ export class BrowserRegistration {
       throw new RegistrationError(allowed.has(error?.code) ? error.code : 'private_export_failed');
     }
     if (state.stage !== 'completed') {
-      await this.store.save({ stage: 'completed', result: { ...result, credentialFile: destination, exportComplete: true } });
+      await this.store.save({ stage: 'completed', result: { ...result, ...(destination?{credentialFile: destination}:{}), exportComplete: true } });
     }
     return {
       stage: 'completed', credentialFile: destination, fireflySessionVerified: true,

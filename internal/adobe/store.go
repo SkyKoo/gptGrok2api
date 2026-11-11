@@ -210,13 +210,14 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 		if id != a.AccountID {
 			return nil, ErrIdentity
 		}
-		if _, e = Sherlock(a.Cookie); e != nil {
+		if _, _, e = MediaSessionARP(a); e != nil {
 			return nil, e
 		}
 		a.ID = "adobe:" + a.AccountID
 		a.Token = strings.TrimSpace(a.Token)
 		a.ExpiresAt = expiry
 		a.CreatedAt = time.Now().Unix()
+		a.MediaSessionRefreshed = false
 		a.MediaSessionStatus = "imported"
 		a.MediaSessionUpdatedAt = a.CreatedAt
 		a.UpdatedAt = a.CreatedAt
@@ -280,7 +281,7 @@ func Eligible(a Account, now time.Time) bool {
 	if err != nil || identity != a.AccountID {
 		return false
 	}
-	_, err = Sherlock(a.Cookie)
+	_, _, err = MediaSessionARP(a)
 	return err == nil
 }
 
@@ -413,12 +414,33 @@ func (s *Store) update(id string, revision uint64, fn func(*Account)) error {
 	return ErrNotFound
 }
 func (s *Store) ReplaceCredentials(expected Account, replacement Account) (Account, error) {
+	return s.replaceCredentials(expected, replacement, false)
+}
+
+func (s *Store) replaceCredentials(expected Account, replacement Account, browserVerified bool) (Account, error) {
 	identity, expires, err := TokenIdentity(replacement.Token)
 	if err != nil {
+		if browserVerified {
+			return Account{}, &Error{Stage: "relogin", Code: "token_invalid"}
+		}
 		return Account{}, err
 	}
 	if identity != expected.AccountID {
 		return Account{}, ErrIdentity
+	}
+	if browserVerified {
+		if replacement.AccountID != expected.AccountID || !strings.EqualFold(strings.TrimSpace(replacement.Email), strings.TrimSpace(expected.Email)) {
+			return Account{}, ErrIdentity
+		}
+		if expires <= time.Now().Unix() {
+			return Account{}, &Error{Stage: "relogin", Code: "token_expired"}
+		}
+		if !replacement.MediaSessionRefreshed || replacement.MediaSessionStatus != "complete" {
+			return Account{}, &Error{Stage: "relogin", Code: "media_session_incomplete"}
+		}
+		if _, _, err := MediaSessionARP(replacement); err != nil {
+			return Account{}, &Error{Stage: "relogin", Code: "media_session_incomplete"}
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -430,7 +452,7 @@ func (s *Store) ReplaceCredentials(expected Account, replacement Account) (Accou
 		if current.ID != expected.ID {
 			continue
 		}
-		if current.Revision != expected.Revision {
+		if current.Revision != expected.Revision || (browserVerified && (current.InFlight != expected.InFlight || current.Status != expected.Status)) {
 			return Account{}, ErrRevision
 		}
 		if current.AccountID != identity {
@@ -438,14 +460,26 @@ func (s *Store) ReplaceCredentials(expected Account, replacement Account) (Accou
 		}
 		mediaCookie := replacement.Cookie
 		mediaStatus := "refreshed"
-		if _, e := Sherlock(mediaCookie); e != nil {
-			if _, oldErr := Sherlock(current.Cookie); oldErr != nil {
-				return Account{}, errors.New("adobe_sherlock_session_incomplete")
+		if !browserVerified {
+			// IMS updates authentication only. It cannot establish, remove or
+			// change the official runtime's decision about the optional ARP header.
+			if replacement.MediaSessionARPMode != current.MediaSessionARPMode || replacement.MediaSessionARPSource != current.MediaSessionARPSource {
+				return Account{}, &Error{Stage: "refresh", Code: "arp_policy_changed"}
 			}
-			mediaCookie = current.Cookie
-			mediaStatus = "preserved"
-		} else if mediaCookie == current.Cookie {
-			mediaStatus = "preserved"
+			if _, _, e := MediaSessionARP(replacement); e != nil {
+				if _, _, oldErr := MediaSessionARP(current); oldErr != nil {
+					return Account{}, &Error{Stage: "refresh", Code: "media_session_incomplete"}
+				}
+				mediaCookie = current.Cookie
+				mediaStatus = "preserved"
+			} else if mediaCookie == current.Cookie {
+				mediaStatus = "preserved"
+			}
+		} else {
+			// An explicit omission must replace the entire media cookie, even
+			// when empty; preserving a historical Sherlock here would be wrong.
+			current.MediaSessionARPMode = replacement.MediaSessionARPMode
+			current.MediaSessionARPSource = replacement.MediaSessionARPSource
 		}
 		current.Token = replacement.Token
 		current.ExpiresAt = expires
@@ -464,7 +498,12 @@ func (s *Store) ReplaceCredentials(expected Account, replacement Account) (Accou
 		current.LastRefreshAt = time.Now().Unix()
 		current.UpdatedAt = current.LastRefreshAt
 		current.NextRefreshAt = time.Now().Add(45 * time.Minute).Unix()
-		current.LastError = ""
+		if current.Status != "submission_unknown" {
+			current.LastError = ""
+		}
+		if browserVerified && current.Status == "invalid" {
+			current.Status = "active"
+		}
 		d.Accounts[i] = current
 		if err = s.save(d); err != nil {
 			return Account{}, err
@@ -532,6 +571,69 @@ func (s *Store) DeleteWithCutoff(ids []string) ([]Account, time.Time, error) {
 	return deleted, cutoff, nil
 }
 
+// Relogin always runs the normal browser login/session initialization. Unknown
+// submissions may renew authentication, but their reservation and task binding
+// remain pinned; this operation never submits, releases or resumes generation.
+func (s *Store) Relogin(ctx context.Context, id string) (Account, error) {
+	return s.relogin(ctx, id, nil)
+}
+
+// A queued task must not log into credentials replaced after its admission.
+func (s *Store) ReloginRevision(ctx context.Context, id string, revision uint64) (Account, error) {
+	return s.relogin(ctx, id, &revision)
+}
+
+func (s *Store) relogin(ctx context.Context, id string, revision *uint64) (Account, error) {
+	if err := ctx.Err(); err != nil {
+		return Account{}, &Error{Stage: "relogin", Code: "cancelled"}
+	}
+	s.mu.Lock()
+	d, err := s.load()
+	if err != nil {
+		s.mu.Unlock()
+		return Account{}, err
+	}
+	var a Account
+	for _, candidate := range d.Accounts {
+		if candidate.ID == id {
+			a = candidate
+			break
+		}
+	}
+	if a.ID == "" {
+		s.mu.Unlock()
+		return a, ErrNotFound
+	}
+	if revision != nil && a.Revision != *revision {
+		s.mu.Unlock()
+		return a, ErrRevision
+	}
+	if (a.InFlight != "" && a.Status != "submission_unknown") || a.SettlementUntil > time.Now().Unix() || s.maintenance[id] {
+		s.mu.Unlock()
+		return a, ErrBusy
+	}
+	browserRefresher := s.browserRefresher
+	if browserRefresher == nil {
+		s.mu.Unlock()
+		return a, &Error{Stage: "relogin", Code: "browser_unavailable"}
+	}
+	s.maintenance[id] = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.maintenance, id); s.mu.Unlock() }()
+	refreshed, err := browserRefresher(ctx, a)
+	if err != nil {
+		return a, err
+	}
+	if ctx.Err() != nil {
+		return a, &Error{Stage: "relogin", Code: "cancelled"}
+	}
+	updated, err := s.replaceCredentials(a, refreshed, true)
+	if err != nil {
+		return a, err
+	}
+	return updated, nil
+}
+
 // Refresh performs bounded maintenance before selection or after settlement;
 // it never refreshes and replays a failed generation request.
 func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials bool) (Account, error) {
@@ -563,12 +665,14 @@ func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials b
 	refreshedOnce := false
 	refreshCredentials := func() error {
 		refreshedOnce = true
+		browserVerified := false
 		refreshed, e := c.Refresh(ctx, a)
 		if e != nil && a.ProfileID != "" && browserRefresher != nil {
+			browserVerified = true
 			refreshed, e = browserRefresher(ctx, a)
 		}
 		if e == nil {
-			updated, saveErr := s.ReplaceCredentials(a, refreshed)
+			updated, saveErr := s.replaceCredentials(a, refreshed, browserVerified)
 			e = saveErr
 			if e == nil {
 				a = updated
@@ -741,12 +845,14 @@ func (s *Store) RefreshTask(ctx context.Context, c *Client, taskID, accountID st
 	browserRefresher := s.browserRefresher
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.maintenance, accountID); s.mu.Unlock() }()
+	browserVerified := false
 	refreshed, err := c.Refresh(ctx, a)
 	if err != nil && a.ProfileID != "" && browserRefresher != nil {
+		browserVerified = true
 		refreshed, err = browserRefresher(ctx, a)
 	}
 	if err == nil {
-		updated, e := s.ReplaceCredentials(a, refreshed)
+		updated, e := s.replaceCredentials(a, refreshed, browserVerified)
 		err = e
 		if e == nil {
 			a = updated

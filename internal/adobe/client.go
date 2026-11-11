@@ -315,7 +315,7 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 	if err != nil || id != a.AccountID {
 		return j, ErrIdentity
 	}
-	sherlock, err := Sherlock(a.Cookie)
+	sherlock, err := generationSession(a)
 	if err != nil {
 		return j, &Error{Stage: "submit", Code: "session_incomplete"}
 	}
@@ -323,7 +323,11 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 	if err != nil {
 		return j, err
 	}
-	d, h, err := c.request(ctx, "submit", http.MethodPost, "https://firefly-3p.ff.adobe.io/v2/3p-"+m.Kind+"s/generate-async", a, raw, map[string]string{"x-nonce": Nonce(a.AccountID, prompt), "x-arp-session-id": sherlock, "x-request-id": j.RequestID})
+	headers := map[string]string{"x-nonce": Nonce(a.AccountID, prompt), "x-request-id": j.RequestID}
+	if sherlock != "" {
+		headers["x-arp-session-id"] = sherlock
+	}
+	d, h, err := c.request(ctx, "submit", http.MethodPost, "https://firefly-3p.ff.adobe.io/v2/3p-"+m.Kind+"s/generate-async", a, raw, headers)
 	if err != nil {
 		j.Status = "SUBMISSION_UNKNOWN"
 		if e, ok := err.(*Error); ok && !e.SubmissionUnknown {
