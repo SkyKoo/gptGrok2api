@@ -33,6 +33,7 @@ export interface AdobeQuota {
   used?: number
   available?: number
   checked_at?: string
+  last_success_at?: string
   error?: string
 }
 export interface AdobeAccount {

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { adobeGenerationQuotaItems, adobeCreditLabel } from '../src/lib/adobeQuotas.ts'
+import { adobeGenerationQuotaItems, adobeGenerationQuotaNotice, adobeCreditLabel } from '../src/lib/adobeQuotas.ts'
 
 const pools = [
  {id:'daily-image',resource_type:'firefly_complimentary_generations',total:3,used:1,available:2,refresh_period:'P1D',kinds:['image'],models:['gemini-3.1-flash-image','gpt-image-2.5-flare']},
@@ -15,7 +15,7 @@ test('Adobe displays shared generation pools once and keeps common credits separ
  assert.equal(adobeCreditLabel(quota),'通用积分 10')
 })
 test('Adobe failed or unknown generation query never presents old counts as available',()=>{
- for(const status of ['unknown','error','stale']){
+ for(const status of ['unknown','error']){
   const items=adobeGenerationQuotaItems({status:'known',available:10,generation:{status,pools,models:[]}})
   assert.ok(items.every(item=>item.text==='未知'&&item.tone==='muted'))
  }
@@ -30,4 +30,26 @@ test('Adobe explicit exhaustion remains zero while missing or invalid values rem
  const item=adobeGenerationQuotaItems({status:'known',generation:{status:'known',pools:[{...pools[1],available:0,used:1}],models:[]}})[0]
  assert.equal(item.text,'0 / 1');assert.equal(item.tone,'danger')
  assert.equal(adobeCreditLabel({status:'error',available:10}),'通用积分未知')
+})
+
+test('Adobe stale snapshots retain historical counts without claiming current availability',()=>{
+ const checked_at='2026-11-11T06:55:43Z'
+ const quota={status:'stale',available:10,checked_at,generation:{status:'stale',checked_at,pools,models:[]}}
+ const items=adobeGenerationQuotaItems(quota)
+ assert.deepEqual(items.map(item=>item.text),['2 / 3','1 / 1','3 / 3'])
+ assert.ok(items.every(item=>item.tone==='muted'))
+ assert.equal(adobeGenerationQuotaNotice(quota),'待刷新 · 上次查询结果')
+ assert.equal(adobeCreditLabel(quota),'通用积分 10（待刷新）')
+ const zero=adobeGenerationQuotaItems({...quota,generation:{...quota.generation,pools:[{...pools[1],available:0}]}})[0]
+ assert.equal(zero.text,'0 / 1'); assert.equal(zero.tone,'muted')
+})
+test('Adobe missing historical timestamps do not turn unconfirmed numbers into snapshots',()=>{
+ for(const checked_at of [undefined,'','not-a-date']) {
+  const quota={status:'stale',available:10,checked_at,generation:{status:'stale',checked_at,pools,models:[]}}
+  assert.ok(adobeGenerationQuotaItems(quota).every(item=>item.text==='未知'))
+  assert.equal(adobeGenerationQuotaNotice(quota),'待查询')
+  assert.equal(adobeCreditLabel(quota),'通用积分未知')
+ }
+ assert.equal(adobeGenerationQuotaNotice({status:'known',generation:{status:'error',pools,models:[]}}),'查询失败')
+ assert.equal(adobeGenerationQuotaNotice({status:'known',generation:{status:'known',pools,models:[]}}),'')
 })

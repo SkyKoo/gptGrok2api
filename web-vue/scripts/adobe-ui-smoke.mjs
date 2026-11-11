@@ -28,8 +28,9 @@ const register={target:'openai',total:1,threads:1,mode:'total',enabled:false,mai
 const image={kind:'image',sizes:['1024x1024','1200x896'],qualities:['auto'],max_reference_images:6,output_formats:['png','jpeg'],variants:[{sizes:['1024x1024'],aspect_ratios:['1:1'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6},{sizes:['1200x896'],aspect_ratios:['4:3'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6}]}
 const video={kind:'video',sizes:['1920x1080'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,variants:[{sizes:['1920x1080'],resolutions:['1080p'],durations:[8],max_count:1,max_reference_images:2,audio:true}]}
 const catalog={chat_models:['gpt-test'],image_models:['gemini-3.1-flash-image'],image_edit_models:['gemini-3.1-flash-image'],video_models:['veo-3.1-lite'],models:[{id:'gpt-test',name:'GPT fixture'},{id:'gemini-3.1-flash-image',name:'Gemini 3.1 Flash Image (Nano Banana 2)'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'}],media_capabilities:{'gemini-3.1-flash-image':image,'veo-3.1-lite':video}}
-async function screenshot(name) { if (process.env.CFM_UI_SCREENSHOT_DIR) { await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, {recursive:true}); await page.screenshot({path:path.join(process.env.CFM_UI_SCREENSHOT_DIR, name+'.png'),fullPage:true}) } }
+async function screenshot(name) { if (process.env.CFM_UI_SCREENSHOT_DIR) { await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, {recursive:true}); await page.screenshot({path:path.join(process.env.CFM_UI_SCREENSHOT_DIR, name+'.png'),fullPage:true,animations:'disabled'}) } }
 let priorities=['chatgpt','adobe'], multi=false
+const deletedAccounts=new Set(), disabledAccounts=new Map()
 const generation={status:'known',checked_at:new Date().toISOString(),models:[],pools:[
  {id:'images',resource_type:'firefly_complimentary_generations',total:3,used:1,available:2,refresh_period:'P1D',kinds:['image'],models:['gemini-3.1-flash-image','gpt-image-2.5-flare']},
  {id:'videos',resource_type:'firefly_complimentary_generations',total:1,used:0,available:1,refresh_period:'P1D',kinds:['video'],models:['veo-3.1-lite']},
@@ -45,13 +46,19 @@ await context.route('**/*',async route=>{
   if(pathname==='/auth/status')data={authenticated:true,role:'admin',name:'Fixture'}
   else if(pathname==='/api/settings')data={config:{}}
   else if(pathname==='/api/model-catalog')data=catalog
+  else if(pathname==='/api/adobe/accounts'&&req.method()==='DELETE'){
+    const ids=JSON.parse(req.postData()).ids;ids.forEach(id=>deletedAccounts.add(id));data={deleted:ids.length}
+  }
+  else if(pathname==='/api/adobe/accounts/disabled'){
+    const body=JSON.parse(req.postData());body.ids.forEach(id=>disabledAccounts.set(id,body.disabled));data={ok:true}
+  }
   else if(pathname==='/api/adobe/accounts')data={items:[{...account,media_session_status:'refreshed',media_session_refreshed:true},
     {...account,id:'adobe:zero',account_id:'zero',email:'zero@example.test',status:'exhausted',quota:{status:'known',total:10,used:0,available:10,generation:{...generation,pools:[{...generation.pools[1],used:1,available:0}]}}},
     {...account,id:'adobe:unknown',account_id:'unknown',email:'unknown@example.test',media_session_status:'preserved',media_session_refreshed:false,quota:{status:'unknown'}},
-    {...account,id:'adobe:stale',account_id:'stale',email:'stale@example.test',quota:{status:'stale',available:10,generation:{...generation,status:'unknown'}}},
+    {...account,id:'adobe:stale',account_id:'stale',email:'stale@example.test',quota:{status:'stale',available:10,checked_at:'2026-11-11T06:55:43Z',generation:{...generation,status:'stale',checked_at:'2026-11-11T06:55:43Z'}}},
     {...account,id:'adobe:error',account_id:'error',email:'error@example.test',quota:{status:'known',available:10,generation:{status:'error',pools:[],models:[],error:'Fixture query error'}}},
-  ],total:5,all_total:5,page:1,page_size:25}
-  else if(pathname==='/api/adobe/accounts/refresh')data={results:[{id:account.id,ok:true}]}
+  ].filter(item=>!deletedAccounts.has(item.id)).map(item=>({...item,disabled:disabledAccounts.get(item.id)??item.disabled})),total:5-deletedAccounts.size,all_total:5-deletedAccounts.size,page:1,page_size:25}
+  else if(pathname==='/api/adobe/accounts/refresh')data={results:JSON.parse(req.postData()).ids.map(id=>({id,ok:true}))}
   else if(pathname==='/api/model-routing'){
     if(req.method()==='PUT')priorities=JSON.parse(req.postData()).priorities['gpt-image-2.5-sunburst']
     data={models:multi?[{model:'gpt-image-2.5-sunburst',name:'Sunburst fixture',channels:['chatgpt','adobe'],priority:priorities}]:[{model:'gemini-3.1-flash-image',channels:['adobe'],priority:['adobe']}]}
@@ -71,17 +78,68 @@ try {
   for(const label of ['每日图片','每日视频','图片体验','2 / 3','1 / 1','3 / 3','通用积分 10']) await accountRow.getByText(label,{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'zero@example.test'}).getByText('0 / 1',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'unknown@example.test'}).getByText('未知',{exact:true}).first().waitFor()
-  assert.equal(await page.getByRole('row').filter({hasText:'stale@example.test'}).getByText('未知',{exact:true}).count(),3)
+  const staleRow=page.getByRole('row').filter({hasText:'stale@example.test'})
+  for(const label of ['待刷新 · 上次查询结果','2 / 3','1 / 1','3 / 3','通用积分 10（待刷新）','可用'])await staleRow.getByText(label,{exact:true}).waitFor()
+  assert.equal(await staleRow.getByText('待验证',{exact:true}).count(),0)
   await page.getByRole('row').filter({hasText:'error@example.test'}).getByText('未知（查询失败）',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'fixture@example.test'}).getByText('媒体会话已更新',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'unknown@example.test'}).getByText('凭据已刷新，保留原媒体会话',{exact:true}).waitFor()
-  await screenshot('adobe-accounts')
-  await page.getByRole('checkbox',{name:'选择 fixture@example.test'}).check()
-  await page.getByRole('button',{name:'刷新额度',exact:true}).click()
+  assert.equal(await page.getByRole('button',{name:/批量操作/}).count(),0)
+  for(const theme of ['dark','light']){
+    await page.emulateMedia({colorScheme:theme})
+    await page.waitForFunction(theme=>(document.documentElement.dataset.theme||'light')===theme,theme)
+    await screenshot('adobe-accounts-'+theme)
+  }
+  // Selecting a different row must never redirect a single-row action.
+  await page.getByRole('checkbox',{name:'选择 zero@example.test'}).check()
+  const refreshBefore=requests.filter(req=>req.path==='/api/adobe/accounts/refresh').length
+  await accountRow.getByRole('button',{name:'刷新额度',exact:true}).click()
   await page.getByText('操作已完成',{exact:true}).waitFor()
-  assert.ok(requests.some(req=>req.path==='/api/adobe/accounts/refresh'&&JSON.parse(req.body).ids[0]==='adobe:fixture'))
+  await accountRow.getByRole('button',{name:'刷新额度',exact:true}).waitFor({state:'visible'})
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/refresh').at(-1).body),{ids:['adobe:fixture'],credentials:false})
+  assert.equal(requests.filter(req=>req.path==='/api/adobe/accounts/refresh').length,refreshBefore+1)
+  await page.waitForFunction(()=>![...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='更多')?.disabled)
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'刷新登录态',exact:true}).click()
+  await page.getByText('操作已完成',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/refresh').at(-1).body),{ids:['adobe:fixture'],credentials:true})
+  await page.waitForFunction(()=>![...document.querySelectorAll('button')].find(button=>button.textContent.trim()==='更多')?.disabled)
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'禁用账号',exact:true}).click()
+  await accountRow.getByText('已禁用',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/disabled').at(-1).body),{ids:['adobe:fixture'],disabled:true})
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'启用账号',exact:true}).click()
+  await accountRow.getByText('可用',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/disabled').at(-1).body),{ids:['adobe:fixture'],disabled:false})
+  // A cancellation sends no DELETE. Confirmation remains bound to the named row.
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'删除账号',exact:true}).click()
+  const dialog=page.getByRole('dialog')
+  await dialog.getByText('删除 Adobe 账号',{exact:true}).waitFor()
+  assert.match(await dialog.innerText(),/fixture@example.test/)
+  assert.doesNotMatch(await dialog.innerText(),/zero@example.test/)
+  const deletesBefore=requests.filter(req=>req.method==='DELETE').length
+  await dialog.getByRole('button',{name:'取消',exact:true}).click()
+  assert.equal(requests.filter(req=>req.method==='DELETE').length,deletesBefore)
+  await page.getByRole('button',{name:/批量操作/}).click()
+  await page.getByRole('button',{name:'刷新额度',exact:true}).last().click()
+  await page.getByText('操作已完成',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/refresh').at(-1).body),{ids:['adobe:zero'],credentials:false})
+  await page.getByRole('button',{name:'取消选择',exact:true}).click()
+  await page.getByRole('button',{name:/批量操作/}).waitFor({state:'detached'})
+  await page.getByRole('checkbox',{name:'选择 stale@example.test'}).check()
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'删除账号',exact:true}).click()
+  await dialog.getByRole('button',{name:'确认删除',exact:true}).click()
+  await page.getByText('共 4 个账号',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.method==='DELETE').at(-1).body),{ids:['adobe:fixture']})
+  assert.equal(await page.getByRole('checkbox',{name:'选择 stale@example.test'}).isChecked(),true)
+  await page.getByRole('button',{name:'取消选择',exact:true}).click()
   await page.goto(origin+'/#/register')
-  await page.getByText('Adobe Firefly',{exact:true}).click()
+  await page.locator('.register-target-segmented').getByRole('button',{name:'Adobe',exact:true}).click()
+  await page.locator('.register-target-segmented').getByRole('button',{name:'Grok',exact:true}).waitFor()
+  assert.equal(await page.locator('.register-target-segmented').getByRole('button',{name:'Grok（协议）',exact:true}).count(),0)
   await page.getByText('Adobe 任务参数',{exact:true}).waitFor()
   await page.getByText('Adobe Firefly 注册',{exact:true}).waitFor()
   await page.getByText('Adobe 定时启动',{exact:true}).waitFor()
@@ -117,7 +175,7 @@ try {
   await screenshot('model-priority')
   assert.deepEqual(errors,[])
   assert.deepEqual(unknown,[], 'Unexpected API fixture path')
-  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts/refresh','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
-  console.log(JSON.stringify({ok:true,checks:['adobe-media-session-status','adobe-account-quota','adobe-account-refresh','third-registration-tab','adobe-schedule','veo-free-parameters','gemini-free-parameters','single-channel-empty-state','multi-channel-admin-priority'],fixtureEndpoints:[...new Set(unknown)].sort()}))
+  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts','/api/adobe/accounts/disabled','/api/adobe/accounts/refresh','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
+  console.log(JSON.stringify({ok:true,checks:['adobe-media-session-status','adobe-account-quota','adobe-account-refresh','adobe-stale-history','adobe-row-target-isolation','adobe-delete-confirmation','adobe-selection-bulk-bar','third-registration-tab','adobe-schedule','veo-free-parameters','gemini-free-parameters','single-channel-empty-state','multi-channel-admin-priority'],fixtureEndpoints:[...new Set(unknown)].sort()}))
 } catch(error){console.log(JSON.stringify({errors,body:(await page.locator('body').innerText()).slice(-6000),fixtureEndpoints:[...new Set(unknown)].sort()}));throw error}
 finally{await browser.close();await new Promise(resolve=>server.close(resolve))}

@@ -73,8 +73,8 @@ export const registerModeGroups = [{ options: registerModeOptions }]
 
 export const registerTargetOptions = [
   { value: 'openai', label: 'OpenAI' },
-  { value: 'grok', label: 'Grok（协议）' },
-  { value: 'adobe', label: 'Adobe Firefly' },
+  { value: 'grok', label: 'Grok' },
+  { value: 'adobe', label: 'Adobe' },
 ] as const
 
 export const turnstileProviderOptions = [

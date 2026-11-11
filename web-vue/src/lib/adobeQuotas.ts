@@ -12,6 +12,19 @@ function knownNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
+function hasQueryTime(value: string | number | undefined) {
+  if (value === undefined || value === '') return false
+  return Number.isFinite(new Date(value).getTime())
+}
+
+export function adobeGenerationQuotaNotice(quota?: AdobeQuota) {
+  const generation = quota?.generation
+  if (generation?.status === 'stale') return hasQueryTime(generation.checked_at) ? '待刷新 · 上次查询结果' : '待查询'
+  if (generation?.status === 'error') return '查询失败'
+  if (generation?.status !== 'known') return '待查询'
+  return ''
+}
+
 function poolLabel(pool: AdobeGenerationQuotaPool) {
   const kind = pool.kinds.includes('image') && pool.kinds.includes('video') ? '媒体' : pool.kinds.includes('video') ? '视频' : '图片'
   if (pool.resource_type === 'firefly_limited_taste') return `${kind}体验`
@@ -26,16 +39,19 @@ export function adobeGenerationQuotaItems(quota?: AdobeQuota): AdobeGenerationQu
   const pools = [...new Map((generation?.pools || []).map(pool => [pool.id, pool])).values()]
   if (!pools.length) return [{ key: 'unknown', label: '生成次数', text: generation?.status === 'error' ? '未知（查询失败）' : '未知', tone: 'muted', models: [] }]
   const known = generation?.status === 'known'
+  const historical = generation?.status === 'stale' && hasQueryTime(generation.checked_at)
   return pools.map(pool => ({
     key: pool.id,
     label: poolLabel(pool),
-    text: !known || !knownNumber(pool.available) ? '未知' : knownNumber(pool.total) ? `${pool.available} / ${pool.total}` : String(pool.available),
+    text: !(known || historical) || !knownNumber(pool.available) ? '未知' : knownNumber(pool.total) ? `${pool.available} / ${pool.total}` : String(pool.available),
     tone: !known || !knownNumber(pool.available) ? 'muted' : pool.available === 0 ? 'danger' : 'success',
     models: [...new Set(pool.models || [])],
   }))
 }
 
 export function adobeCreditLabel(quota?: AdobeQuota) {
-  if (!quota || !['known', 'success'].includes(quota.status) || !knownNumber(quota.available)) return '通用积分未知'
+  if (!quota || !knownNumber(quota.available)) return '通用积分未知'
+  if (quota.status === 'stale' && hasQueryTime(quota.last_success_at || quota.checked_at)) return `通用积分 ${quota.available}（待刷新）`
+  if (!['known', 'success'].includes(quota.status)) return '通用积分未知'
   return `通用积分 ${quota.available}`
 }

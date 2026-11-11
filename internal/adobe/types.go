@@ -232,6 +232,9 @@ func Public(a Account) map[string]any {
 		}
 		q.Generation = &generation
 	}
+	// A previously verified identity stays active when its quota snapshot ages.
+	// Preserve stale counters for historical display; selection and preflight
+	// still apply their own freshness rules before any generation request.
 	status := a.Status
 	if !a.Enabled {
 		status = "disabled"
@@ -241,9 +244,9 @@ func Public(a Account) map[string]any {
 		status = "expired"
 	} else if a.InFlight != "" {
 		status = "busy"
-	} else if q.Status != "known" {
+	} else if q.Status != "known" && !(q.Status == "stale" && a.Status == "active") {
 		status = "pending"
-	} else if q.Generation != nil && q.Generation.Exhausted() {
+	} else if q.Status == "known" && q.Generation != nil && q.Generation.Exhausted() {
 		status = "exhausted"
 	}
 	return map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != ""}
