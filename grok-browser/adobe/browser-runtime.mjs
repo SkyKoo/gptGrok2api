@@ -8,9 +8,13 @@ export function browserProxy(raw) {
   try {
     if (typeof raw !== 'string' || /[\r\n\0]/.test(raw)) throw new Error();
     const url = new URL(raw);
-    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname ||
-        !['', '/'].includes(url.pathname) || url.search || url.hash) throw new Error();
-    return { server: url.origin,
+    if (!['http:', 'https:', 'socks5:', 'socks5h:'].includes(url.protocol) || !url.hostname ||
+        !['', '/'].includes(url.pathname) || url.search || url.hash ||
+        (url.password && !url.username)) throw new Error();
+    // Chromium 的 SOCKS5 在代理端解析域名；socks5h 使用相同入口。
+    // 非 HTTP 协议的 URL.origin 为 null，必须保留实际 host（含 IPv6/端口）。
+    const protocol = url.protocol === 'socks5h:' ? 'socks5:' : url.protocol;
+    return { server: `${protocol}//${url.host}`,
       ...(url.username ? { username: decodeURIComponent(url.username) } : {}),
       ...(url.password ? { password: decodeURIComponent(url.password) } : {}),
     };
@@ -30,6 +34,12 @@ export async function launchPersistentBrowser(profileDir, { headless = false } =
     throw new RegistrationError('browser_channel_invalid');
   }
   const proxy = browserProxy(env.ADOBE_BROWSER_PROXY);
+  // CloakBrowser 的 Chromium 支持 RFC 1929；普通 Playwright 不支持认证 SOCKS。
+  // 在启动前明确拒绝，不能丢弃凭据或退回直连。
+  if (backend === 'playwright' && proxy?.server.startsWith('socks5:') &&
+      (proxy.username || proxy.password)) {
+    throw new RegistrationError('browser_proxy_auth_unsupported');
+  }
 
   let runtime;
   try { runtime = await importer(backend); }

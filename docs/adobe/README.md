@@ -1,7 +1,7 @@
 # Adobe Firefly 接入
 
-Adobe HME、重新登录与生成会话修复 `10be7fd` 已于 2026-11-11 上线验证。
-本次将其与 `main` 中的账号默认出口修复 `0fb35c3` 整合；合并后的统一版本需通过发布验收。
+Adobe HME、重新登录与生成会话修复已与账号默认出口整合，`main` 的 `76e3f00` 于
+2026-11-11 上线。本轮补齐 Adobe 浏览器对带认证 SOCKS5 默认出口的兼容。
 验证日期：2026-11-11（Asia/Shanghai）。免费模型权益、余额与上游协议可能变化。
 
 ## 模型与统一接口
@@ -78,6 +78,11 @@ Adobe 在收到上游任务句柄后加密保存，只在明确 COMPLETED 后交
 注册设置、调度、结果恢复记录分别保存，已提交注册结果未知时不建新号。
 取得账号但导入或校验失败时，只恢复已有结果。邮件验证码复用邮箱管理器；人机验证保留待人工
 处理状态，不绕过验证。浏览器仅参与注册、登录态维护，图片与视频调用由 Go HTTP 完成。
+
+注册和重新登录均通过共享 `cfm-browser-worker` 排队执行。Adobe 的 CloakBrowser 驱动支持
+HTTP、HTTPS、SOCKS5（含用户名/密码）代理；`socks5h` 按 Chromium 的远端域名解析行为
+规范化为 `socks5`。重新登录遵循账号日常出口配置，不因代理失败自动改为直连。
+普通 Playwright 后端仅支持无认证 SOCKS5，认证配置会在启动前明确拒绝。
 
 `/api/adobe/accounts` 及其 import/refresh/relogin/disabled/link-mailboxes 子接口只允许管理员。列表采用安全字段白名单，
 不返回 Cookie、令牌、密码、Sherlock、代理凭据或浏览器资料。凭据按账号身份和版本校验后更新；

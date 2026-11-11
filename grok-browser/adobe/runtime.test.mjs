@@ -9,8 +9,58 @@ test('proxy root slash is normalized and credentials remain separate from the se
     server: 'http://proxy.example.test:8080', username: 'fixture', password: 'p@ss',
   });
   for (const raw of ['http://proxy.test/path', 'http://proxy.test/?secret=fixture',
-    'http://proxy.test/#fragment', 'socks5://proxy.test:1080', 'not-a-url', 'http://proxy.test/\n']) {
+    'http://proxy.test/#fragment', 'socks4://proxy.test:1080', 'not-a-url', 'http://proxy.test/\n']) {
     assert.throws(() => browserProxy(raw), error => error.code === 'browser_proxy_invalid' && !error.message.includes(raw));
+  }
+});
+
+test('SOCKS5 normalizes remote DNS aliases and preserves encoded credentials and IPv6', () => {
+  assert.deepEqual(browserProxy('socks5://proxy.example.test:1080/'), { server: 'socks5://proxy.example.test:1080' });
+  assert.deepEqual(browserProxy('socks5h://[::1]:1080/'), { server: 'socks5://[::1]:1080' });
+  assert.deepEqual(browserProxy('socks5h://fixture%40user:p%40ss%2B%3D%25@[::1]:1080/'), {
+    server: 'socks5://[::1]:1080', username: 'fixture@user', password: 'p@ss+=%',
+  });
+  assert.deepEqual(browserProxy('socks5://fixture:%E7%A7%98%E5%AF%86@proxy.example.test:1080'), {
+    server: 'socks5://proxy.example.test:1080', username: 'fixture', password: '秘密',
+  });
+  for (const raw of ['socks5://proxy.test/path', 'socks5://proxy.test/?secret=fixture',
+    'socks5://proxy.test/#fragment', 'socks5://proxy.test:65536',
+    'socks5://fixture:%ZZ@proxy.test:1080', 'socks5://:secret@proxy.test:1080']) {
+    assert.throws(() => browserProxy(raw), error => error.code === 'browser_proxy_invalid' && !error.message.includes(raw));
+  }
+});
+
+test('both backends receive unauthenticated SOCKS5 and CloakBrowser retains authenticated SOCKS5', async () => {
+  for (const backend of ['playwright', 'cloakbrowser']) {
+    for (const scheme of ['socks5', 'socks5h']) {
+      let captured;
+      await launchPersistentBrowser('/fixture/browser', {}, {
+        env: { ADOBE_BROWSER_BACKEND: backend, ADOBE_BROWSER_PROXY: `${scheme}://[::1]:1080/` },
+        importer: async () => backend === 'cloakbrowser'
+          ? { launchPersistentContext: async options => { captured = options; } }
+          : { chromium: { launchPersistentContext: async (_path, options) => { captured = options; } } },
+      });
+      assert.deepEqual(captured.proxy, { server: 'socks5://[::1]:1080' });
+    }
+  }
+  for (const scheme of ['socks5', 'socks5h']) {
+    let captured;
+    await launchPersistentBrowser('/fixture/browser', {}, {
+      env: { ADOBE_BROWSER_BACKEND: 'cloakbrowser', ADOBE_BROWSER_PROXY: `${scheme}://fixture:p%40ss%2B%3D%25@proxy.test:1080/` },
+      importer: async () => ({ launchPersistentContext: async options => { captured = options; } }),
+    });
+    assert.deepEqual(captured.proxy, { server: 'socks5://proxy.test:1080', username: 'fixture', password: 'p@ss+=%' });
+  }
+});
+
+test('ordinary Playwright rejects authenticated SOCKS before importing or launching', async () => {
+  for (const scheme of ['socks5', 'socks5h']) {
+    for (const userinfo of ['fixture:secret', 'fixture']) {
+      await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
+        env: { ADOBE_BROWSER_BACKEND: 'playwright', ADOBE_BROWSER_PROXY: `${scheme}://${userinfo}@proxy.test:1080/` },
+        importer: async () => assert.fail('unsupported authentication must not launch or fall back'),
+      }), error => error.code === 'browser_proxy_auth_unsupported' && !error.message.includes('secret'));
+    }
   }
 });
 
