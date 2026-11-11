@@ -456,11 +456,20 @@ func (s *Store) SetEnabled(ids []string, enabled bool) error {
 	return s.save(d)
 }
 func (s *Store) Delete(ids []string) ([]Account, error) {
+	deleted, _, err := s.DeleteWithCutoff(ids)
+	return deleted, err
+}
+
+// DeleteWithCutoff captures mailbox cleanup ownership time under the account
+// lock. A concurrent association must finish before this cutoff, while a later
+// reimport/relink must not be released by this deletion's cleanup.
+func (s *Store) DeleteWithCutoff(ids []string) ([]Account, time.Time, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	cutoff := time.Now()
 	d, err := s.load()
 	if err != nil {
-		return nil, err
+		return nil, cutoff, err
 	}
 	set := map[string]bool{}
 	for _, id := range ids {
@@ -471,7 +480,7 @@ func (s *Store) Delete(ids []string) ([]Account, error) {
 	for _, a := range d.Accounts {
 		if set[a.ID] {
 			if a.InFlight != "" || s.maintenance[a.ID] {
-				return nil, ErrBusy
+				return nil, cutoff, ErrBusy
 			}
 			deleted = append(deleted, a)
 		} else {
@@ -480,9 +489,9 @@ func (s *Store) Delete(ids []string) ([]Account, error) {
 	}
 	d.Accounts = keep
 	if err = s.save(d); err != nil {
-		return nil, err
+		return nil, cutoff, err
 	}
-	return deleted, nil
+	return deleted, cutoff, nil
 }
 
 // Refresh performs bounded maintenance before selection or after settlement;

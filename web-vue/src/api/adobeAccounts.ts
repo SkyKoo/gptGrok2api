@@ -68,6 +68,14 @@ export interface AdobeMutationResponse {
   error?: string
   hme_cleanup?: { failed: number; results?: Array<{status:string; message?:string}> }
 }
+export interface AdobeMailboxLinkResponse {
+  linked: number
+  already_linked: number
+  unmatched: number
+  conflicts: number
+  failed: number
+  results: Array<{ id: string; status: 'linked' | 'already_linked' | 'unmatched' | 'conflict' | 'failed'; message?: string }>
+}
 const path = '/api/adobe/accounts'
 export const adobeAccountsApi = {
   list: (params: { page: number; page_size: number; keyword?: string; status?: string }) => apiClient.get<never, AdobeAccountsResponse>(path, { params }),
@@ -83,5 +91,6 @@ export const adobeAccountsApi = {
     return { results }
   },
   setDisabled: (ids: string[], disabled: boolean) => apiClient.post<unknown, AdobeMutationResponse>(`${path}/disabled`, { ids, disabled }),
+  linkMailboxes: (ids: string[]) => apiClient.post<unknown, AdobeMailboxLinkResponse>(`${path}/link-mailboxes`, { ids }),
   remove: (ids: string[]) => apiClient.delete<never, AdobeMutationResponse>(path, { data: { ids } }),
 }

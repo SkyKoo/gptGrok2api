@@ -2,6 +2,7 @@
   <div class="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
     <Checkbox
       :model-value="allSelected"
+      :disabled="disabled"
       @update:model-value="emit('toggle-all', $event)"
     >
       全选当前结果
@@ -26,6 +27,7 @@ import { Checkbox, ViewModeSwitch } from 'nanocat-ui'
 import MetaChip from './MetaChip.vue'
 
 defineProps<{
+  disabled?: boolean
   allSelected: boolean
   totalCount: number
   selectedCount: number

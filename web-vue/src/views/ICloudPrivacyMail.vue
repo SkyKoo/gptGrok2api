@@ -3,7 +3,7 @@
     <PagePanel class="space-y-5">
       <PanelHeader title="邮箱管理" align="start">
         <template #copy>
-          <p class="mt-1 text-xs text-muted-foreground">统一管理邮箱来源、邮箱资产，以及 GPT 和 Grok 的占用、释放和历史操作。</p>
+          <p class="mt-1 text-xs text-muted-foreground">统一管理邮箱来源、邮箱资产，以及 {{ registrationChannelNames }} 的占用、释放和历史操作。</p>
         </template>
         <template #actions>
           <StateBadge :tone="bridgeTone" shape="rounded">{{ bridgeLabel }}</StateBadge>
@@ -25,7 +25,7 @@
         </div>
 
         <div class="rounded-lg border border-border bg-muted/20 px-3 py-3 text-xs leading-5 text-muted-foreground">
-          邮箱由已配置的上游来源提供。一个邮箱可以同时被 GPT 和 Grok 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。GPT、Grok 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用且无注册预留的邮箱，操作日志会保留。Grok 仅在注册执行期间显示“注册预留”；注册失败且没有保存账号结果后释放预留，等待自动重试期间也不保留。重试执行前重新取得预留，成功保存账号后才显示“已占用”。
+          邮箱由已配置的上游来源提供。一个邮箱可以同时被 {{ registrationChannelNames }} 使用；删除账号会释放对应平台占用；只有来源开启同步删除、邮箱没有渠道禁用且没有其他占用时，才会自动删除上游邮箱。{{ registrationChannelNames }} 可分别禁用注册，不影响已有账号和收信；没有可用资产时才向上游创建邮箱。也可手动删除未占用且无注册预留的邮箱，操作日志会保留。Grok 仅在注册执行期间显示“注册预留”；注册失败且没有保存账号结果后释放预留，等待自动重试期间也不保留。重试执行前重新取得预留，成功保存账号后才显示“已占用”。Adobe 在实际注册开始后失败或结果未知时保留预留，避免重复注册。
           <span v-if="!bridge.hme_configured" class="text-amber-700 dark:text-amber-300">当前尚未配置可用邮箱上游。</span>
         </div>
 
@@ -109,13 +109,20 @@
                 <MetaChip size="xs" :tone="mailboxTone(mailbox)">{{ mailboxLabel(mailbox) }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap gap-1.5">
-                <MetaChip size="xs" :tone="mailbox.openai_claimed ? 'success' : 'muted'">GPT {{ mailboxOccupancyLabel(mailbox, 'openai') }}</MetaChip>
-                <MetaChip size="xs" :tone="mailbox.grok_claimed ? 'info' : 'muted'">Grok {{ mailboxOccupancyLabel(mailbox, 'grok') }}</MetaChip>
-                <MetaChip size="xs" :tone="mailbox.adobe_claimed ? 'info' : 'muted'">Adobe {{ mailboxOccupancyLabel(mailbox, 'adobe') }}</MetaChip>
+                <MetaChip
+                  v-for="channel in registrationChannels"
+                  :key="channel.value"
+                  size="xs"
+                  :tone="mailbox[`${channel.value}_claimed`] ? channel.value === 'openai' ? 'success' : 'info' : 'muted'"
+                >{{ channel.label }} {{ mailboxOccupancyLabel(mailbox, channel.value) }}</MetaChip>
               </div>
               <div class="mt-2 flex flex-wrap gap-1.5">
-                <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'openai') || mailboxRegistrationDisabled(mailbox, 'openai') ? 'warning' : 'success'">GPT {{ mailboxRegistrationLabel(mailbox, 'openai') }}</MetaChip>
-                <MetaChip size="xs" :tone="mailboxRegistrationRetired(mailbox, 'grok') || mailboxRegistrationDisabled(mailbox, 'grok') ? 'warning' : 'success'">Grok {{ mailboxRegistrationLabel(mailbox, 'grok') }}</MetaChip>
+                <MetaChip
+                  v-for="channel in registrationChannels"
+                  :key="channel.value"
+                  size="xs"
+                  :tone="mailboxRegistrationRetired(mailbox, channel.value) || mailboxRegistrationDisabled(mailbox, channel.value) ? 'warning' : 'success'"
+                >{{ channel.label }} {{ mailboxRegistrationLabel(mailbox, channel.value) }}</MetaChip>
               </div>
               <div class="mt-3 flex flex-wrap justify-end gap-2">
                 <Button
@@ -132,7 +139,7 @@
                   size="xs"
                   variant="outline"
                   :disabled="Boolean(mailboxActionID) || mailbox.status === 'deleted' || mailboxDeletionBlocked(mailbox)"
-                  :title="mailboxHasReservation(mailbox) ? '邮箱仍有注册任务正在执行，请等待任务结束' : mailboxDeletionBlocked(mailbox) ? '请先解除 GPT/Grok 占用' : '同步删除上游邮箱，保留操作日志'"
+                  :title="mailboxHasReservation(mailbox) ? '邮箱仍有注册任务正在执行，请等待任务结束' : mailboxDeletionBlocked(mailbox) ? `请先解除 ${registrationChannelNames} 占用` : '同步删除上游邮箱，保留操作日志'"
                   root-class="text-rose-600"
                   @click="deleteMailbox(mailbox)"
                 >
@@ -154,7 +161,7 @@
             <div v-for="event in events" :key="event.id" class="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs">
               <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span class="font-medium text-foreground">{{ mailboxEventLabel(event) }}</span>
-                <MetaChip size="xs" :tone="event.platform === 'grok' ? 'info' : event.platform === 'openai' ? 'success' : 'muted'">{{ event.platform || '系统' }}</MetaChip>
+                <MetaChip size="xs" :tone="event.platform === 'openai' ? 'success' : event.platform === 'grok' || event.platform === 'adobe' ? 'info' : 'muted'">{{ registrationChannelLabel(event.platform) }}</MetaChip>
                 <span class="text-muted-foreground">{{ formatDate(event.created_at) }}</span>
               </div>
               <p class="mt-1 break-all text-muted-foreground">邮箱 {{ event.email || '未知邮箱' }} · 结果 {{ event.result || '-' }}<span v-if="event.error"> · {{ event.error }}</span></p>
@@ -208,24 +215,26 @@ const statusFilter = ref('')
 const platformFilter = ref('')
 const sourceFilter = ref('')
 
+const registrationChannelNames = registrationChannels.map(channel => channel.label).join('、')
+function registrationChannelLabel(platform?: string) {
+  return registrationChannels.find(channel => channel.value === platform)?.label || platform || '系统'
+}
+
 const mailboxStatusOptions = [
   { label: '全部状态', value: '' },
   { label: '可用', value: 'available' },
   { label: '已占用', value: 'active' },
   { label: '注册预留', value: 'reserved' },
   { label: '存在渠道禁用', value: 'disabled' },
-  { label: 'GPT 已禁用', value: 'disabled_openai' },
-  { label: 'Grok 已禁用', value: 'disabled_grok' },
+  ...registrationChannels.map(channel => ({ label: `${channel.label} 已禁用`, value: `disabled_${channel.value}` })),
   { label: '已使用，待清理', value: 'retired' },
-  { label: 'GPT 已使用，待清理', value: 'retired_openai' },
-  { label: 'Grok 已使用，待清理', value: 'retired_grok' },
+  ...registrationChannels.map(channel => ({ label: `${channel.label} 已使用，待清理`, value: `retired_${channel.value}` })),
   { label: '待清理', value: 'cleanup_pending' },
   { label: '已删除', value: 'deleted' },
 ]
 const mailboxPlatformOptions = [
   { label: '全部占用', value: '' },
-  { label: 'GPT 已占用', value: 'openai' },
-  { label: 'Grok 已占用', value: 'grok' },
+  ...registrationChannels.map(channel => ({ label: `${channel.label} 已占用`, value: channel.value })),
   { label: '暂无平台占用', value: 'unclaimed' },
   { label: '注册预留', value: 'reserved' },
 ]
@@ -325,8 +334,11 @@ function mailboxStatusLabel(mailbox: ICloudMailbox) {
 }
 
 function mailboxEventLabel(event: ICloudMailboxEvent) {
+  if (event.event_type === 'account_mailbox_linked') {
+    return `关联 ${registrationChannelLabel(event.platform)} 邮箱资产`
+  }
   if (event.event_type === 'mailbox_disabled' || event.event_type === 'mailbox_enabled') {
-    const channel = event.platform === 'openai' ? 'GPT' : event.platform === 'grok' ? 'Grok' : 'GPT 和 Grok'
+    const channel = event.platform ? registrationChannelLabel(event.platform) : registrationChannelNames
     return `${event.event_type === 'mailbox_disabled' ? '禁用' : '启用'} ${channel} 注册`
   }
   return event.event_type || 'mailbox_event'
@@ -384,7 +396,7 @@ async function setMailboxStatus(mailbox: ICloudMailbox, platform: RegistrationCh
   try {
     const result = await icloudApi.updateMailboxStatus(id, target, platform)
     if (!result.mailbox) throw new Error('邮箱状态更新失败')
-    notice.value = `${result.mailbox.email || id} 已${target === 'disabled' ? '禁用' : '启用'} ${platform === 'openai' ? 'GPT' : 'Grok'} 注册。`
+    notice.value = `${result.mailbox.email || id} 已${target === 'disabled' ? '禁用' : '启用'} ${registrationChannelLabel(platform)} 注册。`
     await Promise.all([loadCounts(), loadMailboxes(), loadEvents()])
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '邮箱状态更新失败')
@@ -444,7 +456,9 @@ async function reconcile() {
   try {
     const result = await icloudApi.reconcile()
     if (!result.success) throw new Error((result.errors || []).join('；') || '邮箱核对失败')
-    notice.value = `核对完成：发现 ${result.aliases || 0} 个上游邮箱，关联 GPT ${result.openai_claims || 0} 个、Grok ${result.grok_claims || 0} 个，修复历史占用 ${result.released_claims || 0} 个。`
+    const claimCounts = { openai: result.openai_claims, grok: result.grok_claims, adobe: result.adobe_claims }
+    const claimsSummary = registrationChannels.map(channel => `${channel.label} ${claimCounts[channel.value] || 0} 个`).join('、')
+    notice.value = `核对完成：发现 ${result.aliases || 0} 个上游邮箱，关联 ${claimsSummary}，修复历史占用 ${result.released_claims || 0} 个。`
     await refreshAll()
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '核对失败')

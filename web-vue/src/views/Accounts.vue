@@ -312,6 +312,14 @@
               :trigger-class="accountToolbarMenuClass"
               @select="handleGrokExportAction"
             />
+            <FloatingActionMenu
+              label="批量操作"
+              :items="grokBatchMenuItems"
+              :disabled="grokBatchBusy || grokSelectedCount === 0"
+              align="left"
+              :trigger-class="accountToolbarMenuClass"
+              @select="runGrokBulkAction"
+            />
           </FilterToolbar>
 
           <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-refresh" :bordered="false" gap="tight">

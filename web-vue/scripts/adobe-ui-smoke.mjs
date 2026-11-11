@@ -30,7 +30,8 @@ const video={kind:'video',sizes:['1920x1080'],resolutions:['1080p'],durations:[8
 const catalog={chat_models:['gpt-test'],image_models:['gemini-3.1-flash-image'],image_edit_models:['gemini-3.1-flash-image'],video_models:['veo-3.1-lite'],models:[{id:'gpt-test',name:'GPT fixture'},{id:'gemini-3.1-flash-image',name:'Gemini 3.1 Flash Image (Nano Banana 2)'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'}],media_capabilities:{'gemini-3.1-flash-image':image,'veo-3.1-lite':video}}
 async function screenshot(name) { if (process.env.CFM_UI_SCREENSHOT_DIR) { await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, {recursive:true}); await page.screenshot({path:path.join(process.env.CFM_UI_SCREENSHOT_DIR, name+'.png'),fullPage:true,animations:'disabled'}) } }
 let priorities=['chatgpt','adobe'], multi=false
-const deletedAccounts=new Set(), disabledAccounts=new Map()
+const deletedAccounts=new Set(), disabledAccounts=new Map(), linkedAccounts=new Set(), grokDisabledAccounts=new Set()
+const grokFixtures=['one','two'].map(id=>({id:`grok:${id}`,platform:'grok',email:`grok-${id}@example.test`,has_password:true,has_sso:true,source_type:'fixture',status:'active',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),sync_state:'synced',runtime_status:'active'}))
 const generation={status:'known',checked_at:new Date().toISOString(),models:[],pools:[
  {id:'images',resource_type:'firefly_complimentary_generations',total:3,used:1,available:2,refresh_period:'P1D',kinds:['image'],models:['gemini-3.1-flash-image','gpt-image-2.5-flare']},
  {id:'videos',resource_type:'firefly_complimentary_generations',total:1,used:0,available:1,refresh_period:'P1D',kinds:['video'],models:['veo-3.1-lite']},
@@ -49,6 +50,17 @@ await context.route('**/*',async route=>{
   else if(pathname==='/api/adobe/accounts'&&req.method()==='DELETE'){
     const ids=JSON.parse(req.postData()).ids;ids.forEach(id=>deletedAccounts.add(id));data={deleted:ids.length}
   }
+  else if(pathname==='/api/adobe/accounts/link-mailboxes'){
+    const ids=JSON.parse(req.postData()).ids
+    assert.ok(ids.length>0)
+    const results=ids.map(id=>{const status=id==='adobe:unknown'?'unmatched':linkedAccounts.has(id)?'already_linked':'linked';if(status==='linked')linkedAccounts.add(id);return {id,status,message:status==='unmatched'?'当前邮箱资产中没有匹配邮箱':''}})
+    const count=status=>results.filter(item=>item.status===status).length
+    data={linked:count('linked'),already_linked:count('already_linked'),unmatched:count('unmatched'),conflicts:0,failed:0,results}
+  }
+  else if(pathname==='/api/register/grok/accounts/runtime/disabled'){
+    const body=JSON.parse(req.postData());body.ids.forEach(id=>body.disabled?grokDisabledAccounts.add(id):grokDisabledAccounts.delete(id));data={disabled:body.disabled,summary:{total:body.ids.length,ok:body.ids.length,fail:0}}
+  }
+  else if(pathname==='/api/register/grok/accounts')data={items:grokFixtures.map(item=>({...item,runtime_status:grokDisabledAccounts.has(item.id)?'disabled':'active'})),total:2,all_total:2,page:1,page_size:20,summary:{total:2,synced:2},runtime_available:true}
   else if(pathname==='/api/adobe/accounts/disabled'){
     const body=JSON.parse(req.postData());body.ids.forEach(id=>disabledAccounts.set(id,body.disabled));data={ok:true}
   }
@@ -84,7 +96,30 @@ try {
   await page.getByRole('row').filter({hasText:'error@example.test'}).getByText('未知（查询失败）',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'fixture@example.test'}).getByText('媒体会话已更新',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'unknown@example.test'}).getByText('凭据已刷新，保留原媒体会话',{exact:true}).waitFor()
-  assert.equal(await page.getByRole('button',{name:/批量操作/}).count(),0)
+  assert.equal(await page.getByRole('button',{name:'批量操作',exact:true}).isDisabled(),true)
+  assert.equal(await page.getByRole('button',{name:/批量操作（/}).count(),0)
+  await page.getByText('账号总数 5',{exact:true}).waitFor()
+  await page.getByText('已选 0',{exact:true}).waitFor()
+  await page.getByText('全选当前结果',{exact:true}).click()
+  await page.getByText('已选 5',{exact:true}).waitFor()
+  await page.getByRole('button',{name:'卡片视图',exact:true}).click()
+  const accountCard=page.getByRole('article',{name:'Adobe 账号 fixture@example.test',exact:true})
+  await accountCard.getByText('2 / 3',{exact:true}).waitFor()
+  assert.equal(await accountCard.getByRole('checkbox',{name:'选择 fixture@example.test'}).isChecked(),true)
+  for(const theme of ['dark','light']){
+    await page.emulateMedia({colorScheme:theme})
+    await page.waitForFunction(theme=>(document.documentElement.dataset.theme||'light')===theme,theme)
+    await screenshot('adobe-account-cards-'+theme)
+  }
+  await page.setViewportSize({width:390,height:844})
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'Adobe cards must fit mobile viewport')
+  await screenshot('adobe-account-cards-mobile')
+  await page.setViewportSize({width:1440,height:1100})
+  await page.reload()
+  await accountCard.waitFor()
+  assert.equal(await accountCard.getByRole('checkbox',{name:'选择 fixture@example.test'}).isChecked(),false)
+  await page.getByRole('button',{name:'列表视图',exact:true}).click()
+  await accountRow.waitFor()
   for(const theme of ['dark','light']){
     await page.emulateMedia({colorScheme:theme})
     await page.waitForFunction(theme=>(document.documentElement.dataset.theme||'light')===theme,theme)
@@ -112,6 +147,18 @@ try {
   await page.getByRole('button',{name:'启用账号',exact:true}).click()
   await accountRow.getByText('可用',{exact:true}).waitFor()
   assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/disabled').at(-1).body),{ids:['adobe:fixture'],disabled:false})
+  // Mailbox linking only uses the row or explicit selected IDs, including partial failures.
+  await accountRow.getByRole('button',{name:'更多',exact:true}).click()
+  await page.getByRole('button',{name:'关联邮箱资产',exact:true}).click()
+  await page.getByText('邮箱关联完成：新增 1，已关联 0，未匹配 0，冲突 0，失败 0。',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/link-mailboxes').at(-1).body),{ids:['adobe:fixture']})
+  await page.getByRole('checkbox',{name:'选择 unknown@example.test'}).check()
+  await page.getByRole('button',{name:'批量操作',exact:true}).click()
+  await page.getByRole('button',{name:'关联邮箱资产',exact:true}).click()
+  await page.getByText('邮箱关联完成：新增 1，已关联 0，未匹配 1，冲突 0，失败 0。',{exact:true}).waitFor()
+  await page.getByRole('alert').filter({hasText:'unknown@example.test：当前邮箱资产中没有匹配邮箱'}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/link-mailboxes').at(-1).body),{ids:['adobe:zero','adobe:unknown']})
+  await page.getByRole('checkbox',{name:'选择 unknown@example.test'}).uncheck()
   // A cancellation sends no DELETE. Confirmation remains bound to the named row.
   await accountRow.getByRole('button',{name:'更多',exact:true}).click()
   await page.getByRole('button',{name:'删除账号',exact:true}).click()
@@ -122,12 +169,13 @@ try {
   const deletesBefore=requests.filter(req=>req.method==='DELETE').length
   await dialog.getByRole('button',{name:'取消',exact:true}).click()
   assert.equal(requests.filter(req=>req.method==='DELETE').length,deletesBefore)
-  await page.getByRole('button',{name:/批量操作/}).click()
+  await page.getByRole('button',{name:'批量操作',exact:true}).click()
   await page.getByRole('button',{name:'刷新额度',exact:true}).last().click()
   await page.getByText('操作已完成',{exact:true}).waitFor()
   assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/adobe/accounts/refresh').at(-1).body),{ids:['adobe:zero'],credentials:false})
   await page.getByRole('button',{name:'取消选择',exact:true}).click()
-  await page.getByRole('button',{name:/批量操作/}).waitFor({state:'detached'})
+  await page.getByRole('button',{name:/批量操作（/}).waitFor({state:'detached'})
+  assert.equal(await page.getByRole('button',{name:'批量操作',exact:true}).isDisabled(),true)
   await page.getByRole('checkbox',{name:'选择 stale@example.test'}).check()
   await accountRow.getByRole('button',{name:'更多',exact:true}).click()
   await page.getByRole('button',{name:'删除账号',exact:true}).click()
@@ -136,6 +184,22 @@ try {
   assert.deepEqual(JSON.parse(requests.filter(req=>req.method==='DELETE').at(-1).body),{ids:['adobe:fixture']})
   assert.equal(await page.getByRole('checkbox',{name:'选择 stale@example.test'}).isChecked(),true)
   await page.getByRole('button',{name:'取消选择',exact:true}).click()
+  // Grok exposes the same persistent toolbar entry and operates on selected rows.
+  await page.goto(origin+'/#/accounts?platform=grok')
+  const grokRow=page.getByRole('row').filter({hasText:'grok-one@example.test'})
+  await grokRow.waitFor()
+  assert.equal(await page.getByRole('button',{name:'批量操作',exact:true}).isDisabled(),true)
+  await grokRow.locator('label').first().click()
+  assert.equal(await grokRow.getByRole('checkbox').isChecked(),true)
+  await page.getByText('已选 1',{exact:true}).waitFor()
+  await page.getByRole('button',{name:'批量操作',exact:true}).click()
+  await page.getByRole('button',{name:'禁用选中',exact:true}).click()
+  await page.getByRole('dialog').getByRole('button',{name:'禁用',exact:true}).click()
+  await grokRow.getByText('禁用',{exact:true}).waitFor()
+  assert.deepEqual(JSON.parse(requests.filter(req=>req.path==='/api/register/grok/accounts/runtime/disabled').at(-1).body),{ids:['grok:one'],disabled:true})
+  await screenshot('grok-account-bulk-controls')
+  await page.getByRole('button',{name:'取消选择',exact:true}).click()
+  assert.equal(await page.getByRole('button',{name:'批量操作',exact:true}).isDisabled(),true)
   await page.goto(origin+'/#/register')
   await page.locator('.register-target-segmented').getByRole('button',{name:'Adobe',exact:true}).click()
   await page.locator('.register-target-segmented').getByRole('button',{name:'Grok',exact:true}).waitFor()
@@ -175,7 +239,7 @@ try {
   await screenshot('model-priority')
   assert.deepEqual(errors,[])
   assert.deepEqual(unknown,[], 'Unexpected API fixture path')
-  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts','/api/adobe/accounts/disabled','/api/adobe/accounts/refresh','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
-  console.log(JSON.stringify({ok:true,checks:['adobe-media-session-status','adobe-account-quota','adobe-account-refresh','adobe-stale-history','adobe-row-target-isolation','adobe-delete-confirmation','adobe-selection-bulk-bar','third-registration-tab','adobe-schedule','veo-free-parameters','gemini-free-parameters','single-channel-empty-state','multi-channel-admin-priority'],fixtureEndpoints:[...new Set(unknown)].sort()}))
+  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts','/api/adobe/accounts/disabled','/api/adobe/accounts/refresh','/api/adobe/accounts/link-mailboxes','/api/register/grok/accounts/runtime/disabled','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
+  console.log(JSON.stringify({ok:true,checks:['adobe-media-session-status','adobe-account-quota','adobe-account-refresh','adobe-stale-history','adobe-row-target-isolation','adobe-delete-confirmation','adobe-selection-bulk-bar','adobe-toolbar-selection','adobe-card-view-persistence','adobe-mobile-cards','adobe-mailbox-link-targets','adobe-mailbox-link-partial-results','grok-toolbar-bulk-targets','third-registration-tab','adobe-schedule','veo-free-parameters','gemini-free-parameters','single-channel-empty-state','multi-channel-admin-priority'],fixtureEndpoints:[...new Set(unknown)].sort()}))
 } catch(error){console.log(JSON.stringify({errors,body:(await page.locator('body').innerText()).slice(-6000),fixtureEndpoints:[...new Set(unknown)].sort()}));throw error}
 finally{await browser.close();await new Promise(resolve=>server.close(resolve))}

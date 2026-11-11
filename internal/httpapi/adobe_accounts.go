@@ -91,6 +91,8 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 			out = append(out, adobe.Public(a))
 		}
 		writeJSON(w, 200, map[string]any{"items": out, "imported": len(out)})
+	case path == "link-mailboxes" && r.Method == http.MethodPost:
+		s.adobeLinkMailboxes(w, r)
 	case path == "refresh" && r.Method == http.MethodPost:
 		var b struct {
 			IDs         []string `json:"ids"`
@@ -147,8 +149,7 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "请选择 Adobe 账号", "invalid_request_error")
 			return
 		}
-		before := time.Now()
-		deleted, err := s.adobeStore.Delete(uniqueStrings(b.IDs))
+		deleted, before, err := s.adobeStore.DeleteWithCutoff(uniqueStrings(b.IDs))
 		if err != nil {
 			writeError(w, 409, adobe.SafeError(err), "adobe_delete_failed")
 			return
