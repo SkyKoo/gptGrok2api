@@ -21,13 +21,13 @@ func TestVideoOptions(t *testing.T) {
 		name, form string
 		want       videoOptions
 	}{
-		{"defaults", "", videoOptions{6, "720x1280", "9:16", "720p", "custom"}},
-		{"one second", "seconds=1&size=720x1280&resolution_name=480p&preset=custom", videoOptions{1, "720x1280", "9:16", "480p", "custom"}},
-		{"short video", "seconds=2&size=1280x720&resolution_name=480p&preset=normal", videoOptions{2, "1280x720", "16:9", "480p", "normal"}},
-		{"five seconds", "seconds=5&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{5, "1792x1024", "3:2", "480p", "fun"}},
-		{"explicit settings", "seconds=6&size=1280x720&resolution_name=480p&preset=normal", videoOptions{6, "1280x720", "16:9", "480p", "normal"}},
-		{"aliases", "seconds=6&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{6, "1792x1024", "3:2", "480p", "fun"}},
-		{"matching aliases", "size=1024x1792&aspect_ratio=2:3&resolution=720p&resolution_name=720p&quality=standard", videoOptions{6, "1024x1792", "2:3", "720p", "custom"}},
+		{"defaults", "", videoOptions{Seconds: 6, Size: "720x1280", Aspect: "9:16", Resolution: "720p", Preset: "custom"}},
+		{"one second", "seconds=1&size=720x1280&resolution_name=480p&preset=custom", videoOptions{Seconds: 1, Size: "720x1280", Aspect: "9:16", Resolution: "480p", Preset: "custom"}},
+		{"short video", "seconds=2&size=1280x720&resolution_name=480p&preset=normal", videoOptions{Seconds: 2, Size: "1280x720", Aspect: "16:9", Resolution: "480p", Preset: "normal"}},
+		{"five seconds", "seconds=5&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{Seconds: 5, Size: "1792x1024", Aspect: "3:2", Resolution: "480p", Preset: "fun"}},
+		{"explicit settings", "seconds=6&size=1280x720&resolution_name=480p&preset=normal", videoOptions{Seconds: 6, Size: "1280x720", Aspect: "16:9", Resolution: "480p", Preset: "normal"}},
+		{"aliases", "seconds=6&aspect_ratio=3:2&resolution=480p&preset=fun", videoOptions{Seconds: 6, Size: "1792x1024", Aspect: "3:2", Resolution: "480p", Preset: "fun"}},
+		{"matching aliases", "size=1024x1792&aspect_ratio=2:3&resolution=720p&resolution_name=720p&quality=standard", videoOptions{Seconds: 6, Size: "1024x1792", Aspect: "2:3", Resolution: "720p", Preset: "custom"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest("POST", "/v1/videos", nil)

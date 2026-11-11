@@ -13,6 +13,8 @@ type MediaVariant struct {
 	AspectRatios       []string `json:"aspect_ratios,omitempty"`
 	Resolutions        []string `json:"resolutions,omitempty"`
 	Durations          []int    `json:"durations,omitempty"`
+	AudioRequired      bool     `json:"audio_required"`
+	DefaultAudio       bool     `json:"default_audio"`
 	Audio              bool     `json:"audio"`
 	MaxReferenceImages int      `json:"max_reference_images"`
 	OutputFormats      []string `json:"output_formats,omitempty"`
@@ -29,6 +31,8 @@ type MediaCapabilities struct {
 	AspectRatios       []string       `json:"aspect_ratios,omitempty"`
 	Resolutions        []string       `json:"resolutions,omitempty"`
 	Durations          []int          `json:"durations,omitempty"`
+	AudioRequired      bool           `json:"audio_required"`
+	DefaultAudio       bool           `json:"default_audio"`
 	Audio              bool           `json:"audio"`
 	MaxReferenceImages int            `json:"max_reference_images"`
 	OutputFormats      []string       `json:"output_formats,omitempty"`
@@ -60,14 +64,16 @@ func MediaChannels(id string) []string {
 func ChannelVariants(id, channel string) []MediaVariant {
 	if channel == "adobe" {
 		if m, ok := AdobeModel(id); ok {
-			v := MediaVariant{Qualities: []string{"auto"}, Sizes: []string{m.Size}, MaxCount: 1, OutputFormats: []string{"png"}}
-			if m.Kind == "video" {
-				v.AspectRatios = []string{m.AspectRatio}
-				v.Resolutions = []string{m.Resolution}
-				v.Durations = []int{m.Duration}
-				v.OutputFormats = nil
+			out := make([]MediaVariant, 0, len(m.Variants))
+			for _, tier := range m.Variants {
+				v := MediaVariant{Qualities: []string{"auto"}, Sizes: []string{tier.Size}, AspectRatios: []string{tier.AspectRatio}, Resolutions: []string{tier.Resolution}, Audio: tier.Audio, AudioRequired: tier.AudioRequired, DefaultAudio: tier.DefaultAudio, MaxReferenceImages: tier.MaxReferenceImages, MaxCount: 1, OutputFormats: []string{"png"}}
+				if m.Kind == "video" {
+					v.Durations = append([]int(nil), tier.Durations...)
+					v.OutputFormats = nil
+				}
+				out = append(out, v)
 			}
-			return []MediaVariant{v}
+			return out
 		}
 		return nil
 	}
@@ -92,7 +98,10 @@ func ChannelVariants(id, channel string) []MediaVariant {
 
 func MediaCapability(id string) MediaCapabilities {
 	c := MediaCapabilities{Kind: "image", Variants: []MediaVariant{}, Sizes: []string{}}
-	if strings.Contains(id, "video") || strings.HasPrefix(id, "veo-") {
+	if m, ok := AdobeModel(id); ok {
+		c.Kind = m.Kind
+		c.AudioRequired, c.DefaultAudio = m.AudioRequired, m.DefaultAudio
+	} else if strings.Contains(id, "video") {
 		c.Kind = "video"
 	}
 	add := func(dst *[]string, values []string) {
@@ -108,8 +117,11 @@ func MediaCapability(id string) MediaCapabilities {
 			}
 		}
 	}
+	allAudioRequired, sawVariant := true, false
 	for _, channel := range MediaChannels(id) {
 		for _, v := range ChannelVariants(id, channel) {
+			sawVariant = true
+			allAudioRequired = allAudioRequired && v.AudioRequired
 			c.Variants = append(c.Variants, v)
 			add(&c.Qualities, v.Qualities)
 			add(&c.Sizes, v.Sizes)
@@ -133,5 +145,6 @@ func MediaCapability(id string) MediaCapabilities {
 			}
 		}
 	}
+	c.AudioRequired = sawVariant && allAudioRequired
 	return c
 }

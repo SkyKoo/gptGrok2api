@@ -1,7 +1,34 @@
 import apiClient from './client'
 
+export interface AdobeGenerationQuotaPool {
+  id: string
+  resource_type: string
+  total?: number
+  used?: number
+  available?: number
+  refresh_period?: string
+  kinds: Array<'image' | 'video'>
+  models: string[]
+}
+export interface AdobeGenerationModelQuota {
+  model: string
+  kind: 'image' | 'video'
+  authorized: boolean
+  reason_code?: string
+  resource_type?: string
+  pool_id?: string
+  cost?: number
+}
+export interface AdobeGenerationQuota {
+  status: 'known' | 'error' | 'unknown' | string
+  checked_at?: string | number
+  error?: string
+  pools: AdobeGenerationQuotaPool[]
+  models: AdobeGenerationModelQuota[]
+}
 export interface AdobeQuota {
   status: 'unknown' | 'known' | 'success' | 'stale' | 'error' | 'failed' | string
+  generation?: AdobeGenerationQuota
   total?: number
   used?: number
   available?: number

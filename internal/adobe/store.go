@@ -231,21 +231,33 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 	}
 	return result, nil
 }
+
+// Eligibility reserves one valid identity; generation preflight decides whether
+// the requested model has a free resource. General credits are a separate pool.
 func Eligible(a Account, now time.Time) bool {
-	if !a.Enabled || a.Status == "invalid" || a.ExpiresAt <= now.Add(time.Minute).Unix() || a.InFlight != "" || a.SettlementUntil > now.Unix() || a.Quota.Status != "known" || a.Quota.Available == nil || *a.Quota.Available <= 0 {
+	if !a.Enabled || a.Status == "invalid" || a.Status == "submission_unknown" || a.NextRefreshAt > now.Unix() && a.LastError != "" || a.ExpiresAt <= now.Add(time.Minute).Unix() || a.InFlight != "" || a.SettlementUntil > now.Unix() {
 		return false
 	}
-	at, e := time.Parse(time.RFC3339Nano, a.Quota.CheckedAt)
-	return e == nil && !at.After(now.Add(time.Minute)) && now.Sub(at) <= 5*time.Minute
+	identity, _, err := TokenIdentity(a.Token)
+	if err != nil || identity != a.AccountID {
+		return false
+	}
+	_, err = Sherlock(a.Cookie)
+	return err == nil
 }
 
-// Reserve durably binds a request before upstream submission. Binding records are
-// never recycled: even a completed/failed request ID cannot generate again.
-func (s *Store) Reserve(taskID string) (Account, error) { return s.reserve(taskID, "") }
+// Reserve durably binds once; failed or completed task IDs cannot generate again.
+func (s *Store) Reserve(taskID string) (Account, error) { return s.reserve(taskID, "", "") }
 func (s *Store) ReserveAccount(taskID, accountID string) (Account, error) {
-	return s.reserve(taskID, accountID)
+	return s.reserve(taskID, accountID, "")
 }
-func (s *Store) reserve(taskID, accountID string) (Account, error) {
+
+// ReserveForModel filters unavailable model pools before the durable binding;
+// a subsequent preflight or submission failure never selects another account.
+func (s *Store) ReserveForModel(taskID, model string) (Account, error) {
+	return s.reserve(taskID, "", model)
+}
+func (s *Store) reserve(taskID, accountID, model string) (Account, error) {
 	if taskID == "" {
 		return Account{}, errors.New("adobe_task_id_required")
 	}
@@ -262,6 +274,9 @@ func (s *Store) reserve(taskID, accountID string) (Account, error) {
 	now := time.Now()
 	for i, a := range d.Accounts {
 		if accountID != "" && a.ID != accountID {
+			continue
+		}
+		if model != "" && a.Quota.Generation != nil && !a.Quota.Generation.ModelAvailable(model, now) {
 			continue
 		}
 		if !s.maintenance[a.ID] && Eligible(a, now) && (selected < 0 || a.LastUsedAt < d.Accounts[selected].LastUsedAt) {
@@ -307,6 +322,9 @@ func (s *Store) finish(taskID string, unknown bool) error {
 			a.InFlight = ""
 			a.SettlementUntil = time.Now().Add(30 * time.Second).Unix()
 			a.Quota.Status = "stale"
+			if a.Quota.Generation != nil {
+				a.Quota.Generation.Status = "stale"
+			}
 		}
 	}
 	return s.save(d)

@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -41,6 +40,13 @@ func trustedURL(raw, kind string) bool {
 	switch kind {
 	case "submit":
 		return u.Hostname() == "firefly-3p.ff.adobe.io" && (u.Path == "/v2/3p-images/generate-async" || u.Path == "/v2/3p-videos/generate-async")
+	case "preflight":
+		api := u.Query().Get("api")
+		return u.Hostname() == "firefly-3p.ff.adobe.io" && u.Path == "/v2/models/generation-preflight" && len(u.Query()) == 1 && len(u.Query()["api"]) == 1 && (api == "/v2/3p-images/generate-async" || api == "/v2/3p-videos/generate-async")
+	case "upload":
+		return u.Hostname() == "firefly-3p.ff.adobe.io" && u.Path == "/v2/storage/image" && u.RawQuery == ""
+	case "entitlements":
+		return u.Hostname() == "bks.adobe.io" && u.Path == "/v1/feature-auth-profile" && u.RawQuery == "include-feature-cost=true&include-effective-quota-balance=true"
 	case "balance":
 		return u.Hostname() == "firefly.adobe.io" && u.Path == "/v1/credits/balance"
 	case "refresh":
@@ -116,7 +122,7 @@ func (c *Client) request(ctx context.Context, stage, method, endpoint string, a 
 	var data map[string]any
 	decodeErr := json.Unmarshal(raw, &data)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: responseCode(resp.StatusCode, data), SubmissionUnknown: stage == "submit" && resp.StatusCode >= 500}
+		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: responseCode(resp.StatusCode, data), SubmissionUnknown: stage == "submit" && (resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout)}
 	}
 	if decodeErr != nil || data == nil {
 		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "invalid_response", SubmissionUnknown: stage == "submit"}
@@ -129,7 +135,7 @@ func responseCode(status int, data map[string]any) string {
 		code, _ = data["code"].(string)
 	}
 	switch code {
-	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request":
+	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request", "timeout_error":
 		return code
 	}
 	switch status {
@@ -218,26 +224,85 @@ func (c *Client) Refresh(ctx context.Context, a Account) (Account, error) {
 	return a, nil
 }
 func (c *Client) SubmitImage(ctx context.Context, a Account, r ImageRequest) (Job, error) {
-	m, ok := FindModel(r.Model)
-	if !ok || m.Kind != "image" || strings.TrimSpace(r.Prompt) == "" || r.N != 1 || fmt.Sprintf("%dx%d", r.Width, r.Height) != m.Size {
-		return Job{}, &Error{Stage: "submit", Code: "unsupported_free_parameters"}
+	m, v, err := ValidateImageRequest(r)
+	if err != nil {
+		return Job{}, err
 	}
-	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "size": map[string]int{"width": r.Width, "height": r.Height}, "seeds": []int{seed()}, "output": map[string]bool{"storeInputs": true}, "generationMetadata": map[string]string{"module": "text2image", "submodule": "ff-image-generate"}, "referenceBlobs": []any{}}
-	if m.ModelID == "gemini-flash" {
-		payload["groundSearch"] = false
-		payload["modelSpecificPayload"] = map[string]any{"parameters": map[string]bool{"addWatermark": false}, "aspectRatio": "1:1"}
-	} else {
-		payload["generationSettings"] = map[string]int{"detailLevel": 3}
+	if _, err = generationSession(a); err != nil {
+		return Job{}, err
 	}
-	return c.submit(ctx, a, m, r.Prompt, payload)
+	refs, err := c.uploadReferences(ctx, a, m, r.References)
+	if err != nil {
+		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
+	}
+	payload := imagePayload(m, v, r, refs)
+	j, err := c.submit(ctx, a, m, r.Prompt, payload)
+	j.Width, j.Height, j.AspectRatio, j.Resolution, j.ReferenceCount = r.Width, r.Height, v.AspectRatio, v.Resolution, len(refs)
+	return j, err
 }
 func (c *Client) SubmitVideo(ctx context.Context, a Account, r VideoRequest) (Job, error) {
-	m, ok := FindModel(r.Model)
-	if !ok || m.Kind != "video" || strings.TrimSpace(r.Prompt) == "" || fmt.Sprintf("%dx%d", r.Width, r.Height) != m.Size || r.Duration != m.Duration || r.Resolution != m.Resolution || r.AspectRatio != m.AspectRatio || r.GenerateAudio {
-		return Job{}, &Error{Stage: "submit", Code: "unsupported_free_parameters"}
+	m, v, err := ValidateVideoRequest(r)
+	if err != nil {
+		return Job{}, err
 	}
-	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "seeds": []int{seed()}, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": r.Resolution, "duration": r.Duration, "generateAudio": false, "referenceBlobs": []any{}, "generationSettings": map[string]string{"aspectRatio": r.AspectRatio}, "generationMetadata": map[string]string{"module": "text2video", "submodule": "ff-video-generate"}, "output": map[string]bool{"storeInputs": true}}
-	return c.submit(ctx, a, m, r.Prompt, payload)
+	if _, err = generationSession(a); err != nil {
+		return Job{}, err
+	}
+	inputs, err := fitVideoReferences(r.References, r.Width, r.Height)
+	if err != nil {
+		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
+	}
+	if err = validateReferences(m, inputs); err != nil {
+		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
+	}
+	refs, err := c.uploadReferences(ctx, a, m, inputs)
+	if err != nil {
+		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
+	}
+	payload := videoPayload(m, v, r, refs)
+	j, err := c.submit(ctx, a, m, r.Prompt, payload)
+	j.Width, j.Height, j.AspectRatio, j.Resolution, j.Duration, j.GenerateAudio, j.ReferenceCount = r.Width, r.Height, v.AspectRatio, v.Resolution, r.Duration, r.GenerateAudio, len(refs)
+	return j, err
+}
+func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[string]any {
+	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "seeds": []int{seed()}, "output": map[string]bool{"storeInputs": true}, "generationMetadata": map[string]string{"module": "text2image", "submodule": "ff-image-generate"}, "referenceBlobs": refs}
+	switch m.ModelID {
+	case "gemini-flash":
+		if m.ModelVersion == "nano-banana-2026-09" {
+			delete(payload, "size")
+			payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
+		} else {
+			payload["modelSpecificPayload"] = map[string]any{"aspectRatio": v.AspectRatio}
+		}
+	case "gpt-image":
+		delete(payload, "seeds")
+		delete(payload, "resolution")
+		payload["generationSettings"] = map[string]int{"detailLevel": 3}
+	case "humain":
+		delete(payload, "n")
+		delete(payload, "size")
+		payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
+	default:
+		payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
+	}
+	return payload
+}
+func videoPayload(m Model, v Variant, r VideoRequest, refs []referenceBlob) map[string]any {
+	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "seeds": []int{seed()}, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "duration": r.Duration, "generateAudio": r.GenerateAudio, "referenceBlobs": refs, "generationSettings": map[string]string{"aspectRatio": v.AspectRatio}, "generationMetadata": map[string]string{"module": "text2video", "submodule": "ff-video-generate"}, "output": map[string]bool{"storeInputs": true}}
+	switch m.ModelID {
+	case "firefly-video":
+		for _, key := range []string{"duration", "resolution", "generateAudio", "generationSettings"} {
+			delete(payload, key)
+		}
+	case "gemini-omni":
+		delete(payload, "seeds")
+		delete(payload, "size")
+	case "luma":
+		delete(payload, "seeds")
+		delete(payload, "generateAudio")
+		payload["modelSpecificPayload"] = map[string]string{"resolution": v.Resolution, "aspect_ratio": v.AspectRatio}
+	}
+	return payload
 }
 func seed() int {
 	var b [4]byte

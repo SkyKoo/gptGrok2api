@@ -31,7 +31,7 @@ type videoResultRecord struct {
 	Rejected     bool               `json:"rejected,omitempty"`
 }
 
-func videoRequestFingerprint(model, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput) string {
+func videoRequestFingerprint(model, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput, audio ...bool) string {
 	refs := make([]string, len(inputs))
 	for i, input := range inputs {
 		refs[i] = fmt.Sprintf("%x", sha256.Sum256(input.Data))
@@ -41,6 +41,14 @@ func videoRequestFingerprint(model, prompt, aspect, resolution string, seconds i
 		Seconds                                   int
 		References                                []string
 	}{model, prompt, aspect, resolution, preset, seconds, refs})
+	// Preserve historical hashes for silent requests. Audio changes the request
+	// identity so reusing a client key cannot return a silent task by mistake.
+	if len(audio) > 0 && audio[0] {
+		raw, _ = json.Marshal(struct {
+			Request       json.RawMessage
+			GenerateAudio bool
+		}{raw, true})
+	}
 	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 

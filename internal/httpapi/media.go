@@ -102,6 +102,9 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 		request.Size = openAIImageRequestedSize(request.Size)
 	} else if request.Size == "" {
 		request.Size = "1024x1024"
+		if m, ok := model.AdobeModel(request.Model); ok && m.Kind == "image" {
+			request.Size = m.Size
+		}
 	}
 	if request.ResponseFormat == "" && !isOpenAIImageModel(request.Model) {
 		request.ResponseFormat = "url"
@@ -131,7 +134,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
 		}
-		data, err := s.generateAdobeImageData(r, r.Context(), selection, request.Prompt, request.Model, request.ResponseFormat, requestPublicBase(r))
+		data, err := s.generateAdobeImageData(r, r.Context(), selection, request.Prompt, request.Model, request.Size, request.ResponseFormat, requestPublicBase(r), request.N, nil, request.ImageOutputOptions)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
@@ -208,7 +211,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		return nil, err
 	}
 	if selection.Channel == "adobe" {
-		return s.generateAdobeImageData(r, ctx, selection, prompt, model, responseFormat, publicBase)
+		return s.generateAdobeImageData(r, ctx, selection, prompt, model, size, responseFormat, publicBase, count, inputs, options)
 	}
 	lease := selection.Lease
 	defer s.accountPool.Release(lease)
@@ -752,11 +755,13 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "n must be between 1 and 2", "invalid_request_error")
 		return
 	}
-	if !isOpenAIImageModel(modelName) && strings.TrimSpace(request.Size) != "" && strings.TrimSpace(request.Size) != "1024x1024" {
+	adobeModel, isAdobe := model.AdobeModel(modelName)
+	adobeEdit := isAdobe && adobeModel.Kind == "image"
+	if !adobeEdit && !isOpenAIImageModel(modelName) && strings.TrimSpace(request.Size) != "" && strings.TrimSpace(request.Size) != "1024x1024" {
 		writeError(w, http.StatusBadRequest, "image edit only supports size 1024x1024", "invalid_request_error")
 		return
 	}
-	if _, ok := model.Find(s.catalog, modelName); !ok || (modelName != "grok-imagine-image-edit" && !isOpenAIImageModel(modelName)) {
+	if _, ok := model.Find(s.catalog, modelName); !ok || (modelName != "grok-imagine-image-edit" && !isOpenAIImageModel(modelName) && !adobeEdit) {
 		writeError(w, http.StatusBadRequest, "model is not an image-edit model", "invalid_request_error")
 		return
 	}
@@ -772,6 +777,36 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := validateGrokImageReferenceCount(modelName, len(inputs)); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return
+	}
+	if adobeEdit && !isOpenAIImageModel(modelName) {
+		if !adobeImageFits(modelName, request.Size, request.Quality, n, len(inputs), request.ImageOutputOptions, mask != nil) {
+			writeError(w, 400, "no channel supports this complete model parameter combination", "invalid_request_error")
+			return
+		}
+		if _, err := adobeImageRequest(modelName, prompt, request.Size, n, inputs); err != nil {
+			writeError(w, 400, err.Error(), "invalid_request_error")
+			return
+		}
+		releaseSlot, err := s.acquireImageSlot(ctx, r)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		defer releaseSlot()
+		selected, err := s.selectImageImplementation(ctx, modelName, "", request.Size, request.Quality, n, len(inputs), request.ImageOutputOptions, mask != nil, nil)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		s.recordInputImages(r, inputs)
+		format := firstNonEmpty(request.ResponseFormat, "url")
+		data, err := s.generateAdobeImageData(r, ctx, selected, prompt, modelName, request.Size, format, requestPublicBase(r), n, inputs, request.ImageOutputOptions)
+		if err != nil {
+			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
+			return
+		}
+		writeJSON(w, http.StatusOK, openAIImagesResult(data, request.ImageOutputOptions))
 		return
 	}
 	if isOpenAIImageModel(modelName) {

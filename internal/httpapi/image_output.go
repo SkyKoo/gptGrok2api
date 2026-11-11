@@ -14,6 +14,14 @@ import (
 func openAIImagesResult(data []map[string]string, options provider.ImageOutputOptions) map[string]any {
 	value := map[string]any{"created": time.Now().Unix(), "data": data}
 	value["output_format"] = options.EffectiveFormat()
+	// Adobe may select the final static encoding. Report the verified actual
+	// encoding rather than labeling JPEG/WebP bytes as the default PNG format.
+	if len(data) == 1 {
+		switch actual := data[0]["output_format"]; actual {
+		case "png", "jpeg", "webp":
+			value["output_format"] = actual
+		}
+	}
 	if options.Background == "transparent" || options.Background == "opaque" {
 		value["background"] = options.Background
 	}

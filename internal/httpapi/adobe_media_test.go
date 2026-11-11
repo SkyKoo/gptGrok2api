@@ -45,6 +45,8 @@ func adobeFixtureClient(t *testing.T, submits, polls *atomic.Int32, failed bool)
 		header := http.Header{"Content-Type": []string{"application/json"}}
 		status := 200
 		switch {
+		case r.URL.Path == "/v2/models/generation-preflight":
+			body = adobeFreePreflightFixture(false)
 		case strings.Contains(r.URL.Path, "generate-async"):
 			submits.Add(1)
 			if failed {
@@ -174,7 +176,7 @@ func TestAdobeUnsupportedCombinationNeverSelectsAccount(t *testing.T) {
 }
 func TestAdobeVideoFreeParameters(t *testing.T) {
 	good := "model=veo-3.1-lite&seconds=8&resolution_name=1080p&size=1920x1080&generate_audio=false"
-	for _, q := range []string{good, strings.Replace(good, "seconds=8", "seconds=4", 1), strings.Replace(good, "1080p", "720p", 1), strings.Replace(good, "false", "true", 1), good + "&preset=normal", good + "&provider=adobe"} {
+	for _, q := range []string{good, strings.Replace(good, "seconds=8", "seconds=4", 1), strings.Replace(good, "1080p", "720p", 1), strings.Replace(good, "false", "invalid", 1), good + "&preset=normal", good + "&provider=adobe"} {
 		r := httptest.NewRequest("POST", "/v1/videos", nil)
 		r.Form, _ = url.ParseQuery(q)
 		_, err := parseVideoOptions(r)
@@ -205,7 +207,7 @@ func TestModelPriorityAndFreeCatalog(t *testing.T) {
 			t.Fatal("provider alias exposed")
 		}
 	}
-	if adobeImageFits("gemini-3.1-flash-image", "1024x1024", "auto", 1, 1, provider.ImageOutputOptions{}, false) {
+	if adobeImageFits("gemini-3.1-flash-image", "1024x1024", "auto", 1, 7, provider.ImageOutputOptions{}, false) {
 		t.Fatal("unsupported reference input accepted")
 	}
 }

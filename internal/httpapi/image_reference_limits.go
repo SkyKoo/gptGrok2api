@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/auucoder/gptgrok2api-go/internal/model"
 )
 
 // Grok Imagine Web uses separate attachment limits for image editing and video.
@@ -13,7 +15,17 @@ func validateGrokImageReferenceCount(model string, count int) error {
 	if strings.HasPrefix(strings.TrimSpace(model), "grok-") && count > maxGrokImageReferences {
 		return fmt.Errorf("Grok 生图最多支持 %d 张参考图，当前 %d 张，请减少参考图数量", maxGrokImageReferences, count)
 	}
+	if _, ok := modelpkgAdobe(model); ok {
+		limit := modelReferenceLimit(model)
+		if count > limit {
+			return fmt.Errorf("this model supports at most %d reference images", limit)
+		}
+	}
 	return nil
+}
+
+func modelReferenceLimit(id string) int {
+	return model.MediaCapability(id).MaxReferenceImages
 }
 
 // Count the formats accepted by imageInputsFromValue before downloading or

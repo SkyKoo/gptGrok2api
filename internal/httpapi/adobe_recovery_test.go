@@ -226,6 +226,8 @@ func TestAdobeSyncPollFailureReturnsResumableTaskWithoutResubmission(t *testing.
 	s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body, status, mime := `{}`, 200, "application/json"
 		switch {
+		case r.URL.Path == "/v2/models/generation-preflight":
+			body = adobeFreePreflightFixture(false)
 		case strings.Contains(r.URL.Path, "generate-async"):
 			submits.Add(1)
 			body = `{"links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/fixture"}}}`

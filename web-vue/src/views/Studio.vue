@@ -162,7 +162,7 @@
 
 <script setup lang="ts">
 import { mediaCapability } from '@/lib/mediaCapabilities'
-import { DEFAULT_VIDEO_OPTIONS, validateStudioReferenceCount } from '@/lib/studioMedia'
+import { DEFAULT_VIDEO_OPTIONS, normalizeStudioVideoOptions, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
 import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -236,15 +236,12 @@ const referenceRuntime = useStudioReferenceRuntime({
 })
 const persistedConversationState = loadStudioConversationPersistenceState()
 const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0 })
-watch([modelFormRuntime.videoModelOptions, modelFormRuntime.catalog, () => videoForm.model], () => {
+watch([modelFormRuntime.videoModelOptions, modelFormRuntime.catalog, () => videoForm.model], (values, previous) => {
   const models = modelFormRuntime.videoModelOptions.value
   if (models.length && !models.includes(videoForm.model || '')) videoForm.model = models[0]
   const capability = mediaCapability(videoForm.model || '')
   if (!capability) return
-  if (capability.sizes?.length && !capability.sizes.includes(videoForm.size)) videoForm.size = capability.sizes[0]!
-  if (capability.durations?.length && !capability.durations.includes(videoForm.seconds)) videoForm.seconds = capability.durations[0]!
-  if (capability.resolutions?.length && !capability.resolutions.includes(videoForm.resolution)) videoForm.resolution = capability.resolutions[0]!
-  if (!capability.audio) videoForm.audio = false
+  Object.assign(videoForm, normalizeStudioVideoOptions(videoForm, capability, values[2] !== previous?.[2] ? 'model' : undefined))
 }, { immediate: true })
 
 const composeMode = composerRuntime.composeMode

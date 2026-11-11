@@ -5,6 +5,8 @@ export interface MediaVariant {
   resolutions?: string[]
   durations?: number[]
   audio?: boolean
+  audio_required?: boolean
+  default_audio?: boolean
   max_reference_images?: number
   output_formats?: string[]
   max_count?: number
@@ -29,6 +31,7 @@ export function validateMediaCombination(model: string, request: { quality?: str
     (!request.resolution || !variant.resolutions?.length || variant.resolutions.includes(request.resolution)) &&
     (request.seconds === undefined || !variant.durations?.length || variant.durations.includes(request.seconds)) &&
     (!request.audio || variant.audio === true) &&
+    (!variant.audio_required || request.audio === true) &&
     ((request.count ?? 1) <= (variant.max_count ?? Infinity)) &&
     ((request.references ?? 0) <= (variant.max_reference_images ?? Infinity)) &&
     (!request.output_format || !variant.output_formats?.length || variant.output_formats.includes(request.output_format)),

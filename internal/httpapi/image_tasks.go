@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
 
@@ -75,6 +76,7 @@ func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *i
 	// Old edit tasks defaulted to square, while generations stored the raw size.
 	// Compare that exact legacy hash only against legacy records. Never equate a
 	// new explicit square request with auto, and never rewrite or restart a match.
+	requestedSize := task.Size
 	legacy := *task
 	if task.Mode == "edit" {
 		legacy.Size = firstNonEmpty(task.Size, "1024x1024")
@@ -89,6 +91,19 @@ func (s *Server) submitImageTask(w http.ResponseWriter, r *http.Request, task *i
 		}
 	} else {
 		task.Size = legacy.Size
+	}
+	if m, ok := model.AdobeModel(task.Model); ok && m.Kind == "image" && !isOpenAIImageModel(task.Model) {
+		task.Size = requestedSize
+		if !adobeImageFits(task.Model, task.Size, task.Quality, task.N, len(inputs), task.ImageOutputOptions, len(task.Mask) > 0) {
+			writeError(w, 400, "no channel supports this complete model parameter combination", "invalid_request_error")
+			return
+		}
+		request, err := adobeImageRequest(task.Model, task.Prompt, task.Size, task.N, inputs)
+		if err != nil {
+			writeError(w, 400, err.Error(), "invalid_request_error")
+			return
+		}
+		task.Size = fmt.Sprintf("%dx%d", request.Width, request.Height)
 	}
 	task.RequestHash = imageTaskHash(task)
 	key := imageTaskKey(task.OwnerID, task.ID)
@@ -279,8 +294,12 @@ func (s *Server) imageTaskJSONEdits(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if len(body.Images) < 1 || len(body.Images) > 7 {
-		writeError(w, 400, "between 1 and 7 reference images are required", "invalid_request_error")
+	limit := 7
+	if _, ok := model.AdobeModel(firstNonEmpty(body.Model, "gpt-image-2")); ok {
+		limit = modelReferenceLimit(firstNonEmpty(body.Model, "gpt-image-2"))
+	}
+	if len(body.Images) < 1 || len(body.Images) > limit {
+		writeError(w, 400, fmt.Sprintf("between 1 and %d reference images are required", limit), "invalid_request_error")
 		return
 	}
 	// Bound URL downloads independently of the asynchronous generation deadline.

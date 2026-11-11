@@ -8,6 +8,9 @@ export interface ImageTaskAsset {
   url?: string
   path?: string
   b64_json?: string
+  mime?: string
+  mime_type?: string
+  output_format?: string
   revised_prompt?: string
   width?: number
   height?: number
@@ -104,7 +107,7 @@ export interface ImageSizeOption {
   value: string
 }
 
-export type ImageSizeResolution = 'auto' | '1K' | '2K' | '4K'
+export type ImageSizeResolution = 'auto' | '512' | '1K' | '2K' | '4K'
 
 export interface ImageSizePreset extends ImageSizeOption {
   ratio: string
@@ -204,13 +207,17 @@ export function supportsHighResolutionImageSizes(model: string) {
 
 export function resolveImageSizePresets(model: string): ImageSizePreset[] {
   const value = String(model || '').toLowerCase()
-  const sizes = mediaCapability(model)?.sizes
-  if (sizes?.length) return sizes.map(size => {
+  const capability = mediaCapability(model)
+  const sizes = capability?.sizes?.length ? capability.sizes : [...new Set(capability?.variants?.flatMap(variant => variant.sizes || []) || [])]
+  if (sizes.length) return sizes.map(size => {
     if (size === 'auto') return AUTO_IMAGE_SIZE_PRESET[0]!
     const [width = 1024, height = 1024] = size.split('x').map(Number)
-    const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a
+    const variant = capability?.variants?.find(item => item.sizes?.includes(size) && item.aspect_ratios?.length === 1)
     const divisor = gcd(width, height)
-    return { value: size, label: size, ratio: `${width / divisor}:${height / divisor}`, resolution: (Math.max(width, height) > 2048 ? '4K' : Math.max(width, height) > 1792 ? '2K' : '1K') as ImageSizeResolution }
+    const ratio = variant?.aspect_ratios?.[0] || `${width / divisor}:${height / divisor}`
+    const declaredResolution = variant?.resolutions?.length === 1 ? variant.resolutions[0] : undefined
+    const resolution = (['512', '1K', '2K', '4K'].includes(declaredResolution || '') ? declaredResolution : imageResolutionTier(width, height)) as ImageSizeResolution
+    return { value: size, label: `${ratio} · ${resolution} · ${size}`, ratio, resolution, width, height }
   })
   if (value === 'grok-imagine-image-lite') return AUTO_IMAGE_SIZE_PRESET
   if (value === 'grok-imagine-image-edit') return GROK_IMAGE_SIZE_PRESETS.slice(0, 2)
@@ -436,7 +443,14 @@ export function imageAssetUrl(asset: ImageTaskAsset) {
   const url = cleanString(asset.url)
   if (url) return url
   const base64 = cleanString(asset.b64_json)
-  return base64 ? `data:image/png;base64,${base64}` : ''
+  if (!base64) return ''
+  const allowed = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+  const declaredMime = [asset.mime, asset.mime_type].map(value => cleanString(value).split(';')[0]!.trim().toLowerCase())
+  const mime = declaredMime.find(value => allowed.has(value))
+  const format = cleanString(asset.output_format).toLowerCase()
+  const formatMime = ({ png: 'image/png', jpeg: 'image/jpeg', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' } as Record<string, string>)[format]
+  const resolved = mime || formatMime || (declaredMime.every(value => !value) && !format ? 'image/png' : '')
+  return resolved ? `data:${resolved};base64,${base64}` : ''
 }
 
 export const imageTasksApi = {

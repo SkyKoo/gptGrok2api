@@ -132,10 +132,6 @@
                   <div class="studio-size-label">模型</div>
                   <GroupedSelectMenu v-model="videoModelValue" :options="videoModelSelectOptions" selected-indicator="none" block />
                 </div>
-                <div class="studio-video-field">
-                  <span class="studio-video-label">时长</span>
-                  <span class="studio-video-value">{{ videoForm.seconds }} 秒</span>
-                </div>
                 <div v-for="group in videoSettingGroups" :key="group.key" class="studio-video-field">
                   <span class="studio-video-label">{{ group.label }}</span>
                   <div class="studio-video-choices">
@@ -309,7 +305,7 @@ import {
   type ImageSizeResolution,
 } from '@/api/imageTasks'
 import { type MediaCapability } from '@/lib/mediaCapabilities'
-import { studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
+import { normalizeStudioVideoOptions, studioVideoSettingValues, studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -437,18 +433,20 @@ const imageQualityOptions = computed(() => IMAGE_QUALITY_OPTIONS.filter(option =
 const imageCountOptions = computed(() => IMAGE_COUNT_OPTIONS.filter(option => option.value <= Math.min(props.references.length ? 2 : 10, imageCapabilities.value?.max_count ?? (Math.max(0, ...(imageCapabilities.value?.variants || []).map(item => item.max_count || 0)) || 10))))
 const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }>>(() => {
   const capability = videoCapabilities.value
+  const values = capability ? studioVideoSettingValues(props.videoForm, capability) : undefined
   const groups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
-    { key: 'seconds', label: '时长', options: capability?.durations?.map(value => ({ label: `${value} 秒`, value: String(value) })) || VIDEO_DURATION_OPTIONS },
-    { key: 'size', label: '尺寸', options: capability?.sizes?.map(value => ({ label: value, value })) || VIDEO_SIZE_OPTIONS },
-    { key: 'resolution', label: '分辨率', options: (capability?.resolutions || ['480p', '720p']).map(value => ({ label: value, value })) },
+    { key: 'size', label: '尺寸', options: values?.sizes.map(value => ({ label: value, value })) || VIDEO_SIZE_OPTIONS },
+    { key: 'resolution', label: '分辨率', options: (values?.resolutions || ['480p', '720p']).map(value => ({ label: value, value })) },
+    { key: 'seconds', label: '时长', options: values?.durations.map(value => ({ label: `${value} 秒`, value: String(value) })) || VIDEO_DURATION_OPTIONS },
   ]
   if (videoModelValue.value.startsWith('grok-')) groups.push({ key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS })
-  if (capability?.audio) groups.push({ key: 'audio', label: '音频', options: [{ label: '无音频', value: 'false' }, { label: '生成音频', value: 'true' }] })
+  if (values?.hasAudio) groups.push({ key: 'audio', label: '音频', options: values.audio.map(value => ({ label: value ? '生成音频' : '无音频', value: String(value) })) })
   return groups
 })
 const videoSummaryLabel = computed(() => `${props.chatModelLabels?.[videoModelValue.value] || videoModelValue.value} · ${props.videoForm.seconds} 秒 · ${props.videoForm.resolution}`)
 function selectVideoSetting(key: keyof StudioVideoOptions, value: string) {
-  emit('update:videoForm', { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : key === 'audio' ? value === 'true' : value })
+  const changed = { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : key === 'audio' ? value === 'true' : value }
+  emit('update:videoForm', normalizeStudioVideoOptions(changed, videoCapabilities.value, key === 'preset' ? undefined : key))
 }
 
 const sizePresets = computed(() => { void props.mediaCapabilities; return resolveImageSizePresets(props.imageForm.model) })
@@ -466,7 +464,7 @@ const ratioOptions = computed(() => {
     .map((preset) => ({ label: preset.ratio === 'auto' ? '自动' : preset.ratio, value: preset.ratio }))
 })
 const resolutionOptions = computed(() => {
-  const order: ImageSizeResolution[] = ['auto', '1K', '2K', '4K']
+  const order: ImageSizeResolution[] = ['auto', '512', '1K', '2K', '4K']
   const values = new Set(sizePresets.value.map((preset) => preset.resolution))
   return order.filter((value) => values.has(value)).map((value) => ({ label: value === 'auto' ? '自动' : value, value }))
 })
@@ -474,7 +472,7 @@ const selectedSizeDetailLabel = computed(() => {
   if (props.imageForm.model.startsWith('grok-imagine-image') && props.imageForm.model !== 'grok-imagine-image-edit') {
     return `${selectedResolution.value === 'auto' ? '1K（默认）' : selectedResolution.value} · ${selectedRatio.value === 'auto' ? '1:1（默认）' : selectedRatio.value}`
   }
-  return formatImageSizeLabel(props.imageForm.size)
+  return selectedPreset.value?.label || formatImageSizeLabel(props.imageForm.size)
 })
 const canAttachReferences = computed(() => props.mode === 'image' || props.mode === 'chat' || props.mode === 'video')
 const selectedChatModelLabel = computed(() => chatModelSelectOptions.value.find((option) => option.value === props.chatModel)?.label || props.chatModel || '自动模型')

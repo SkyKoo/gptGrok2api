@@ -21,7 +21,7 @@
     "test:account-progress-layout": "node --experimental-strip-types --test scripts/account-progress-layout.test.mjs",
     "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs",
     "test:registration-channel-isolation": "node --experimental-strip-types --test scripts/registration-channel-isolation.test.mjs",
-    "test:adobe-media": "node --experimental-strip-types --test scripts/adobe-media-capabilities.test.mjs",
+    "test:adobe-media": "node --experimental-strip-types --test scripts/adobe-media-capabilities.test.mjs scripts/adobe-account-quotas.test.mjs",
     "test:adobe-ui": "node scripts/adobe-ui-smoke.mjs"
   },
   "devDependencies": {

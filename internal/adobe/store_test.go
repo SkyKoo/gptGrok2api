@@ -258,17 +258,17 @@ func TestRefreshTaskKeepsPinnedReservationAndNeverGenerates(t *testing.T) {
 	}
 }
 
-func TestTokenRefreshPreservesWholeCompleteMediaCookie(t *testing.T) {
+func TestTokenRefreshPreservesWholeMediaCookieWhenMissing(t *testing.T) {
 	s, a := readyStore(t)
 	replacement := a
-	replacement.Cookie = "sherlockToken=eyJzaWQiOiJwYXJ0aWFsIiwiZnRyIjoicGFydGlhbCJ9"
+	replacement.Cookie = "unrelatedCookie=value"
 	replacement.RefreshCookie = "imsSession=new-private"
 	fresh, e := s.ReplaceCredentials(a, replacement)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if fresh.Cookie != a.Cookie || fresh.RefreshCookie != replacement.RefreshCookie || fresh.MediaSessionStatus != "preserved" || fresh.Revision != a.Revision+1 {
-		t.Fatal("partial cookie replaced/mixed with known media cookie")
+		t.Fatal("missing media token replaced/mixed with known media cookie")
 	}
 	if Public(fresh)["media_session_refreshed"] != false {
 		t.Fatal("token refresh falsely marked media renewed")
@@ -296,5 +296,22 @@ func TestMediaCookieRefreshRequiresCompleteOldOrNew(t *testing.T) {
 	fresh, e := s.ReplaceCredentials(a, newToken)
 	if e != nil || fresh.MediaSessionStatus != "refreshed" || Public(fresh)["media_session_refreshed"] != true {
 		t.Fatalf("complete new session not recorded: %v", e)
+	}
+}
+
+func TestFreePreflightEligibilityDoesNotRequireGeneralCredits(t *testing.T) {
+	_, a := readyStore(t)
+	zero := 0.0
+	a.Quota.Available = &zero
+	if !Eligible(a, time.Now()) {
+		t.Fatal("zero general credits blocked independent daily free pools")
+	}
+	a.Quota = Quota{Status: "unknown"}
+	if !Eligible(a, time.Now()) {
+		t.Fatal("unrelated credit query blocked free generation preflight")
+	}
+	a.InFlight = "unknown-submission"
+	if Eligible(a, time.Now()) {
+		t.Fatal("free preflight eligibility bypassed account binding")
 	}
 }

@@ -1,7 +1,7 @@
 <template>
   <PagePanel class="space-y-5">
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <div><h2 class="font-semibold">Adobe 账号</h2><p class="text-xs text-muted-foreground">Web Free 图片与视频共用账号额度。未知或过期数据不代表可用次数。</p></div>
+      <div><h2 class="font-semibold">Adobe 账号</h2><p class="text-xs text-muted-foreground">免费生成次数按额度池共享；图片、视频和体验次数分别显示。通用积分不代表生成次数。</p></div>
       <Button variant="outline" size="sm" :disabled="loading || busy" @click="load">刷新列表</Button>
     </div>
     <div class="flex flex-wrap items-center gap-3">
@@ -39,14 +39,21 @@
       <table class="w-full min-w-[780px] text-left text-sm">
         <thead class="text-xs text-muted-foreground"><tr>
           <th class="p-3"><input type="checkbox" aria-label="选择本页 Adobe 账号" :checked="allSelected" :disabled="busy || !accounts.length" @change="selectPage" /></th>
-          <th class="p-3">邮箱 / 账号</th><th class="p-3">状态</th><th class="p-3">共享额度</th><th class="p-3">最近查询</th><th class="p-3">登录态有效期</th>
+          <th class="p-3">邮箱 / 账号</th><th class="p-3">状态</th><th class="p-3">免费生成次数<div class="mt-1 font-normal">剩余 / 总量</div></th><th class="p-3">最近查询</th><th class="p-3">登录态有效期</th>
         </tr></thead>
         <tbody><tr v-for="account in accounts" :key="account.id" class="border-t align-top">
           <td class="p-3"><input v-model="selected" type="checkbox" :value="account.id" :disabled="busy" :aria-label="`选择 ${account.email}`" /></td>
           <td class="p-3 break-all"><div>{{ account.email }}</div><div class="text-xs text-muted-foreground">{{ account.account_id || account.id }}</div><p v-if="account.last_error" class="text-xs text-rose-500">{{ account.last_error }}</p></td>
           <td class="p-3">{{ account.disabled ? '已禁用' : statusLabel(account.status) }}<div v-if="account.in_flight" class="text-xs">生成中</div></td>
-          <td class="p-3"><div>{{ quotaLabel(account.quota) }}</div><div v-if="account.quota?.total !== undefined" class="text-xs text-muted-foreground">总额 {{ account.quota.total }} · 已用 {{ account.quota.used ?? '未知' }}</div><p v-if="account.quota?.error" class="text-xs text-rose-500">{{ account.quota.error }}</p></td>
-          <td class="p-3 text-xs">{{ time(account.quota?.checked_at) }}</td>
+          <td class="p-3">
+            <div v-for="item in adobeGenerationQuotaItems(account.quota)" :key="item.key" class="flex items-baseline justify-between gap-3 text-xs leading-6" :title="item.models.join('、')">
+              <span class="whitespace-nowrap">{{ item.label }}</span>
+              <span class="whitespace-nowrap font-medium" :class="item.tone === 'danger' ? 'text-rose-500' : item.tone === 'muted' ? 'text-muted-foreground' : ''">{{ item.text }}</span>
+            </div>
+            <div class="mt-1 text-xs text-muted-foreground">{{ adobeCreditLabel(account.quota) }}</div>
+            <p v-if="account.quota?.generation?.error" class="mt-1 text-xs text-rose-500">{{ account.quota.generation.error }}</p>
+          </td>
+          <td class="p-3 text-xs">{{ time(account.quota?.generation?.checked_at) }}</td>
           <td class="p-3 text-xs"><div>{{ time(account.expires_at ? account.expires_at * 1000 : undefined) }}</div><div class="mt-1 max-w-52 text-muted-foreground">{{ mediaSessionLabel(account.media_session_status) }}</div><div v-if="account.media_session_updated_at" class="mt-1 text-muted-foreground" :title="`最近保存完整媒体会话：${time(account.media_session_updated_at * 1000)}`">会话保存：{{ time(account.media_session_updated_at * 1000) }}</div></td>
         </tr><tr v-if="!accounts.length"><td colspan="6" class="p-8 text-center text-muted-foreground">{{ loading ? '正在加载…' : '暂无 Adobe 账号，可在注册页创建或导入已有账号。' }}</td></tr></tbody>
       </table>
@@ -59,7 +66,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
-import { adobeAccountsApi, type AdobeAccount, type AdobeQuota, type AdobeMutationResponse } from '@/api/adobeAccounts'
+import { adobeAccountsApi, type AdobeAccount, type AdobeMutationResponse } from '@/api/adobeAccounts'
+import { adobeGenerationQuotaItems, adobeCreditLabel } from '@/lib/adobeQuotas'
 const emit = defineEmits<{ (e: 'total', value: number): void }>()
 const accounts = ref<AdobeAccount[]>([]), total = ref(0), page = ref(1), pageSize = 25
 const keyword = ref(''), status = ref(''), selected = ref<string[]>([]), loading = ref(false), busy = ref(false)
@@ -83,14 +91,6 @@ function time(value?: string | number) { if (!value) return '未知'; const date
 function statusLabel(value: string) { return ({ active: '可用', expired: '凭据过期', invalid: '凭据异常', pending: '待验证', refreshing: '刷新中', busy: '生成中', exhausted: '额度耗尽', submission_unknown: '提交结果待核对' } as Record<string, string>)[value] || value }
 function mediaSessionLabel(value?: string) {
   return ({ imported: '已保存导入的媒体会话', refreshed: '媒体会话已更新', preserved: '凭据已刷新，保留原媒体会话' } as Record<string, string>)[value || ''] || '媒体会话状态未知'
-}
-function quotaLabel(quota?: AdobeQuota) {
-  if (!quota) return '额度未知'
-  const suffix = quota.available === undefined ? '' : ` · 上次可用 ${quota.available}`
-  if (quota.status === 'stale') return `已过期${suffix}`
-  if (quota.status === 'error' || quota.status === 'failed') return `查询失败${suffix}`
-  if (!['known', 'success'].includes(quota.status) || quota.available === undefined) return `额度未知${suffix}`
-  return quota.available === 0 ? '额度已用完（0）' : `可用 ${quota.available}`
 }
 async function load() {
   const current = ++sequence; loading.value = true; error.value = ''

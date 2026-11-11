@@ -11,6 +11,7 @@ import (
 )
 
 type videoOptions struct {
+	GenerateAudio                    bool
 	Seconds                          int
 	Size, Aspect, Resolution, Preset string
 }
@@ -95,7 +96,7 @@ func parseVideoOptions(r *http.Request) (videoOptions, error) {
 
 func parseAdobeVideoOptions(r *http.Request, id string) (videoOptions, error) {
 	m, _ := model.AdobeModel(id)
-	v := videoOptions{Seconds: m.Duration, Size: m.Size, Aspect: m.AspectRatio, Resolution: m.Resolution}
+	v := videoOptions{Seconds: m.Duration, Size: m.Size, Aspect: m.AspectRatio, Resolution: m.Resolution, GenerateAudio: m.DefaultAudio}
 	for key, values := range r.Form {
 		switch key {
 		case "model", "prompt", "seconds", "size", "aspect_ratio", "resolution_name", "resolution", "generate_audio", "client_task_id":
@@ -106,16 +107,49 @@ func parseAdobeVideoOptions(r *http.Request, id string) (videoOptions, error) {
 			return v, fmt.Errorf("unsupported parameter %q for this model", key)
 		}
 	}
-	if value := r.FormValue("seconds"); value != "" && value != strconv.Itoa(m.Duration) {
-		return v, fmt.Errorf("verified Free duration for this model is %d seconds", m.Duration)
-	}
-	for _, field := range []struct{ key, value string }{{"size", m.Size}, {"aspect_ratio", m.AspectRatio}, {"resolution", m.Resolution}, {"resolution_name", m.Resolution}} {
-		if value := strings.TrimSpace(r.FormValue(field.key)); value != "" && value != field.value {
-			return v, fmt.Errorf("unsupported %s for the verified Free model tier", field.key)
+	if value := strings.TrimSpace(r.FormValue("seconds")); value != "" {
+		var err error
+		v.Seconds, err = strconv.Atoi(value)
+		if err != nil {
+			return v, fmt.Errorf("seconds must be an integer")
 		}
 	}
-	if audio := strings.TrimSpace(r.FormValue("generate_audio")); audio != "" && audio != "false" && audio != "0" {
-		return v, fmt.Errorf("audio is not enabled for the verified Free model tier")
+	for _, field := range []struct {
+		key   string
+		value *string
+	}{{"size", &v.Size}, {"aspect_ratio", &v.Aspect}, {"resolution_name", &v.Resolution}} {
+		if value := strings.TrimSpace(r.FormValue(field.key)); value != "" {
+			*field.value = value
+		}
 	}
-	return v, nil
+	if resolution := strings.TrimSpace(r.FormValue("resolution")); resolution != "" {
+		if primary := strings.TrimSpace(r.FormValue("resolution_name")); primary != "" && resolution != primary {
+			return v, fmt.Errorf("resolution and resolution_name must match")
+		}
+		v.Resolution = resolution
+	}
+	if audio := strings.TrimSpace(r.FormValue("generate_audio")); audio != "" {
+		switch audio {
+		case "true", "1":
+			v.GenerateAudio = true
+		case "false", "0":
+			v.GenerateAudio = false
+		default:
+			return v, fmt.Errorf("generate_audio must be true or false")
+		}
+	}
+	requestedSize := strings.TrimSpace(r.FormValue("size"))
+	requestedAspect := strings.TrimSpace(r.FormValue("aspect_ratio"))
+	requestedResolution := strings.TrimSpace(firstNonEmpty(r.FormValue("resolution_name"), r.FormValue("resolution")))
+	for _, variant := range m.Variants {
+		if requestedSize != "" && variant.Size != requestedSize || requestedAspect != "" && variant.AspectRatio != requestedAspect || requestedResolution != "" && variant.Resolution != requestedResolution {
+			continue
+		}
+		width, height, validSize := adobePixelSize(variant.Size)
+		if _, ok := m.MatchVideo(width, height, v.Seconds, variant.Resolution, variant.AspectRatio, v.GenerateAudio, 0); validSize && ok {
+			v.Size, v.Aspect, v.Resolution = variant.Size, variant.AspectRatio, variant.Resolution
+			return v, nil
+		}
+	}
+	return v, fmt.Errorf("unsupported video parameter combination for this model")
 }

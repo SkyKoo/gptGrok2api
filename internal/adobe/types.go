@@ -24,14 +24,15 @@ var (
 )
 
 type Quota struct {
-	LastSuccessAt  string   `json:"last_success_at,omitempty"`
-	Status         string   `json:"status"`
-	Total          *float64 `json:"total,omitempty"`
-	Used           *float64 `json:"used,omitempty"`
-	Available      *float64 `json:"available,omitempty"`
-	CheckedAt      string   `json:"checked_at,omitempty"`
-	AvailableUntil string   `json:"available_until,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	Generation     *GenerationEntitlements `json:"generation,omitempty"`
+	LastSuccessAt  string                  `json:"last_success_at,omitempty"`
+	Status         string                  `json:"status"`
+	Total          *float64                `json:"total,omitempty"`
+	Used           *float64                `json:"used,omitempty"`
+	Available      *float64                `json:"available,omitempty"`
+	CheckedAt      string                  `json:"checked_at,omitempty"`
+	AvailableUntil string                  `json:"available_until,omitempty"`
+	Error          string                  `json:"error,omitempty"`
 }
 
 // Account is private. HTTP responses must use Public, never marshal Account.
@@ -66,47 +67,36 @@ type Account struct {
 	SettlementUntil       int64                 `json:"settlement_until,omitempty"`
 }
 
-// Models contain only parameter tiers proven with a Web Free account.
-type Model struct {
-	ID, Name, ModelID, ModelVersion, Kind, Size, Resolution, AspectRatio string
-	Duration                                                             int
-}
-
-func FreeModels() []Model {
-	return []Model{
-		{ID: "gemini-3.1-flash-image", Name: "Gemini 3.1 Flash Image (Nano Banana 2)", ModelID: "gemini-flash", ModelVersion: "nano-banana-3", Kind: "image", Size: "1024x1024", AspectRatio: "1:1"},
-		{ID: "veo-3.1-lite", Name: "Veo 3.1 Lite", ModelID: "veo", ModelVersion: "3.1-lite-generate", Kind: "video", Size: "1920x1080", Resolution: "1080p", Duration: 8, AspectRatio: "16:9"},
-	}
-}
-func FindModel(id string) (Model, bool) {
-	for _, m := range FreeModels() {
-		if m.ID == id {
-			return m, true
-		}
-	}
-	return Model{}, false
-}
-
 type ImageRequest struct {
-	Model, Prompt    string
-	Width, Height, N int
+	Model, Prompt           string
+	Width, Height, N        int
+	AspectRatio, Resolution string
+	References              []ReferenceImage
 }
 type VideoRequest struct {
 	Model, Prompt           string
 	Width, Height, Duration int
 	Resolution, AspectRatio string
 	GenerateAudio           bool
+	References              []ReferenceImage
 }
 type Job struct {
-	Kind         string   `json:"kind"`
-	Model        string   `json:"model"`
-	ModelID      string   `json:"model_id"`
-	ModelVersion string   `json:"model_version"`
-	RequestID    string   `json:"request_id"`
-	PollURL      string   `json:"poll_url,omitempty"`
-	Status       string   `json:"status"`
-	Progress     float64  `json:"progress"`
-	OutputURLs   []string `json:"output_urls,omitempty"`
+	Width          int      `json:"width,omitempty"`
+	Height         int      `json:"height,omitempty"`
+	AspectRatio    string   `json:"aspect_ratio,omitempty"`
+	Resolution     string   `json:"resolution,omitempty"`
+	Duration       int      `json:"duration,omitempty"`
+	GenerateAudio  bool     `json:"generate_audio,omitempty"`
+	ReferenceCount int      `json:"reference_count,omitempty"`
+	Kind           string   `json:"kind"`
+	Model          string   `json:"model"`
+	ModelID        string   `json:"model_id"`
+	ModelVersion   string   `json:"model_version"`
+	RequestID      string   `json:"request_id"`
+	PollURL        string   `json:"poll_url,omitempty"`
+	Status         string   `json:"status"`
+	Progress       float64  `json:"progress"`
+	OutputURLs     []string `json:"output_urls,omitempty"`
 }
 
 // Error never includes response bodies, URLs, headers, prompts or credentials.
@@ -197,27 +187,23 @@ func Nonce(id, prompt string) string {
 	sum := sha256.Sum256([]byte(id + "-" + p))
 	return hex.EncodeToString(sum[:])
 }
+
+// Sherlock forwards the official opaque ARP session token unchanged. Its internal
+// JSON fields are not a public schema and must not be invented or required.
 func Sherlock(cookie string) (string, error) {
 	for _, part := range strings.Split(cookie, ";") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(kv) != 2 || kv[0] != "sherlockToken" {
 			continue
 		}
-		raw, err := base64.StdEncoding.DecodeString(kv[1])
-		if err != nil {
-			raw, err = base64.RawStdEncoding.DecodeString(kv[1])
-		}
-		if err != nil {
-			break
-		}
-		var fields map[string]string
-		if json.Unmarshal(raw, &fields) != nil {
+		if len(kv[1]) == 0 || len(kv[1]) > 65536 {
 			break
 		}
 		valid := true
-		for _, k := range []string{"sid", "ark", "bfp", "ftr"} {
-			if fields[k] == "" {
+		for _, c := range kv[1] {
+			if c < 33 || c > 126 {
 				valid = false
+				break
 			}
 		}
 		if valid {
@@ -236,6 +222,16 @@ func Public(a Account) map[string]any {
 			q.Status = "stale"
 		}
 	}
+	if q.Generation != nil {
+		generation := *q.Generation
+		if generation.Status == "known" {
+			at, _ := time.Parse(time.RFC3339Nano, generation.CheckedAt)
+			if at.IsZero() || now.Sub(at) > 5*time.Minute || q.Status != "known" {
+				generation.Status = "stale"
+			}
+		}
+		q.Generation = &generation
+	}
 	status := a.Status
 	if !a.Enabled {
 		status = "disabled"
@@ -247,7 +243,7 @@ func Public(a Account) map[string]any {
 		status = "busy"
 	} else if q.Status != "known" {
 		status = "pending"
-	} else if q.Available != nil && *q.Available <= 0 {
+	} else if q.Generation != nil && q.Generation.Exhausted() {
 		status = "exhausted"
 	}
 	return map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != ""}

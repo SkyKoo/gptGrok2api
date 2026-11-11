@@ -173,9 +173,22 @@ func (s *Server) refreshAdobeAccount(ctx context.Context, id string, credentials
 	if err != nil {
 		return a, err
 	}
-	return s.adobeStore.Refresh(ctx, s.adobeClient, id, credentials)
+	a, err = s.adobeStore.Refresh(ctx, s.adobeClient, id, credentials)
+	if err != nil {
+		return a, err
+	}
+	generation, generationErr := s.adobeClient.GenerationPermissions(ctx, a)
+	if generationErr != nil {
+		generation.Status = "error"
+		generation.Error = adobe.SafeError(generationErr)
+	}
+	if saveErr := s.adobeStore.UpdateGenerationPermissions(a.ID, a.Revision, generation); saveErr != nil {
+		return a, saveErr
+	}
+	a.Quota.Generation = &generation
+	return a, nil
 }
-func (s *Server) ensureAdobeAccounts(ctx context.Context) error {
+func (s *Server) ensureAdobeAccounts(ctx context.Context, targetModel string) error {
 	if s.adobeStore == nil || s.adobeClient == nil {
 		return adobe.ErrNoAccount
 	}
@@ -183,19 +196,24 @@ func (s *Server) ensureAdobeAccounts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	modelAvailable := func(a adobe.Account) bool {
+		return a.Quota.Generation == nil || a.Quota.Generation.ModelAvailable(targetModel, time.Now())
+	}
 	for _, a := range items {
-		if adobe.Eligible(a, time.Now()) {
+		if adobe.Eligible(a, time.Now()) && modelAvailable(a) {
 			return nil
 		}
 	}
 	count := 0
 	for _, a := range items {
-		if !a.Enabled || a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
+		// Freshly unavailable model observations need no immediate recheck.
+		// They must not prevent another account from renewing its credentials.
+		if !modelAvailable(a) || !a.Enabled || a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
 			continue
 		}
 		fresh, e := s.refreshAdobeAccount(ctx, a.ID, false)
 		count++
-		if e == nil && adobe.Eligible(fresh, time.Now()) {
+		if e == nil && adobe.Eligible(fresh, time.Now()) && modelAvailable(fresh) {
 			return nil
 		}
 		if count >= 4 {

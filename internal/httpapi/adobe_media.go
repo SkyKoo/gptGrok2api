@@ -17,7 +17,12 @@ import (
 	"time"
 )
 
-func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, selected imageSelection, prompt, id, format, publicBase string) (result []map[string]string, resultErr error) {
+func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, selected imageSelection, prompt, id, size, format, publicBase string, count int, inputs []provider.OpenAIImageInput, options provider.ImageOutputOptions) (result []map[string]string, resultErr error) {
+	request, validationErr := adobeImageRequest(id, prompt, size, count, inputs)
+	if validationErr != nil {
+		s.adobeStore.Release(selected.Key)
+		return nil, &protocol.UpstreamError{Status: 400, Message: validationErr.Error()}
+	}
 	// Synchronous calls also need a durable owner-scoped recovery handle.
 	if imageTaskFromContext(ctx) == nil {
 		m, _ := model.AdobeModel(id)
@@ -25,7 +30,11 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 		if r != nil {
 			owner = s.authIdentity(r)
 		}
-		task := &imageTaskState{ID: selected.Key, OwnerID: owner, Status: "running", Mode: "generate", Model: id, N: 1, Size: m.Size, CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), recovering: true, Route: &mediaRoute{Channel: "adobe", AccountID: selected.Adobe.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, JobKey: selected.Key, Stage: "selected"}}
+		mode := "generate"
+		if len(inputs) > 0 {
+			mode = "edit"
+		}
+		task := &imageTaskState{ImageOutputOptions: options, ID: selected.Key, OwnerID: owner, Status: "running", Mode: mode, Model: id, N: count, Size: fmt.Sprintf("%dx%d", request.Width, request.Height), CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), recovering: true, Route: &mediaRoute{Channel: "adobe", AccountID: selected.Adobe.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, JobKey: selected.Key, Stage: "selected"}}
 		s.imageTaskMu.Lock()
 		err := s.saveImageTaskLocked(task)
 		if err == nil {
@@ -46,7 +55,7 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 				task.Status = "success"
 				task.Data = nil
 				for _, item := range result {
-					task.Data = append(task.Data, map[string]any{"url": item["url"]})
+					task.Data = append(task.Data, map[string]any{"url": item["url"], "mime": item["mime"], "output_format": item["output_format"]})
 				}
 				task.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 				s.persistFinishedImageTaskLocked(task)
@@ -70,14 +79,16 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 		return nil, &protocol.UpstreamError{Status: 400, Message: "response_format must be url or b64_json"}
 	}
 	m, _ := model.AdobeModel(id)
-	var width, height int
-	_, _ = fmt.Sscanf(m.Size, "%dx%d", &width, &height)
 	s.enrichRequestMonitor(r, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion})
+	if _, err := s.adobeClient.PreflightImage(ctx, selected.Adobe, request); err != nil {
+		s.adobeStore.Release(selected.Key)
+		return nil, adobeAPIError(err)
+	}
 	if err := s.imageRouteStage(ctx, "submit_started"); err != nil {
 		s.adobeStore.Release(selected.Key)
 		return nil, err
 	}
-	job, err := s.adobeClient.SubmitImage(ctx, selected.Adobe, adobe.ImageRequest{Model: id, Prompt: prompt, Width: width, Height: height, N: 1})
+	job, err := s.adobeClient.SubmitImage(ctx, selected.Adobe, request)
 	if err != nil {
 		s.adobeSubmissionFailed(selected.Key, err)
 		return nil, adobeAPIError(err)
@@ -177,25 +188,36 @@ func (s *Server) finishAdobeImage(ctx context.Context, a adobe.Account, key stri
 	if err = s.imageRouteStage(ctx, "downloading"); err != nil {
 		return nil, err
 	}
-	raw, mime, err := s.adobeClient.Download(ctx, job.OutputURLs[0], 32<<20)
+	raw, _, err := s.adobeClient.Download(ctx, job.OutputURLs[0], 32<<20)
 	if err != nil {
 		return nil, adobeAPIError(err)
 	}
 	cfg, kind, err := image.DecodeConfig(bytes.NewReader(raw))
-	if err != nil || kind != "png" || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 40_000_000 {
+	mime := map[string]string{"png": "image/png", "jpeg": "image/jpeg", "webp": "image/webp"}[kind]
+	if err != nil || mime == "" || http.DetectContentType(raw) != mime || adobeOutputAnimated(raw, kind) || cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > 40_000_000 {
 		return nil, fmt.Errorf("invalid Adobe image output")
 	}
-	m, ok := model.AdobeModel(job.Model)
-	if !ok || fmt.Sprintf("%dx%d", cfg.Width, cfg.Height) != m.Size {
+	// New handles retain the chosen dimensions. Legacy handles only used the
+	// original square tier, so their zero values resolve to that model default.
+	width, height := job.Width, job.Height
+	if width == 0 && height == 0 {
+		width, height, _ = adobeImageSize(job.Model, "")
+	}
+	if cfg.Width != width || cfg.Height != height {
 		return nil, fmt.Errorf("Adobe image dimensions do not match the selected Free tier")
 	}
 	if _, _, err = image.Decode(bytes.NewReader(raw)); err != nil {
 		return nil, fmt.Errorf("incomplete Adobe image output")
 	}
+	if task := imageTaskFromContext(ctx); task != nil && task.OutputFormat != "" && task.OutputFormat != kind {
+		return nil, fmt.Errorf("Adobe image encoding does not match the requested output_format")
+	}
 	value, err := s.mediaProvider.ResolveImage(ctx, accounts.Account{}, provider.ImageResult{URL: "cfm:" + key, Base64: base64.StdEncoding.EncodeToString(raw), MIME: mime}, "url", s.cfg.ImageDataDir, publicBase)
 	if err != nil {
 		return nil, err
 	}
+	value["mime"] = mime
+	value["output_format"] = kind
 	s.recordGeneratedMedia(ctx, value)
 	if err = s.imageRouteStage(ctx, "completed"); err != nil {
 		return nil, err
@@ -275,7 +297,7 @@ func (s *Server) resumeAdobeImageTask(task *imageTaskState) bool {
 	return true
 }
 
-func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOptions) {
+func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOptions, inputs []provider.OpenAIImageInput) {
 	s.videoMu.Lock()
 	job.recovering = true
 	s.videoMu.Unlock()
@@ -283,9 +305,14 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	s.ensureAdobeAccounts(ctx)
+	request, err := adobeVideoRequest(job.Model, prompt, options, inputs)
+	if err != nil {
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "invalid_request", "message": err.Error()})
+		return
+	}
+	s.ensureAdobeAccounts(ctx, job.Model)
 	key := "video-" + job.ID
-	a, err := s.adobeStore.Reserve(key)
+	a, err := s.adobeStore.ReserveForModel(key, job.Model)
 	if err != nil {
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": adobe.SafeError(err)})
 		return
@@ -298,7 +325,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	}
 	m, _ := model.AdobeModel(job.Model)
 	s.videoMu.Lock()
-	job.Route = &mediaRoute{Channel: "adobe", AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "submit_started", JobKey: key}
+	job.Route = &mediaRoute{Channel: "adobe", AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
 	err = s.saveVideoCheckpointLocked(job)
 	s.videoMu.Unlock()
 	if err != nil {
@@ -306,11 +333,23 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "could not persist selected channel"})
 		return
 	}
-	s.monitor.enrich(job.ID, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion})
+	if _, err := s.adobeClient.PreflightVideo(ctx, a, request); err != nil {
+		s.adobeStore.Release(key)
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "free_generation_unavailable", "message": adobe.SafeError(err)})
+		return
+	}
+	s.videoMu.Lock()
+	job.Route.Stage = "submit_started"
+	err = s.saveVideoCheckpointLocked(job)
+	s.videoMu.Unlock()
+	if err != nil {
+		s.adobeStore.Release(key)
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "could not persist submission state"})
+		return
+	}
+	s.monitor.enrich(job.ID, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion, "generate_audio": options.GenerateAudio, "reference_count": len(inputs)})
 	s.setVideoStatus(job, "in_progress", 1, nil)
-	var width, height int
-	_, _ = fmt.Sscanf(options.Size, "%dx%d", &width, &height)
-	handle, err := s.adobeClient.SubmitVideo(ctx, a, adobe.VideoRequest{Model: job.Model, Prompt: prompt, Width: width, Height: height, Duration: options.Seconds, Resolution: options.Resolution, AspectRatio: options.Aspect})
+	handle, err := s.adobeClient.SubmitVideo(ctx, a, request)
 	if err != nil {
 		s.adobeSubmissionFailed(key, err)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_submit_failed", "message": adobe.SafeError(err)})

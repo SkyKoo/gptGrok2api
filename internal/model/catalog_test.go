@@ -59,7 +59,7 @@ func TestConsoleThinkingAliasesUseNativeRoute(t *testing.T) {
 func TestExplicitImageModelsStayOutOfChatCatalog(t *testing.T) {
 	for _, id := range []string{"gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6-flare"} {
 		spec, ok := Find(Catalog(), id)
-		if !ok || spec.Capability != Image {
+		if !ok || spec.Capability&Image == 0 || spec.Capability&(Chat|ConsoleChat) != 0 {
 			t.Fatalf("incorrect image catalog entry for %s: %#v", id, spec)
 		}
 		if _, ok := ResolveChat(id); ok {

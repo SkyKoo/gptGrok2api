@@ -25,12 +25,17 @@ const page = await context.newPage(), errors=[], requests=[], unknown=[]
 page.on('pageerror',error=>errors.push(error.message))
 const schedule={enabled:false,interval_minutes:60,next_run_at:'',last_attempt_at:'',last_started_at:'',last_result:'',last_error:''}
 const register={target:'openai',total:1,threads:1,mode:'total',enabled:false,mail:{source_id:'mail',providers:[{id:'mail',type:'icloud_hme',enable:true,label:'fixture'}]},target_settings:Object.fromEntries(['openai','grok','adobe'].map(target=>[target,{total:1,threads:1,mode:'total',mail_source_id:'mail',proxy:'direct'}])),target_runtime:Object.fromEntries(['openai','grok','adobe'].map(target=>[target,{enabled:false,stats:{},logs:[],jobs:[],registration_schedule:schedule}]))}
-const image={kind:'image',sizes:['1024x1024'],qualities:['auto'],max_reference_images:0,output_formats:['png'],variants:[{sizes:['1024x1024'],qualities:['auto'],max_count:1,max_reference_images:0}]}
-const video={kind:'video',sizes:['1920x1080'],resolutions:['1080p'],durations:[8],audio:false,max_reference_images:0,variants:[{sizes:['1920x1080'],resolutions:['1080p'],durations:[8],max_count:1,max_reference_images:0,audio:false}]}
-const catalog={chat_models:['gpt-test'],image_models:['gemini-3.1-flash-image'],image_edit_models:[],video_models:['veo-3.1-lite'],models:[{id:'gpt-test',name:'GPT fixture'},{id:'gemini-3.1-flash-image',name:'Gemini 3.1 Flash Image (Nano Banana 2)'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'}],media_capabilities:{'gemini-3.1-flash-image':image,'veo-3.1-lite':video}}
+const image={kind:'image',sizes:['1024x1024','1200x896'],qualities:['auto'],max_reference_images:6,output_formats:['png','jpeg'],variants:[{sizes:['1024x1024'],aspect_ratios:['1:1'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6},{sizes:['1200x896'],aspect_ratios:['4:3'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6}]}
+const video={kind:'video',sizes:['1920x1080'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,variants:[{sizes:['1920x1080'],resolutions:['1080p'],durations:[8],max_count:1,max_reference_images:2,audio:true}]}
+const catalog={chat_models:['gpt-test'],image_models:['gemini-3.1-flash-image'],image_edit_models:['gemini-3.1-flash-image'],video_models:['veo-3.1-lite'],models:[{id:'gpt-test',name:'GPT fixture'},{id:'gemini-3.1-flash-image',name:'Gemini 3.1 Flash Image (Nano Banana 2)'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'}],media_capabilities:{'gemini-3.1-flash-image':image,'veo-3.1-lite':video}}
 async function screenshot(name) { if (process.env.CFM_UI_SCREENSHOT_DIR) { await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, {recursive:true}); await page.screenshot({path:path.join(process.env.CFM_UI_SCREENSHOT_DIR, name+'.png'),fullPage:true}) } }
 let priorities=['chatgpt','adobe'], multi=false
-const account={id:'adobe:fixture',account_id:'fixture',email:'fixture@example.test',provider:'adobe',status:'active',disabled:false,media_session_status:'imported',media_session_updated_at:Math.floor(Date.now()/1000),expires_at:Math.floor(Date.now()/1000)+3600,quota:{status:'known',total:10,used:0,available:10,checked_at:new Date().toISOString()}}
+const generation={status:'known',checked_at:new Date().toISOString(),models:[],pools:[
+ {id:'images',resource_type:'firefly_complimentary_generations',total:3,used:1,available:2,refresh_period:'P1D',kinds:['image'],models:['gemini-3.1-flash-image','gpt-image-2.5-flare']},
+ {id:'videos',resource_type:'firefly_complimentary_generations',total:1,used:0,available:1,refresh_period:'P1D',kinds:['video'],models:['veo-3.1-lite']},
+ {id:'trial',resource_type:'firefly_limited_taste',total:3,used:0,available:3,kinds:['image'],models:['gpt-image-2']},
+]}
+const account={id:'adobe:fixture',account_id:'fixture',email:'fixture@example.test',provider:'adobe',status:'active',disabled:false,media_session_status:'imported',media_session_updated_at:Math.floor(Date.now()/1000),expires_at:Math.floor(Date.now()/1000)+3600,quota:{status:'known',total:10,used:0,available:10,checked_at:new Date().toISOString(),generation}}
 await context.route('**/*',async route=>{
   const req=route.request(), url=new URL(req.url()), pathname=url.pathname
   if(url.origin!==origin){await route.abort();return}
@@ -41,10 +46,10 @@ await context.route('**/*',async route=>{
   else if(pathname==='/api/settings')data={config:{}}
   else if(pathname==='/api/model-catalog')data=catalog
   else if(pathname==='/api/adobe/accounts')data={items:[{...account,media_session_status:'refreshed',media_session_refreshed:true},
-    {...account,id:'adobe:zero',account_id:'zero',email:'zero@example.test',status:'exhausted',quota:{status:'known',total:10,used:10,available:0}},
+    {...account,id:'adobe:zero',account_id:'zero',email:'zero@example.test',status:'exhausted',quota:{status:'known',total:10,used:0,available:10,generation:{...generation,pools:[{...generation.pools[1],used:1,available:0}]}}},
     {...account,id:'adobe:unknown',account_id:'unknown',email:'unknown@example.test',media_session_status:'preserved',media_session_refreshed:false,quota:{status:'unknown'}},
-    {...account,id:'adobe:stale',account_id:'stale',email:'stale@example.test',quota:{status:'stale',available:10}},
-    {...account,id:'adobe:error',account_id:'error',email:'error@example.test',quota:{status:'error',available:8,error:'Fixture query error'}},
+    {...account,id:'adobe:stale',account_id:'stale',email:'stale@example.test',quota:{status:'stale',available:10,generation:{...generation,status:'unknown'}}},
+    {...account,id:'adobe:error',account_id:'error',email:'error@example.test',quota:{status:'known',available:10,generation:{status:'error',pools:[],models:[],error:'Fixture query error'}}},
   ],total:5,all_total:5,page:1,page_size:25}
   else if(pathname==='/api/adobe/accounts/refresh')data={results:[{id:account.id,ok:true}]}
   else if(pathname==='/api/model-routing'){
@@ -62,11 +67,12 @@ await context.route('**/*',async route=>{
 try {
   await page.goto(origin+'/#/accounts?platform=adobe')
   await page.getByRole('heading',{name:'Adobe 账号',exact:true}).waitFor()
-  await page.getByText('可用 10',{exact:true}).waitFor()
-  await page.getByText('额度已用完（0）',{exact:true}).waitFor()
-  await page.getByText('额度未知',{exact:true}).waitFor()
-  await page.getByText('已过期 · 上次可用 10',{exact:true}).waitFor()
-  await page.getByText('查询失败 · 上次可用 8',{exact:true}).waitFor()
+  const accountRow=page.getByRole('row').filter({hasText:'fixture@example.test'})
+  for(const label of ['每日图片','每日视频','图片体验','2 / 3','1 / 1','3 / 3','通用积分 10']) await accountRow.getByText(label,{exact:true}).waitFor()
+  await page.getByRole('row').filter({hasText:'zero@example.test'}).getByText('0 / 1',{exact:true}).waitFor()
+  await page.getByRole('row').filter({hasText:'unknown@example.test'}).getByText('未知',{exact:true}).first().waitFor()
+  assert.equal(await page.getByRole('row').filter({hasText:'stale@example.test'}).getByText('未知',{exact:true}).count(),3)
+  await page.getByRole('row').filter({hasText:'error@example.test'}).getByText('未知（查询失败）',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'fixture@example.test'}).getByText('媒体会话已更新',{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'unknown@example.test'}).getByText('凭据已刷新，保留原媒体会话',{exact:true}).waitFor()
   await screenshot('adobe-accounts')
@@ -87,6 +93,8 @@ try {
   await page.getByText('视频设置 · Veo 3.1 Lite',{exact:true}).waitFor()
   await page.getByRole('button',{name:'8 秒',exact:true}).waitFor()
   assert.equal(await page.getByRole('button',{name:'720p',exact:true}).count(),0)
+  await page.getByRole('button',{name:'生成音频',exact:true}).click()
+  await page.getByRole('button',{name:'生成音频',exact:true}).getAttribute('aria-pressed').then(value=>assert.equal(value,'true'))
   await screenshot('veo-options')
   assert.equal(await page.getByText('渠道',{exact:true}).count(),0)
   await page.getByRole('button',{name:'切换模式',exact:true}).click()
@@ -94,6 +102,9 @@ try {
   await page.getByRole('button',{name:'图片设置',exact:true}).click()
   await page.getByText('模型默认画质',{exact:true}).waitFor()
   assert.equal(await page.getByRole('button',{name:'2 张',exact:true}).count(),0)
+  await page.getByRole('button',{name:'4:3',exact:true}).click()
+  await page.locator('.studio-size-current').filter({hasText:'4:3 · 1K · 1200x896'}).waitFor()
+  await screenshot('nano-reference-options')
   await page.goto(origin+'/#/settings')
   await page.getByText('当前没有已确认可用的多渠道模型，无需设置优先级。',{exact:true}).waitFor()
   multi=true

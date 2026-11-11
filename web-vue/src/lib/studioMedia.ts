@@ -1,4 +1,4 @@
-import { mediaCapability, mediaReferenceLimit, validateMediaCombination } from './mediaCapabilities.ts'
+import { mediaCapability, mediaReferenceLimit, validateMediaCombination, type MediaCapability, type MediaVariant } from './mediaCapabilities.ts'
 export const GROK_IMAGE_REFERENCE_LIMIT = 5
 export const GROK_VIDEO_REFERENCE_LIMIT = 7
 
@@ -64,11 +64,64 @@ export const VIDEO_PRESET_OPTIONS = [
 ]
 export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { model: 'grok-imagine-video', audio: false, seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
 
+type VideoSelectionKey = 'size' | 'resolution' | 'seconds' | 'audio'
+
+function videoVariants(capability: MediaCapability): MediaVariant[] {
+  return capability.variants?.length ? capability.variants : [capability]
+}
+function hasValue<T>(values: T[] | undefined, value: T) {
+  return !values?.length || values.includes(value)
+}
+function videoVariantMatches(variant: MediaVariant, options: StudioVideoOptions, key: VideoSelectionKey) {
+  if (key === 'size') return hasValue(variant.sizes, options.size)
+  if (key === 'resolution') return hasValue(variant.resolutions, options.resolution)
+  if (key === 'seconds') return hasValue(variant.durations, options.seconds)
+  return (!options.audio || !!variant.audio) && (!variant.audio_required || options.audio === true)
+}
+
+// Preserve valid user selections while moving all dependent fields to one supported combination.
+export function normalizeStudioVideoOptions(options: StudioVideoOptions, capability?: MediaCapability, changed?: VideoSelectionKey | 'model'): StudioVideoOptions {
+  if (!capability) return { ...options }
+  const variants = videoVariants(capability)
+  const preferred = changed && changed !== 'model' ? variants.filter(variant => videoVariantMatches(variant, options, changed)) : variants
+  const candidates = preferred.length ? preferred : variants
+  const keys: VideoSelectionKey[] = ['size', 'resolution', 'seconds', 'audio']
+  const score = (variant: MediaVariant) => keys.reduce((sum, key, index) => sum + (videoVariantMatches(variant, options, key) ? 1 << (keys.length - index) : 0), 0)
+  const selected = candidates.reduce<MediaVariant | undefined>((best, variant) => !best || score(variant) > score(best) ? variant : best, undefined)
+  if (!selected) return { ...options }
+  const choose = <T>(values: T[] | undefined, value: T) => hasValue(values, value) ? value : values![0]!
+  const requestedAudio = changed === 'model' || options.audio === undefined ? selected.default_audio ?? capability.default_audio ?? false : options.audio
+  return {
+    ...options,
+    size: choose(selected.sizes, options.size),
+    resolution: choose(selected.resolutions, options.resolution),
+    seconds: choose(selected.durations, options.seconds),
+    audio: selected.audio_required ? true : selected.audio ? requestedAudio : false,
+  }
+}
+
+// Size is the first choice; resolution, duration and audio follow that supported branch.
+export function studioVideoSettingValues(options: StudioVideoOptions, capability: MediaCapability) {
+  const variants = videoVariants(capability)
+  const bySize = variants.filter(variant => hasValue(variant.sizes, options.size))
+  const byResolution = bySize.filter(variant => hasValue(variant.resolutions, options.resolution))
+  const byDuration = byResolution.filter(variant => hasValue(variant.durations, options.seconds))
+  const unique = <T>(values: T[]) => [...new Set(values)]
+  return {
+    sizes: unique(variants.flatMap(variant => variant.sizes || [])),
+    resolutions: unique(bySize.flatMap(variant => variant.resolutions || [])),
+    durations: unique(byResolution.flatMap(variant => variant.durations || [])),
+    audio: unique(byDuration.flatMap(variant => variant.audio_required ? [true] : variant.audio ? [false, true] : [false])),
+    hasAudio: byDuration.some(variant => variant.audio),
+  }
+}
+
 export function buildVideoForm(prompt: string, options: StudioVideoOptions, files: File[]) {
   const model = options.model || 'grok-imagine-video'
   const capability = mediaCapability(model)
   if (!capability && model !== 'grok-imagine-video') throw new Error('视频模型能力尚未加载，请刷新模型目录')
-  validateMediaCombination(model, { size: options.size, seconds: options.seconds, resolution: options.resolution, audio: options.audio, references: files.length })
+  const audio = options.audio ?? capability?.default_audio ?? capability?.audio_required ?? false
+  validateMediaCombination(model, { size: options.size, seconds: options.seconds, resolution: options.resolution, audio, references: files.length })
   if (!capability && !VIDEO_DURATION_OPTIONS.some(option => Number(option.value) === options.seconds)) throw new Error('请选择 1～6 秒的视频时长')
   if (!capability && !VIDEO_SIZE_OPTIONS.some(option => option.value === options.size)) throw new Error('请选择支持的视频比例')
   if (!capability && !['480p', '720p'].includes(options.resolution)) throw new Error('请选择支持的视频分辨率')
@@ -82,7 +135,7 @@ export function buildVideoForm(prompt: string, options: StudioVideoOptions, file
   form.set('size', options.size)
   form.set('resolution_name', options.resolution)
   if (model.startsWith('grok-')) form.set('preset', preset)
-  if (!model.startsWith('grok-') && options.audio !== undefined) form.set('generate_audio', String(options.audio))
+  if (!model.startsWith('grok-')) form.set('generate_audio', String(audio))
   files.forEach(file => form.append('input_reference', file))
   return form
 }

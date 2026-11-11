@@ -62,7 +62,9 @@ func adobeImageFits(id, size, quality string, count, refs int, options provider.
 		return false
 	}
 	// auto is an explicit model default, never a silently downgraded exact size.
-	return (size == "" || size == "auto" || size == m.Size) && count == 1 && refs == 0 && !masked &&
+	width, height, validSize := adobeImageSize(id, size)
+	_, fits := m.MatchImage(width, height, count, refs)
+	return validSize && fits && !masked &&
 		(quality == "" || quality == "auto" || quality == "standard") &&
 		(options.Background == "" || options.Background == "auto") && options.EffectiveFormat() == "png" &&
 		options.FrameCount == nil && options.FrameDurationMS == nil && !options.Stream && options.PartialImages == nil && options.OutputCompression == nil
@@ -91,9 +93,9 @@ func (s *Server) selectImageImplementation(ctx context.Context, id, conversation
 			if s.adobeStore == nil || s.adobeClient == nil {
 				continue
 			}
-			s.ensureAdobeAccounts(ctx)
+			s.ensureAdobeAccounts(ctx, id)
 			key := imageExecutionKey(ctx)
-			a, err := s.adobeStore.Reserve(key)
+			a, err := s.adobeStore.ReserveForModel(key, id)
 			if err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
 					continue
@@ -141,6 +143,14 @@ func adobeAPIError(err error) error {
 	var e *adobe.Error
 	if errors.As(err, &e) {
 		status := e.Status
+		if e.Stage == "preflight" {
+			switch e.Code {
+			case "free_quota_exhausted":
+				status = 429
+			case "free_entitlement_unavailable":
+				status = 403
+			}
+		}
 		if status < 400 {
 			status = 502
 		}

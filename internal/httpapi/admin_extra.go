@@ -792,7 +792,8 @@ func (s *Server) imageTaskEdits(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	files := r.MultipartForm.File["image[]"]
-	if strings.HasPrefix(modelName, "grok-") {
+	_, adobeModel := model.AdobeModel(modelName)
+	if strings.HasPrefix(modelName, "grok-") || adobeModel {
 		// Both aliases belong to the same request; never ignore either batch.
 		files = append(files, r.MultipartForm.File["image"]...)
 		if err := validateGrokImageReferenceCount(modelName, len(files)); err != nil {

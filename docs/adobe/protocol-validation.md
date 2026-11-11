@@ -4,7 +4,7 @@ Checked locally in Docker on 2026-11-11 (Asia/Shanghai). These results are for t
 `codex/adobe-integration` development branch. No production service was deployed
 or restarted, and `main` was not merged.
 
-## Free model admission
+## Earlier two-model admission (superseded below)
 
 Only complete parameter combinations confirmed with the existing Web Free
 account enter the Adobe allowlist. Public discovery visibility is not sufficient.
@@ -208,3 +208,83 @@ does not distinguish media-session validity, current video entitlement, the
 request itself, or upstream policy. No speculative transport workaround was
 implemented. Successful historical video generation and the new Go read/download
 verification remain valid separate observations.
+
+
+## New account, official free entitlements and expanded capabilities (2026-11-11)
+
+This section supersedes the earlier two-model allowlist and the inference that
+missing internal Sherlock fields mean an unusable session. Historical requests
+and failures above remain separate observations.
+
+A new user-supplied mailbox was registered once in the local Docker browser. The
+user supplied the email OTP; the helper verified the Firefly identity and saved
+private credentials. The new account is separate from the earlier account.
+No credentials, mailbox address, OTP, signed URL or raw account identifier is
+included here.
+
+The official feature-auth-profile request returned 28 model results. Fourteen
+were authorized using free resources; all fourteen then passed their complete
+UGS generation-preflight payloads with HTTP 200. The admitted catalog is eight
+image and six video models listed in README. Sunburst, Nano Banana Pro, standard
+Veo and the other excluded candidates did not receive free authorization for the
+queried account/parameters. Static web visibility alone was not used for admission.
+
+The fresh account exposes three distinct shared pools:
+
+| Pool | Provisioned / consumed | Refresh |
+| --- | --- | --- |
+| Complimentary image generations | 3 / 0 | P1D |
+| Complimentary video generations | 1 / 0 | P1D |
+| GPT Image 2 limited taste | 3 / 0 | No refresh period supplied |
+
+The account UI now shows each pool once. General credits (previously 10/0/10)
+remain separate and do not determine free generation eligibility. Each actual
+request checks its model/parameter preflight before uploading or generating;
+paid resources are rejected. Cached explicit model denial or insufficient shared
+quota is filtered before binding, without switching account/channel afterward.
+Missing authorization data is unknown/error, never a fabricated zero balance.
+
+Public discovery, current UGS web overrides and preflight confirm:
+
+- Nano Banana 2 reference input, including the user-observed 4:3 1K tier (1200x896),
+  ten explicit 1K aspect/size mappings, and web reference limit six.
+- Nano Banana 2.1 and the other admitted models have their own schemas and limits.
+- Veo Lite accepts 1080p/8s audio and a first-frame reference. First/last frames use
+  usage=frame and order=1/2; the client fits reference frames to the output canvas.
+- Omni 1.1/1.2 audio is required rather than optional.
+- The current UGS uploads raw image bytes to the third-party generation base's
+  /v2/storage/image and uses images[0].id. No presigned upload flow was invented.
+- Firefly first-party branded models use the third-party UGS route in current web
+  overrides; a model's brand does not determine its HTTP endpoint.
+- Official ARP handling forwards an opaque token. It does not parse or require
+  sid/ark/bfp/ftr. No challenge fields are fabricated or merged.
+
+Actual generation results are distinct from preflight success:
+
+| Test | Free preflight | Upload | Generation |
+| --- | --- | --- | --- |
+| Nano Banana 2, 4:3, one reference | 200, authorized | 200, image ID | 408 timeout_error, no task handle |
+| Veo Lite, 1080p, 8s, audio, first frame | 200, authorized | 200, image ID | 408 timeout_error, no task handle |
+| GPT Image 2.5 Flare, 1024 square, text, new CFM Go client | 200, authorized | Not needed | 408 timeout_error, no task handle |
+
+Each was a separate single submission, not a replay or fallback. The two Node
+requests retained private markers; the Go client explicitly records
+SUBMISSION_UNKNOWN for 408. No generated file or audio track was obtained, so
+reference fidelity and actual audio output remain unverified. No further
+submission was made after these tests.
+
+A bounded normal editor initialization using the same new profile and proxy
+waited until the prompt editor was visible/enabled and IMS ready (about 12s).
+Identity matched. The official media cookie changed but still contained sid/ftr;
+the token and browser user agent stayed unchanged. The subsequent distinct Go
+Flare test still timed out. The runtime authentication service token was not
+observable through the known public page element, so equality with the exported
+cookie is not established. These facts do not establish missing challenge fields,
+reference input, audio, model permission, Go transport, or quota as the 408 cause.
+The tests do not constitute a complete live generation acceptance.
+
+Validation includes complete media combinations, upload failure with zero
+generation requests, opaque sessions, 408 unknown handling, shared pool parsing,
+model-aware account selection, audio idempotency and restart persistence, actual
+PNG/JPEG/WebP decoding, and explicit output encoding mismatch. Docker-only Go,
+Worker and frontend regressions are separate from live upstream success.

@@ -69,8 +69,13 @@ func Catalog() []Spec {
 	}
 	for _, m := range adobe.FreeModels() {
 		found := false
-		for _, item := range items {
+		for i, item := range items {
 			if item.ID == m.ID {
+				for _, v := range m.Variants {
+					if m.Kind == "image" && v.MaxReferenceImages > 0 {
+						items[i].Capability |= ImageEdit
+					}
+				}
 				found = true
 				break
 			}
@@ -79,8 +84,14 @@ func Catalog() []Spec {
 			capability := Image
 			if m.Kind == "video" {
 				capability = Video
+			} else {
+				for _, v := range m.Variants {
+					if v.MaxReferenceImages > 0 {
+						capability |= ImageEdit
+					}
+				}
 			}
-			items = append(items, Spec{m.ID, m.Name, "google", created, capability, true})
+			items = append(items, Spec{m.ID, m.Name, m.OwnedBy, created, capability, true})
 		}
 	}
 	return items

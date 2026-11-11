@@ -9,15 +9,32 @@
 Grok 模型 ID 保留。Adobe 模型沿用 CFM 的 `/v1/images/generations`、`/api/image-tasks/generations`
 以及 `/v1/videos` 接口。`/v1/models` 和管理目录返回能力组合，Studio 仅展示模型和对应参数。
 
-| 逻辑模型 | 名称 | 已验证的 Web Free 参数 |
-| --- | --- | --- |
-| gemini-3.1-flash-image | Gemini 3.1 Flash Image / Nano Banana 2 | 1024×1024，单张 PNG，无参考图，默认画质 |
-| veo-3.1-lite | Veo 3.1 Lite | 1920×1080、16:9、1080p、8 秒、无音频、无参考图 |
+当前目录包含新免费账号在官方 `generation-preflight` 中确认授权的 8 个图片模型、6 个视频模型。
+权限检查通过与生成完成分别记录；本轮实际生成仍遇到 HTTP 408，不能宣称全部模型已实测生成成功。
 
-只允许已通过免费账号实测的组合；目录可见或请求字段存在不等于可用。其他档位、付费模型和
-未验证的参考图/音频能力不开放。Adobe 的 Sunburst 在本轮测试返回 403 且未创建任务，因此
-`gpt-image-2.5-sunburst` 当前仍仅走已有 ChatGPT 渠道。此前 Veo Lite 成功与本轮验证结果应
-分别阅读[协议验证记录](protocol-validation.md)，不能把目录资格解释为每次请求必然成功。
+| 类型 | 逻辑模型 | 名称 |
+| --- | --- | --- |
+| 图片 | gemini-3.1-flash-image | Nano Banana 2 |
+| 图片 | gemini-3.1-flash-image-2.1 | Nano Banana 2.1 |
+| 图片 | firefly-image-4 / firefly-image-5 | Firefly Image 4 / 5 |
+| 图片 | humain-image-1 | HUMAIN Image 1 |
+| 图片 | gpt-image-2 | GPT Image 2 |
+| 图片 | gpt-image-2.5-flare / gpt-image-2.6-flare | GPT Image 2.5 / 2.6 Flare |
+| 视频 | veo-3.1-lite / veo-3.1-fast | Veo 3.1 Lite / Fast |
+| 视频 | gemini-omni-flash-1.1 / gemini-omni-flash-1.2 | Gemini Omni Flash 1.1 / 1.2 |
+| 视频 | firefly-video | Firefly Video |
+| 视频 | ray-3.14 | Ray 3.14 |
+
+Nano Banana 2 开放 10 个有精确尺寸映射的 1K 比例和至多 6 张参考图；例如 4:3 是 1200×896，
+不按像素最大公约数误显示为 75:56。Nano Banana 2.1 可使用 14 张参考图。其他模型参考图数量、
+用途、尺寸与档位来自各自目录，不能把一个模型的能力复制给所有模型。
+Veo Lite/Fast 当前开放 1080p、8 秒、16:9，可选择音频并使用首尾帧；Omni 的音频必须开启。
+前端依完整参数组合联动，调用方仍只选模型；不支持的组合在上传和提交前拒绝。
+
+GPT Image 2、2.5 Flare、2.6 Flare 同时保留 ChatGPT 与 Adobe 渠道，管理员可配置优先级。
+Sunburst、Nano Banana Pro、标准 Veo 等候选在本次账号/参数查询没有免费授权，不加入当前目录。
+每次生成前再次检查实际参数的免费权益，只接受官方免费资源，不能用通用积分自动走付费资源。
+详细权限证据、历史成功与本轮失败记录见 [协议验证记录](protocol-validation.md)。
 
 同步生图示例：
 
@@ -25,9 +42,9 @@ Grok 模型 ID 保留。Adobe 模型沿用 CFM 的 `/v1/images/generations`、`/
 {"model":"gemini-3.1-flash-image","prompt":"A blue ceramic vase on a white table","n":1,"size":"1024x1024","response_format":"url"}
 ```
 
-异步生图使用相同参数并提供 `client_task_id`；按调用者隔离幂等，同 ID 不同输入返回 409。
+参考图生图沿用 `/v1/images/edits` 与 `/api/image-tasks/edits`。异步生图使用相同参数并提供 `client_task_id`；按调用者隔离幂等，同 ID 不同输入返回 409。
 视频为 multipart：model=veo-3.1-lite、prompt、seconds=8、size=1920x1080、
-resolution_name=1080p、generate_audio=false。`Idempotency-Key` 或 `client_task_id` 提供幂等，
+resolution_name=1080p、generate_audio=true/false；参考图复用现有 multipart 图片字段。`Idempotency-Key` 或 `client_task_id` 提供幂等，
 重复调用返回原任务，不重新生成；不同输入使用同键返回 409。
 
 ## CFM 内部路由
@@ -66,14 +83,16 @@ Adobe 在收到上游任务句柄后加密保存，只在明确 COMPLETED 后交
 刷新返回其他身份时拒绝覆盖。IMS 刷新失败可使用原 browser profile，仍须核对相同身份。
 后台维护与生成占用互斥，不能在提交失败后刷新并重发生成。
 
-令牌刷新与媒体会话更新分别显示：仅取得新 Token/IMS Cookie 时，保留已有完整媒体 Cookie，
-标记 `preserved`；取得完整且不同的媒体 Cookie 才标记 `refreshed`。不能拼装缺失的人机验证
-字段，也不能把令牌刷新成功解释为媒体会话已续期。现有账号密码回退只有离线测试通过，
-真实启动测试止于 `browser_start_failed`，未验证实际登录。
+令牌刷新与媒体会话更新分别显示。ARP 会话按官方客户端的不透明值原样转发，不要求或拼装
+`sid/ark/bfp/ftr` 等内部字段；新账号合法导出可能只有 sid/ftr。仅取得新 Token/IMS Cookie 而
+没有新媒体会话时保留已有值，不能把令牌刷新成功解释为媒体会话已续期。
 
-Adobe 图片和视频共用账号余额。余额保留 known/unknown/stale/error，零与未知不同；未确认余额
-不得当作可用。生成过程中独占账号，完成后先等待结算再查询。当前余额接口多次仍为 10/0/10，
-因此不按“每次扣 1”估算，也不标记无限额度；真实成本规则尚未由余额观察确定。
+账号页分别显示 `quota.generation.pools` 中的共享免费额度，不按模型复制或合并为一个总次数。
+本次新账号返回：图片池 3 次/日、视频池 1 次/日、GPT Image 2 独立 3 次体验池；实际数值及
+刷新周期以各账号接口为准。`quota.available` 的 10/0/10 是通用积分，不能代替这些生成额度。
+未知、查询失败、过期与明确零值分开。选择账号前按目标模型过滤新鲜、明确不可用的额度；
+未知额度由精确 preflight 判定。已绑定后失败不换账号或渠道，408 按提交结果未知保留，不重发。
+生成仍独占账号，结束后等待结算并重新查询，既不假定每次固定扣 1，也不据积分不变推断无限。
 
 ## Docker 与持久化
 
@@ -99,7 +118,7 @@ Compose 挂载 `data/browser-worker:/data`；Adobe profile 位于 `/data/adobe/<
 | Go 全量 `go test ./...`、`go vet ./...` | 通过 |
 | Adobe、路由、恢复及不重发关键路径 race 检查 | 通过 |
 | 图片四类入口拒绝调用方指定渠道 | 40 个组合通过；包括空白字段和重复 multipart 值 |
-| Node Worker 测试 | 94 项通过（含可选出生日期字段） |
+| Node Worker 测试 | 95 项通过（含可选出生日期与不透明媒体会话） |
 | Python Worker 生命周期与队列测试 | 77 项通过 |
 | Vue TypeScript/Vite 构建 | 通过 |
 | 离线 UI 浏览器检查 | 9 项通过，无未知 API 写入或页面异常 |
@@ -109,12 +128,10 @@ Compose 挂载 `data/browser-worker:/data`；Adobe profile 位于 `/data/adobe/<
 | 三份 Compose 配置 | 仅解析校验通过，未启动业务 Compose |
 | 最终应用镜像断网检查 | 健康、静态资源、鉴权、模型目录、优先级约束、注册设置/队列/调度、渠道字段拒绝全部通过 |
 
-本地 ARM64 镜像（不上传）：
+本地预览镜像使用 `cfm:adobe-dev` 与 `cfm-browser-worker:adobe-test`；仅在独立本地
+Compose 项目更新，不上传、不发布线上。当前构建的实际 image ID 以本地 Docker inspect 为准。
 
-- `cfm:adobe-dev`：`sha256:f672948eb956a7ded4defa3308ec8813c0bdb7b9927d95447cf5e9cc60ac75ec`。
-- `cfm-browser-worker:adobe-test`：`sha256:e3fa59eb2880197b1e835fa392208109c68da891a2247fc3f5bfd77bd2856faf`。
-
-运行时镜像验证与第三方实测边界分开记录：新 Go 图片任务成功；新 Go Veo 提交尚未通过。
-同一当前凭据、代理和参数的单次 Node 对照也返回 403，不能将其归因为 Go 独有问题。
-完整媒体 Cookie 长期自动续期与额度扣费规则也未得到实测确认。详细证据和失败记录见
-[协议验证记录](protocol-validation.md)。这些结果不构成线上发布验收。
+本轮 14 个模型的免费参数预检全部通过，参考图上传成功；Nano Banana 2 参考图、Veo Lite
+首帧加音频、CFM Go 客户端的 GPT Image 2.5 Flare 文生图均返回 HTTP 408 `timeout_error`，
+没有任务句柄且没有重试。先前普通 Nano Banana 2 与 Veo Lite 的成功记录仍保留，不能用它们
+替代本轮新增能力的生成完成验收。协议与界面已接入，当前真实提交链路仍有未解决的上游错误。

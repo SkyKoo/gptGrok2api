@@ -38,6 +38,8 @@ type videoJob struct {
 	Size           string             `json:"size"`
 	Quality        string             `json:"quality"`
 	ResolutionName string             `json:"resolution_name"`
+	GenerateAudio  bool               `json:"generate_audio,omitempty"`
+	ReferenceCount int                `json:"reference_count,omitempty"`
 	AspectRatio    string             `json:"aspect_ratio"`
 	Preset         string             `json:"preset"`
 	CompletedAt    int64              `json:"completed_at,omitempty"`
@@ -86,9 +88,11 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 		return
 	}
-	if m, ok := model.AdobeModel(modelName); ok && m.Kind == "video" && len(inputs) > 0 {
-		writeError(w, 400, "this model does not support reference images in the verified Free tier", "invalid_request_error")
-		return
+	if m, ok := model.AdobeModel(modelName); ok && m.Kind == "video" {
+		if _, err := adobeVideoRequest(modelName, prompt, options, inputs); err != nil {
+			writeError(w, 400, err.Error(), "invalid_request_error")
+			return
+		}
 	}
 	owner := s.authIdentity(r)
 	clientKey := strings.TrimSpace(firstNonEmpty(r.Header.Get("Idempotency-Key"), r.FormValue("client_task_id")))
@@ -96,8 +100,8 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "idempotency key too long", "invalid_request_error")
 		return
 	}
-	requestHash := videoRequestFingerprint(modelName, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
-	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(options.Seconds), Size: options.Size, Quality: "standard", ResolutionName: options.Resolution, AspectRatio: options.Aspect, Preset: options.Preset}
+	requestHash := videoRequestFingerprint(modelName, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs, options.GenerateAudio)
+	job := &videoJob{ID: "video_" + randomID(), Object: "video", CreatedAt: time.Now().Unix(), Status: "queued", Model: modelName, Progress: 0, Prompt: prompt, Seconds: fmt.Sprint(options.Seconds), Size: options.Size, Quality: "standard", ResolutionName: options.Resolution, AspectRatio: options.Aspect, Preset: options.Preset, GenerateAudio: options.GenerateAudio, ReferenceCount: len(inputs)}
 	job.OwnerID = owner
 	job.RequestHash = requestHash
 	job.ClientKey = clientKey
@@ -136,7 +140,7 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	s.videoMu.RUnlock()
 	s.launchDeploymentWork(func() {
 		if m, ok := model.AdobeModel(job.Model); ok && m.Kind == "video" {
-			s.runAdobeVideoJob(job, prompt, options)
+			s.runAdobeVideoJob(job, prompt, options, inputs)
 		} else {
 			s.runVideoJob(job, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs)
 		}
