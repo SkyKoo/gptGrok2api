@@ -201,6 +201,24 @@ test('profile completion waits for the create button to become enabled and stops
   assert.equal((await store.load()).submission.started, false);
 });
 
+test('profile keeps the generated day and fills it only when the form requests it', async t => {
+  for (const hasDay of [false, true]) {
+    const { store, browser } = await fixture(t);
+    const names = ['firstName', 'lastName', 'birthMonth', 'birthYear', 'country', ...(hasDay ? ['birthDay'] : [])];
+    const fields = names.map(name => ({ tag: 'input', type: 'text', id: name, name, label: name === 'birthMonth' ? 'Birthday month' : name, autocomplete: '' }));
+    const filled = {};
+    browser.form = async () => form({fields, buttons:[{text:'Create account', disabled:false}]});
+    browser.authFrame = async () => ({getByRole:()=>({count:async()=>0})});
+    browser.field = async (_frame, descriptor) => ({fill:async value => { filled[descriptor.name] = value; }});
+    const profile = {firstName:'Fixture',lastName:'Test',birthYear:1984,birthMonth:2,birthDay:29,country:'US'};
+    await browser.advance({profile});
+    assert.equal(filled.birthMonth, '2');
+    assert.equal(filled.birthDay, hasDay ? '29' : undefined);
+    assert.deepEqual((await store.load()).config.profile, profile);
+    assert.equal((await store.load()).submission.started, false);
+  }
+});
+
 test('OTP auto submission waits for the resulting page and never adds a second Verify click', async t => {
   const { store, browser } = await fixture(t);
   await store.markSubmissionStarted();

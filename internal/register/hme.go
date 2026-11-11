@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// Default mailbox timing is shared by registration providers. Adobe uses these
+// built-in values; legacy GPT/Grok overrides remain supported independently.
+const (
+	defaultMailWaitTimeout  = 3 * time.Minute
+	defaultMailPollInterval = 3 * time.Second
+)
+
 type HMEConfig struct{ SourceID, BaseURL, Password, AccountID string }
 
 func (c HMEConfig) Validate() error {

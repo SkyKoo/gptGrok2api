@@ -33,6 +33,7 @@ func taskSettings(raw map[string]any) map[string]any {
 
 // 旧配置仅有一套参数；首次读取时复制到各渠道独立配置，不改变已有渠道的出口。
 func normalizeTargetSettings(value map[string]any) {
+	normalizeAdobeSettings(value)
 	target := registrationTarget(value["target"])
 	profiles := object(value["target_settings"])
 	normalized := map[string]any{}

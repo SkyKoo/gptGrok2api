@@ -111,7 +111,7 @@ export type RegisterMailboxConfig = {
 }
 
 export type RegisterTarget = 'openai' | 'grok' | 'adobe'
-export type AdobeRegisterConfig = { api_base: string; api_key: string; api_key_set?: boolean; request_timeout: number; country: string; birth_year: number; birth_month: number }
+export type AdobeRegisterConfig = { api_base: string; api_key: string; api_key_set?: boolean; request_timeout: number }
 
 export type GrokTurnstileProvider = 'browser'
 

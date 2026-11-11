@@ -1,6 +1,9 @@
 package register
 
 import (
+	"crypto/rand"
+	"io"
+	"math/big"
 	"net/url"
 	"os"
 	"strings"
@@ -24,6 +27,10 @@ func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
 	normalized := cloneMap(raw)
 	normalized["target"] = "grok"
 	normalized["grok"] = map[string]any{"provider": "browser"}
+	mail := cloneMap(object(normalized["mail"]))
+	delete(mail, "wait_timeout")
+	delete(mail, "wait_interval")
+	normalized["mail"] = mail
 	common, err := ParseGrokConfig(normalized)
 	if err != nil {
 		return c, err
@@ -43,17 +50,50 @@ func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
 	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.Fragment != "" {
 		return c, fail("config", "adobe_worker_url_invalid")
 	}
-	country := firstNonEmpty(stringValue(a["country"]), "US")
-	year, month := intValue(a["birth_year"]), intValue(a["birth_month"])
-	if year == 0 {
-		year = 1990
-	}
-	if month == 0 {
-		month = 1
-	}
-	if len(country) != 2 || year < 1900 || year > time.Now().Year()-18 || month < 1 || month > 12 {
-		return c, fail("config", "adobe_profile_invalid")
-	}
-	c.Profile = map[string]any{"country": strings.ToUpper(country), "birthYear": year, "birthMonth": month}
 	return c, nil
+}
+
+// Adobe registration identity is generated once per task, never from shared
+// settings. The encrypted task journal retains it across result recovery.
+type adobeRegistrationProfile struct {
+	Country    string `json:"country"`
+	BirthYear  int    `json:"birthYear"`
+	BirthMonth int    `json:"birthMonth"`
+	BirthDay   int    `json:"birthDay"`
+}
+
+func (p adobeRegistrationProfile) fields() map[string]any {
+	return map[string]any{"country": p.Country, "birthYear": p.BirthYear, "birthMonth": p.BirthMonth, "birthDay": p.BirthDay}
+}
+
+// Clamp a leap-day anniversary to the last calendar day of the target month.
+func adobeBirthdayYear(date time.Time, year int) time.Time {
+	day := min(date.Day(), time.Date(year, date.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day())
+	return time.Date(year, date.Month(), day, 0, 0, 0, 0, time.UTC)
+}
+
+func adobeBirthdayBounds(now time.Time) (time.Time, time.Time) {
+	// 51st birthday must still be in the future, and the 25th birthday must
+	// already have occurred. Whole UTC dates avoid DST-dependent day lengths.
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	return adobeBirthdayYear(today, today.Year()-51).AddDate(0, 0, 1), adobeBirthdayYear(today, today.Year()-25)
+}
+
+func newAdobeRegistrationProfile(now time.Time, random io.Reader) (*adobeRegistrationProfile, error) {
+	first, last := adobeBirthdayBounds(now)
+	days := int64(last.Sub(first)/(24*time.Hour)) + 1
+	offset, err := rand.Int(random, big.NewInt(days))
+	if err != nil {
+		return nil, fail("task", "random_failed")
+	}
+	birth := first.AddDate(0, 0, int(offset.Int64()))
+	return &adobeRegistrationProfile{Country: "US", BirthYear: birth.Year(), BirthMonth: int(birth.Month()), BirthDay: birth.Day()}, nil
+}
+
+func normalizeAdobeSettings(value map[string]any) {
+	adobe := cloneMap(object(value["adobe"]))
+	for _, key := range []string{"country", "birth_year", "birth_month", "birth_day"} {
+		delete(adobe, key)
+	}
+	value["adobe"] = adobe
 }

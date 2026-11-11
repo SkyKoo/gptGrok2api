@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/mail"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,11 @@ func (f *AdobeBrowserFlow) Close() {
 		f.lease.Release()
 	}
 }
+
+// HME preserves some original senders in its iCloud forwarding address. Keep
+// the encoded Adobe domain anchored before the opaque suffix, not a substring.
+var adobeHMESender = regexp.MustCompile(`^(?:account[-_]?)?noreply_at_(?:[a-z0-9]+_)*adobe_com_[a-z0-9-]+$`)
+
 func isAdobeSender(sender string) bool {
 	addr, err := mail.ParseAddress(sender)
 	if err != nil {
@@ -37,7 +43,8 @@ func isAdobeSender(sender string) bool {
 	if len(parts) != 2 {
 		return false
 	}
-	return parts[1] == "adobe.com" || strings.HasSuffix(parts[1], ".adobe.com")
+	return parts[1] == "adobe.com" || strings.HasSuffix(parts[1], ".adobe.com") ||
+		(parts[1] == "icloud.com" && adobeHMESender.MatchString(parts[0]))
 }
 func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox, cfg AdobeConfig, waitCode func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
 	profile := cloneMap(cfg.Profile)

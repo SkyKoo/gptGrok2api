@@ -470,11 +470,24 @@ export class BrowserRegistration {
         ['firstName', /first.?name|名字|名$/i], ['lastName', /last.?name|姓氏|^姓$/i],
         ['birthMonth', /month|月份|^月$/i], ['birthYear', /year|年份|^年$/i], ['country', /country|region|国家|地区/i],
       ];
+      // Adobe currently asks only for month/year in some regions. Keep the
+      // generated day in the saved profile and fill it only when requested.
+      const dayPattern = /birth.?day|(^|\s)day(\s|$)|日期|^日$/i;
+      const dayDescriptor = form.fields.find(f => {
+        const text = `${f.name} ${f.id} ${f.label}`;
+        return dayPattern.test(text) && !/month|year|月|年/i.test(text);
+      });
+      if (dayDescriptor) {
+        const day = Number(profile.birthDay);
+        const maxDay = new Date(Date.UTC(Number(profile.birthYear), Number(profile.birthMonth), 0)).getUTCDate();
+        if (!Number.isInteger(day) || day < 1 || day > maxDay) throw new RegistrationError('profile_invalid');
+        rules.push(['birthDay', dayPattern, dayDescriptor]);
+      }
       if (!profile.firstName || !profile.lastName || !profile.birthMonth || !profile.birthYear || !profile.country) throw new RegistrationError('profile_incomplete');
       if (![profile.firstName,profile.lastName,profile.country].every(v=>typeof v==='string' && v.trim() && v.length<=120) || !/^\d{4}$/.test(String(profile.birthYear))) throw new RegistrationError('profile_invalid');
       await this.store.save({ config: { ...state.config, profile } });
-      for (const [key, pattern] of rules) {
-        const descriptor = form.fields.find(f => pattern.test(`${f.name} ${f.id} ${f.label}`));
+      for (const [key, pattern, providedDescriptor] of rules) {
+        const descriptor = providedDescriptor || form.fields.find(f => pattern.test(`${f.name} ${f.id} ${f.label}`));
         if (!descriptor) throw new RegistrationError('profile_field_unrecognized');
         const field = await this.field(frame, descriptor);
         let value = String(profile[key]);

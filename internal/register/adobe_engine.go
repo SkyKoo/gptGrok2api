@@ -132,15 +132,22 @@ func (e *AdobeEngine) Start(raw map[string]any) (string, error) {
 		return "", fail("task", "already_running")
 	}
 	ids := make([]string, cfg.Total)
-	now := time.Now().UTC().Format(time.RFC3339)
+	started := time.Now().UTC()
+	now := started.Format(time.RFC3339)
 	before := len(e.jobs)
 	for i := range ids {
 		b := make([]byte, 16)
 		if _, err := rand.Read(b); err != nil {
+			e.jobs = e.jobs[:before]
 			return "", fail("task", "random_failed")
 		}
+		profile, err := newAdobeRegistrationProfile(started, rand.Reader)
+		if err != nil {
+			e.jobs = e.jobs[:before]
+			return "", err
+		}
 		ids[i] = hex.EncodeToString(b)
-		e.jobs = append(e.jobs, RegistrationJob{ID: ids[i], Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}})
+		e.jobs = append(e.jobs, RegistrationJob{ID: ids[i], Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}, AdobeProfile: profile})
 	}
 	if err := e.saveLocked(); err != nil {
 		e.jobs = e.jobs[:before]
@@ -201,6 +208,12 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			e.failJob(id, fail("task", "internal_error"))
 		}
 	}()
+	job, err := e.getJob(id)
+	if err != nil || job.AdobeProfile == nil {
+		e.failJob(id, fail("task", "adobe_profile_missing"))
+		return
+	}
+	cfg.Profile = job.AdobeProfile.fields()
 	release, err := e.ProxyRouting.acquire(ctx, id, "adobe", &cfg.Proxy, e.getJob, e.change)
 	if err != nil {
 		e.failJob(id, err)

@@ -229,11 +229,14 @@ test('Adobe drafts and late saves stay isolated from both existing channels', as
 
 test('Adobe save sends only its own config, task settings and mail source', async t => {
  const h = harness(t), s = h.state
- s.setTarget('adobe'); s.config.value.adobe.country = 'US'; s.config.value.total = 8
+ s.setTarget('adobe'); s.config.value.total = 8
+ Object.assign(s.config.value.adobe, { country: 'CA', birth_year: 1990, birth_month: 1 })
+ s.config.value.mail.wait_timeout = 999; s.config.value.mail.wait_interval = 60
  await s.flushAutosave()
  const [action, target, payload] = h.calls[0]
  assert.equal(action, 'save'); assert.equal(target, 'adobe')
  assert.ok(payload.adobe); assert.equal(payload.grok, undefined); assert.equal(payload.openai_free, undefined)
  assert.deepEqual(Object.keys(payload.target_settings), ['adobe'])
- assert.equal(payload.mail.source_id, 'adobe-mail')
+ assert.deepEqual(payload.mail, { source_id: 'adobe-mail' })
+ assert.deepEqual(Object.keys(payload.adobe).sort(), ['api_base', 'api_key', 'api_key_set', 'request_timeout'])
 })

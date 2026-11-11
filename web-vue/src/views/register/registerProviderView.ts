@@ -3,6 +3,7 @@ import { registrationResinChannel, registrationProxyFailureText } from '@/lib/re
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
 import type { ProxyGroup } from '@/api/proxy'
 import type {
+  AdobeRegisterConfig,
   GptMailStatus,
   GrokRegisterConfig,
   GrokTurnstileProvider,
@@ -189,7 +190,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
   openai_free: { timeout_seconds: 600, auto_twofa: false },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
-  adobe: { api_base: 'http://cfm-browser-worker:8899', api_key: '', request_timeout: 120, country: 'US', birth_year: 1990, birth_month: 1 },
+  adobe: { api_base: 'http://cfm-browser-worker:8899', api_key: '', request_timeout: 120 },
   checkout: {
     enabled: false,
     channel: 'upi',
@@ -558,7 +559,7 @@ export function normalizeRegisterConfig(raw: LegacyRegisterConfig): LegacyRegist
     openai_free: { timeout_seconds: raw.openai_free?.timeout_seconds || defaultRegisterConfig.openai_free.timeout_seconds, auto_twofa: raw.openai_free?.auto_twofa === true },
     target,
     grok: normalizeGrokRegisterConfig(raw.grok),
-    adobe: { ...defaultRegisterConfig.adobe, ...raw.adobe },
+    adobe: normalizeAdobeRegisterConfig(raw.adobe),
     mode: target !== 'openai' ? 'total' : (raw.mode || defaultRegisterConfig.mode),
     mail,
     checkout,
@@ -724,6 +725,15 @@ export function sanitizedProviderPayload(provider: RegisterProvider): RegisterPr
   return output
 }
 
+function normalizeAdobeRegisterConfig(raw?: Partial<AdobeRegisterConfig>): AdobeRegisterConfig {
+  return {
+    api_base: String(raw?.api_base ?? defaultRegisterConfig.adobe.api_base).trim(),
+    api_key: String(raw?.api_key || '').trim(),
+    api_key_set: Boolean(raw?.api_key_set),
+    request_timeout: Math.max(30, Math.min(180, Math.round(Number(raw?.request_timeout) || defaultRegisterConfig.adobe.request_timeout))),
+  }
+}
+
 export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<LegacyRegisterConfig> {
   const target = normalizeRegisterTarget(config.target)
   const grok = normalizeGrokRegisterConfig(config.grok)
@@ -734,7 +744,7 @@ export function legacyRegisterPayload(config: LegacyRegisterConfig): Partial<Leg
     target_settings: registrationTargetSettingsPayload(config),
     openai_free: { timeout_seconds: config.openai_free.timeout_seconds, auto_twofa: Boolean(config.openai_free.auto_twofa) },
     grok,
-    adobe: { ...config.adobe },
+    adobe: normalizeAdobeRegisterConfig(config.adobe),
     checkout: {
       enabled: Boolean(config.checkout?.enabled),
       channel: checkoutChannel,

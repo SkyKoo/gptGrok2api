@@ -33,7 +33,8 @@ async function command(request) {
       context = await launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1'});
     } else {
       store = new PrivateRunStore(root, request.profile_id);
-      await store.init({email:request.email, config:{profile:request.profile}});
+      const state = await store.init({email:request.email, config:{profile:request.profile}});
+      init.profile = state.config.profile;
       browser = new BrowserRegistration(store, {headless:process.env.TURNSTILE_HEADLESS === '1'});
       browser.workerMode = true;
       await browser.open();

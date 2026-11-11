@@ -71,7 +71,7 @@ type FreeConfig struct {
 // the legacy mode fields explicit. Total controls how many accounts one run
 // attempts; Threads controls the number of simultaneous registration jobs.
 func ParseFreeConfig(raw map[string]any) (FreeConfig, error) {
-	c := FreeConfig{Timeout: 10 * time.Minute, MailTimeout: 3 * time.Minute, PollInterval: 3 * time.Second}
+	c := FreeConfig{Timeout: 10 * time.Minute, MailTimeout: defaultMailWaitTimeout, PollInterval: defaultMailPollInterval}
 	if stringValue(raw["target"]) != "openai" {
 		return c, fail("config", "openai_target_required")
 	}

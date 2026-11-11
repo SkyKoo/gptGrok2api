@@ -588,7 +588,7 @@ func defaultConfig() map[string]any {
 		"enabled":                  false,
 		"resin_proxy_url":          "",
 		"target":                   "openai",
-		"adobe":                    map[string]any{"api_base": "", "api_key": "", "country": "US", "birth_year": 1990, "birth_month": 1},
+		"adobe":                    map[string]any{"api_base": "", "api_key": ""},
 		"total":                    1,
 		"threads":                  1,
 		"mode":                     "total",

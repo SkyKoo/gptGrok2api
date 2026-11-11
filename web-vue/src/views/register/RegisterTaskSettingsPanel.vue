@@ -487,11 +487,8 @@
         <FormField label="浏览器服务地址"><Input v-model.trim="config.adobe.api_base" block placeholder="http://cfm-browser-worker:8899" :disabled="config.enabled" /></FormField>
         <FormField label="浏览器服务密钥"><Input v-model.trim="config.adobe.api_key" :placeholder="config.adobe.api_key_set ? '已配置，留空保留' : '服务密钥'" type="password" block autocomplete="new-password" :disabled="config.enabled" /></FormField>
         <FormField label="请求超时（秒）"><Input v-model.number="config.adobe.request_timeout" type="number" min="30" max="180" block :disabled="config.enabled" /></FormField>
-        <FormField label="国家 / 地区代码"><Input v-model.trim="config.adobe.country" block placeholder="US" :disabled="config.enabled" /></FormField>
-        <FormField label="出生年份"><Input v-model.number="config.adobe.birth_year" type="number" min="1900" :max="new Date().getFullYear() - 18" block :disabled="config.enabled" /></FormField>
-        <FormField label="出生月份"><Input v-model.number="config.adobe.birth_month" type="number" min="1" max="12" block :disabled="config.enabled" /></FormField>
       </div>
-      <p class="text-xs text-muted-foreground">邮箱来源、代理和批次参数独立保存。注册完成后核对账号并加入 Adobe 账号池；提交结果不明确时保留任务供核查。</p>
+      <p class="text-xs text-muted-foreground">地区默认美国，生日按 25–50 岁随机生成。验证码由所选邮箱来源自动接收，注册成功后自动加入 Adobe 账号池。</p>
     </FormSection>
 
     <FormSection v-if="config.target === 'grok'" title="Grok 注册协议" density="roomy">
@@ -777,6 +774,7 @@
     </FormSection>
 
     <FormSection
+      v-if="config.target !== 'adobe'"
       title="验证码接收"
       density="roomy"
       :class="{ 'register-collapsible-section--collapsed': !mailRequestExpanded }"

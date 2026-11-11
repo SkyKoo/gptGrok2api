@@ -28,6 +28,7 @@ type RegistrationJob struct {
 	Mailbox      Mailbox               `json:"mailbox"`
 	// BrowserProfile is private task state. Snapshot deliberately omits it,
 	// while compensation retries use it to keep the protocol environment stable.
+	AdobeProfile   *adobeRegistrationProfile `json:"adobe_profile,omitempty"` // encrypted Adobe journal only
 	BrowserProfile *BrowserProfile           `json:"browser_profile,omitempty"`
 	MailboxAPIBase string                    `json:"mailbox_api_base,omitempty"`
 	AutoRetry      *RegistrationCompensation `json:"auto_retry,omitempty"`

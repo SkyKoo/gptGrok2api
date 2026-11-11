@@ -41,8 +41,8 @@ type GrokConfig struct {
 func ParseGrokConfig(raw map[string]any) (GrokConfig, error) {
 	c := GrokConfig{
 		Timeout:        10 * time.Minute,
-		MailTimeout:    3 * time.Minute,
-		PollInterval:   3 * time.Second,
+		MailTimeout:    defaultMailWaitTimeout,
+		PollInterval:   defaultMailPollInterval,
 		RequestTimeout: 45 * time.Second,
 	}
 	if !strings.EqualFold(strings.TrimSpace(stringValue(raw["target"])), "grok") {
