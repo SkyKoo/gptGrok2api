@@ -318,7 +318,7 @@ func (e *AdobeEngine) acquire(ctx context.Context, id string, mail MailSource) (
 		return box, err
 	}
 	if blocked[strings.ToLower(box.Email)] {
-		return box, fail("mailbox", "existing_registration_requires_review")
+		return box, e.releaseUnstartedMailbox(mail, box, fail("mailbox", "existing_registration_requires_review"))
 	}
 	err = e.change(id, func(j *RegistrationJob) {
 		j.Mailbox = box
@@ -326,7 +326,37 @@ func (e *AdobeEngine) acquire(ctx context.Context, id string, mail MailSource) (
 		j.Status = "running"
 		attachRegistrationLogAccount(j)
 	})
+	if err != nil {
+		err = e.releaseUnstartedMailbox(mail, box, err)
+	}
 	return box, err
+}
+
+// Allocation can succeed before the journal accepts the mailbox. No browser
+// work has started here, so release this source's platform/job reservation even
+// if the request context was cancelled or the journal is now unwritable.
+func (e *AdobeEngine) releaseUnstartedMailbox(mail MailSource, box Mailbox, cause error) error {
+	releaser, ok := mail.(interface {
+		Release(context.Context, Mailbox, string) error
+	})
+	code := "reservation_release_unavailable"
+	if ok {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := releaser.Release(ctx, box, "registration_not_submitted"); err == nil {
+			return cause
+		}
+		code = "reservation_release_failed"
+	}
+	failure := &Failure{Stage: "mailbox", Code: code, Operation: safeFailure(cause)}
+	e.mu.Lock()
+	if e.loadError != nil {
+		// failJob cannot persist after a journal error; keep both failures in
+		// the engine error returned by Snapshot instead of hiding the leak.
+		e.loadError = failure
+	}
+	e.mu.Unlock()
+	return failure
 }
 func (e *AdobeEngine) importAndVerify(ctx context.Context, id string) error {
 	j, err := e.getJob(id)

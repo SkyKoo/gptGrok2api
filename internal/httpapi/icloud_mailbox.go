@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -451,11 +452,32 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			result["errors"] = append(result["errors"].([]string), "Adobe 账号读取失败")
 		} else {
-			rows := []map[string]any{}
 			for _, a := range accounts {
-				rows = append(rows, map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "registration_job_id": a.RegistrationJobID, "registration_mailbox": a.RegistrationMailbox})
+				// Only the upstream list above creates/synchronizes Adobe assets.
+				// Imported metadata must not overwrite an existing asset or claim.
+				_, err := s.linkAdobeMailbox(ctx, a.ID, true)
+				if errors.Is(err, errAdobeMailboxMetadataMissing) || errors.Is(err, adobe.ErrNotFound) {
+					continue
+				}
+				if err != nil {
+					message := "Adobe 邮箱关联失败，已保留原占用；可重试核对"
+					switch {
+					case errors.Is(err, mailboxstore.ErrMailboxNotFound):
+						message = "Adobe 邮箱资产未匹配，请先核对该邮箱来源，再关联账号"
+					case errors.Is(err, mailboxstore.ErrMailboxInUse):
+						message = "Adobe 邮箱已有其他账号或注册任务占用，未覆盖"
+					case errors.Is(err, mailboxstore.ErrMailboxStateImmutable):
+						message = "Adobe 邮箱已删除或待清理，未关联"
+					case errors.Is(err, errAdobeMailboxMetadataMismatch):
+						message = "Adobe 账号邮箱来源与现有资产不一致，未改写"
+					case errors.Is(err, errAdobeMailboxSourceUnsupported):
+						message = "Adobe 邮箱来源暂不支持关联"
+					}
+					result["errors"] = append(result["errors"].([]string), a.ID+"："+message)
+					continue
+				}
+				result["adobe_claims"] = result["adobe_claims"].(int) + 1
 			}
-			reconcile("adobe", rows, "adobe_claims")
 		}
 	}
 	if s.grokRegister != nil {

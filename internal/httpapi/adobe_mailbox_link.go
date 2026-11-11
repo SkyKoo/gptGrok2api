@@ -11,6 +11,7 @@ import (
 	mailboxstore "github.com/auucoder/gptgrok2api-go/internal/mailbox"
 )
 
+var errAdobeMailboxMetadataMissing = errors.New("HME mailbox metadata is required for automatic reconciliation")
 var errAdobeMailboxMetadataMismatch = errors.New("existing mailbox metadata does not match asset")
 var errAdobeMailboxSourceUnsupported = errors.New("mailbox source does not support account association")
 
@@ -48,23 +49,7 @@ func (s *Server) adobeLinkMailboxes(w http.ResponseWriter, r *http.Request) {
 	summary := adobeMailboxLinkSummary{Results: make([]adobeMailboxLinkResult, 0, len(ids))}
 	for _, id := range ids {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		changed, err := s.adobeStore.LinkMailbox(id, func(a adobe.Account) (map[string]any, bool, error) {
-			box, claimed, err := s.mailboxStore.LinkExistingAccount(ctx, "adobe", a.ID, a.RegistrationJobID, a.Email, func(box mailboxstore.Mailbox) error {
-				return validateAdobeMailboxMetadata(a.RegistrationMailbox, box)
-			})
-			if err != nil {
-				return nil, false, err
-			}
-			metadata := make(map[string]any, len(a.RegistrationMailbox)+8)
-			for key, value := range a.RegistrationMailbox {
-				metadata[key] = value
-			}
-			metadata["provider"], metadata["platform"] = "icloud_hme", "adobe"
-			metadata["source_id"], metadata["source_type"] = box.SourceID, box.SourceType
-			metadata["id"], metadata["source_mailbox_id"] = box.ID, box.SourceMailboxID
-			metadata["account_id"], metadata["email"] = box.SourceAccountID, box.Email
-			return metadata, claimed, nil
-		})
+		changed, err := s.linkAdobeMailbox(ctx, id, false)
 		cancel()
 		result := adobeMailboxLinkResult{ID: id}
 		switch {
@@ -99,6 +84,34 @@ func (s *Server) adobeLinkMailboxes(w http.ResponseWriter, r *http.Request) {
 		summary.Results = append(summary.Results, result)
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// Automatic reconciliation and manual linking share account/asset lock ordering.
+// Re-read the account under its store lock so a stale list cannot resurrect an
+// account deleted while reconciliation was collecting other providers.
+func (s *Server) linkAdobeMailbox(ctx context.Context, id string, requireMetadata bool) (bool, error) {
+	return s.adobeStore.LinkMailbox(id, func(a adobe.Account) (map[string]any, bool, error) {
+		if requireMetadata {
+			if _, _, ok := mailboxAccount(map[string]any{"registration_mailbox": a.RegistrationMailbox}); !ok {
+				return nil, false, errAdobeMailboxMetadataMissing
+			}
+		}
+		box, claimed, err := s.mailboxStore.LinkExistingAccount(ctx, "adobe", a.ID, a.RegistrationJobID, a.Email, func(box mailboxstore.Mailbox) error {
+			return validateAdobeMailboxMetadata(a.RegistrationMailbox, box)
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		metadata := make(map[string]any, len(a.RegistrationMailbox)+8)
+		for key, value := range a.RegistrationMailbox {
+			metadata[key] = value
+		}
+		metadata["provider"], metadata["platform"] = "icloud_hme", "adobe"
+		metadata["source_id"], metadata["source_type"] = box.SourceID, box.SourceType
+		metadata["id"], metadata["source_mailbox_id"] = box.ID, box.SourceMailboxID
+		metadata["account_id"], metadata["email"] = box.SourceAccountID, box.Email
+		return metadata, claimed, nil
+	})
 }
 
 func validateAdobeMailboxMetadata(metadata map[string]any, box mailboxstore.Mailbox) error {
