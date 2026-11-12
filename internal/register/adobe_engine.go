@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"os"
 	"strings"
@@ -12,22 +13,24 @@ import (
 	"time"
 )
 
-// AdobeEngine persists an encrypted result before import. A failed/unknown
-// signup is never resubmitted: only the already captured result can recover.
+// AdobeEngine journals each recovery attempt before work. Unknown submissions
+// only resume the original browser session; saved results only resume import.
 type AdobeEngine struct {
-	mu           sync.Mutex
-	mailboxMu    sync.Mutex
-	path, secret string
-	jobs         []RegistrationJob
-	factory      AdobeFactory
-	importer     ImportAccount
-	verifier     VerifyAccount
-	ProxyRouting *ProxyRouting
-	cancel       context.CancelFunc
-	done         chan struct{}
-	active       int
-	closing      bool
-	loadError    error
+	mu                sync.Mutex
+	mailboxMu         sync.Mutex
+	path, secret      string
+	jobs              []RegistrationJob
+	factory           AdobeFactory
+	importer          ImportAccount
+	verifier          VerifyAccount
+	ProxyRouting      *ProxyRouting
+	cancel            context.CancelFunc
+	done              chan struct{}
+	active            int
+	closing           bool
+	stopRequested     bool
+	loadError         error
+	compensationError string
 }
 
 func NewAdobeEngine(path, secret string, factory AdobeFactory, importer ImportAccount, verifier VerifyAccount) *AdobeEngine {
@@ -55,15 +58,16 @@ func NewAdobeEngine(path, secret string, factory AdobeFactory, importer ImportAc
 	changed := false
 	for i := range e.jobs {
 		j := &e.jobs[i]
-		if j.Status == "running" || j.Status == "queued" {
+		if j.Status == "running" || j.Status == "queued" || j.AutoRetry != nil && (j.AutoRetry.State == "running" || j.AutoRetry.State == "manual_running") {
 			j.Status = "registration_pending"
-			j.Error = "process_restarted_no_automatic_registration_retry"
+			j.Error = "process_restarted_compensation_delayed"
 			if len(j.Account) > 0 {
 				j.Status = "import_pending"
 				if j.Imported {
 					j.Status = "verification_pending"
 				}
 			}
+			recoverAdobeRegistrationCompensation(j, time.Now())
 			changed = true
 		}
 	}
@@ -147,13 +151,14 @@ func (e *AdobeEngine) Start(raw map[string]any) (string, error) {
 			return "", err
 		}
 		ids[i] = hex.EncodeToString(b)
-		e.jobs = append(e.jobs, RegistrationJob{ID: ids[i], Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}, AdobeProfile: profile})
+		e.jobs = append(e.jobs, RegistrationJob{ID: ids[i], Status: "queued", Stage: "queued", CreatedAt: now, UpdatedAt: now, Logs: []JobLog{}, AdobeProfile: profile, MailboxAPIBase: cfg.HME.BaseURL, AdobeRegistration: &AdobeRegistrationState{BrowserProfileID: ids[i]}})
 	}
 	if err := e.saveLocked(); err != nil {
 		e.jobs = e.jobs[:before]
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	e.stopRequested = false
 	e.cancel = cancel
 	e.done = make(chan struct{})
 	go e.batch(ctx, cfg, ids)
@@ -208,35 +213,77 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			e.failJob(id, fail("task", "internal_error"))
 		}
 	}()
+	failTask := func(err error) {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		e.failJob(id, err)
+	}
 	job, err := e.getJob(id)
+	if err == nil && len(job.Account) > 0 {
+		if err := e.importAndVerify(ctx, id); err != nil {
+			failTask(err)
+		}
+		return
+	}
 	if err != nil || job.AdobeProfile == nil {
-		e.failJob(id, fail("task", "adobe_profile_missing"))
+		failTask(fail("task", "adobe_profile_missing"))
 		return
 	}
 	cfg.Profile = job.AdobeProfile.fields()
+	cfg.BrowserProfileID = adobeBrowserProfileID(job)
+	if job.ParentJobID != "" {
+		cfg.RecoveryMode = adobeRegistrationRecoveryMode(job)
+		if job.AdobeRegistration != nil && job.AdobeRegistration.ProxyRecorded {
+			cfg.Proxy = job.AdobeRegistration.Proxy
+		}
+		if cfg.RecoveryMode == "resume_session" && job.ProxyBinding == nil && (job.AdobeRegistration == nil || !job.AdobeRegistration.ProxyRecorded) {
+			failTask(fail("task", "saved_environment_missing"))
+			return
+		}
+	}
 	release, err := e.ProxyRouting.acquire(ctx, id, "adobe", &cfg.Proxy, e.getJob, e.change)
 	if err != nil {
-		e.failJob(id, err)
+		failTask(err)
 		return
 	}
 	defer release()
+	if cfg.Proxy == "" {
+		cfg.Proxy = "direct"
+	}
+	if job.AdobeRegistration != nil && job.AdobeRegistration.ProxyRecorded && cfg.Proxy != job.AdobeRegistration.Proxy {
+		failTask(fail("proxy", "saved_registration_egress_changed"))
+		return
+	}
+	if err := e.change(id, func(j *RegistrationJob) {
+		ensureAdobeRegistrationState(j)
+		j.AdobeRegistration.Proxy, j.AdobeRegistration.ProxyRecorded = cfg.Proxy, true
+	}); err != nil {
+		failTask(err)
+		return
+	}
 	mail, flow, err := e.factory(cfg)
 	if err != nil {
-		e.failJob(id, err)
+		failTask(err)
 		return
 	}
 	defer mail.Close()
 	defer flow.Close()
-	box, err := e.acquire(ctx, id, mail)
+	box := job.Mailbox
+	if job.ParentJobID == "" {
+		box, err = e.acquire(ctx, id, mail)
+	} else {
+		err = prepareSavedAdobeMailbox(ctx, mailboxClaimJobID(job), box, mail)
+	}
 	if err != nil {
-		e.failJob(id, err)
+		failTask(err)
 		return
 	}
 	defer func() {
 		job, _ := e.getJob(id)
 		// Only pre-submission failures may release a reservation. Once the
 		// Worker flow begins, its outcome must be reviewed before reuse.
-		if len(job.Account) > 0 || job.Imported || (job.Stage != "mailbox" && job.Stage != "waiting_browser" && job.Stage != "starting_browser") {
+		if len(job.Account) > 0 || job.Imported || adobeRegistrationRecoveryMode(job) == "resume_session" {
 			return
 		}
 		if releaser, ok := mail.(interface {
@@ -258,16 +305,23 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		return "", fail("mail", "adobe_sender_filter_required")
 	}, func(stage string) error {
 		return e.change(id, func(j *RegistrationJob) {
+			ensureAdobeRegistrationState(j)
+			if adobeStageMayHaveSubmitted(stage) {
+				j.AdobeRegistration.FlowStarted = true
+			}
+			if stage == "adobe_creation_submitted" {
+				j.AdobeRegistration.SubmissionStarted = true
+			}
 			j.Status = "running"
 			j.Stage = stage
 			appendRegistrationLog(j, stage, adobeRegistrationStageText(stage), "info")
 		})
 	})
 	if err != nil {
-		e.failJob(id, err)
+		failTask(err)
 		return
 	}
-	account["platform"], account["registration_job_id"], account["enabled"] = "adobe", id, false
+	account["platform"], account["registration_job_id"], account["enabled"] = "adobe", mailboxClaimJobID(job), false
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "platform": "adobe", "source_id": box.SourceID, "source_type": box.SourceType, "source_mailbox_id": box.SourceMailboxID, "id": box.ID, "account_id": box.AccountID, "email": box.Email}
 	if err = e.change(id, func(j *RegistrationJob) {
 		UseDefaultAccountProxy(account)
@@ -275,7 +329,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		j.Status = "import_pending"
 		j.Stage = "import"
 	}); err != nil {
-		e.failJob(id, err)
+		failTask(err)
 		return
 	}
 	// Commit the upstream identity, not the registration task identifier.
@@ -283,12 +337,12 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		Commit(context.Context, string, Mailbox) error
 	}); ok {
 		if err = m.Commit(ctx, "adobe:"+stringValue(account["account_id"]), box); err != nil {
-			e.failJob(id, err)
+			failTask(err)
 			return
 		}
 	}
 	if err = e.importAndVerify(ctx, id); err != nil {
-		e.failJob(id, err)
+		failTask(err)
 	}
 }
 func (e *AdobeEngine) acquire(ctx context.Context, id string, mail MailSource) (Mailbox, error) {
@@ -370,7 +424,7 @@ func (e *AdobeEngine) importAndVerify(ctx context.Context, id string) error {
 		if e.importer == nil {
 			return fail("import", "account_writer_not_configured")
 		}
-		if err := e.importer(ctx, id, j.Account); err != nil {
+		if err := e.importer(ctx, mailboxClaimJobID(j), j.Account); err != nil {
 			return fail("import", "account_write_failed")
 		}
 		if err := e.change(id, func(j *RegistrationJob) { j.Imported = true; j.Status = "verification_pending"; j.Stage = "verify" }); err != nil {
@@ -380,7 +434,7 @@ func (e *AdobeEngine) importAndVerify(ctx context.Context, id string) error {
 	if e.verifier == nil {
 		return fail("verify", "account_verifier_not_configured")
 	}
-	if err := e.verifier(ctx, id, j.Account); err != nil {
+	if err := e.verifier(ctx, mailboxClaimJobID(j), j.Account); err != nil {
 		return fail("verify", "account_unverified")
 	}
 	return e.change(id, func(j *RegistrationJob) {
@@ -389,11 +443,13 @@ func (e *AdobeEngine) importAndVerify(ctx context.Context, id string) error {
 		j.Status = "completed"
 		j.Stage = "completed"
 		j.Error = ""
+		finishRegistrationCompensation(j, "completed")
 		appendRegistrationLog(j, "completed", "Adobe 账号已入库并通过校验", "success")
 	})
 }
 func (e *AdobeEngine) failJob(id string, err error) {
 	_ = e.change(id, func(j *RegistrationJob) {
+		e.ProxyRouting.recordFailure(j, err)
 		j.Error = safeFailure(err)
 		j.Status = "failed"
 		if j.Mailbox.Email != "" {
@@ -404,6 +460,12 @@ func (e *AdobeEngine) failJob(id string, err error) {
 			if j.Imported {
 				j.Status = "verification_pending"
 			}
+		}
+		if errors.Is(err, context.Canceled) && e.closing && !e.stopRequested {
+			j.Error = "process_restarted_compensation_delayed"
+			recoverAdobeRegistrationCompensation(j, time.Now())
+		} else {
+			planAdobeRegistrationCompensation(j, err, time.Now())
 		}
 		appendRegistrationLog(j, j.Stage, j.Error, "error")
 	})
@@ -430,6 +492,7 @@ func (e *AdobeEngine) RetrySavedResult(id string) error {
 		return fail("task", "no_saved_result")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	e.stopRequested = false
 	e.cancel = cancel
 	e.done = make(chan struct{})
 	e.mu.Unlock()
@@ -443,7 +506,28 @@ func (e *AdobeEngine) RetrySavedResult(id string) error {
 }
 func (e *AdobeEngine) Stop() {
 	e.mu.Lock()
+	e.stopRequested = true
 	cancel := e.cancel
+	before := e.jobs
+	e.jobs = append([]RegistrationJob(nil), e.jobs...)
+	changed := false
+	for i, job := range e.jobs {
+		if adobeNeedsCompensationPlan(job) || job.AutoRetry != nil && (job.AutoRetry.State == "waiting" || job.AutoRetry.State == "running" || job.AutoRetry.State == "manual_running") {
+			job = cloneJob(job)
+			if job.AutoRetry == nil {
+				job.AutoRetry = &RegistrationCompensation{}
+			}
+			finishRegistrationCompensation(&job, "manual")
+			job.AutoRetry.Reason = "cancelled"
+			appendRegistrationLog(&job, "compensation_stopped", "已停止自动补偿，保留邮箱、历史次数与原提交记录", "info")
+			e.jobs[i], changed = job, true
+		}
+	}
+	if changed && e.loadError == nil {
+		if err := e.saveLocked(); err != nil {
+			e.jobs, e.loadError = before, fail("storage", "journal_write_failed")
+		}
+	}
 	e.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -488,12 +572,19 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		if i < start || i >= end {
 			continue
 		}
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && e.cancel == nil, "can_retry_registration": false, "review_hint": adobeRegistrationReviewHint(j.Error)})
+		mode := adobeRegistrationRecoveryMode(j)
+		eligible := adobeCompensationPending(j) && e.cancel == nil && (j.AutoRetry == nil || j.AutoRetry.Reason != "duplicate_mailbox_retry")
+		state := adobeCompensationSummary(j, e.adobeMailboxAttemptsLocked(j.Mailbox.Email))
+		hint := adobeRegistrationReviewHint(j.Error)
+		if state != nil && (state.State == "waiting" || state.State == "running") {
+			hint = "当前不是在等待邮件验证码；系统将复用原邮箱、原浏览器资料与原出口自动恢复，保留原提交记录，不重复创建账号。"
+		}
+		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
 	}
 	if len(logs) > 200 {
 		logs = logs[len(logs)-200:]
 	}
-	result := map[string]any{"running": e.cancel != nil, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": e.active, "threads": e.active}}
+	result := map[string]any{"running": e.cancel != nil, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "compensation_error": e.compensationError, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": e.active, "threads": e.active}}
 	if e.loadError != nil {
 		result["error"] = safeFailure(e.loadError)
 	}
@@ -511,7 +602,7 @@ func (e *AdobeEngine) ClearFinished() (int, error) {
 	kept := []RegistrationJob{}
 	removed := 0
 	for _, j := range e.jobs {
-		if j.Status == "completed" {
+		if j.Status == "completed" && j.ParentJobID == "" && j.RetryJobID == "" && (j.AutoRetry == nil || j.AutoRetry.Attempts == 0) {
 			removed++
 		} else {
 			kept = append(kept, j)

@@ -289,7 +289,7 @@ test('bounded attempts stop stalled stages and cancellation prevents subsequent 
   assert.equal(interrupted.calls.length, 1);
 });
 
-test('full runner observes an automatic verification transition then continues OTP and export once', async () => {
+test('full runner observes an instruction with a cancelled request then continues OTP and export once', async () => {
   const f=fixture({phase:'awaiting_verification',submitted:true});
   const normalStatus=f.browser.status;
   let reads=0, now=0;
@@ -297,7 +297,8 @@ test('full runner observes an automatic verification transition then continues O
     const status=await normalStatus();
     if (++reads <= 3) {
       status.detected='needs_manual';
-      status.form.humanVerification={required:true,source:'visible_challenge_frame'};
+      status.form.humanVerification={required:true,source:'visible_instruction'};
+      status.networkDiagnosis={code:'verification_request_aborted'};
     }
     return status;
   };
@@ -322,8 +323,41 @@ test('full runner never clicks a persistent or explicit human challenge', async 
       verificationWait:{timeoutMs:300,pollIntervalMs:100,now:()=>now,pause:async ms=>{now+=ms;}},
     });
     assert.equal(result.code,'human_verification_required');
-    assert.equal(now,source==='visible_instruction'?0:300);
+    assert.equal(now,300);
     assert.deepEqual(f.calls,[]);
     assert.equal(f.state.submission.started,true);
+  }
+});
+
+test('cancellation during instruction observation stops before OTP entry, export, or a repeated Create',async()=>{
+  const f=fixture({phase:'awaiting_verification',submitted:true});let now=0,stop=false;
+  f.browser.status=async()=>({detected:'needs_manual',form:{humanVerification:{required:true,source:'visible_instruction'}}});
+  const result=await runAutomaticRegistration(f.browser,f.store,{shouldStop:()=>stop,
+    readInput:async()=>assert.fail('Cancellation must stop email-code actions'),
+    verificationWait:{now:()=>now,pause:async ms=>{now+=ms;stop=true;}}});
+  assert.equal(result.code,'automatic_interrupted');assert.equal(now,250);
+  assert.deepEqual(f.calls,[]);assert.equal(f.state.submission.started,true);
+});
+
+test('a safe unsubmitted retry continues current form progress without clearing prior submit markers',async()=>{
+  const f=fixture({phase:'awaiting_profile',patch:{stage:'needs_manual',code:'continuation_result_unknown',emailSubmitted:true,passwordSubmitted:true}});
+  const originalStatus=f.browser.status;
+  f.browser.status=async()=>{const current=await originalStatus();return {...current,form:{notices:[],buttons:[],agreements:[],...current.form}};};
+  f.store.setStage=async stage=>{f.state.stage=stage;f.state.code=null;};
+  const result=await runAutomaticRegistration(f.browser,f.store,{resumeBeforeSubmission:true,readInput:async()=>({profile})});
+  assert.equal(result.code,'account_agreement_required');
+  assert.deepEqual(f.calls,[['advance','awaiting_profile',{profile}]]);
+  assert.equal(f.state.emailSubmitted,true);assert.equal(f.state.passwordSubmitted,true);
+  assert.equal(f.state.submission.started,false);
+});
+
+test('an unsubmitted retry cannot clear a marker when the original email/password form still remains',async()=>{
+  for(const [phase,marker] of [['awaiting_email','emailSubmitted'],['awaiting_password','passwordSubmitted']]){
+    const f=fixture({phase,patch:{stage:'needs_manual',code:'continuation_result_unknown',[marker]:true}});
+    const originalStatus=f.browser.status;
+    f.browser.status=async()=>{const current=await originalStatus();return {...current,form:{notices:[],buttons:[],agreements:[],...current.form}};};
+    f.store.setStage=()=>assert.fail('Do not clear a pending stage');
+    assert.equal((await runAutomaticRegistration(f.browser,f.store,{resumeBeforeSubmission:true})).code,'continuation_result_unknown');
+    assert.deepEqual(f.calls,[]);assert.equal(f.state[marker],true);
   }
 });

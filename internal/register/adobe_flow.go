@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/mail"
@@ -47,6 +48,18 @@ func isAdobeSender(sender string) bool {
 		(parts[1] == "icloud.com" && adobeHMESender.MatchString(parts[0]))
 }
 func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox, cfg AdobeConfig, waitCode func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	action, mode, stage := "run", "registration", "adobe_flow_started"
+	switch cfg.RecoveryMode {
+	case "", "retry_registration":
+	case "resume_session":
+		if cfg.BrowserProfileID == "" {
+			return nil, fail("adobe", "recovery_profile_missing")
+		}
+		action, mode, stage = "resume", "resume", "adobe_recovery_started"
+	default:
+		return nil, fail("adobe", "recovery_mode_invalid")
+	}
+	profileID := firstNonEmpty(cfg.BrowserProfileID, id)
 	profile := cloneMap(cfg.Profile)
 	prefix := strings.Split(box.Email, "@")[0]
 	names := strings.FieldsFunc(prefix, func(r rune) bool { return r == '-' || r == '_' || r == '.' })
@@ -58,25 +71,45 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		profile["lastName"] = names[1]
 	}
 	var err error
-	f.lease, err = browserqueue.Acquire(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": id, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile}, progress)
+	f.lease, err = browserqueue.Acquire(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id}, progress)
 	if err != nil {
+		var startup *browserqueue.StartupError
+		if errors.As(err, &startup) {
+			return nil, fail("adobe", startup.Code)
+		}
 		return nil, fail("browser", "adobe_browser_unavailable")
 	}
 	before := time.Now().UTC()
-	if err := progress("adobe_flow_started"); err != nil {
+	if err := progress(stage); err != nil {
 		return nil, err
 	}
 	// The Node driver persists its own submission fence before clicking Create.
 	// Go retains ownership on any loss of contact from this point onwards.
-	result, err := f.command(ctx, cfg, "run", "")
+	result, err := f.command(ctx, cfg, action, "")
 	if err != nil {
 		return nil, err
 	}
 	if result.Stage != "completed" && (result.Code == "verification_required" || result.Stage == "awaiting_verification") {
+		if result.SubmissionStarted || result.Diagnostics.SubmissionStarted {
+			if err := progress("adobe_creation_submitted"); err != nil {
+				return nil, err
+			}
+		}
 		if err := progress("awaiting_verification"); err != nil {
 			return nil, err
 		}
-		code, err := waitCode(ctx, before)
+		after := before
+		if result.VerificationRequestedAt != "" {
+			requested, err := time.Parse(time.RFC3339Nano, result.VerificationRequestedAt)
+			now := time.Now().UTC()
+			if err != nil || requested.Before(now.Add(-15*time.Minute)) || requested.After(now.Add(5*time.Second)) {
+				return nil, fail("adobe", "recovery_verification_time_invalid")
+			}
+			// The Worker records its normal email/Resend action before clicking.
+			// A small clock margin includes the resulting message, not old codes.
+			after = requested.Add(-5 * time.Second)
+		}
+		code, err := waitCode(ctx, after)
 		if err != nil {
 			return nil, err
 		}
@@ -98,11 +131,12 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 }
 
 type adobeBrowserResult struct {
-	SubmissionStarted bool                         `json:"submission_started"`
-	Diagnostics       adobeRegistrationDiagnostics `json:"diagnostics"`
-	Stage             string                       `json:"stage"`
-	Code              string                       `json:"code"`
-	Account           map[string]any               `json:"account"`
+	VerificationRequestedAt string                       `json:"verification_requested_at"`
+	SubmissionStarted       bool                         `json:"submission_started"`
+	Diagnostics             adobeRegistrationDiagnostics `json:"diagnostics"`
+	Stage                   string                       `json:"stage"`
+	Code                    string                       `json:"code"`
+	Account                 map[string]any               `json:"account"`
 }
 
 func (f *AdobeBrowserFlow) command(ctx context.Context, cfg AdobeConfig, action, code string) (adobeBrowserResult, error) {

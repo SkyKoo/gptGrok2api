@@ -88,11 +88,36 @@ export class NetworkDiagnostics {
     this.contexts = new WeakSet();
     this.snapshotSources = new WeakMap();
     this.supersededCaptcha = new WeakSet();
+    this.documents = new WeakMap();
+    this.documentStarted = new WeakMap();
+    this.requestDocuments = new WeakMap();
+    this.pages = new WeakSet();
   }
+
+  attachPage(page) {
+    if (!page || this.pages.has(page) || typeof page.on !== 'function') return;
+    this.pages.add(page);
+    page.on('framenavigated', frame => {
+      if (frame !== page.mainFrame()) return;
+      this.documents.set(page, (this.documents.get(page) || 0) + 1);
+      this.documentStarted.set(page, this.now());
+    });
+  }
+
+  documentVersion(page) { return this.documents.get(page) || 0; }
 
   attach(context) {
     if (!context || this.contexts.has(context) || typeof context.on !== 'function') return;
     this.contexts.add(context);
+    for (const page of context.pages?.() || []) this.attachPage(page);
+    context.on('page', page => this.attachPage(page));
+    context.on('request', request => {
+      try {
+        const page = request.frame().page();
+        this.attachPage(page);
+        this.requestDocuments.set(request, this.documents.get(page) || 0);
+      } catch { /* Requests with no owning document cannot classify its current form. */ }
+    });
     const observe = request => {
       let page;
       try { page = request.frame().page(); } catch { return; }
@@ -118,7 +143,14 @@ export class NetworkDiagnostics {
     // 保留请求可能仍在进行中；不能用 response() 等待它完成，阻塞只读 status。
     if (!completed && !failure && !(request.timing()?.responseEnd >= 0)) return;
     this.seen.add(request);
-    const event = { ...metadata, ...requestTime(request, this.now) };
+    // This is the observation time, not the browser's exact cancellation time.
+    // Retained requests may have finished before the listener was attached.
+    const event = { ...metadata, ...requestTime(request, this.now),
+      observedAt: new Date(this.now()).toISOString(), source: completed ? 'event' : 'retained' };
+    // Capture ownership before asynchronous response inspection. A request
+    // cancelled by navigation still belongs to the document that started it.
+    const epoch = this.requestDocuments.has(request) ? this.requestDocuments.get(request)
+      : Date.parse(event.time) < (this.documentStarted.get(page) || 0) ? -1 : this.documents.get(page) || 0;
     if (failure) event.errorCode = safeFailure(failure);
     else {
       let timer;
@@ -142,7 +174,7 @@ export class NetworkDiagnostics {
       } catch { return; }
       finally { clearTimeout(timer); }
     }
-    this.events.push({ page, event });
+    this.events.push({ page, event, epoch });
     this.events = this.events.slice(-MAX_EVENTS);
   }
 
@@ -163,17 +195,21 @@ export class NetworkDiagnostics {
   }
 
   activeSnapshot(page) {
-    return this.snapshot(page).filter(event => !this.supersededCaptcha.has(this.snapshotSources.get(event)));
+    const current = new Set(this.events.filter(item => item.page === page && item.epoch === (this.documents.get(page) || 0)).map(item => item.event));
+    return this.snapshot(page).filter(event => current.has(this.snapshotSources.get(event)) && !this.supersededCaptcha.has(this.snapshotSources.get(event)));
   }
 
-  // OTP progress supersedes only the exact previously observed captcha events.
-  // Preserve raw history and all network failures. A later request, even with
-  // identical metadata/timestamps, remains independent and can still block.
+  // Progress retires exact observed events only. History, DNS/timeouts and a
+  // later request with identical metadata/timestamps remain independent.
   supersedeCaptchaEvidence(page, observed) {
+    return this.supersedeProgressEvidence(page, observed);
+  }
+
+  supersedeProgressEvidence(page, observed, { includeAborted = false } = {}) {
     const sources = new Set((observed || []).map(event => this.snapshotSources.get(event)));
     let count = 0;
     for (const {page:owner, event} of this.events) {
-      if (owner === page && sources.has(event) && event.errorCode === 'captcha_required') {
+      if (owner === page && sources.has(event) && (event.errorCode === 'captcha_required' || includeAborted && event.errorCode === 'ERR_ABORTED')) {
         this.supersededCaptcha.add(event);
         count++;
       }

@@ -43,25 +43,27 @@ test('DNS, timeout and explicit abort are distinct and retain only normalized me
     ['net::ERR_TIMED_OUT', 'verification_request_timeout', 20000],
     ['net::ERR_ABORTED', 'verification_request_aborted', 20000],
   ]) {
-    const diagnostics = new NetworkDiagnostics();
+    const diagnostics = new NetworkDiagnostics({now: () => start + 30_000});
     const page = {};
     await diagnostics.record(request({ error, elapsed }), page);
     const events = diagnostics.snapshot(page);
     assert.deepEqual(events, [{ method: 'POST', path: 'https://arks-client.adobe.com/fc/gt2/public_key/:key',
-      time: '2026-11-10T05:00:00.000Z', elapsedMs: elapsed, errorCode: error.replace('net::', '') }]);
+      time: '2026-11-10T05:00:00.000Z', elapsedMs: elapsed, errorCode: error.replace('net::', ''),
+      observedAt:'2026-11-10T05:00:30.000Z', source:'retained' }]);
     assert.deepEqual(verificationDiagnosis(events), { code });
     assert.doesNotMatch(JSON.stringify(events), /PRIVATE|token|public_key\/[A-Z]/);
   }
 });
 
 test('only an exact signup error code in its completed JSON response establishes captcha', async () => {
-  const diagnostics = new NetworkDiagnostics();
+  const diagnostics = new NetworkDiagnostics({now: () => start + 500});
   const page = {};
   await diagnostics.record(request({ url: accountURL, status: 400,
     body: { errorCode: 'captcha_required', email: 'PRIVATE_EMAIL', token: 'PRIVATE_TOKEN', message: 'PRIVATE_BODY' } }), page);
   const events = diagnostics.snapshot(page);
   assert.deepEqual(events, [{ method: 'POST', path: 'https://auth.services.adobe.com/signin/v2/accounts',
-    time: '2026-11-10T05:00:00.000Z', elapsedMs: 100, status: 400, errorCode: 'captcha_required' }]);
+    time: '2026-11-10T05:00:00.000Z', elapsedMs: 100, status: 400, errorCode: 'captcha_required',
+    observedAt:'2026-11-10T05:00:00.500Z', source:'retained' }]);
   assert.equal(hasCaptchaRequirement(events), true);
   assert.deepEqual(verificationDiagnosis(events), { code: 'captcha_required' });
   assert.doesNotMatch(JSON.stringify(events), /PRIVATE|email|token|message|body/);
@@ -158,4 +160,68 @@ test('superseding captcha uses exact observed events and preserves history, new 
   assert.equal(hasCaptchaRequirement(diagnostics.activeSnapshot(otherPage)),true);
   assert.equal(verificationDiagnosis(diagnostics.activeSnapshot(page)).code,'verification_dns_failed');
   assert.equal(diagnostics.supersedeCaptchaEvidence(page,observed.map(event=>({...event}))),0);
+});
+
+test('requests cancelled after a top-level navigation retain old-document ownership without blocking the current page', async () => {
+  let now=start;
+  const diagnostics=new NetworkDiagnostics({now:()=>now});
+  const pageEvents=new Map(),contextEvents=new Map();
+  const frame={};
+  const page={on:(name,handler)=>pageEvents.set(name,handler),mainFrame:()=>frame};
+  diagnostics.attach({pages:()=>[page],on:(name,handler)=>contextEvents.set(name,handler)});
+  const old=request({page,error:'net::ERR_ABORTED'});
+  contextEvents.get('request')(old);
+  now+=1000;
+  pageEvents.get('framenavigated')(frame);
+  await diagnostics.record(old,page,true);
+  assert.equal(verificationDiagnosis(diagnostics.activeSnapshot(page)).code,null);
+  assert.equal(diagnostics.snapshot(page)[0].errorCode,'ERR_ABORTED');
+  const current=request({page,error:'net::ERR_ABORTED',offset:1001});
+  contextEvents.get('request')(current);
+  await diagnostics.record(current,page,true);
+  assert.equal(verificationDiagnosis(diagnostics.activeSnapshot(page)).code,'verification_request_aborted');
+  pageEvents.get('framenavigated')({});
+  assert.equal(verificationDiagnosis(diagnostics.activeSnapshot(page)).code,'verification_request_aborted');
+});
+
+test('late retained old-document requests and delayed response parsing do not revive stale captcha', async () => {
+  let now=start;
+  const diagnostics=new NetworkDiagnostics({now:()=>now});
+  const events=new Map(),frame={};
+  const page={on:(name,handler)=>events.set(name,handler),mainFrame:()=>frame};
+  diagnostics.attachPage(page);
+  let release;
+  const pending=request({page,url:accountURL,status:400,bodyReader:()=>new Promise(resolve=>{release=resolve;})});
+  const operation=diagnostics.record(pending,page,true);
+  await Promise.resolve();
+  now+=1000;events.get('framenavigated')(frame);
+  release(Buffer.from('{"errorCode":"captcha_required"}'));
+  await operation;
+  await diagnostics.record(request({page,error:'net::ERR_ABORTED',offset:500}),page,true);
+  assert.equal(diagnostics.snapshot(page).length,2);
+  assert.equal(diagnostics.activeSnapshot(page).length,0);
+});
+
+test('event observation keeps its original timestamp when a retained capture later sees the same request', async () => {
+  let now = start + 1_000;
+  const diagnostics = new NetworkDiagnostics({now: () => now});
+  const listeners = new Map(), page = {};
+  diagnostics.attach({on: (name, listener) => listeners.set(name, listener)});
+  const aborted = request({page, error:'net::ERR_ABORTED'});
+  listeners.get('requestfailed')(aborted);
+  page.requests = async () => [aborted];
+  await diagnostics.capture(page);
+  now += 30_000;
+  await diagnostics.capture(page);
+  assert.equal(diagnostics.snapshot(page).length, 1);
+  assert.equal(diagnostics.snapshot(page)[0].source, 'event');
+  assert.equal(diagnostics.snapshot(page)[0].observedAt, '2026-11-10T05:00:01.000Z');
+});
+
+test('retained-only observation does not claim the browser failure happened at capture time', async () => {
+  const diagnostics = new NetworkDiagnostics({now: () => start + 60_000});
+  const page = {requests: async () => [request({error:'net::ERR_ABORTED', elapsed:20_000})]};
+  await diagnostics.capture(page);
+  assert.deepEqual(diagnostics.snapshot(page).map(({time, elapsedMs, observedAt, source}) => ({time, elapsedMs, observedAt, source})),
+    [{time:'2026-11-10T05:00:00.000Z',elapsedMs:20_000,observedAt:'2026-11-10T05:01:00.000Z',source:'retained'}]);
 });

@@ -41,6 +41,14 @@ func (s *Server) initAdobeRegistration() {
 	_ = s.adobeRegistrationSchedule.BindTarget("adobe")
 }
 func (s *Server) retryAdobeRegistration(w http.ResponseWriter, r *http.Request) {
+	s.retryAdobeRegistrationAction(w, r, true)
+}
+
+func (s *Server) retryAdobeRegistrationTask(w http.ResponseWriter, r *http.Request) {
+	s.retryAdobeRegistrationAction(w, r, false)
+}
+
+func (s *Server) retryAdobeRegistrationAction(w http.ResponseWriter, r *http.Request, savedResultOnly bool) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	if s.registrationClosing {
@@ -57,7 +65,14 @@ func (s *Server) retryAdobeRegistration(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.adobeRegister.RetrySavedResult(body.ID); err != nil {
+	config := s.registerStore.ConfigForTarget("adobe")
+	var err error
+	if savedResultOnly {
+		err = s.adobeRegister.RetrySavedResultWithConfig(config, body.ID)
+	} else {
+		err = s.adobeRegister.RetryRegistration(config, body.ID)
+	}
+	if err != nil {
 		registrationError(w, err)
 		return
 	}

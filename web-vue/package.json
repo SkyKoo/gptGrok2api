@@ -25,7 +25,8 @@
     "test:adobe-ui": "node scripts/adobe-ui-smoke.mjs",
     "test:adobe-relogin-ui": "node scripts/adobe-relogin-ui-smoke.mjs",
     "test:proxy-binding-ui": "node scripts/proxy-binding-ui-smoke.mjs",
-    "test:adobe-recovery-ui": "node scripts/adobe-recovery-ui-smoke.mjs"
+    "test:adobe-recovery-ui": "node scripts/adobe-recovery-ui-smoke.mjs",
+    "test:adobe-registration-ui": "node scripts/adobe-registration-ui-smoke.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",

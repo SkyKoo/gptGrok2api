@@ -3,20 +3,21 @@
     <p class="text-xs text-muted-foreground mb-3">{{ registrationCompensationHelp(target) }}</p>
     <p v-if="compensationError" class="text-xs text-amber-600 mb-3">自动补偿暂缓：请检查已保存的批次和邮箱来源配置。</p>
     <EmptyState v-if="!visibleJobs.length" plain title="暂无注册任务" description="启动注册后会在这里显示任务记录。" />
-    <div v-for="job in visibleJobs" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words">
-      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id, target) }}</p>
+    <div v-for="job in visibleJobs" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words" role="group" :aria-label="`注册任务 ${job.id}`">
+      <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id, target, job.recovery_mode) }}</p>
       <p v-if="job.parent_job_id" class="text-xs text-muted-foreground break-all">补偿任务 {{ job.id }} · 来源任务 {{ job.parent_job_id }}</p>
+      <p v-if="job.root_job_id && job.root_job_id !== job.id" class="text-xs text-muted-foreground break-all">首次任务 {{ job.root_job_id }}</p>
       <p v-if="job.retry_job_id" class="text-xs text-muted-foreground break-all">后续补偿任务 {{ job.retry_job_id }}</p>
-      <p class="text-xs text-muted-foreground">{{ stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
+      <p class="text-xs text-muted-foreground">{{ target === 'adobe' && job.stage === 'needs_manual' ? '自动流程已暂停' : stages[job.stage] || job.stage }} · 入库{{ job.imported ? '完成' : '未完成' }} · 校验{{ job.verified ? '通过' : '未通过' }}</p>
       <p v-if="job.twofa" class="text-xs" :class="job.twofa.status === 'completed' ? 'text-teal-600' : 'text-amber-600'" role="status">
         2FA · {{ twoFALabels[job.twofa.status] || job.twofa.status }} · {{ job.twofa.message }}
         <span v-if="job.twofa.pending">（待激活密钥已保留）</span>
         <span v-if="job.twofa.error"> · {{ job.twofa.error }}</span>
       </p>
       <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
-      <p v-if="target === 'adobe' && job.review_hint" class="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400" role="status">{{ job.review_hint }}</p>
-      <p v-if="registrationCompensationText(job.auto_retry, running, now, target)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target) }}</p>
-      <Button v-if="target !== 'adobe' && job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
+      <p v-if="target === 'adobe' && job.review_hint && !['waiting', 'running'].includes(job.auto_retry?.state || '')" class="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400" role="status">{{ job.review_hint }}</p>
+      <p v-if="registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode) }}</p>
+      <Button v-if="registrationRecoveryAction(job, target)" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">{{ registrationRecoveryAction(job, target) }}</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
     <div v-if="totalCount > pageSize" class="flex flex-wrap items-center justify-between gap-3 pt-4 text-sm">
@@ -36,7 +37,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationProxyFailureText } from '@/lib/registrationProxy'
-import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText } from '@/lib/registrationCompensation'
+import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText, registrationRecoveryAction } from '@/lib/registrationCompensation'
 const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' | 'adobe' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
@@ -75,7 +76,7 @@ watch(() => props.jobs, () => {
 })
 onBeforeUnmount(() => { loadSequence++; clearInterval(clock) })
 const twoFALabels: Record<string, string> = { running: '进行中', completed: '已开启', failed: '失败，需补充开启', interrupted: '已中断，需核对', cancelled: '已取消' }
-const stages: Record<string, string> = { needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
+const stages: Record<string, string> = { compensation_stopped: '已停止自动补偿', adobe_recovery_started: '恢复原会话并检查登录', needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 async function retry(id: string) {
   busy.value = true; error.value = ''
   try { if (props.target === 'adobe') await registerApi.retryAdobeResult(id); else if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
@@ -84,7 +85,7 @@ async function retry(id: string) {
 }
 async function retryRegistration(id: string) {
   busy.value = true; error.value = ''
-  try { if (props.target === 'grok') await registerApi.retryGrokRegistration(id); else await registerApi.retryFreeRegistration(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
+  try { if (props.target === 'adobe') await registerApi.retryAdobeRegistration(id); else if (props.target === 'grok') await registerApi.retryGrokRegistration(id); else await registerApi.retryFreeRegistration(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
   catch (e: any) { error.value = registrationProxyFailureText(e?.message || '补偿注册失败') }
   finally { busy.value = false }
 }

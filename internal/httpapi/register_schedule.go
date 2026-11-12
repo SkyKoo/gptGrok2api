@@ -135,4 +135,7 @@ func (s *Server) runRegistrationSchedule(now time.Time) {
 	// Existing per-engine compensation rules remain independent of the viewed tab.
 	_, _ = s.freeRegister.RunCompensation(s.registerStore.ConfigForTarget("openai"), now)
 	_, _ = s.grokRegister.RunCompensation(s.registerStore.ConfigForTarget("grok"), now)
+	if s.adobeRegister != nil {
+		_, _ = s.adobeRegister.RunCompensation(s.registerStore.ConfigForTarget("adobe"), now)
+	}
 }

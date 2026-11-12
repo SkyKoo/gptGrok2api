@@ -5,6 +5,36 @@ from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupErro
 from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe
 
 class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_resume_action_uses_the_same_claimed_profile_process(self):
+        from types import SimpleNamespace
+        handle = AdobeProcess(None)
+        handle.command = AsyncMock(return_value={"stage":"awaiting_verification", "submission_started":True,
+            "verification_requested_at":"2026-11-12T00:00:00Z"})
+        entry = SimpleNamespace(browser=handle, closing=False, state="active", touched=0)
+        with patch("adobe_flow.queue", SimpleNamespace(entries={"a"*32:entry})):
+            result = await adobe_command(AdobeCommandRequest(browser_lease="a"*32, action="resume"))
+        handle.command.assert_awaited_once_with({"action":"resume", "code":""})
+        self.assertTrue(result["submission_started"])
+        self.assertEqual(result["verification_requested_at"], "2026-11-12T00:00:00Z")
+
+    async def test_fixed_rpc_error_preserves_authoritative_submission_marker(self):
+        import json
+        for marker in (True, False, "PRIVATE"):
+            class Process:
+                returncode = None
+                def __init__(self):
+                    self.stdin = self
+                    self.stdout = self
+                def write(self, raw): self.request = json.loads(raw)
+                async def drain(self): pass
+                async def readline(self):
+                    return json.dumps({"id":self.request["id"], "ok":False,
+                        "code":"recovery_login_result_unknown", "submission_started":marker}).encode()+b"\n"
+            result = await AdobeProcess(Process()).command({"action":"resume"})
+            self.assertEqual(result["code"], "recovery_login_result_unknown")
+            if isinstance(marker, bool): self.assertIs(result["submission_started"], marker)
+            else: self.assertNotIn("submission_started", result)
+
     async def test_init_failure_preserves_safe_code_and_closes_before_raising(self):
         for code in BrowserStartupError.CODES:
             handle = AsyncMock()
@@ -116,4 +146,34 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(commands,['run','close'])
                 self.assertEqual((await client.get('/health')).json()['service'],'cfm-browser-worker')
                 await client.delete('/v1/browser/reservations/'+g)
+        await q.shutdown()
+
+    async def test_resume_reservation_requires_recovery_identity_and_preserves_original_profile_options(self):
+        import httpx
+        import server
+        import adobe_flow
+        q = BrowserQueue(close_timeout=.1)
+        handle = AsyncMock(spec=AdobeProcess)
+        launcher = AsyncMock(return_value=handle)
+        profile = {"firstName":"Fixture", "lastName":"Person", "country":"US"}
+        base = {"id":"r"*32, "provider":"adobe", "profile_id":"original-profile",
+            "email":"fixture@example.test", "adobe_mode":"resume", "adobe_profile":profile,
+            "proxy":"socks5://fixture:password@127.0.0.1:1080"}
+        with patch.object(server, "queue", q), patch.object(adobe_flow, "queue", q), \
+             patch.object(server, "_auth_token", "secret"), patch.object(server, "launch_adobe", launcher):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url="http://worker",
+                headers={"Authorization":"Bearer secret"}) as client:
+                for changes in ({}, {"adobe_recovery_id":"../escape"}, {"adobe_recovery_id":"x"*81},
+                    {"adobe_recovery_id":"child", "profile_id":"../escape"}):
+                    response = await client.post("/v1/browser/reservations", json={**base, **changes})
+                    self.assertEqual(response.status_code,422)
+                launcher.assert_not_awaited()
+                response = await client.post("/v1/browser/reservations", json={**base, "adobe_recovery_id":"child-1"})
+                self.assertEqual(response.status_code,200)
+                for _ in range(50):
+                    if q.status(base["id"])["status"] == "ready": break
+                    await asyncio.sleep(.01)
+                launcher.assert_awaited_once_with(profile_id="original-profile", email="fixture@example.test",
+                    profile=profile, proxy=base["proxy"], mode="resume", recovery_id="child-1", account_id="", password="")
+                await client.delete("/v1/browser/reservations/"+base["id"])
         await q.shutdown()

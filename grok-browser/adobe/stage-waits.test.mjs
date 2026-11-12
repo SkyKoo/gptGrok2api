@@ -7,6 +7,7 @@ import { runInNewContext } from 'node:vm';
 import { BrowserRegistration, formBlockingCode, waitForFormStage } from './browser.mjs';
 import { PrivateRunStore } from './core.mjs';
 import { NetworkDiagnostics } from './network-diagnostics.mjs';
+import { runAutomaticRegistration } from './auto-runner.mjs';
 
 const form = patch => ({ fields: [], headings: [], notices: [], buttons: [], agreements: [], ...patch });
 const emailForm = () => form({ fields: [{ tag: 'input', type: 'email', name: 'email', id: 'email', label: 'Email', autocomplete: 'email' }] });
@@ -346,15 +347,44 @@ test('an upstream captcha response can settle into an account landing page durin
   assert.equal(reads,3);
 });
 
-test('explicit puzzle instructions stop immediately while persistent frames have a bounded observation window', async () => {
+test('instructions, frames and upstream evidence share the same bounded read-only observation window', async () => {
   for (const source of ['visible_challenge_frame','upstream_captcha_response','visible_instruction']) {
     const timing=clock();
     const result=await waitForFormStage(async()=>form({humanVerification:{required:true,source}}),
       {...timing,verificationGraceMs:400,accept:()=>true});
     assert.equal(result.code,'human_verification_required');
     assert.equal(result.stage,'needs_manual');
-    assert.equal(timing.elapsed(),source === 'visible_instruction' ? 0 : 400);
+    assert.equal(timing.elapsed(),400);
   }
+});
+
+test('a transient visible instruction proceeds to OTP without touching verification controls',async()=>{
+  const timing=clock();let reads=0;
+  const result=await waitForFormStage(async()=>++reads<=3
+    ?form({humanVerification:{required:true,source:'visible_instruction'}}):verificationForm(),
+    {...timing,fromStage:'awaiting_profile'});
+  assert.equal(result.stage,'awaiting_verification');assert.equal(result.code,null);
+  assert.equal(reads,4);assert.equal(timing.elapsed(),300);
+});
+
+test('default verification window stops at fifteen seconds even when frame evidence changes to an instruction',async()=>{
+  const timing=clock();
+  const result=await waitForFormStage(async()=>form({humanVerification:{required:true,
+    source:timing.elapsed()<5000?'visible_challenge_frame':'visible_instruction'}}),{...timing,timeoutMs:30000,accept:()=>true});
+  assert.equal(result.code,'human_verification_required');assert.equal(timing.elapsed(),15000);
+});
+
+test('a completed creation-stage observation is not followed by a second runner wait or another Create',async t=>{
+  const {store,browser}=await fixture(t);const timing=clock();let clicks=0;
+  browser.stageWaitOptions={...timing,timeoutMs:30000};
+  await store.setStage('awaiting_approval');
+  browser.authFrame=async()=>({getByRole:()=>({count:async()=>1,isEnabled:async()=>true,click:async()=>{clicks++;}})});
+  browser.form=async()=>form({humanVerification:{required:true,source:'visible_instruction'}});
+  await browser.approveCreate();assert.equal(timing.elapsed(),15000);
+  browser.status=async()=>{const state=await store.load();return {stage:state.stage,code:state.code,detected:'needs_manual',form:await browser.form()};};
+  const result=await runAutomaticRegistration(browser,store,{approveCreate:true,verificationWait:{...timing,timeoutMs:15000}});
+  assert.equal(result.code,'human_verification_required');assert.equal(timing.elapsed(),15000);
+  assert.equal(clicks,1);assert.equal((await store.load()).submission.started,true);
 });
 
 test('bounded challenge observation retains the original creation fence and never clicks again', async t => {
@@ -450,9 +480,9 @@ test('real form/status never retire a new captcha merely because the old OTP fie
   assert.equal(status.networkDiagnosis.code,'captcha_required');
 });
 
-test('real form/status preserve DNS, timeout and aborted errors while superseding only captcha evidence', async () => {
+test('real form/status preserve DNS and timeout failures despite OTP progress', async () => {
   for (const [error,code] of [['net::ERR_NAME_NOT_RESOLVED','verification_dns_failed'],
-    ['net::ERR_TIMED_OUT','verification_request_timeout'],['net::ERR_ABORTED','verification_request_aborted']]) {
+    ['net::ERR_TIMED_OUT','verification_request_timeout']]) {
     const f=observedBrowserFixture();
     f.addRequest();
     f.addRequest(error);
@@ -466,6 +496,28 @@ test('real form/status preserve DNS, timeout and aborted errors while supersedin
     assert.equal(status.networkDiagnosis.code,code);
     assert.equal(status.network.length,2);
   }
+});
+
+test('first OTP progress retires an old aborted request but a later abort still blocks',async()=>{
+  const f=observedBrowserFixture();
+  f.addRequest();f.addRequest('net::ERR_ABORTED');
+  let status=await f.browser.status();
+  assert.equal(status.detected,'awaiting_verification');
+  assert.equal(status.networkDiagnosis.code,null);
+  assert.equal(status.network.length,2);
+  f.addRequest('net::ERR_ABORTED');
+  status=await f.browser.status();
+  assert.equal(status.networkDiagnosis.code,'verification_request_aborted');
+  assert.equal(status.network.length,3);
+});
+
+test('a real visible challenge is not hidden by an aborted request or an OTP field',async()=>{
+  const f=observedBrowserFixture();
+  f.addRequest('net::ERR_ABORTED');f.setChallenge(true);
+  const status=await f.browser.status();
+  assert.equal(status.code,'human_verification_required');
+  assert.equal(status.form.humanVerification.required,true);
+  assert.equal(status.networkDiagnosis.code,'verification_request_aborted');
 });
 
 test('real form/status retain visible challenges even when an OTP field or previous superseded captcha exists', async () => {

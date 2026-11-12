@@ -16,6 +16,28 @@ async function fixture() {
 }
 const codeIs = (code) => (error) => error instanceof RegistrationError && error.code === code;
 
+test('recovery requires an existing journal and never creates a replacement profile', async t => {
+  const { root } = await fixture();
+  const missing = new PrivateRunStore(root, 'missing');
+  await assert.rejects(missing.init({email:'fixture@example.test'}, {requireExisting:true}), codeIs('state_missing'));
+  await assert.rejects(lstat(root), {code:'ENOENT'});
+  const original = new PrivateRunStore(root, 'one');
+  await original.init({email:'fixture@example.test',config:{password:'saved-secret'}});
+  await original.markSubmissionStarted();
+  const started = (await original.load()).submission.startedAt;
+  await original.close();
+  const resumed = new PrivateRunStore(root, 'one');
+  t.after(() => resumed.close());
+  const state = await resumed.init({email:'fixture@example.test',config:{password:'replacement'}}, {requireExisting:true});
+  assert.equal(state.submission.started,true);
+  assert.equal(state.submission.startedAt,started);
+  assert.equal(state.config.password,'saved-secret');
+  await assert.rejects(resumed.markSubmissionStarted(),codeIs('submission_already_started'));
+  const absent = new PrivateRunStore(root,'absent');
+  await assert.rejects(absent.init({}, {requireExisting:true}),codeIs('state_missing'));
+  await assert.rejects(lstat(absent.runDir),{code:'ENOENT'});
+});
+
 test('private export publishes mode 0600 and reuses identical bytes without replacing the inode', async (t) => {
   const { root } = await fixture(t);
   await mkdir(root, { mode: 0o700 });

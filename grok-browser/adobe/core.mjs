@@ -252,14 +252,20 @@ export class PrivateRunStore {
       await unlink(this.lockPath);
     } finally { await handle.close(); }
   }
-  init(initial = {}) {
+  init(initial = {}, { requireExisting = false } = {}) {
     return this.#serial(async () => {
       if (this.#ready || this.#lock) fail('store_already_open');
       if (!isRecord(initial)) fail('invalid_state');
       validateJSON(initial);
       // The caller creates its parent directory; do not recursively traverse untrusted paths.
-      await privateDirectory(this.root, true);
-      const newRun = await privateDirectory(this.runDir, true);
+      let newRun;
+      try {
+        await privateDirectory(this.root, !requireExisting);
+        newRun = await privateDirectory(this.runDir, !requireExisting);
+      } catch (error) {
+        if (requireExisting && error.code === 'ENOENT') fail('state_missing');
+        throw error;
+      }
       try {
         this.#lock = await open(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       } catch (error) {
@@ -273,7 +279,7 @@ export class PrivateRunStore {
         try { state = await this.#read(); }
         catch (error) {
           if (error.code !== 'ENOENT') throw error;
-          if (!newRun) fail('state_missing');
+          if (requireExisting || !newRun) fail('state_missing');
           const now = new Date().toISOString();
           state = {
             schemaVersion: 1, runId: this.runId, email: initial.email ?? '', config: initial.config ?? {},

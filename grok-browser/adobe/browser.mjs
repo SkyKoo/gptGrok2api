@@ -98,11 +98,11 @@ export async function waitForFormStage(readForm, {
     try {
       const form = await readForm();
       const code = formBlockingCode(form);
-      // A visible provider frame can briefly perform its own check before the
-      // next form appears. Observe that transition without touching challenge
-      // controls or replaying the submit; explicit manual instructions stop now.
+      // A verification frame or instruction can briefly appear while Adobe
+      // advances its own checks. Observe the same bounded window for both,
+      // without touching challenge controls or replaying the submit.
       const transientVerification = code === 'human_verification_required' &&
-        ['visible_challenge_frame', 'upstream_captcha_response'].includes(form.humanVerification?.source);
+        ['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(form.humanVerification?.source);
       if (code && !transientVerification) return { form, stage: 'needs_manual', code };
       if (transientVerification) {
         verificationDeadline ??= Math.min(deadline, now() + verificationGraceMs);
@@ -130,15 +130,16 @@ export class BrowserRegistration {
     this.context = null;
     this.page = null;
     this.network = [];
-    this.otpProgressPages = new WeakSet();
+    this.otpProgressPages = new WeakMap();
   }
 
   async waitForStage(options = {}) {
     return waitForFormStage(() => this.form(), { ...this.stageWaitOptions, ...options });
   }
 
-  async open() {
+  async open({ resumeOnly = false } = {}) {
     const state = await this.store.load();
+    if (resumeOnly) this.focusPageOnly = true;
     const profileDir = path.join(this.store.runDir, 'browser');
     await mkdir(profileDir, { mode: 0o700, recursive: true });
     await chmod(profileDir, 0o700);
@@ -146,7 +147,7 @@ export class BrowserRegistration {
     this.networkDiagnostics ??= new NetworkDiagnostics();
     this.networkDiagnostics.attach(this.context);
     this.page = this.context.pages()[0] || await this.context.newPage();
-    if (state.emailSubmitted || state.passwordSubmitted || state.submission.started) {
+    if (resumeOnly || state.emailSubmitted || state.passwordSubmitted || state.submission.started) {
       const restored = this.context.pages().filter(p => isTrustedAdobeURL(p.url()));
       if (restored.length) {
         this.page = restored.at(-1);
@@ -154,7 +155,7 @@ export class BrowserRegistration {
       }
     }
     await this.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
-    if (state.submission.started) return this.status();
+    if (resumeOnly || state.submission.started) return this.status();
     const createLink = this.page.getByRole('link', { name: /^(Create an account|创建[帐账]户)$/i });
     try {
       try { await createLink.waitFor({state:'visible',timeout:20000}); }
@@ -232,10 +233,12 @@ export class BrowserRegistration {
     const hasOTP = fields.some(field => field.type !== 'hidden' && /one-time-code/i.test(field.autocomplete));
     let upstreamCaptchaSuperseded = false;
     const visibleChallenge = ['visible_challenge_frame', 'visible_instruction'].includes(humanVerification.source);
-    if (hasOTP && !visibleChallenge && !this.otpProgressPages.has(this.page)) {
-      this.otpProgressPages.add(this.page);
+    const documentVersion = this.networkDiagnostics?.documentVersion(this.page) || 0;
+    if (hasOTP && !visibleChallenge && this.otpProgressPages.get(this.page) !== documentVersion) {
+      this.otpProgressPages.set(this.page, documentVersion);
+      const superseded = this.networkDiagnostics?.supersedeProgressEvidence(this.page, verificationEvidence, { includeAborted: true }) > 0;
       if (humanVerification.source === 'upstream_captcha_response') {
-        upstreamCaptchaSuperseded = this.networkDiagnostics?.supersedeCaptchaEvidence(this.page, verificationEvidence) > 0;
+        upstreamCaptchaSuperseded = superseded;
         if (upstreamCaptchaSuperseded) humanVerification = {required:false};
       }
     }
@@ -313,8 +316,9 @@ export class BrowserRegistration {
     const screenshot = this.workerMode ? undefined : path.join(this.store.runDir, 'current.png');
     if (!this.workerMode) await this.page.screenshot({ path: screenshot, timeout: 10000 }).then(() => chmod(screenshot, 0o600)).catch(() => {});
     const pages = this.context.pages().map(page => {const u = new URL(page.url() || 'about:blank'); return {host:u.hostname,path:u.pathname};});
+    const visibleChallenge = ['visible_challenge_frame', 'visible_instruction'].includes(form.humanVerification?.source);
     return { stage: humanVerificationRequired || networkDiagnosis.code ? 'needs_manual' : state.stage,
-      code: networkDiagnosis.code || (humanVerificationRequired ? 'human_verification_required' : state.code),
+      code: visibleChallenge ? 'human_verification_required' : networkDiagnosis.code || (humanVerificationRequired ? 'human_verification_required' : state.code),
       recordedStage: state.stage, detected, submissionStarted: state.submission.started,
       form, pages, network:this.network, networkDiagnosis, screenshot };
   }
@@ -566,15 +570,21 @@ export class BrowserRegistration {
     }
   }
 
-  async verify(input = {}) {
+  async verify(input = {}, { recoveryId } = {}) {
     const state = await this.store.load();
+    const attempt = recoveryId ? state.recoveryAttempts?.[recoveryId] : null;
+    if (recoveryId && (!state.submission.started || !attempt?.verificationRequestedAt)) throw new RegistrationError('verification_not_ready');
+    const alreadySubmitted = recoveryId ? attempt.verificationSubmitted : state.verificationSubmitted;
+    const markSubmitted = () => this.store.save(recoveryId
+      ? { recoveryAttempts: { ...state.recoveryAttempts, [recoveryId]: { ...attempt, verificationSubmitted: true } }, stage: 'verification' }
+      : { verificationSubmitted: true, stage: 'verification' });
     let actionStarted = false;
     try {
       let applyVerification;
       if (input.verificationURL) {
         if (!isTrustedAdobeURL(input.verificationURL)) throw new RegistrationError('untrusted_verification_link');
-        if (state.verificationSubmitted) throw new RegistrationError('verification_already_submitted');
-        await this.store.save({ verificationSubmitted: true, stage: 'verification' });
+        if (alreadySubmitted) throw new RegistrationError('verification_already_submitted');
+        await markSubmitted();
         actionStarted = true;
         applyVerification = () => this.page.goto(input.verificationURL, { waitUntil: 'domcontentloaded', timeout: 45000 });
       } else {
@@ -582,11 +592,11 @@ export class BrowserRegistration {
         const frame = await this.authFrame();
         const form = await this.form();
         if (classifyForm(form) !== 'awaiting_verification') throw new RegistrationError('verification_not_ready');
-        if (state.verificationSubmitted) throw new RegistrationError('verification_already_submitted');
+        if (alreadySubmitted) throw new RegistrationError('verification_already_submitted');
         const descriptor = form.fields.find(f => /one-time-code/i.test(f.autocomplete) || /verification.code|验证码/i.test(f.label));
         if (!descriptor) throw new RegistrationError('verification_field_unrecognized');
         // 输入六位码可能即触发校验，先保存单次提交标记。
-        await this.store.save({ verificationSubmitted: true, stage: 'verification' });
+        await markSubmitted();
         actionStarted = true;
         applyVerification = async () => (await this.field(frame, descriptor)).fill(String(input.code));
       }

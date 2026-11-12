@@ -17,6 +17,8 @@ type AdobeConfig struct {
 	MailboxSourceID                                    string
 	HME                                                HMEConfig
 	Profile                                            map[string]any
+	// Recovery is derived from the encrypted task journal, never user settings.
+	BrowserProfileID, RecoveryMode string
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {

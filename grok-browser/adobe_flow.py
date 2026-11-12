@@ -11,7 +11,7 @@ from browser_sessions import queue, BrowserQueueError, BrowserStartupError
 
 class AdobeCommandRequest(BaseModel):
     browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
-    action: str = Field(default="run", pattern=r"^(run|verify|refresh)$")
+    action: str = Field(default="run", pattern=r"^(run|verify|refresh|resume)$")
     code: str = Field(default="", max_length=6, pattern=r"^(|[0-9]{6})$")
 
 class AdobeProcess:
@@ -34,7 +34,9 @@ class AdobeProcess:
                 if response.get("id") != identifier:
                     raise RuntimeError("adobe_response_mismatch")
                 if not response.get("ok"):
-                    return {"stage":"needs_manual", "code":response.get("code", "adobe_browser_failed"), **({"diagnostics":response["diagnostics"]} if "diagnostics" in response else {})}
+                    return {"stage":"needs_manual", "code":response.get("code", "adobe_browser_failed"),
+                        **({"submission_started":response["submission_started"]} if isinstance(response.get("submission_started"), bool) else {}),
+                        **({"diagnostics":response["diagnostics"]} if "diagnostics" in response else {})}
                 return response["result"]
             except BaseException:
                 # Never send another business command after a lost response.

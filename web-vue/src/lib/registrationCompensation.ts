@@ -6,17 +6,55 @@ export type RegistrationCompensation = {
   last_attempt_at?: string
   reason?: string
 }
+export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'saved_result'
+type RegistrationRecoveryActions = {
+  can_retry?: boolean
+  can_retry_registration?: boolean
+  can_resume_registration?: boolean
+  recovery_mode?: RegistrationRecoveryMode
+}
+
+// Capability flags come from the server. A recovery mode is descriptive, never
+// permission to retry an unknown submission or replace an already saved result.
+export function registrationRecoveryAction(job: RegistrationRecoveryActions, target?: string): string {
+  if (target !== 'adobe') return job.can_retry_registration ? '复用此邮箱重试注册' : ''
+  if (job.can_retry || job.recovery_mode === 'saved_result') return ''
+  if (job.can_resume_registration) return '恢复注册'
+  return job.can_retry_registration ? '补偿注册' : ''
+}
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 注册提交后结果未知时保留邮箱和任务，不自动重复注册；已保存凭据可继续入库或校验。'
+  if (target === 'adobe') return 'Adobe 可恢复的临时失败最多自动补偿 3 次，沿用原邮箱和登录环境。创建结果未知时只恢复原会话，不再次创建账号；已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'
 }
 
-export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string): string {
+export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string, recoveryMode?: RegistrationRecoveryMode): string {
   if (!state) return ''
   const attempts = `${state.attempts}/${state.max_attempts}`
+  if (target === 'adobe') {
+    if (recoveryMode === 'saved_result') return ''
+    const resume = recoveryMode === 'resume_session'
+    const action = resume ? '恢复原注册会话' : '补偿注册'
+    const boundary = resume ? '仅继续原会话和结果检查，不再次创建账号。' : '沿用原邮箱和登录环境。'
+    if (state.state === 'running') return `正在自动${action} · 第 ${attempts} 次 · ${boundary}`
+    if (state.state === 'exhausted') return `自动补偿次数已达上限（${attempts}）。${boundary}可用操作以任务按钮为准。`
+    if (state.state === 'waiting') {
+      const due = Date.parse(state.next_attempt_at || '')
+      if (!Number.isFinite(due)) return `等待自动${action} · 已尝试 ${attempts} · 下次时间待确认。${boundary}`
+      const seconds = Math.ceil((due - now) / 1000)
+      const remaining = seconds >= 60 ? `约 ${Math.ceil(seconds / 60)} 分钟后` : `${seconds} 秒后`
+      const next = due <= now ? (running ? '等待当前注册任务结束' : '等待后台执行') : `${remaining}执行（${new Date(due).toLocaleString()}），有注册任务时顺延`
+      return `等待自动${action} · 已尝试 ${attempts} · ${next}。${boundary}`
+    }
+    if (state.state === 'manual') {
+      if (state.reason === 'human_verification_required') return 'Adobe 安全验证尚未完成，自动处理已暂停；请核查验证组件和网络，恢复仍须通过 Adobe 校验。'
+      if (state.reason === 'registration_result_uncertain') return '创建结果尚未确认，保留原邮箱和会话；恢复仅检查原会话与账号结果，不会再次创建账号。'
+      if (state.reason === 'cancelled') return '自动补偿已停止，原任务记录保留；可用操作以任务按钮为准。'
+      if (state.reason === 'failure_requires_review') return '当前错误不支持自动补偿，原任务记录保留；请查看具体失败原因和可用操作。'
+    }
+  }
   const scope = target === 'grok' ? '同邮箱累计 · ' : ''
   const retained = target === 'grok' ? '失败预留已释放，重试前重新取得。' : '邮箱仍保留。'
   if (state.state === 'running') return `${scope}正在自动补偿注册 · 第 ${attempts} 次 · 复用原邮箱和登录环境`
@@ -47,8 +85,17 @@ export function registrationCompensationText(state: RegistrationCompensation | n
   return `${scope}自动补偿已尝试 ${attempts} · ${remaining}重试（${new Date(due).toLocaleString()}），有注册任务时顺延。`
 }
 
-export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null, retryJobId?: string, target?: string): string {
+export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null, retryJobId?: string, target?: string, recoveryMode?: RegistrationRecoveryMode): string {
   if (retryJobId) return '已创建补偿任务，原记录已保留'
+  if (status === 'registration_pending' && target === 'adobe') {
+    const action = recoveryMode === 'resume_session' ? '恢复原会话' : '补偿'
+    if (state?.state === 'waiting') return `注册尚未完成，等待自动${action}`
+    if (state?.state === 'running') return `正在自动${action}`
+    if (state?.state === 'exhausted') return '注册尚未完成，自动补偿次数已用完'
+    if (state?.reason === 'human_verification_required') return '注册尚未完成，需通过安全验证'
+    if (recoveryMode === 'resume_session') return '创建结果尚未确认，原会话保留'
+    return '注册尚未完成'
+  }
   if (status === 'registration_pending' && target === 'grok') {
     if (state?.reason === 'duplicate_mailbox_retry') return '同邮箱补偿已合并，原记录保留'
     if (state?.state === 'waiting') return '注册未成功，等待自动补偿'

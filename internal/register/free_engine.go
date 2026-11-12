@@ -28,14 +28,15 @@ type RegistrationJob struct {
 	Mailbox      Mailbox               `json:"mailbox"`
 	// BrowserProfile is private task state. Snapshot deliberately omits it,
 	// while compensation retries use it to keep the protocol environment stable.
-	AdobeProfile   *adobeRegistrationProfile `json:"adobe_profile,omitempty"` // encrypted Adobe journal only
-	BrowserProfile *BrowserProfile           `json:"browser_profile,omitempty"`
-	MailboxAPIBase string                    `json:"mailbox_api_base,omitempty"`
-	AutoRetry      *RegistrationCompensation `json:"auto_retry,omitempty"`
-	Imported       bool                      `json:"imported"`
-	Verified       bool                      `json:"verified"`
-	Account        map[string]any            `json:"account,omitempty"` // private recovery journal only
-	TwoFA          *RegistrationTwoFAState   `json:"twofa,omitempty"`
+	AdobeProfile      *adobeRegistrationProfile `json:"adobe_profile,omitempty"`      // encrypted Adobe journal only
+	AdobeRegistration *AdobeRegistrationState   `json:"adobe_registration,omitempty"` // encrypted Adobe journal only
+	BrowserProfile    *BrowserProfile           `json:"browser_profile,omitempty"`
+	MailboxAPIBase    string                    `json:"mailbox_api_base,omitempty"`
+	AutoRetry         *RegistrationCompensation `json:"auto_retry,omitempty"`
+	Imported          bool                      `json:"imported"`
+	Verified          bool                      `json:"verified"`
+	Account           map[string]any            `json:"account,omitempty"` // private recovery journal only
+	TwoFA             *RegistrationTwoFAState   `json:"twofa,omitempty"`
 	// CodexOAuth is a credential-free progress record for the optional Codex
 	// OAuth step that can be run after Web Free registration completes.
 	CodexOAuth *CodexOAuthTask `json:"codex_oauth,omitempty"`

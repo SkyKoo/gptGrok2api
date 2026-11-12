@@ -27,6 +27,7 @@ class BrowserStartupError(RuntimeError):
         "browser_launch_profile_locked", "browser_launch_process_exited",
         "browser_launch_profile_unavailable", "browser_launch_license_denied",
         "browser_launch_failed",
+        "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage",
     })
 
     def __init__(self, code):

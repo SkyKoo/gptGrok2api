@@ -1,4 +1,5 @@
 import { RegistrationError } from './core.mjs';
+import { formBlockingCode } from './browser.mjs';
 
 const ADVANCE_STAGES = new Set(['awaiting_email', 'awaiting_password', 'awaiting_profile']);
 const APPROVAL_STAGES = new Set(['awaiting_password', 'awaiting_profile', 'awaiting_approval']);
@@ -22,7 +23,7 @@ function needsPhone(form) {
 
 // Status can catch an automatic check between form transitions. Waiting only
 // re-observes the existing browser; no challenge control or submit is invoked.
-async function observeAutomaticVerification(browser, initial, shouldStop, {
+export async function observeAutomaticVerification(browser, initial, shouldStop, {
   timeoutMs = 15_000, pollIntervalMs = 250, now = Date.now, pause = wait,
 } = {}) {
   let status = initial;
@@ -31,8 +32,10 @@ async function observeAutomaticVerification(browser, initial, shouldStop, {
     const human = status.form?.humanVerification;
     const network = status.networkDiagnosis?.code;
     const transient = human?.required === true &&
-      ['visible_challenge_frame', 'upstream_captcha_response'].includes(human.source);
-    if (!transient || (network && network !== 'captcha_required')) return status;
+      ['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(human.source);
+    // Cancellation alone does not establish a failed verification. Give the
+    // current page this one observation window to show OTP/session progress.
+    if (!transient || (network && !['captcha_required', 'verification_request_aborted'].includes(network))) return status;
     const remaining = deadline - now();
     if (remaining <= 0) return status;
     await pause(Math.min(pollIntervalMs, remaining));
@@ -45,7 +48,7 @@ async function observeAutomaticVerification(browser, initial, shouldStop, {
 /** 有界推进正常注册阶段；动作由浏览器驱动落盘，未知提交不能在循环中重放。 */
 export async function runAutomaticRegistration(browser, store, {
   readInput = async () => ({}), approveCreate = false, onEvent = () => {},
-  shouldStop = () => false, maxSteps = 8, verificationWait = {},
+  shouldStop = () => false, maxSteps = 8, verificationWait = {}, resumeBeforeSubmission = false,
 } = {}) {
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 12) {
     throw new RegistrationError('automatic_step_limit_invalid');
@@ -81,9 +84,21 @@ export async function runAutomaticRegistration(browser, store, {
       if (state.stage === 'completed' || state.stage === 'credentials_saved') {
         return complete(await perform('export', () => browser.exportSession()));
       }
+      if (['visible_challenge_frame', 'visible_instruction'].includes(status.form?.humanVerification?.source) &&
+          status.form.humanVerification.required === true) return paused('human_verification_required');
       if (status.networkDiagnosis?.code) return paused(status.networkDiagnosis.code);
       if (status.form?.humanVerification?.required === true) return paused('human_verification_required');
       if (needsPhone(status.form)) return paused('phone_verification_required');
+      // A new attempt may continue a provably unsubmitted form that advanced
+      // beyond a previous navigation failure. Never reset durable form-submit
+      // markers, nor repeat an email/password stage that is still displayed.
+      if (resumeBeforeSubmission && !state.submission.started && state.stage === 'needs_manual' &&
+          ADVANCE_STAGES.has(status.detected) && !formBlockingCode(status.form) &&
+          !(status.detected === 'awaiting_email' && state.emailSubmitted) &&
+          !(status.detected === 'awaiting_password' && state.passwordSubmitted)) {
+        await store.setStage('form_ready');
+        state.stage = 'form_ready'; state.code = null; status.code = null;
+      }
       if (BLOCKING_CODES.has(state.code) || BLOCKING_CODES.has(status.code)) {
         return paused(BLOCKING_CODES.has(status.code) ? status.code : state.code);
       }

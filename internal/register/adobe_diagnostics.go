@@ -51,11 +51,13 @@ func adobeRegistrationStageText(stage string) string {
 	case "adobe_verification_request_timeout":
 		return "人工验证组件请求超时"
 	case "adobe_verification_request_aborted":
-		return "人工验证组件请求被取消，需人工核查"
+		return "验证组件请求被取消，保留当前提交记录等待恢复"
 	case "adobe_creation_submitted":
-		return "创建账户请求已提交，尚未确认注册结果，不会重发"
+		return "已发起创建账户操作，尚未确认注册结果；恢复时不会再次创建"
 	case "adobe_registration_needs_review":
-		return "自动注册已停止；邮箱和原任务保留，需要人工核对 Adobe 账号状态"
+		return "本次浏览器流程已结束，邮箱与原提交记录保留，按任务状态安排恢复"
+	case "adobe_recovery_started":
+		return "正在恢复原浏览器会话并核对注册结果"
 	default:
 		return stage
 	}
@@ -66,7 +68,7 @@ func adobeRegistrationReviewHint(failure string) string {
 	code := strings.TrimPrefix(failure, "adobe: ")
 	switch code {
 	case "human_verification_required", "captcha_required", "verification_dns_failed", "verification_request_timeout", "verification_request_aborted":
-		return "Adobe 自动校验未完成，本次注册已停止并保留邮箱与原提交记录。浏览器已结束，不是在等待邮件验证码；系统不会重复创建账号。请查看日志区分验证组件加载失败与持续的交互验证要求。"
+		return "Adobe 验证尚未完成，邮箱与原提交记录已保留。当前浏览器已结束，不是在等待邮件验证码；恢复会复用原会话，通过正常登录和接码核对结果。持续的人机验证仍需通过 Adobe 验证，系统不会重复创建账号。"
 	default:
 		return ""
 	}

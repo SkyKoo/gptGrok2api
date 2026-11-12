@@ -22,8 +22,24 @@ type Lease struct {
 	client        *http.Client
 }
 type status struct {
-	Status string `json:"status"`
-	Code   string `json:"code"`
+	Status         string `json:"status"`
+	Code           string `json:"code"`
+	DiagnosticCode string `json:"diagnostic_code"`
+}
+
+// StartupError preserves only allowlisted diagnostics. The generic Error text
+// keeps existing callers' retry classifications unchanged.
+type StartupError struct{ Code string }
+
+func (*StartupError) Error() string { return "browser_start_failed" }
+
+func startupFailure(code string) error {
+	switch code {
+	case "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage":
+		return &StartupError{Code: code}
+	default:
+		return errors.New("browser_start_failed")
+	}
 }
 
 // Acquire prepares the browser before any registration or device-code action.
@@ -76,7 +92,7 @@ func Acquire(ctx context.Context, client *http.Client, base, key string, options
 			return lease, nil
 		}
 		if stage != "waiting_browser" && stage != "starting_browser" {
-			return nil, errors.New("browser_start_failed")
+			return nil, startupFailure(current.DiagnosticCode)
 		}
 		if progress != nil && previous != stage {
 			if err := progress(stage); err != nil {

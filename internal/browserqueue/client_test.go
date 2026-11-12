@@ -3,6 +3,7 @@ package browserqueue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,33 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAcquirePreservesOnlyFixedStartupDiagnostics(t *testing.T) {
+	for _, code := range []string{"state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "PRIVATE-RAW-ERROR"} {
+		t.Run(code, func(t *testing.T) {
+			var closes atomic.Int32
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					closes.Add(1)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"status": "failed", "code": "browser_start_failed", "diagnostic_code": code})
+			}))
+			defer s.Close()
+			_, err := Acquire(context.Background(), s.Client(), s.URL, "", nil, nil)
+			var startup *StartupError
+			if err == nil || err.Error() != "browser_start_failed" || closes.Load() != 1 {
+				t.Fatal("startup error changed generic contract or leaked reservation")
+			}
+			if code == "PRIVATE-RAW-ERROR" {
+				if errors.As(err, &startup) {
+					t.Fatal("raw diagnostic exposed")
+				}
+			} else if !errors.As(err, &startup) || startup.Code != code {
+				t.Fatal("fixed diagnostic lost")
+			}
+		})
+	}
+}
 
 func TestAcquireWaitsBeforeReadyAndReleasesOnCancellation(t *testing.T) {
 	for _, cancelled := range []bool{false, true} {
