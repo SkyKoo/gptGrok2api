@@ -78,6 +78,54 @@ test('captured rejection evidence is not combined with unrelated later form fiel
   assert.equal(success.form_error,undefined);assert.equal(success.failure_action,undefined);
 });
 
+test('regional profile errors preserve specific safe fields and fixed reasons without raw form data', () => {
+  const fields = ['email', 'password', 'verification_code', 'profile', 'first_name', 'last_name',
+    'birth_day', 'birth_month', 'birth_year', 'country', 'terms', 'phone', 'other'];
+  const result = registrationDiagnostics({code:'form_rejected', failureDiagnostics:{
+    form_error:'invalid_field', invalid_fields:fields,
+    invalid_field_reasons:[
+      {field:'birth_day',reason:'required',label:'PRIVATE',id:'PRIVATE',value:'PRIVATE'},
+      {field:'terms',reason:'unchecked',message:'PRIVATE'},
+      {field:'email',reason:'format'}, {field:'birth_year',reason:'range'}, {field:'other',reason:'invalid'},
+      {field:'PRIVATE',reason:'required'}, {field:'country',reason:'PRIVATE'},
+      {field:'birth_day',reason:'range'}, null, 'PRIVATE', ['PRIVATE'],
+    ],
+  }}, null);
+  assert.deepEqual(result.invalid_fields, fields);
+  assert.deepEqual(result.invalid_field_reasons, [
+    {field:'birth_day',reason:'required'}, {field:'terms',reason:'unchecked'},
+    {field:'email',reason:'format'}, {field:'birth_year',reason:'range'}, {field:'other',reason:'invalid'},
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|label|message|value/);
+});
+
+test('field reasons require the same rejection evidence and cannot classify an unrelated field', () => {
+  const result = registrationDiagnostics({code:'form_rejected', failureDiagnostics:{
+    form_error:'invalid_field', invalid_fields:['birth_day'],
+    invalid_field_reasons:[{field:'email',reason:'required'}],
+  }, form:{fields:[{type:'email',invalid:true}],notices:[]}}, null);
+  assert.deepEqual(result.invalid_fields, ['birth_day']);
+  assert.equal(result.invalid_field_reasons, undefined);
+  const empty = registrationDiagnostics({code:'form_rejected', failureDiagnostics:{
+    invalid_field_reasons:[{field:'birth_day',reason:'required'}], failure_action:'wait_login_result',
+  }}, null);
+  assert.equal(empty.invalid_fields, undefined);
+  assert.equal(empty.invalid_field_reasons, undefined);
+  const success = registrationDiagnostics({stage:'completed',failureDiagnostics:{
+    invalid_fields:['birth_day'],invalid_field_reasons:[{field:'birth_day',reason:'required'}],
+  }}, null);
+  assert.equal(success.invalid_field_reasons, undefined);
+});
+
+test('field diagnostics bound input before filtering and retain no more than one reason per category', () => {
+  const result = registrationDiagnostics({code:'form_rejected', failureDiagnostics:{
+    invalid_fields:[...Array(20).fill('birth_day'),'country'],
+    invalid_field_reasons:[...Array(20).fill({field:'country',reason:'required'}),{field:'birth_day',reason:'required'}],
+  }}, null);
+  assert.deepEqual(result.invalid_fields, ['birth_day']);
+  assert.equal(result.invalid_field_reasons, undefined);
+});
+
 test('startup diagnostics retain exact fixed actions and bounded zero-inclusive step timing', () => {
   for (const action of ['starting_browser', 'adobe_loading_account_page', 'adobe_waiting_create_entry',
     'adobe_reloading_account_page', 'adobe_opening_registration', 'adobe_waiting_registration_form', 'adobe_checking_registration_form']) {

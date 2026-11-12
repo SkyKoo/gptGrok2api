@@ -90,6 +90,7 @@ async function startupFixture(t, failureStage, { blockedFont = false } = {}) {
     if (stage === failureStage) throw failure;
   };
   const entry = {
+    count: async () => 1,
     waitFor: async options => {
       entryWaits++;
       if (blockedFont && entryWaits === 1) { clock += 20_000; throw failure; }
@@ -104,7 +105,9 @@ async function startupFixture(t, failureStage, { blockedFont = false } = {}) {
     evaluate: async () => blockedFont,
     route: async () => {},
     reload: async options => action('adobe_reloading_account_page', options, 29),
-    locator: () => ({ waitFor: async options => action('adobe_waiting_registration_form', options, 19) }),
+    locator: selector => selector === '[data-id="EmailPage-CreateAccountLink"]:visible'
+      ? { or: other => { assert.equal(other, entry); return entry; } }
+      : { waitFor: async options => action('adobe_waiting_registration_form', options, 19) },
   };
   const context = { pages: () => [page], on: () => {}, off: () => {}, close: async () => {} };
   const startupProgress = new StartupProgress({ emit: frame => frames.push(frame), now: () => clock });

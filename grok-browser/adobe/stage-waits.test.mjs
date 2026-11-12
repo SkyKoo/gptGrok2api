@@ -81,7 +81,7 @@ test('rejection diagnostics classify explicit visible errors without treating no
     {type:'email', invalid:true}, {type:'password', invalid:true},
     {autocomplete:'one-time-code',invalid:true}, {name:'birthYear',invalid:true},
     {name:'SECRET',invalid:true}, {type:'email',invalid:true},
-  ]})), {form_error:'invalid_field',invalid_fields:['email','password','verification_code','profile','other']});
+  ]})), {form_error:'invalid_field',invalid_fields:['email','password','verification_code','birth_year','other']});
 });
 
 async function fixture(t) {
@@ -214,14 +214,24 @@ test('profile completion waits for the create button to become enabled and stops
     .map(name => ({ tag: 'input', type: 'text', id: name, name, label: name, autocomplete: '' }));
   let reads = 0;
   let fills = 0;
-  browser.form = async () => form({ fields, buttons: [{ text: 'Create account', disabled: ++reads < 3 }] });
+  let readyReads = 0;
+  const values = {};
+  browser.form = async () => {
+    reads++;
+    if (fills === 5) readyReads++;
+    return form({ fields, buttons: [{ text: 'Create account', disabled: readyReads < 3 }] });
+  };
   browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0, click: async () => assert.fail('Creation requires separate approval') }) });
-  browser.field = async () => ({ fill: async () => { fills++; } });
+  browser.field = async (_frame, descriptor) => ({
+    fill: async value => { fills++; values[descriptor.name] = value; },
+    inputValue: async () => values[descriptor.name] || '',
+  });
   const result = await browser.advance({ profile: {
     firstName: 'Fixture', lastName: 'Test', birthMonth: 5, birthYear: 1985, country: 'United States',
   } });
   assert.equal(fills, 5);
-  assert.equal(reads, 3);
+  assert.equal(readyReads, 3);
+  assert.ok(reads > readyReads, 'Country transition is observed before filling other controls');
   assert.deepEqual(result, { stage: 'awaiting_approval', code: 'account_agreement_required' });
   assert.equal((await store.load()).submission.started, false);
 });
@@ -234,7 +244,7 @@ test('profile keeps the generated day and fills it only when the form requests i
     const filled = {};
     browser.form = async () => form({fields, buttons:[{text:'Create account', disabled:false}]});
     browser.authFrame = async () => ({getByRole:()=>({count:async()=>0})});
-    browser.field = async (_frame, descriptor) => ({fill:async value => { filled[descriptor.name] = value; }});
+    browser.field = async (_frame, descriptor) => ({fill:async value => { filled[descriptor.name] = value; }, inputValue:async()=>filled[descriptor.name] || ''});
     const profile = {firstName:'Fixture',lastName:'Test',birthYear:1984,birthMonth:2,birthDay:29,country:'US'};
     await browser.advance({profile});
     assert.equal(filled.birthMonth, '2');
@@ -242,6 +252,136 @@ test('profile keeps the generated day and fills it only when the form requests i
     assert.deepEqual((await store.load()).config.profile, profile);
     assert.equal((await store.load()).submission.started, false);
   }
+});
+
+test('country changes asynchronously replace profile fields and add a day before a single fill pass', async t => {
+  const { store, browser } = await fixture(t);
+  const timing = clock();
+  browser.stageWaitOptions = timing;
+  const values = { country: 'US' };
+  const writes = [];
+  let changedAt;
+  browser.form = async () => {
+    const regional = changedAt !== undefined && timing.elapsed() - changedAt >= 200;
+    const names = ['firstName', 'lastName', 'month', 'year', 'country', ...(regional ? ['day'] : [])];
+    return form({ fields: names.map(name => ({
+      tag: 'input', type: 'text', id: `${name}-${regional ? 'kr' : 'us'}`, name, label: name,
+      required: true, filled: !!values[name], invalid: regional && name !== 'country' && !values[name],
+      validity: { valueMissing: !values[name] },
+    })), buttons: [{ text: 'Create account', disabled: false }] });
+  };
+  browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0, click: async () => assert.fail('No creation') }) });
+  browser.field = async (_frame, descriptor) => ({
+    fill: async value => {
+      if (descriptor.name === 'country') changedAt = timing.elapsed();
+      else assert.ok(descriptor.id.endsWith('-kr'), 'Never fill controls captured before country changed');
+      writes.push({ name: descriptor.name, value });
+      values[descriptor.name] = value;
+    },
+    inputValue: async () => values[descriptor.name] || '',
+  });
+  const result = await browser.advance({ profile: { firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, birthDay: 29, country: 'KR' } });
+  assert.equal(result.stage, 'awaiting_approval');
+  assert.deepEqual(writes.map(row => row.name), ['country', 'firstName', 'lastName', 'month', 'year', 'day']);
+  assert.equal(values.day, '29');
+  assert.ok(timing.elapsed() >= 450);
+  assert.equal((await store.load()).submission.started, false);
+});
+
+test('country changes wait past a country-only form or disabled core controls before filling once', async t => {
+  for (const transition of ['country-only', 'disabled']) {
+    await t.test(transition, async t => {
+      const { store, browser } = await fixture(t);
+      const timing = clock();
+      browser.stageWaitOptions = timing;
+      const values = { country: 'US' };
+      const writes = [];
+      let changing = false;
+      browser.form = async () => {
+        const pending = changing && timing.elapsed() < 600;
+        const names = pending && transition === 'country-only' ? ['country']
+          : ['country', 'firstName', 'lastName', 'birthMonth', 'birthYear'];
+        return form({ fields: names.map(name => ({
+          tag: 'input', type: 'text', id: name, name, label: name,
+          disabled: pending && transition === 'disabled' && name !== 'country',
+          required: true, filled: !!values[name],
+        })), buttons: [{ text: 'Create account', disabled: false }] });
+      };
+      browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0, click: async () => assert.fail('No creation') }) });
+      browser.field = async (_frame, descriptor) => ({
+        fill: async value => {
+          if (descriptor.name === 'country') changing = true;
+          else {
+            assert.ok(timing.elapsed() >= 850, 'Wait for complete enabled controls and their stability window');
+            assert.notEqual(descriptor.disabled, true);
+          }
+          writes.push(descriptor.name);
+          values[descriptor.name] = value;
+        },
+        inputValue: async () => values[descriptor.name] || '',
+      });
+      const result = await browser.advance({ profile: {
+        firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, country: 'KR',
+      } });
+      assert.equal(result.stage, 'awaiting_approval');
+      assert.deepEqual(writes, ['country', 'firstName', 'lastName', 'birthMonth', 'birthYear']);
+      assert.equal(timing.elapsed(), 900);
+      assert.equal((await store.load()).submission.started, false);
+    });
+  }
+});
+
+test('a required control appearing after the country stability window stops before creation', async t => {
+  const { store, browser } = await fixture(t);
+  const values = {};
+  let fills = 0;
+  const names = ['firstName', 'lastName', 'birthMonth', 'birthYear', 'country'];
+  browser.form = async () => form({ fields: [
+    ...names.map(name => ({ tag: 'input', type: 'text', id: name, name, label: name, required: true, filled: !!values[name] })),
+    ...(fills === 5 ? [{ tag: 'input', type: 'text', id: 'new-required', name: 'new-required', label: 'Required detail', required: true, filled: false, validity: { valueMissing: true } }] : []),
+  ], buttons: [{ text: 'Create account', disabled: false }] });
+  browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0, click: async () => assert.fail('No creation') }) });
+  browser.field = async (_frame, descriptor) => ({ fill: async value => { fills++; values[descriptor.name] = value; }, inputValue: async () => values[descriptor.name] || '' });
+  browser.status = async () => { throw Error('Execution context was destroyed after the rejection snapshot'); };
+  const result = await browser.advance({ profile: { firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, birthDay: 29, country: 'KR' } });
+  assert.equal(result.code, 'form_rejected');
+  assert.equal(result.form.fields.find(field => field.id === 'new-required').invalid, true);
+  assert.equal(fills, 5, 'Unknown controls are not filled by guessing');
+  assert.equal((await store.load()).submission.started, false);
+});
+
+test('a required unchecked agreement is reported without accepting it implicitly', async t => {
+  const { store, browser } = await fixture(t);
+  const values = {};
+  const names = ['firstName', 'lastName', 'birthMonth', 'birthYear', 'country'];
+  browser.form = async () => form({ fields: [
+    ...names.map(name => ({ tag: 'input', type: 'text', id: name, name, label: name, required: true, filled: !!values[name] })),
+    { tag: 'input', type: 'checkbox', id: 'required-consent', name: 'required-consent', label: 'Terms agreement', required: true, filled: true, checked: false },
+    { tag: 'input', type: 'checkbox', id: 'optional', name: 'optional', label: 'Optional offers', required: false, filled: true, checked: false },
+  ], buttons: [{ text: 'Create account', disabled: false }] });
+  browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0, click: async () => assert.fail('No creation') }) });
+  browser.field = async (_frame, descriptor) => ({ fill: async value => { assert.notEqual(descriptor.type, 'checkbox'); values[descriptor.name] = value; }, inputValue: async () => values[descriptor.name] || '' });
+  const result = await browser.advance({ profile: { firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, country: 'KR' } });
+  assert.equal(result.code, 'form_rejected');
+  assert.equal(result.form.fields.find(field => field.id === 'required-consent').invalid, true);
+  assert.notEqual(result.form.fields.find(field => field.id === 'optional').invalid, true);
+  assert.equal((await store.load()).submission.started, false);
+});
+
+test('profile readiness rejects a country that changed while the other fields were filled', async t => {
+  const { store, browser } = await fixture(t);
+  const values = {};
+  const names = ['firstName', 'lastName', 'birthMonth', 'birthYear', 'country'];
+  browser.form = async () => form({ fields: names.map(name => ({ tag: 'input', type: 'text', id: name, name, label: name, filled: !!values[name] })), buttons: [{ text: 'Create account', disabled: false }] });
+  browser.authFrame = async () => ({ getByRole: () => ({ count: async () => 0 }) });
+  browser.field = async (_frame, descriptor) => ({
+    fill: async value => { values[descriptor.name] = value; if (descriptor.name === 'birthYear') values.country = 'US'; },
+    inputValue: async () => values[descriptor.name] || '',
+  });
+  const result = await browser.advance({ profile: { firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, country: 'KR' } });
+  assert.equal(result.code, 'form_rejected');
+  assert.equal(result.form.fields.find(field => field.name === 'country').invalid, true);
+  assert.equal((await store.load()).submission.started, false);
 });
 
 test('OTP auto submission waits for the resulting page and never adds a second Verify click', async t => {
@@ -431,7 +571,7 @@ test('a completed creation-stage observation is not followed by a second runner 
   browser.stageWaitOptions={...timing,timeoutMs:30000};
   await store.setStage('awaiting_approval');
   browser.authFrame=async()=>({getByRole:()=>({count:async()=>1,isEnabled:async()=>true,click:async()=>{clicks++;}})});
-  browser.form=async()=>form({humanVerification:{required:true,source:'visible_instruction'}});
+  browser.form=async()=>clicks ? form({humanVerification:{required:true,source:'visible_instruction'}}) : profileForm();
   await browser.approveCreate();assert.equal(timing.elapsed(),15000);
   browser.status=async()=>{const state=await store.load();return {stage:state.stage,code:state.code,detected:'needs_manual',form:await browser.form()};};
   const result=await runAutomaticRegistration(browser,store,{approveCreate:true,verificationWait:{...timing,timeoutMs:15000}});

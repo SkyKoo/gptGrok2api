@@ -396,3 +396,50 @@ test('an unsubmitted retry cannot clear a marker when the original email/passwor
     assert.deepEqual(f.calls,[]);assert.equal(f.state[marker],true);
   }
 });
+
+test('terminal action snapshots return immediately for every automatic action', async t => {
+  for (const [name, phase, submitted, method, patch] of [
+    ['profile', 'awaiting_profile', false, 'advance', {}],
+    ['create', 'awaiting_profile', false, 'approveCreate', { stage: 'awaiting_approval' }],
+    ['verify', 'awaiting_verification', true, 'verify', {}],
+    ['open_firefly', 'account', true, 'advance', {}],
+  ]) await t.test(name, async () => {
+    const f = fixture({ phase, submitted, patch });
+    let reads = 0;
+    const status = f.browser.status;
+    f.browser.status = async () => {
+      assert.equal(++reads, 1, 'A terminal action snapshot must not be overwritten by a fresh observation');
+      return status();
+    };
+    const snapshot = { code: 'form_rejected', stage: 'needs_manual', submissionStarted: submitted,
+      form: { fields: [{ name: 'country', invalid: true }] },
+      failureDiagnostics: { form_error: 'invalid_field', invalid_fields: ['country'] } };
+    f.browser[method] = async () => snapshot;
+    const events = [];
+    const result = await runAutomaticRegistration(f.browser, f.store, {
+      approveCreate: true, resumeBeforeSubmission: true,
+      readInput: async () => ({ profile, code: '123456' }), onEvent: value => events.push(value),
+    });
+    assert.deepEqual(result, { ...snapshot, automatic: { paused: true, steps: 1 } });
+    assert.deepEqual(events, [snapshot]);
+    assert.equal(reads, 1);
+  });
+});
+
+test('cancellation after an action retains its actual submission snapshot', async () => {
+  const f = fixture({ phase: 'awaiting_profile', patch: { stage: 'awaiting_approval' } });
+  let stop = false;
+  f.browser.approveCreate = async () => {
+    stop = true;
+    return { stage: 'needs_manual', code: 'form_rejected', submissionStarted: true,
+      failureDiagnostics: { form_error: 'invalid_field', invalid_fields: ['country'] } };
+  };
+  const result = await runAutomaticRegistration(f.browser, f.store, {
+    approveCreate: true, shouldStop: () => stop,
+    onEvent: () => assert.fail('Cancellation suppresses further event callbacks'),
+  });
+  assert.equal(result.code, 'automatic_interrupted');
+  assert.equal(result.submissionStarted, true);
+  assert.deepEqual(result.failureDiagnostics, { form_error: 'invalid_field', invalid_fields: ['country'] });
+  assert.deepEqual(result.automatic, { paused: true, steps: 1 });
+});

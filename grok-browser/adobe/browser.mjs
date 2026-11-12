@@ -9,9 +9,10 @@ import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from
 import { CreationTracker } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
 import { verificationObservation } from './verification-observation.mjs';
+import { KOREA_REQUIRED_GROUP, KOREA_REQUIRED_CONSENTS, regionalConsentPlan, regionalConsentPreflight } from './regional-consent.mjs';
+import { registrationButtonAction, registrationLinkAction, isRegistrationButton,
+  locateRegistrationButton, locateCreateAccountLink, isSignupPasswordForm } from './form-actions.mjs';
 
-const CONTINUE = /^(Continue|Next|继续|下一步)$/i;
-const CREATE = /^(Create account|Create an account|Agree and create account|创建帐户|创建账户|同意并创建帐户|同意并创建账户)$/i;
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /** Adobe 用按钮覆盖原生 select；操作关联的可见列表，再回读实际表单值。 */
@@ -26,7 +27,7 @@ export async function selectProfileOption(frame, field, option) {
     return null;
   });
   if (buttonId === null) {
-    await field.selectOption(option.value);
+    await field.selectOption({value:option.value});
   } else {
     if (!buttonId) throw new RegistrationError('profile_dropdown_unrecognized');
     const button = frame.locator(`[id=${JSON.stringify(buttonId)}]`);
@@ -59,6 +60,57 @@ export async function selectProfileOption(frame, field, option) {
   }
 }
 
+/** 国家切换可能重建资料控件；稳定窗只等待结构，不代替提交前的必填检查。 */
+async function waitForProfileControls(readForm, {
+  timeoutMs = 5000, pollIntervalMs = 100, now = Date.now, pause = wait,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  const coreFields = [/country|region|国家|地区/i, /first.?name|名字|名$/i,
+    /last.?name|姓氏|^姓$/i, /month|月份|^月$/i, /year|年份|^年$/i];
+  let previous;
+  let stableSince;
+  while (true) {
+    const form = await readForm();
+    const code = formBlockingCode(form);
+    // 新地区可能立即把尚待填写的资料标红；先填已知字段，最终统一校验。
+    if (code && code !== 'form_rejected') return { form, code };
+    // 国家控件可先于姓名和生日重新出现；缺项或禁用期间不能开始稳定计时。
+    const profileVisible = classifyForm(form) === 'awaiting_profile' && coreFields.every(pattern =>
+      form.fields.some(field => field.disabled !== true && pattern.test(`${field.name} ${field.id} ${field.label}`)));
+    const shape = profileVisible ? JSON.stringify(form.fields.map(field => [
+      field.tag, field.type, field.name, field.id, field.label, field.required, field.disabled,
+    ])) : null;
+    if (shape !== null && shape === previous) {
+      if (now() - stableSince >= 250) return { form, code: null };
+    } else {
+      previous = shape;
+      stableSince = now();
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) throw new RegistrationError('profile_controls_not_ready');
+    await pause(Math.min(pollIntervalMs, remaining));
+  }
+}
+
+function profileFieldMissing(field, fields) {
+  if (field.disabled === true || field.required !== true) return false;
+  if (field.type === 'checkbox') return field.checked !== true;
+  // 同组另一项被选中时，required radio 自身未勾选仍可合法。
+  if (field.type === 'radio') return field.validity?.valueMissing === true ||
+    !(field.name ? fields.some(other => other.type === 'radio' && other.name === field.name && other.checked === true) : field.checked === true);
+  return field.validity?.valueMissing === true || field.filled === false;
+}
+
+function profileFormPreflight(form, { country, deferRegionalConsents = false } = {}) {
+  form = regionalConsentPreflight(form, country, deferRegionalConsents);
+  return { ...form, fields: form.fields.map(field => {
+    const nativeInvalid = field.disabled !== true && ['valueMissing','typeMismatch','patternMismatch',
+      'rangeUnderflow','rangeOverflow','tooShort','tooLong','badInput','stepMismatch']
+      .some(key => field.validity?.[key] === true);
+    return profileFieldMissing(field, form.fields) || nativeInvalid ? { ...field, invalid: true } : field;
+  }) };
+}
+
 export function classifyForm(form) {
   const text = `${form.headings.join(' ')} ${form.notices.join(' ')}`;
   if (form.humanVerification?.required === true) return 'needs_manual';
@@ -69,7 +121,7 @@ export function classifyForm(form) {
   if (form.fields.some(f => /first.?name|last.?name|birth|country|region|名字|姓氏|出生|国家|地区|月份|年份/i.test(`${f.name} ${f.id} ${f.label}`))) return 'awaiting_profile';
   if (form.fields.some(f => f.type === 'password')) return 'awaiting_password';
   if (form.fields.some(f => f.type === 'email' || /email|电子邮件|邮箱/i.test(`${f.name} ${f.label}`))) return 'awaiting_email';
-  if (form.buttons.some(b => CREATE.test(b.text))) return 'awaiting_approval';
+  if (form.buttons.some(b => isRegistrationButton(b, 'create'))) return 'awaiting_approval';
   return 'needs_manual';
 }
 
@@ -91,14 +143,33 @@ export function formBlockingCode(form) {
 export function formFailureDiagnostics(form) {
   const fields = Array.isArray(form?.fields) ? form.fields.slice(0, 100) : [];
   const invalid = new Set();
+  const reasons = new Map();
   for (const field of fields) {
     if (!field || field.invalid !== true) continue;
     const identity = `${field.name || ''} ${field.id || ''} ${field.label || ''} ${field.autocomplete || ''}`;
-    if (/one-time-code|verification.?code|验证码/i.test(identity)) invalid.add('verification_code');
-    else if (field.type === 'password') invalid.add('password');
-    else if (field.type === 'email' || /email|username|电子邮件|邮箱/i.test(identity)) invalid.add('email');
-    else if (/first.?name|last.?name|birth|country|region|名字|姓氏|出生|国家|地区|月份|年份/i.test(identity)) invalid.add('profile');
-    else invalid.add('other');
+    let category = 'other';
+    if (/one-time-code|verification.?code|验证码/i.test(identity)) category = 'verification_code';
+    else if (field.type === 'password') category = 'password';
+    else if (field.type === 'email' || /email|username|电子邮件|邮箱/i.test(identity)) category = 'email';
+    else if (field.type === 'tel' || /phone|mobile|telephone|手机号|电话号码/i.test(identity)) category = 'phone';
+    else if (field.type === 'checkbox' && (Object.hasOwn(KOREA_REQUIRED_CONSENTS, field.regionalConsent || '') || /terms|conditions|agree|consent|privacy|条款|同意|隐私/i.test(identity))) category = 'terms';
+    else if (/first.?name|given.?name|名字|(?:^|\s)名(?:\s|$)/i.test(identity)) category = 'first_name';
+    else if (/last.?name|family.?name|姓氏|(?:^|\s)姓(?:\s|$)/i.test(identity)) category = 'last_name';
+    // Native controls may be called only day/month/year or bday-*, without "birth".
+    // Month/year precede day so a label like "Birthday month" stays unambiguous.
+    else if (/month|月份|(?:^|\s)月(?:\s|$)/i.test(identity)) category = 'birth_month';
+    else if (/year|年份|(?:^|\s)年(?:\s|$)/i.test(identity)) category = 'birth_year';
+    else if (/birth.?day|(?:^|[\s_-])day(?:[\s_-]|$)|日期|(?:^|\s)日(?:\s|$)/i.test(identity)) category = 'birth_day';
+    else if (/country|region|国家|地区/i.test(identity)) category = 'country';
+    else if (/birth|出生/i.test(identity)) category = 'profile';
+    invalid.add(category);
+    const validity = field.validity || {};
+    let reason;
+    if (field.type === 'checkbox' && field.checked === false && field.required === true) reason = 'unchecked';
+    else if (validity.valueMissing === true || (field.required === true && field.filled === false)) reason = 'required';
+    else if (validity.rangeUnderflow === true || validity.rangeOverflow === true || validity.stepMismatch === true) reason = 'range';
+    else if (['typeMismatch','patternMismatch','tooShort','tooLong','badInput'].some(key => validity[key] === true)) reason = 'format';
+    if (reason && !reasons.has(category)) reasons.set(category, reason);
   }
   const errors = (Array.isArray(form?.notices) ? form.notices : [])
     .slice(0, 20).filter(value => typeof value === 'string').map(value => value.slice(0, 300)).join(' ');
@@ -110,7 +181,8 @@ export function formFailureDiagnostics(form) {
   else if (invalid.size) classification = 'invalid_field';
   else if (/\b(invalid|incorrect|error|failed|unable|cannot)\b|无效|不正确|错误|失败|无法|不能/i.test(errors)) classification = 'generic_notice';
   return { ...(classification ? { form_error: classification } : {}),
-    ...(invalid.size ? { invalid_fields: [...invalid] } : {}) };
+    ...(invalid.size ? { invalid_fields: [...invalid] } : {}),
+    ...(reasons.size ? { invalid_field_reasons: [...reasons].map(([field, reason]) => ({field, reason})) } : {}) };
 }
 
 /** 等待后置条件；只读取状态，超时或导航不确定时绝不重放提交。 */
@@ -221,7 +293,7 @@ export class BrowserRegistration {
       throw error;
     }
     if (resumeOnly || state.submission.started) return this.status();
-    const createLink = this.page.getByRole('link', { name: /^(Create an account|创建[帐账]户)$/i });
+    const createLink = locateCreateAccountLink(this.page);
     try {
       try { await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000})); }
       catch (error) {
@@ -235,7 +307,10 @@ export class BrowserRegistration {
         await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000}));
         this.onEvent({code:'optional_font_load_skipped'});
       }
-      await this.startupProgress.run('adobe_opening_registration', () => createLink.click());
+      await this.startupProgress.run('adobe_opening_registration', async () => {
+        if (await createLink.count() !== 1) throw new RegistrationError('create_entry_not_ready');
+        await createLink.click();
+      });
       await this.startupProgress.run('adobe_waiting_registration_form', () => this.page.locator('input[autocomplete="new-password"]').waitFor({state:'visible',timeout:20000}));
       const outcome = await this.startupProgress.run('adobe_checking_registration_form', () => this.waitForStage());
       await this.store.setStage(outcome.code ? 'needs_manual' : 'form_ready', outcome.code);
@@ -272,16 +347,29 @@ export class BrowserRegistration {
     let humanVerification = await this.detectHumanVerification();
     const verificationEvidence = this.activeNetwork;
     // Adobe 登录页自身也使用 Shadow DOM；由 Playwright 穿透，不能在 body 上 querySelector。
-    const [fields, headings, notices, buttons, agreements, fieldErrors] = await Promise.all([
-      frame.locator('input:visible,select:visible').evaluateAll(elements => elements.map(e => ({
+    const [fields, headings, notices, rawButtons, agreements, fieldErrors, regionalGroupCount, rawLinks] = await Promise.all([
+      frame.locator('input:visible,select:visible').evaluateAll(elements => elements.map(e => {
+        const group = e.closest('[data-id="MarketingConsent-SouthKorea-Required"]');
+        const marker = e.closest('[data-id="SouthKorea-StorageConsent"],[data-id="SouthKorea-ServiceProviderConsent"]');
+        const regionalConsent = group && marker && group.contains(marker)
+          ? ({'SouthKorea-StorageConsent':'kr_storage','SouthKorea-ServiceProviderConsent':'kr_transfer'})[marker.getAttribute('data-id')] : undefined;
+        return {
         tag: e.tagName.toLowerCase(), type: e.type || '', id: e.id, name: e.name || '',
         label: (e.getAttribute('aria-label') || [...(e.labels || [])].map(l => {const copy=l.cloneNode(true);copy.querySelectorAll('select,input,option').forEach(n=>n.remove());return copy.textContent.trim();}).join(' ') || e.placeholder || '').slice(0,200),
-        autocomplete: e.autocomplete || '', filled: !!e.value, invalid: e.getAttribute('aria-invalid') === 'true',
+        autocomplete: e.autocomplete || '',
+        filled: ['checkbox','radio'].includes(e.type) ? !!e.checked : !!e.value,
+        required: e.required === true || e.getAttribute('aria-required') === 'true', disabled: e.disabled === true,
+        ...(['checkbox','radio'].includes(e.type) ? {checked:!!e.checked} : {}),
+        ...(regionalConsent ? {regionalConsent} : {}),
+        invalid: e.getAttribute('aria-invalid') === 'true',
+        validity: Object.fromEntries(['valueMissing','typeMismatch','patternMismatch','rangeUnderflow','rangeOverflow',
+          'tooShort','tooLong','badInput','stepMismatch'].map(key => [key,e.validity?.[key] === true])),
         ...(e.tagName === 'SELECT' && e.name === 'month' ? {options:[...e.options].map(o=>({value:o.value,label:o.label}))}:{}),
-      }))),
+      }; })),
       frame.locator('h1:visible,h2:visible,h3:visible').evaluateAll(elements => elements.map(e => e.textContent.trim().slice(0,200))),
       frame.locator('[role="alert"]:visible,.error:visible,.alert:visible').evaluateAll(elements => elements.map(e => e.textContent.trim().slice(0,300))),
-      frame.locator('button:visible,input[type="submit"]:visible').evaluateAll(elements => elements.map(e => ({text:(e.textContent || e.value || e.getAttribute('aria-label') || '').trim().slice(0,200),disabled:!!e.disabled}))),
+      frame.locator('button:visible,input[type="submit"]:visible').evaluateAll(elements => elements.map(e => ({text:(e.textContent || e.value || e.getAttribute('aria-label') || '').trim().slice(0,200),disabled:!!e.disabled,
+        dataId:e.getAttribute('data-id'),clickEvent:e.getAttribute('data-click-event')}))),
       frame.locator('p:visible,span:visible,small:visible').evaluateAll(elements => elements.map(e => e.textContent.trim()).filter(t => /by (continuing|clicking).{0,80}(agree|accept)|继续即.{0,30}同意/is.test(t)).map(t => t.slice(0,300)).slice(0,5)),
       // 错误可能仅由输入框的 ARIA 属性关联，位于 Shadow DOM 中且没有 .error 类。
       frame.locator('input[aria-invalid="true"]:visible,select[aria-invalid="true"]:visible').evaluateAll(elements => elements.flatMap(element => {
@@ -291,7 +379,14 @@ export class BrowserRegistration {
           .filter(node => node && node.getClientRects().length)
           .map(node => node.textContent.trim().slice(0,300)).filter(Boolean);
       })),
+      frame.locator('[data-id="MarketingConsent-SouthKorea-Required"]:visible').evaluateAll(elements => elements.length),
+      frame.locator('[data-id="EmailPage-CreateAccountLink"]:visible').evaluateAll(elements => elements.map(e => ({dataId:e.getAttribute('data-id')}))),
     ]);
+    const buttons = rawButtons.map(({dataId,clickEvent,...button}) => {
+      const action = registrationButtonAction({dataId,clickEvent});
+      return {...button,...(action ? {action} : {})};
+    });
+    const links = rawLinks.map(link => ({action:registrationLinkAction(link)})).filter(link => link.action);
     notices.push(...fieldErrors.filter(message => !notices.includes(message)));
     // A new visible OTP field proves progress beyond the old account endpoint's
     // captcha response. Preserve the network history, but do not let that stale
@@ -311,7 +406,9 @@ export class BrowserRegistration {
     }
     // 仅添加固定提示，不读取或输出挑战题目、令牌及解答。
     if (humanVerification.required) notices.unshift('人机验证需要手动完成');
-    const result = {fields,headings,notices,buttons,agreements,humanVerification,upstreamCaptchaSuperseded};
+    const result = {fields,headings,notices,buttons,agreements,humanVerification,upstreamCaptchaSuperseded,
+      ...(links.length ? {links} : {}),
+      ...(Number.isInteger(regionalGroupCount) && regionalGroupCount > 0 ? {regionalConsentGroupCount:regionalGroupCount} : {})};
     const url = new URL(frame.url());
     const state = await this.store.load();
     // 页面错误偶尔包含邮箱；输出只保留表单结构和经脱敏的提示。
@@ -410,6 +507,46 @@ export class BrowserRegistration {
       form, pages, network:this.network, networkDiagnosis, screenshot };
   }
 
+  async rejectedFormStatus(form) {
+    // 失败已由当前快照证明；不再读 DOM/网络，以免导航或后来的状态覆盖字段证据。
+    const state = await this.store.load();
+    return { stage: state.stage, code: 'form_rejected', recordedStage: state.stage,
+      detected: classifyForm(form), submissionStarted: state.submission.started,
+      ...(this.verificationWait ? { verificationWait: this.verificationWait } : {}),
+      form, network: this.network, failureDiagnostics: formFailureDiagnostics(form) };
+  }
+
+  async profilePreflight(profile, { deferRegionalConsents = false } = {}) {
+    let form = await this.form();
+    if (profile?.country) {
+      const country = form.fields.find(field => /country|region|国家|地区/i.test(`${field.name} ${field.id} ${field.label}`));
+      if (!country) throw new RegistrationError('profile_field_unrecognized');
+      const field = await this.field(await this.authFrame(), country);
+      let expected = String(profile.country);
+      if (country.tag === 'select') {
+        const options = await field.locator('option').evaluateAll(options => options.map(option => ({value:option.value,label:option.label})));
+        expected = (options.find(option => option.value === expected) || options.find(option => option.label === expected))?.value;
+      }
+      if (expected === undefined || await field.inputValue() !== expected) {
+        form = { ...form, fields: form.fields.map(item => item === country ? { ...item, invalid: true } : item) };
+      }
+    }
+    return profileFormPreflight(form, { country: profile?.country, deferRegionalConsents });
+  }
+
+  async regionalConsentControl(key) {
+    const marker = KOREA_REQUIRED_CONSENTS[key];
+    if (!marker) throw new RegistrationError('regional_consent_not_ready');
+    const frame = await this.authFrame();
+    const groups = frame.locator(`[data-id="${KOREA_REQUIRED_GROUP}"]:visible`);
+    const wrapper = groups.locator(`[data-id="${marker}"]:visible`);
+    const control = wrapper.locator('input[type="checkbox"]:visible');
+    if (await groups.count() !== 1 || await wrapper.count() !== 1 || await control.count() !== 1 || !await control.isEnabled()) {
+      throw new RegistrationError('regional_consent_not_ready');
+    }
+    return control;
+  }
+
   async field(frame, descriptor) {
     const visible = frame.locator('input:visible,select:visible');
     const items = await visible.all();
@@ -420,8 +557,8 @@ export class BrowserRegistration {
     throw new RegistrationError('field_changed');
   }
 
-  async clickContinue(frame, beforeClick, fromStage) {
-    const button = frame.getByRole('button', { name: CONTINUE });
+  async clickContinue(frame, beforeClick, fromStage, form) {
+    const button = await locateRegistrationButton(frame, 'continue', form);
     await button.waitFor({state:'visible',timeout:10000});
     if (await button.count() !== 1) throw new RegistrationError('continue_not_ready');
     // Playwright 的 trial 只等待可交互，不产生表单点击。
@@ -530,9 +667,9 @@ export class BrowserRegistration {
     if (input.action === 'open_account') {
       this.page = await this.context.newPage();
       await this.page.goto('https://account.adobe.com/', {waitUntil:'domcontentloaded',timeout:45000});
-      const entry = this.page.getByRole('link',{name:/^(Create an account|创建帐户|创建账户)$/i});
+      const entry = locateCreateAccountLink(this.page);
       await entry.waitFor({state:'visible',timeout:45000}).catch(() => {});
-      if (await entry.isVisible()) await entry.click();
+      if (await entry.count() === 1 && await entry.isVisible()) await entry.click();
       return this.status();
     }
     const frame = await this.authFrame();
@@ -543,8 +680,8 @@ export class BrowserRegistration {
       await this.store.setStage('needs_manual', blocked);
       return this.status();
     }
-    const createLink = frame.getByRole('link',{name:/^(Create an account|创建[帐账]户)$/i});
-    if (kind === 'awaiting_email' && /^(Sign in|登录)$/i.test(form.headings.join(' ').trim()) && await createLink.count() === 1) {
+    const createLink = locateCreateAccountLink(frame, form);
+    if (kind === 'awaiting_email' && (form.links?.some(link => link.action === 'create_account') || /^(Sign in|登录)$/i.test(form.headings.join(' ').trim())) && await createLink.count() === 1) {
       await createLink.click();
       const outcome = await this.waitForStage({ fromStage: 'awaiting_email' });
       await this.store.setStage(outcome.code ? 'needs_manual' : 'form_ready', outcome.code);
@@ -562,10 +699,10 @@ export class BrowserRegistration {
       }
       const descriptor = form.fields.find(f => f.type === 'email' || /email|电子邮件|邮箱/i.test(`${f.name} ${f.label}`));
       await (await this.field(frame, descriptor)).fill(state.email);
-      outcome = await this.clickContinue(frame, () => this.store.save({ emailSubmitted: true, emailSubmittedAt: new Date().toISOString(), stage: 'awaiting_email' }), kind);
+      outcome = await this.clickContinue(frame, () => this.store.save({ emailSubmitted: true, emailSubmittedAt: new Date().toISOString(), stage: 'awaiting_email' }), kind, form);
     } else if (kind === 'awaiting_password') {
       // 不把登录已有账户或修改密码当作新账号注册。
-      if (!/create.{0,20}account|sign up|创建.{0,3}[帐账]户|注册/i.test(form.headings.join(' '))) {
+      if (!isSignupPasswordForm(form) && !/create.{0,20}account|sign up|创建.{0,3}[帐账]户|注册/i.test(form.headings.join(' '))) {
         await this.store.setStage('needs_manual', 'existing_account_or_password_required');
         return this.status();
       }
@@ -575,7 +712,7 @@ export class BrowserRegistration {
       for (const descriptor of form.fields.filter(f => f.type === 'email' || f.type === 'password')) {
         await (await this.field(frame, descriptor)).fill(descriptor.type === 'password' ? password : state.email);
       }
-      if (form.buttons.some(b => CREATE.test(b.text))) {
+      if (form.buttons.some(b => isRegistrationButton(b, 'create'))) {
         await this.store.setStage('awaiting_approval', 'account_agreement_required');
         return this.status();
       }
@@ -583,34 +720,17 @@ export class BrowserRegistration {
         await this.store.setStage('needs_manual', 'early_agreement_requires_manual');
         return this.status();
       }
-      outcome = await this.clickContinue(frame, () => this.store.save({ passwordSubmitted: true, stage: 'awaiting_password' }), kind);
+      outcome = await this.clickContinue(frame, () => this.store.save({ passwordSubmitted: true, stage: 'awaiting_password' }), kind, form);
     } else if (kind === 'awaiting_profile') {
       const profile = input.profile || state.config.profile;
       if (!profile) { await this.store.setStage('awaiting_profile', 'profile_required'); return this.status(); }
-      const rules = [
-        ['firstName', /first.?name|名字|名$/i], ['lastName', /last.?name|姓氏|^姓$/i],
-        ['birthMonth', /month|月份|^月$/i], ['birthYear', /year|年份|^年$/i], ['country', /country|region|国家|地区/i],
-      ];
-      // Adobe currently asks only for month/year in some regions. Keep the
-      // generated day in the saved profile and fill it only when requested.
-      const dayPattern = /birth.?day|(^|\s)day(\s|$)|日期|^日$/i;
-      const dayDescriptor = form.fields.find(f => {
-        const text = `${f.name} ${f.id} ${f.label}`;
-        return dayPattern.test(text) && !/month|year|月|年/i.test(text);
-      });
-      if (dayDescriptor) {
-        const day = Number(profile.birthDay);
-        const maxDay = new Date(Date.UTC(Number(profile.birthYear), Number(profile.birthMonth), 0)).getUTCDate();
-        if (!Number.isInteger(day) || day < 1 || day > maxDay) throw new RegistrationError('profile_invalid');
-        rules.push(['birthDay', dayPattern, dayDescriptor]);
-      }
       if (!profile.firstName || !profile.lastName || !profile.birthMonth || !profile.birthYear || !profile.country) throw new RegistrationError('profile_incomplete');
       if (![profile.firstName,profile.lastName,profile.country].every(v=>typeof v==='string' && v.trim() && v.length<=120) || !/^\d{4}$/.test(String(profile.birthYear))) throw new RegistrationError('profile_invalid');
       await this.store.save({ config: { ...state.config, profile } });
-      for (const [key, pattern, providedDescriptor] of rules) {
-        const descriptor = providedDescriptor || form.fields.find(f => pattern.test(`${f.name} ${f.id} ${f.label}`));
+      const fillProfileField = async (key, descriptor) => {
         if (!descriptor) throw new RegistrationError('profile_field_unrecognized');
-        const field = await this.field(frame, descriptor);
+        const currentFrame = await this.authFrame();
+        const field = await this.field(currentFrame, descriptor);
         let value = String(profile[key]);
         if (descriptor.tag === 'select') {
           const options = await field.locator('option').evaluateAll(options => options.map(o => ({value:o.value,label:o.label})));
@@ -619,13 +739,48 @@ export class BrowserRegistration {
             if (month<1 || month>12) throw new RegistrationError('profile_option_invalid');
             if (options.some(o=>o.value==='0') && options.some(o=>o.value==='11') && !options.some(o=>o.value==='12')) value=String(month-1);
           }
-          const match = options.find(o => o.value === value || o.label === value);
+          const match = options.find(o => o.value === value) || options.find(o => o.label === value);
           if (!match) throw new RegistrationError('profile_option_invalid');
-          await selectProfileOption(frame, field, match);
+          await selectProfileOption(currentFrame, field, match);
+          return match.value;
         } else await field.fill(value);
+        return value;
+      };
+      const countryPattern = /country|region|国家|地区/i;
+      const countryDescriptor = form.fields.find(field => countryPattern.test(`${field.name} ${field.id} ${field.label}`));
+      await fillProfileField('country', countryDescriptor);
+      const countryForm = await waitForProfileControls(() => this.form(), this.stageWaitOptions);
+      if (countryForm.code) {
+        await this.store.setStage('needs_manual', countryForm.code);
+        return this.status();
       }
-      const ready = await this.waitForStage({ accept: (_stage, current) => current.buttons.some(button => CREATE.test(button.text) && !button.disabled) });
+      const fields = countryForm.form.fields;
+      const rules = [
+        ['firstName', /first.?name|名字|名$/i], ['lastName', /last.?name|姓氏|^姓$/i],
+        ['birthMonth', /month|月份|^月$/i], ['birthYear', /year|年份|^年$/i],
+      ];
+      // 必须依据国家切换后的控件判断是否需要“日”，保留原生成日期。
+      const dayPattern = /birth.?day|(^|\s)day(\s|$)|日期|^日$/i;
+      const dayDescriptor = fields.find(field => {
+        const text = `${field.name} ${field.id} ${field.label}`;
+        return dayPattern.test(text) && !/month|year|月|年/i.test(text);
+      });
+      if (dayDescriptor) {
+        const day = Number(profile.birthDay);
+        const maxDay = new Date(Date.UTC(Number(profile.birthYear), Number(profile.birthMonth), 0)).getUTCDate();
+        if (!Number.isInteger(day) || day < 1 || day > maxDay) throw new RegistrationError('profile_invalid');
+        rules.push(['birthDay', dayPattern, dayDescriptor]);
+      }
+      for (const [key, pattern, providedDescriptor] of rules) {
+        const descriptor = providedDescriptor || fields.find(field => pattern.test(`${field.name} ${field.id} ${field.label}`));
+        await fillProfileField(key, descriptor);
+      }
+      const ready = await waitForFormStage(() => this.profilePreflight(profile, {deferRegionalConsents:true}), { ...this.stageWaitOptions,
+        onVerificationWait: observation => { this.verificationWait = observation; },
+        accept: (_stage, current) => current.buttons.some(button => isRegistrationButton(button, 'create') && !button.disabled),
+      });
       await this.store.setStage(ready.code ? 'needs_manual' : 'awaiting_approval', ready.code || 'account_agreement_required');
+      if (ready.code === 'form_rejected') return this.rejectedFormStatus(ready.form);
       return this.status();
     } else {
       await this.store.setStage(kind, kind === 'needs_manual' ? 'unrecognized_page' : null);
@@ -639,8 +794,40 @@ export class BrowserRegistration {
     const state = await this.store.load();
     if (state.submission.started) throw new RegistrationError('submission_already_started');
     if (state.stage !== 'awaiting_approval') throw new RegistrationError('approval_not_ready');
+    // 在持久化提交标记前再观察一次，防止晚出现的地区必填项被误记为已提交。
+    let form = await this.profilePreflight(state.config.profile, {deferRegionalConsents:true});
+    let blocking = formBlockingCode(form);
+    // 先确认这是唯一明确的创建动作，再接受地区必选同意；不能在中间步骤先勾选。
+    if (!blocking) await locateRegistrationButton(await this.authFrame(), 'create', form);
+    const plan = blocking ? [] : regionalConsentPlan(form, state.config.profile?.country);
+    if (!blocking && plan.length) {
+      // 只有显式创建入口才能接受已核对的两项地区必选同意。
+      for (const {key} of plan) {
+        form = await this.profilePreflight(state.config.profile, {deferRegionalConsents:true});
+        blocking = formBlockingCode(form);
+        if (blocking) break;
+        const control = await this.regionalConsentControl(key);
+        if (!await control.isChecked()) {
+          try { await control.check({timeout:5000}); }
+          catch { throw new RegistrationError('regional_consent_not_applied'); }
+        }
+      }
+      // 正常控件事件必须真正生效；勾选后重新核对国家及所有必填项。
+      if (!blocking) {
+        form = await this.profilePreflight(state.config.profile);
+        blocking = formBlockingCode(form);
+        if (regionalConsentPlan(form, state.config.profile?.country).length !== plan.length) {
+          throw new RegistrationError('regional_consent_not_ready');
+        }
+      }
+    }
+    if (blocking) {
+      await this.store.setStage('needs_manual', blocking);
+      if (blocking === 'form_rejected') return this.rejectedFormStatus(form);
+      return { ...await this.status(), form };
+    }
     const frame = await this.authFrame();
-    const button = frame.getByRole('button', { name: CREATE });
+    const button = await locateRegistrationButton(frame, 'create', form);
     if (await button.count() !== 1 || !await button.isEnabled()) throw new RegistrationError('create_button_not_ready');
     await this.store.markSubmissionStarted();
     this.creationTracker ??= new CreationTracker(this.store, this.context);
@@ -652,6 +839,7 @@ export class BrowserRegistration {
       // 账户欢迎页证明页面已跳转，不证明 Firefly 身份或会话可用；成功仍由 exportSession 核对。
       const code = outcome.form.host === 'account.adobe.com' ? 'firefly_identity_required' : 'creation_needs_verification';
       await this.store.setStage(outcome.stage === 'awaiting_verification' ? outcome.stage : 'needs_manual', outcome.code || code);
+      if (outcome.code === 'form_rejected') return this.rejectedFormStatus(outcome.form);
       return this.status();
     } catch {
       await this.store.markOutcomeUnknown();

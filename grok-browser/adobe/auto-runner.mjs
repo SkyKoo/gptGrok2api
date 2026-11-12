@@ -83,6 +83,13 @@ export async function runAutomaticRegistration(browser, store, {
     if (!shouldStop() && result !== undefined) onEvent(result);
     return result;
   };
+  const actionPause = result => {
+    // 预检可能只在返回快照中标记无效控件。再次读 DOM 会丢失这份证据，
+    // 甚至被未提交恢复逻辑误当作正常资料页而重复填表。
+    if (result !== undefined) status = result;
+    if (shouldStop()) return paused('automatic_interrupted');
+    return BLOCKING_CODES.has(result?.code) ? paused(result.code) : null;
+  };
 
   try {
     for (let observation = 0; observation <= maxSteps; observation++) {
@@ -125,7 +132,8 @@ export async function runAutomaticRegistration(browser, store, {
         if (onFirefly) return complete(await perform('export', () => browser.exportSession()));
         if (status.form?.host === 'account.adobe.com' &&
             !['awaiting_email', 'awaiting_password', 'awaiting_verification'].includes(detected)) {
-          await perform('open_firefly', () => browser.advance({ action: 'open_firefly' }));
+          const failure = actionPause(await perform('open_firefly', () => browser.advance({ action: 'open_firefly' })));
+          if (failure) return failure;
           continue;
         }
         if (detected !== 'awaiting_verification') return paused('recovery_required');
@@ -138,7 +146,8 @@ export async function runAutomaticRegistration(browser, store, {
           : input.code !== undefined ? { code: input.code } : null;
         if (!verification) return paused('verification_required');
         if (shouldStop()) return paused('automatic_interrupted');
-        await perform('verify', () => browser.verify(verification));
+        const failure = actionPause(await perform('verify', () => browser.verify(verification)));
+        if (failure) return failure;
         continue;
       }
       if (state.stage === 'outcome_unknown') return paused('recovery_required');
@@ -148,7 +157,8 @@ export async function runAutomaticRegistration(browser, store, {
       if (state.stage === 'awaiting_approval') {
         if (!APPROVAL_STAGES.has(detected)) return paused('approval_not_ready');
         if (approveCreate !== true) return paused('account_agreement_required');
-        await perform('create', () => browser.approveCreate());
+        const failure = actionPause(await perform('create', () => browser.approveCreate()));
+        if (failure) return failure;
         continue;
       }
       if (!ADVANCE_STAGES.has(detected)) return paused('unrecognized_page');
@@ -163,7 +173,8 @@ export async function runAutomaticRegistration(browser, store, {
         input = { profile };
       }
       if (shouldStop()) return paused('automatic_interrupted');
-      await perform(detected, () => browser.advance(input));
+      const failure = actionPause(await perform(detected, () => browser.advance(input)));
+      if (failure) return failure;
     }
     return paused('automatic_step_limit_reached');
   } catch (error) {

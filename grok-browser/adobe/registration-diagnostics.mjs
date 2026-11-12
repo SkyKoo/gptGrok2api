@@ -28,7 +28,9 @@ const RESOURCES = new Map([
 const WINDOW_MS = 15 * 60 * 1000;
 const FORM_ERRORS = new Set(['account_not_found', 'invalid_email', 'invalid_password',
   'invalid_verification_code', 'invalid_field', 'generic_notice']);
-const INVALID_FIELDS = new Set(['email', 'password', 'verification_code', 'profile', 'other']);
+const INVALID_FIELDS = new Set(['email', 'password', 'verification_code', 'profile',
+  'first_name', 'last_name', 'birth_day', 'birth_month', 'birth_year', 'country', 'terms', 'phone', 'other']);
+const FIELD_REASONS = new Set(['required', 'format', 'range', 'unchecked', 'invalid']);
 const FAILURE_ACTIONS = new Set(['inspect_form', 'open_login', 'click_login_entry', 'fill_email',
   'fill_password', 'submit_email', 'submit_password', 'wait_login_result', 'request_code',
   'verify_code', 'export_session', 'open_firefly', ...STARTUP_STAGES]);
@@ -44,10 +46,20 @@ function failureDiagnostics(result) {
   const form = result.code === 'form_rejected' && !FAILURE_ACTIONS.has(source.failure_action)
     ? formFailureDiagnostics(result.form) : {};
   const classification = FORM_ERRORS.has(source.form_error) ? source.form_error : form.form_error;
-  const invalid = [...new Set((Array.isArray(source.invalid_fields) ? source.invalid_fields : form.invalid_fields || [])
-    .slice(0, 20).filter(value => INVALID_FIELDS.has(value)))].slice(0, 5);
+  const evidence = Array.isArray(source.invalid_fields) ? source : form;
+  const invalid = [...new Set((Array.isArray(evidence.invalid_fields) ? evidence.invalid_fields : [])
+    .slice(0, 20).filter(value => INVALID_FIELDS.has(value)))].slice(0, INVALID_FIELDS.size);
+  const reasons = [];
+  const reasonFields = new Set();
+  for (const item of (Array.isArray(evidence.invalid_field_reasons) ? evidence.invalid_field_reasons.slice(0, 20) : [])) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || !invalid.includes(item.field)
+      || !FIELD_REASONS.has(item.reason) || reasonFields.has(item.field)) continue;
+    reasonFields.add(item.field);
+    reasons.push({ field: item.field, reason: item.reason });
+  }
   return { ...(result.code === 'form_rejected' && classification ? { form_error: classification } : {}),
     ...(result.code === 'form_rejected' && invalid.length ? { invalid_fields: invalid } : {}),
+    ...(result.code === 'form_rejected' && reasons.length ? { invalid_field_reasons: reasons } : {}),
     ...(FAILURE_ACTIONS.has(source.failure_action) ? { failure_action: source.failure_action } : {}),
     ...(FAILURE_PHASES.has(source.failure_phase) ? { failure_phase: source.failure_phase } : {}),
     ...(EXCEPTION_TYPES.has(source.exception_type) ? { exception_type: source.exception_type } : {}),

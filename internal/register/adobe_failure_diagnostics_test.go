@@ -17,7 +17,7 @@ func TestAdobeFailureDiagnosticProjectionRejectsUntrustedValues(t *testing.T) {
 		FormError: "PRIVATE_SECRET", InvalidFields: []string{"email", "email", "PRIVATE_SECRET", "password", "verification_code", "profile"},
 		FailureAction: "PRIVATE_SECRET", FailurePhase: "PRIVATE_SECRET", ExceptionType: "PRIVATE_SECRET",
 	}
-	if got := adobeFailureDiagnosticText(diagnostics); got != "校验未通过字段：邮箱、密码、验证码" {
+	if got := adobeFailureDiagnosticText(diagnostics); got != "校验未通过字段：邮箱、密码、验证码、个人资料" {
 		t.Fatalf("unsafe or unbounded projection: %q", got)
 	}
 	diagnostics.InvalidFields = []string{"PRIVATE_SECRET"}
@@ -33,6 +33,48 @@ func TestAdobeFailureDiagnosticProjectionRejectsUntrustedValues(t *testing.T) {
 	}
 	if strings.Contains(got, "旧表单") || strings.Contains(got, "创建账户") {
 		t.Fatalf("diagnostic inferred an unsupported cause: %q", got)
+	}
+}
+
+func TestAdobeRegionalProfileDiagnosticFieldsAndReasonsUseFixedLabels(t *testing.T) {
+	var diagnostic adobeRegistrationDiagnostics
+	if err := json.Unmarshal([]byte(`{"form_error":"invalid_field","invalid_fields":["first_name","last_name","birth_day","birth_month","birth_year","country","terms","phone","other","PRIVATE"],"invalid_field_reasons":[{"field":"birth_day","reason":"required","value":"PRIVATE","label":"PRIVATE"},{"field":"terms","reason":"unchecked"},{"field":"phone","reason":"format"},{"field":"birth_year","reason":"range"},{"field":"other","reason":"invalid"},{"field":"PRIVATE","reason":"required"},{"field":"country","reason":"PRIVATE"},{"field":"birth_day","reason":"range"},{"field":"email","reason":"required"}]}`), &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	got := adobeFailureDiagnosticText(diagnostic)
+	for _, want := range []string{
+		"校验未通过字段：名、姓、出生日期（日）、出生月份、出生年份、国家/地区、条款同意项、手机号、其他字段",
+		"出生日期（日）：必填项未填写", "条款同意项：必选项未勾选", "手机号：格式不符合要求",
+		"出生年份：超出允许范围", "其他字段：字段校验未通过",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing specific safe field diagnosis %q: %q", want, got)
+		}
+	}
+	for _, unwanted := range []string{"PRIVATE", "邮箱", "出生日期（日）：超出允许范围", "国家/地区："} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("unobserved, duplicate or private reason entered log: %q", got)
+		}
+	}
+}
+
+func TestAdobeRegionalProfileDiagnosticReasonsRequireBoundedMatchingFields(t *testing.T) {
+	diagnostic := adobeRegistrationDiagnostics{
+		InvalidFields:       []string{"birth_day"},
+		InvalidFieldReasons: []adobeInvalidFieldReason{{Field: "terms", Reason: "unchecked"}},
+	}
+	if got := adobeFailureDiagnosticText(diagnostic); got != "校验未通过字段：出生日期（日）" {
+		t.Fatalf("reason inferred a field not in the rejection: %q", got)
+	}
+	diagnostic.InvalidFields = append(make([]string, 20), "birth_day")
+	diagnostic.InvalidFieldReasons = []adobeInvalidFieldReason{{Field: "birth_day", Reason: "required"}}
+	if got := adobeFailureDiagnosticText(diagnostic); got != "" {
+		t.Fatalf("unbounded field was inspected: %q", got)
+	}
+	diagnostic.InvalidFields = []string{"birth_day"}
+	diagnostic.InvalidFieldReasons = append(make([]adobeInvalidFieldReason, 20), adobeInvalidFieldReason{Field: "birth_day", Reason: "required"})
+	if got := adobeFailureDiagnosticText(diagnostic); got != "校验未通过字段：出生日期（日）" {
+		t.Fatalf("unbounded reason was inspected: %q", got)
 	}
 }
 
@@ -64,7 +106,7 @@ func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 			return
 		}
 		resumes.Add(1)
-		_, _ = w.Write([]byte(`{"stage":"needs_manual","code":"form_rejected","submission_started":true,"diagnostics":{"submission_started":true,"form_error":"invalid_email","invalid_fields":["email","PRIVATE_SECRET"],"failure_action":"wait_login_result","failure_phase":"submission_started","exception_type":"registration","raw_error":"PRIVATE_SECRET"}}`))
+		_, _ = w.Write([]byte(`{"stage":"needs_manual","code":"form_rejected","submission_started":true,"diagnostics":{"submission_started":true,"form_error":"invalid_email","invalid_fields":["email","PRIVATE_SECRET"],"invalid_field_reasons":[{"field":"email","reason":"format","value":"PRIVATE_SECRET"},{"field":"PRIVATE_SECRET","reason":"required"}],"failure_action":"wait_login_result","failure_phase":"submission_started","exception_type":"registration","raw_error":"PRIVATE_SECRET"}}`))
 	}))
 	defer worker.Close()
 	config := adobeTestConfig()
@@ -99,7 +141,7 @@ func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 		}
 		if log.Action == "adobe_registration_diagnostics" {
 			diagnostic++
-			if !strings.Contains(log.Detail, "邮箱被拒绝") || !strings.Contains(log.Detail, "等待登录结果") {
+			if !strings.Contains(log.Detail, "邮箱被拒绝") || !strings.Contains(log.Detail, "等待登录结果") || !strings.Contains(log.Detail, "邮箱：格式不符合要求") {
 				t.Fatalf("missing safe diagnostic evidence: %+v", log)
 			}
 		}

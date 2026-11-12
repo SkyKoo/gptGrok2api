@@ -10,22 +10,36 @@ import (
 // Adobe diagnostics are an allowlisted projection; never log raw Worker JSON,
 // challenge content, URLs, credentials or upstream response text.
 type adobeRegistrationDiagnostics struct {
-	SubmissionStarted           bool     `json:"submission_started"`
-	HumanVerificationRequired   bool     `json:"human_verification_required"`
-	VerificationSource          string   `json:"verification_source"`
-	VerificationNetworkCode     string   `json:"verification_network_code"`
-	VerificationInstructionKind string   `json:"verification_instruction_kind"`
-	VerificationFrameKind       string   `json:"verification_frame_kind"`
-	PuzzleEntryVisible          *bool    `json:"puzzle_entry_visible"`
-	FormError                   string   `json:"form_error"`
-	InvalidFields               []string `json:"invalid_fields"`
-	FailureAction               string   `json:"failure_action"`
-	FailurePhase                string   `json:"failure_phase"`
-	ExceptionType               string   `json:"exception_type"`
-	ElapsedMS                   *int64   `json:"elapsed_ms"`
-	DurationMS                  *int64   `json:"duration_ms"`
-	VerificationWaitElapsedMS   *int64   `json:"verification_wait_elapsed_ms"`
-	VerificationWaitOutcome     string   `json:"verification_wait_outcome"`
+	SubmissionStarted           bool                      `json:"submission_started"`
+	HumanVerificationRequired   bool                      `json:"human_verification_required"`
+	VerificationSource          string                    `json:"verification_source"`
+	VerificationNetworkCode     string                    `json:"verification_network_code"`
+	VerificationInstructionKind string                    `json:"verification_instruction_kind"`
+	VerificationFrameKind       string                    `json:"verification_frame_kind"`
+	PuzzleEntryVisible          *bool                     `json:"puzzle_entry_visible"`
+	FormError                   string                    `json:"form_error"`
+	InvalidFields               []string                  `json:"invalid_fields"`
+	InvalidFieldReasons         []adobeInvalidFieldReason `json:"invalid_field_reasons"`
+	FailureAction               string                    `json:"failure_action"`
+	FailurePhase                string                    `json:"failure_phase"`
+	ExceptionType               string                    `json:"exception_type"`
+	ElapsedMS                   *int64                    `json:"elapsed_ms"`
+	DurationMS                  *int64                    `json:"duration_ms"`
+	VerificationWaitElapsedMS   *int64                    `json:"verification_wait_elapsed_ms"`
+	VerificationWaitOutcome     string                    `json:"verification_wait_outcome"`
+}
+
+type adobeInvalidFieldReason struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
+func adobeInvalidFieldLabel(field string) string {
+	return map[string]string{
+		"email": "邮箱", "password": "密码", "verification_code": "验证码", "profile": "个人资料",
+		"first_name": "名", "last_name": "姓", "birth_day": "出生日期（日）", "birth_month": "出生月份",
+		"birth_year": "出生年份", "country": "国家/地区", "terms": "条款同意项", "phone": "手机号", "other": "其他字段",
+	}[field]
 }
 
 // SubmissionStarted describes the original journal, not a new action performed
@@ -171,8 +185,8 @@ func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 	}
 	fields := []string{}
 	seen := map[string]bool{}
-	for _, field := range d.InvalidFields[:min(len(d.InvalidFields), 5)] {
-		label := map[string]string{"email": "邮箱", "password": "密码", "verification_code": "验证码", "profile": "个人资料", "other": "其他字段"}[field]
+	for _, field := range d.InvalidFields[:min(len(d.InvalidFields), 20)] {
+		label := adobeInvalidFieldLabel(field)
 		if label != "" && !seen[field] {
 			seen[field] = true
 			fields = append(fields, label)
@@ -180,6 +194,25 @@ func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 	}
 	if len(fields) > 0 {
 		parts = append(parts, "校验未通过字段："+strings.Join(fields, "、"))
+	}
+	fieldReasons := []string{}
+	reasonFields := map[string]bool{}
+	for _, item := range d.InvalidFieldReasons[:min(len(d.InvalidFieldReasons), 20)] {
+		if !seen[item.Field] || reasonFields[item.Field] {
+			continue
+		}
+		reason := map[string]string{
+			"required": "必填项未填写", "format": "格式不符合要求", "range": "超出允许范围",
+			"unchecked": "必选项未勾选", "invalid": "字段校验未通过",
+		}[item.Reason]
+		if reason == "" {
+			continue
+		}
+		reasonFields[item.Field] = true
+		fieldReasons = append(fieldReasons, adobeInvalidFieldLabel(item.Field)+"："+reason)
+	}
+	if len(fieldReasons) > 0 {
+		parts = append(parts, "字段原因："+strings.Join(fieldReasons, "、"))
 	}
 	if label := map[string]string{
 		"inspect_form": "检查表单", "open_login": "打开登录页", "click_login_entry": "进入登录",
