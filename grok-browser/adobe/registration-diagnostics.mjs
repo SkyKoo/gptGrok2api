@@ -36,6 +36,8 @@ const FAILURE_ACTIONS = new Set(['inspect_form', 'open_login', 'click_login_entr
   'verify_code', 'export_session', 'open_firefly', ...STARTUP_STAGES]);
 const FAILURE_PHASES = new Set(['before_submission', 'submission_started']);
 const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_closed', 'unknown']);
+const PROFILE_FIELDS = new Set(['country', 'birth_month', 'birth_year', 'birth_day']);
+const OPTION_REASONS = new Set(['missing', 'incomplete', 'ambiguous', 'disabled', 'invalid']);
 
 function failureDiagnostics(result) {
   if (typeof result?.code !== 'string' || !result.code) return {};
@@ -58,6 +60,10 @@ function failureDiagnostics(result) {
     reasons.push({ field: item.field, reason: item.reason });
   }
   return { ...(result.code === 'form_rejected' && classification ? { form_error: classification } : {}),
+    ...(result.code === 'profile_option_invalid' && PROFILE_FIELDS.has(source.profile_field) && OPTION_REASONS.has(source.profile_option_reason)
+      ? { profile_field: source.profile_field, profile_option_reason: source.profile_option_reason,
+        ...(Number.isSafeInteger(source.option_count) && source.option_count >= 0 && source.option_count <= 400
+          ? { option_count: source.option_count } : {}) } : {}),
     ...(result.code === 'form_rejected' && invalid.length ? { invalid_fields: invalid } : {}),
     ...(result.code === 'form_rejected' && reasons.length ? { invalid_field_reasons: reasons } : {}),
     ...(FAILURE_ACTIONS.has(source.failure_action) ? { failure_action: source.failure_action } : {}),

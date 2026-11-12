@@ -2,6 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
+test('option failures keep only bounded field categories and never option text or selected values', () => {
+  const source = { profile_field:'birth_month', profile_option_reason:'incomplete', option_count:1,
+    options:['PRIVATE'], value:'PRIVATE', label:'PRIVATE' };
+  const result = registrationDiagnostics({code:'profile_option_invalid', failureDiagnostics:source}, null);
+  assert.deepEqual(result, {submission_started:false, human_verification_required:false,
+    profile_field:'birth_month', profile_option_reason:'incomplete', option_count:1});
+  for (const patch of [{profile_field:'PRIVATE'}, {profile_option_reason:'PRIVATE'}]) {
+    assert.deepEqual(registrationDiagnostics({code:'profile_option_invalid', failureDiagnostics:{...source,...patch}}, null),
+      {submission_started:false,human_verification_required:false});
+  }
+  for (const option_count of [-1, 401, 1.5, '12']) {
+    assert.equal(registrationDiagnostics({code:'profile_option_invalid',failureDiagnostics:{...source,option_count}}, null).option_count, undefined);
+  }
+  assert.equal(registrationDiagnostics({code:'form_rejected',failureDiagnostics:source}, null).profile_field, undefined);
+});
+
 test('registration diagnostics retain the evidence and submission fence without form or network secrets', () => {
   const result = registrationDiagnostics({
     detected: 'needs_manual', code: 'human_verification_required',

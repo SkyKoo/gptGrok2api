@@ -12,6 +12,28 @@ import (
 	"time"
 )
 
+func TestAdobeProfileOptionDiagnosticUsesFixedBoundedLabels(t *testing.T) {
+	count := 1
+	d := adobeRegistrationDiagnostics{ProfileField: "birth_month", ProfileOptionReason: "incomplete", OptionCount: &count}
+	if got := adobeFailureDiagnosticText(d); got != "下拉选项：出生月份，选项尚未完整加载（已读取 1 项）" {
+		t.Fatalf("missing option diagnosis: %q", got)
+	}
+	for _, invalid := range []int{-1, 401} {
+		d.OptionCount = &invalid
+		if got := adobeFailureDiagnosticText(d); got != "下拉选项：出生月份，选项尚未完整加载" {
+			t.Fatalf("unbounded option count: %q", got)
+		}
+	}
+	d.ProfileField = "PRIVATE"
+	if got := adobeFailureDiagnosticText(d); got != "" {
+		t.Fatalf("private field reached log: %q", got)
+	}
+	d.ProfileField, d.ProfileOptionReason = "country", "PRIVATE"
+	if got := adobeFailureDiagnosticText(d); got != "" {
+		t.Fatalf("private reason reached log: %q", got)
+	}
+}
+
 func TestAdobeFailureDiagnosticProjectionRejectsUntrustedValues(t *testing.T) {
 	diagnostics := adobeRegistrationDiagnostics{
 		FormError: "PRIVATE_SECRET", InvalidFields: []string{"email", "email", "PRIVATE_SECRET", "password", "verification_code", "profile"},

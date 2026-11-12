@@ -20,6 +20,9 @@ type adobeRegistrationDiagnostics struct {
 	FormError                   string                    `json:"form_error"`
 	InvalidFields               []string                  `json:"invalid_fields"`
 	InvalidFieldReasons         []adobeInvalidFieldReason `json:"invalid_field_reasons"`
+	ProfileField                string                    `json:"profile_field"`
+	ProfileOptionReason         string                    `json:"profile_option_reason"`
+	OptionCount                 *int                      `json:"option_count"`
 	FailureAction               string                    `json:"failure_action"`
 	FailurePhase                string                    `json:"failure_phase"`
 	ExceptionType               string                    `json:"exception_type"`
@@ -149,6 +152,15 @@ func adobeStartupEventText(event browserqueue.StartupEvent) string {
 // text and unbounded lists cannot become log content or change retry policy.
 func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 	parts := []string{}
+	if field := map[string]string{"country": "国家/地区", "birth_month": "出生月份", "birth_year": "出生年份", "birth_day": "出生日期（日）"}[d.ProfileField]; field != "" {
+		if reason := map[string]string{"missing": "找不到目标选项", "incomplete": "选项尚未完整加载", "ambiguous": "选项不唯一", "disabled": "目标选项不可用", "invalid": "目标值不符合要求"}[d.ProfileOptionReason]; reason != "" {
+			text := "下拉选项：" + field + "，" + reason
+			if d.OptionCount != nil && *d.OptionCount >= 0 && *d.OptionCount <= 400 {
+				text += fmt.Sprintf("（已读取 %d 项）", *d.OptionCount)
+			}
+			parts = append(parts, text)
+		}
+	}
 	if d.VerificationWaitElapsedMS != nil && *d.VerificationWaitElapsedMS >= 0 && *d.VerificationWaitElapsedMS <= 150000 {
 		if result := map[string]string{
 			"still_required": "页面仍要求人机验证", "resolved": "页面已离开验证阶段",

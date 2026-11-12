@@ -7,6 +7,7 @@ import { BrowserRegistration } from './browser.mjs';
 import { PrivateRunStore } from './core.mjs';
 import { creationOutcome } from './creation-outcome.mjs';
 import { runAutomaticRegistration } from './auto-runner.mjs';
+import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
 const profile = { firstName: 'Fixture', lastName: 'Test', birthMonth: 2, birthYear: 1984, birthDay: 29, country: 'KR' };
 const fieldNames = ['firstName', 'lastName', 'birthMonth', 'birthYear', 'country'];
@@ -48,6 +49,22 @@ async function fixture(t, decorate = (_state, fields) => fields) {
   t.after(async () => { await store.close(); await rm(directory, { recursive: true, force: true }); });
   return { store, browser, writes, clicks: () => clicks };
 }
+
+test('option timeout keeps its field diagnosis through the real driver and runner without submission', async t => {
+  const f = await fixture(t, (_state, fields) => fields.map(field => field.name === 'country'
+    ? {...field, tag:'select', type:'select-one'} : field));
+  f.browser.field = async () => ({ locator: () => ({ evaluateAll: async () => [{value:'',label:'PRIVATE'}] }) });
+  const result = await runAutomaticRegistration(f.browser, f.store, options);
+  assert.equal(result.code, 'profile_option_invalid');
+  const diagnostic = registrationDiagnostics(result, await f.store.load());
+  assert.equal(diagnostic.profile_field, 'country');
+  assert.equal(diagnostic.profile_option_reason, 'missing');
+  assert.equal(diagnostic.option_count, 1);
+  assert.equal(diagnostic.submission_started, false);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE|options|label/);
+  assert.equal(f.clicks(), 0);
+  assert.deepEqual(f.writes, []);
+});
 
 test('runner retains a late required profile field rejection without refilling or submitting', async t => {
   const f = await fixture(t, ({ writes }, fields) => [...fields, ...(writes.length === 5 ? [{

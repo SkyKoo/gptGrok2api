@@ -10,6 +10,7 @@ import { CreationTracker } from './creation-outcome.mjs';
 import { StartupProgress, startupExceptionType } from './startup-progress.mjs';
 import { verificationObservation } from './verification-observation.mjs';
 import { KOREA_REQUIRED_GROUP, KOREA_REQUIRED_CONSENTS, regionalConsentPlan, regionalConsentPreflight } from './regional-consent.mjs';
+import { waitForProfileOption } from './profile-options.mjs';
 import { registrationButtonAction, registrationLinkAction, isRegistrationButton,
   locateRegistrationButton, locateCreateAccountLink, isSignupPasswordForm } from './form-actions.mjs';
 
@@ -580,9 +581,11 @@ export class BrowserRegistration {
     if (!marker) throw new RegistrationError('regional_consent_not_ready');
     const frame = await this.authFrame();
     const groups = frame.locator(`[data-id="${KOREA_REQUIRED_GROUP}"]:visible`);
-    const wrapper = groups.locator(`[data-id="${marker}"]:visible`);
-    const control = wrapper.locator('input[type="checkbox"]:visible');
-    if (await groups.count() !== 1 || await wrapper.count() !== 1 || await control.count() !== 1 || !await control.isEnabled()) {
+    const markers = groups.locator(`[data-id="${marker}"]:visible`);
+    // Spectrum 会将 data-id 放在 input 自身；旧页面也可能保留在包裹节点上。
+    const control = groups.locator(`input[type="checkbox"][data-id="${marker}"]:visible`)
+      .or(markers.locator('input[type="checkbox"]:visible'));
+    if (await groups.count() !== 1 || await markers.count() !== 1 || await control.count() !== 1 || !await control.isEnabled()) {
       throw new RegistrationError('regional_consent_not_ready');
     }
     return control;
@@ -770,18 +773,19 @@ export class BrowserRegistration {
       await this.store.save({ config: { ...state.config, profile } });
       const fillProfileField = async (key, descriptor) => {
         if (!descriptor) throw new RegistrationError('profile_field_unrecognized');
-        const currentFrame = await this.authFrame();
-        const field = await this.field(currentFrame, descriptor);
+        let currentFrame = await this.authFrame();
+        let field = await this.field(currentFrame, descriptor);
         let value = String(profile[key]);
         if (descriptor.tag === 'select') {
-          const options = await field.locator('option').evaluateAll(options => options.map(o => ({value:o.value,label:o.label})));
-          if (key === 'birthMonth' && /^\d+$/.test(value)) {
-            const month = Number(value);
-            if (month<1 || month>12) throw new RegistrationError('profile_option_invalid');
-            if (options.some(o=>o.value==='0') && options.some(o=>o.value==='11') && !options.some(o=>o.value==='12')) value=String(month-1);
-          }
-          const match = options.find(o => o.value === value) || options.find(o => o.label === value);
-          if (!match) throw new RegistrationError('profile_option_invalid');
+          // Spectrum 的 select 可先出现，集合随后才挂载；只读等待完整选项，
+          // 每次重新定位以跟随 React 重建，不能猜月份基数或改写原生日。
+          const match = await waitForProfileOption(async () => {
+            currentFrame = await this.authFrame();
+            field = await this.field(currentFrame, descriptor);
+            return field.locator('option').evaluateAll(options => options.map(o => ({
+              value:o.value, label:o.label, disabled:o.disabled || o.parentElement?.disabled === true,
+            })));
+          }, key, value, this.stageWaitOptions);
           await selectProfileOption(currentFrame, field, match);
           return match.value;
         } else await field.fill(value);

@@ -190,6 +190,11 @@ export async function runAutomaticRegistration(browser, store, {
         status = { stage: 'needs_manual' };
       }
     }
+    // 保留动作现场的固定字段诊断；RPC 持久化边界仍逐项白名单校验，
+    // 不把之后读取的正常表单当成原选项失败的证据。
+    if (error instanceof RegistrationError && error.failureDiagnostics) {
+      status = { ...status, failureDiagnostics: error.failureDiagnostics };
+    }
     return paused(shouldStop() ? 'automatic_interrupted' : errorCode(error));
   }
 }
