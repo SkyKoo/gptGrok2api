@@ -975,6 +975,8 @@ func responseImageOutputs(raw []byte) []map[string]string {
 
 func monitorStageLabel(stage string) string {
 	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case "media_session_preparing", "image_media_session_preparing":
+		return "准备生成会话"
 	case "video_validated":
 		return "视频输入校验完成"
 	case "video_reference_upload":

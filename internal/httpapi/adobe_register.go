@@ -105,9 +105,10 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	}
 	defer resp.Body.Close()
 	var result struct {
-		Stage   string        `json:"stage"`
-		Code    string        `json:"code"`
-		Account adobe.Account `json:"account"`
+		Stage       string          `json:"stage"`
+		Code        string          `json:"code"`
+		Account     adobe.Account   `json:"account"`
+		Diagnostics json.RawMessage `json:"diagnostics"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil {
 		return failure("browser_failed")
@@ -125,7 +126,11 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 		case "refresh_account_mismatch", "refresh_email_mismatch":
 			return adobe.Account{}, adobe.ErrIdentity
 		case "media_session_incomplete":
-			return failure("media_session_incomplete")
+			var diagnostics struct {
+				MediaRuntime json.RawMessage `json:"media_runtime"`
+			}
+			_ = json.Unmarshal(result.Diagnostics, &diagnostics)
+			return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: adobe.SanitizeMediaPreparationDiagnostic(diagnostics.MediaRuntime)}
 		case "media_session_cancelled":
 			return failure("cancelled")
 		case "refresh_login_form_unrecognized":

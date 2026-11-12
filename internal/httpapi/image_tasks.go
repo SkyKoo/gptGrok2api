@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
 )
@@ -233,6 +234,17 @@ func (s *Server) cleanupExpiredImageTasks() {
 	s.imageTaskMu.Lock()
 	defer s.imageTaskMu.Unlock()
 	for key, task := range s.imageTasks {
+		if task.recovering {
+			continue
+		}
+		if task.Route != nil && task.Route.Channel == "adobe" && s.adobeStore != nil {
+			account, err := s.adobeStore.Get(task.Route.AccountID)
+			// Retain the evidence needed to review a pinned task. Storage errors
+			// must not turn an uncertain reservation into disposable history.
+			if (err != nil && !errors.Is(err, adobe.ErrNotFound)) || (err == nil && account.InFlight != "" && account.InFlight == task.Route.JobKey) {
+				continue
+			}
+		}
 		if task.Status != "success" && task.Status != "error" {
 			continue
 		}

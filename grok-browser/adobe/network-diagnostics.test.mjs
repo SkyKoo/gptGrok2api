@@ -141,3 +141,21 @@ test('unknown network error strings are redacted and history stays bounded', asy
   assert.equal(diagnostics.snapshot(page)[0].errorCode, 'NETWORK_ERROR');
   assert.doesNotMatch(JSON.stringify(diagnostics.snapshot(page)), /PRIVATE|example.test/);
 });
+
+test('superseding captcha uses exact observed events and preserves history, new events, other pages and network errors', async () => {
+  const diagnostics=new NetworkDiagnostics();
+  const page={},otherPage={};
+  const captcha=()=>request({url:accountURL,status:400,body:{errorCode:'captcha_required'}});
+  await diagnostics.record(captcha(),page);
+  await diagnostics.record(request({error:'net::ERR_NAME_NOT_RESOLVED'}),page);
+  const observed=diagnostics.activeSnapshot(page);
+  await diagnostics.record(captcha(),page);
+  await diagnostics.record(captcha(),otherPage);
+  assert.equal(diagnostics.supersedeCaptchaEvidence(page,observed),1);
+  assert.equal(diagnostics.snapshot(page).length,3);
+  assert.equal(diagnostics.activeSnapshot(page).length,2);
+  assert.equal(hasCaptchaRequirement(diagnostics.activeSnapshot(page)),true);
+  assert.equal(hasCaptchaRequirement(diagnostics.activeSnapshot(otherPage)),true);
+  assert.equal(verificationDiagnosis(diagnostics.activeSnapshot(page)).code,'verification_dns_failed');
+  assert.equal(diagnostics.supersedeCaptchaEvidence(page,observed.map(event=>({...event}))),0);
+});

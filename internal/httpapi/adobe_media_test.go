@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -24,7 +25,7 @@ func adobeFixtureAccount(t *testing.T, s *Server) adobe.Account {
 	t.Helper()
 	claims, _ := json.Marshal(map[string]any{"user_id": "fixture-adobe", "exp": time.Now().Add(time.Hour).Unix()})
 	cookie, _ := json.Marshal(map[string]string{"sid": "fixture", "ark": "fixture", "bfp": "fixture", "ftr": "fixture"})
-	rows, err := s.adobeStore.Import([]adobe.Account{{AccountID: "fixture-adobe", Email: "fixture@example.test", Enabled: true, Token: "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature", Cookie: "sherlockToken=" + base64.StdEncoding.EncodeToString(cookie)}})
+	rows, err := s.adobeStore.Import([]adobe.Account{{AccountID: "fixture-adobe", Email: "fixture@example.test", Enabled: true, ProfileID: "fixture-profile", Token: "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature", Cookie: "sherlockToken=" + base64.StdEncoding.EncodeToString(cookie)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +35,35 @@ func adobeFixtureAccount(t *testing.T, s *Server) adobe.Account {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return a
+	s.adobeStore.SetBrowserRefresher(adobeFixtureMediaRefresh)
+	return adobeFixtureModelPermissions(t, s, a)
+}
+
+func adobeFixtureModelPermissions(t *testing.T, s *Server, a adobe.Account) adobe.Account {
+	t.Helper()
+	one, available := 1.0, 10.0
+	const resource = "firefly_complimentary_generations"
+	permissions := adobe.GenerationEntitlements{Status: "known", CheckedAt: time.Now().UTC().Format(time.RFC3339Nano), Pools: []adobe.GenerationPool{{ID: "fixture-free-pool", ResourceType: resource, Available: &available}}}
+	for _, m := range adobe.FreeModels() {
+		permissions.Models = append(permissions.Models, adobe.ModelEntitlement{Model: m.ID, Kind: m.Kind, Authorized: true, ResourceType: resource, PoolID: "fixture-free-pool", Cost: &one})
+	}
+	if err := s.adobeStore.UpdateGenerationPermissions(a.ID, a.Revision, permissions); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.adobeStore.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fresh
+}
+
+func adobeFixtureMediaRefresh(_ context.Context, current adobe.Account) (adobe.Account, error) {
+	current.Cookie = "sherlockToken=fixture-fresh-media-session"
+	current.MediaSessionRefreshed = true
+	current.MediaSessionStatus = "complete"
+	current.MediaSessionARPSource = "spl_runtime"
+	current.MediaSessionARPMode = "present"
+	return current, nil
 }
 func adobeFixtureClient(t *testing.T, submits, polls *atomic.Int32, failed bool) *adobe.Client {
 	t.Helper()
@@ -96,7 +125,11 @@ func TestAdobeAsyncDuplicateNeverResubmits(t *testing.T) {
 		t.Run(fmt.Sprint(failed), func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			adobeFixtureAccount(t, s)
-			var submits, polls atomic.Int32
+			var submits, polls, prepares atomic.Int32
+			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+				prepares.Add(1)
+				return adobeFixtureMediaRefresh(ctx, current)
+			})
 			s.adobeClient = adobeFixtureClient(t, &submits, &polls, failed)
 			body := `{"client_task_id":"adobe-once","model":"gemini-3.1-flash-image","prompt":"one blue circle","size":"1024x1024"}`
 			first := imageTaskCall(s, "POST", "/api/image-tasks/generations", "api-secret", body)
@@ -113,8 +146,8 @@ func TestAdobeAsyncDuplicateNeverResubmits(t *testing.T) {
 					t.Fatal(again.Body.String())
 				}
 			}
-			if submits.Load() != 1 {
-				t.Fatalf("generation replayed %d times", submits.Load())
+			if submits.Load() != 1 || prepares.Load() != 1 {
+				t.Fatalf("generation or media preparation replayed: submits=%d prepares=%d", submits.Load(), prepares.Load())
 			}
 			if task.Route == nil || task.Route.Channel != "adobe" {
 				t.Fatal("route not persisted")
@@ -148,15 +181,19 @@ func TestAdobeRestartResumesHandleWithoutGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	fresh := NewWithWorkers(s.cfg, false)
-	var submits, polls atomic.Int32
+	var submits, polls, prepares atomic.Int32
+	fresh.adobeStore.SetBrowserRefresher(func(_ context.Context, current adobe.Account) (adobe.Account, error) {
+		prepares.Add(1)
+		return adobe.Account{}, fmt.Errorf("recovery must not prepare a new media session")
+	})
 	fresh.adobeClient = adobeFixtureClient(t, &submits, &polls, false)
 	fresh.recoverAdobeImageTasks()
 	got := waitAdobeImage(t, fresh, "recovery")
 	if got.Status != "success" {
 		t.Fatalf("recovery: %s", got.Error)
 	}
-	if submits.Load() != 0 || polls.Load() != 1 {
-		t.Fatalf("restart submitted=%d polls=%d", submits.Load(), polls.Load())
+	if submits.Load() != 0 || polls.Load() != 1 || prepares.Load() != 0 {
+		t.Fatalf("restart submitted=%d polls=%d prepares=%d", submits.Load(), polls.Load(), prepares.Load())
 	}
 }
 func TestAdobeUnsupportedCombinationNeverSelectsAccount(t *testing.T) {

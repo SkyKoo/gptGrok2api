@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
+	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
 
 func adobeReloginBody(requestID string, ids ...string) string {
@@ -111,6 +113,77 @@ func TestAdobeReloginAdminIsolationAndUnknownRetention(t *testing.T) {
 	}
 }
 
+func TestAdobeReloginHTTPPreparesReusableSessionWithPinnedEgress(t *testing.T) {
+	for _, endpoint := range []string{"", "http://fixture-proxy.invalid:8080"} {
+		t.Run(map[bool]string{true: "direct", false: "proxy"}[endpoint == ""], func(t *testing.T) {
+			s := imageTaskTestServer(t)
+			a := adobeFixtureAccount(t, s)
+			s.proxyManager.SetDefault(endpoint, nil)
+			var calls atomic.Int32
+			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+				calls.Add(1)
+				actual, selected := proxyruntime.URLSelectionFromContext(ctx)
+				if !selected || actual != endpoint {
+					t.Error("background relogin did not pass fixed egress to the Store and browser")
+				}
+				return adobeFixtureMediaRefresh(ctx, current)
+			})
+			response := imageTaskCall(s, "POST", "/api/adobe/accounts/relogin", "admin-secret", adobeReloginBody("request-ready-after-login", a.ID))
+			if response.Code != 202 {
+				t.Fatalf("login rejected: %d %s", response.Code, response.Body.String())
+			}
+			tasks := waitAdobeReloginTasks(t, s, "request-ready-after-login")
+			if len(tasks) != 1 || !tasks[0].SessionUpdated || tasks[0].Error != "" {
+				t.Fatalf("login did not succeed: %+v", tasks)
+			}
+			current, err := s.adobeStore.Get(a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixed, err := s.adobeAccountContext(context.Background(), current)
+			if err != nil || !s.adobeStore.MediaSessionReady(fixed, current, 0) {
+				t.Fatalf("successful HTTP relogin did not warm a reusable session: %v", err)
+			}
+			selected, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
+			if err != nil || selected.Adobe.ID != a.ID {
+				t.Fatalf("freshly logged-in account was not selected: %v", err)
+			}
+			if _, err = s.adobeStore.PrepareMediaForTask(selected.Context, selected.Key, selected.Adobe.ID, selected.Adobe.Revision); err != nil || calls.Load() != 1 {
+				t.Fatalf("generation preparation recollected after HTTP relogin: calls=%d err=%v", calls.Load(), err)
+			}
+		})
+	}
+}
+
+func TestAdobeReloginHTTPRoutingFailureDoesNotLaunchOrReplaceSession(t *testing.T) {
+	s := imageTaskTestServer(t)
+	a := adobeFixtureAccount(t, s)
+	if _, err := s.adobeStore.BindProxy(a.ID, proxyruntime.Binding{Reference: "node:missing/node", Platform: "adobe", Purpose: "account"}, "fixture unavailable route"); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.adobeStore.Get(a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+		calls.Add(1)
+		return adobeFixtureMediaRefresh(ctx, current)
+	})
+	response := imageTaskCall(s, "POST", "/api/adobe/accounts/relogin", "admin-secret", adobeReloginBody("request-routing-failure", a.ID))
+	if response.Code != 202 {
+		t.Fatalf("login rejected: %d %s", response.Code, response.Body.String())
+	}
+	tasks := waitAdobeReloginTasks(t, s, "request-routing-failure")
+	if len(tasks) != 1 || tasks[0].SessionUpdated || tasks[0].Stage != "failed" || tasks[0].Error != "adobe_routing_proxy_unavailable" || calls.Load() != 0 {
+		t.Fatalf("routing failure reached browser or lost error: tasks=%+v calls=%d", tasks, calls.Load())
+	}
+	after, err := s.adobeStore.Get(a.ID)
+	if err != nil || after.Revision != before.Revision || after.Token != before.Token || after.Cookie != before.Cookie || after.LastRefreshAt != before.LastRefreshAt {
+		t.Fatal("routing failure replaced existing session")
+	}
+}
+
 func TestAdobeReloginAcceptsQuicklyAndSurvivesRequestCancellation(t *testing.T) {
 	s := imageTaskTestServer(t)
 	a := adobeFixtureAccount(t, s)
@@ -199,6 +272,7 @@ func TestAdobeBrowserReloginWorkerContract(t *testing.T) {
 		name, stage, code, want string
 		mode, source            string
 		verified                bool
+		diagnostics             any
 	}{
 		{name: "complete runtime session", stage: "completed", verified: true},
 		{name: "runtime explicitly omitted", stage: "completed", verified: true, mode: "omitted", source: "spl_runtime"},
@@ -213,6 +287,9 @@ func TestAdobeBrowserReloginWorkerContract(t *testing.T) {
 		{name: "login pending", stage: "needs_manual", code: "refresh_login_pending", want: "adobe_relogin_login_pending"},
 		{name: "completion unconfirmed", stage: "needs_manual", code: "refresh_login_completion_unconfirmed", want: "adobe_relogin_login_pending"},
 		{name: "cancelled session", stage: "needs_manual", code: "media_session_cancelled", want: "adobe_relogin_cancelled"},
+		{name: "media vendor pending", stage: "needs_manual", code: "media_session_incomplete", want: "adobe_relogin_media_session_incomplete [vendors_pending]", diagnostics: map[string]any{"host": "PRIVATE@example.test", "media_runtime": map[string]any{"state": "pending", "readiness_reason": "vendors_pending", "vendors_started": 3, "vendors_complete": 2, "token": "PRIVATE_TOKEN"}}},
+		{name: "media diagnostic injection", stage: "needs_manual", code: "media_session_incomplete", want: "adobe_relogin_media_session_incomplete", diagnostics: map[string]any{"media_runtime": map[string]any{"state": "https://private.invalid", "readiness_reason": "PRIVATE_TOKEN", "vendors_complete": 999}}},
+		{name: "malformed optional diagnostic", stage: "needs_manual", code: "media_session_incomplete", want: "adobe_relogin_media_session_incomplete", diagnostics: "PRIVATE_TOKEN"},
 		{name: "untrusted detail", stage: "needs_manual", code: "private cookie secret url", want: "adobe_relogin_browser_failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,7 +332,7 @@ func TestAdobeBrowserReloginWorkerContract(t *testing.T) {
 					if tc.mode == "omitted" {
 						replacement.Cookie = ""
 					}
-					writeJSON(w, 200, map[string]any{"stage": tc.stage, "code": tc.code, "account": replacement})
+					writeJSON(w, 200, map[string]any{"stage": tc.stage, "code": tc.code, "account": replacement, "diagnostics": tc.diagnostics})
 				default:
 					t.Error("unexpected worker request")
 					w.WriteHeader(404)

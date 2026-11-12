@@ -110,32 +110,75 @@ func (c *Client) request(ctx context.Context, stage, method, endpoint string, a 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	started := time.Now()
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, nil, &Error{Stage: stage, Code: "transport_error", SubmissionUnknown: stage == "submit"}
+		return nil, nil, &Error{Stage: stage, Code: "transport_error", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "transport_error", "transport", nil)}
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if err != nil || len(raw) > 4*1024*1024 {
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "response_unreadable", SubmissionUnknown: stage == "submit"}
+		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "response_unreadable", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "response_unreadable", "response_read", nil)}
 	}
 	var data map[string]any
 	decodeErr := json.Unmarshal(raw, &data)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: responseCode(resp.StatusCode, data), SubmissionUnknown: stage == "submit" && (resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout)}
+		code := responseCode(resp.StatusCode, data)
+		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: code, SubmissionUnknown: stage == "submit" && (resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout), Diagnostic: requestDiagnostic(resp, started, code, "http_status", data)}
 	}
 	if decodeErr != nil || data == nil {
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "invalid_response", SubmissionUnknown: stage == "submit"}
+		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "invalid_response", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "invalid_response", "response_decode", nil)}
 	}
 	return data, resp.Header, nil
 }
+
+func knownResponseCode(code string) bool {
+	switch code {
+	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request", "timeout_error":
+		return true
+	}
+	return false
+}
+
+func requestDiagnostic(resp *http.Response, started time.Time, code, source string, data map[string]any) *SubmissionDiagnostic {
+	d := &SubmissionDiagnostic{ErrorCode: code, ErrorSource: source, ElapsedMS: time.Since(started).Milliseconds()}
+	if resp == nil {
+		return d
+	}
+	d.ResponseReceived, d.HTTPStatus = true, resp.StatusCode
+	if resp.ProtoMajor == 2 {
+		d.HTTPProto = "2"
+	} else if resp.ProtoMajor == 1 && resp.ProtoMinor == 1 {
+		d.HTTPProto = "1.1"
+	}
+	// Only the exact category observed from Adobe is admitted. In particular,
+	// never persist arbitrary header values or x-access-user-context.
+	if access := resp.Header.Get("x-access-error"); access != "" {
+		d.AccessError = "unknown"
+		if access == "taste_exhausted" {
+			d.AccessError = access
+		}
+	}
+	for _, candidate := range []struct{ code, source string }{
+		{str(data["error_code"]), "top_error_code"},
+		{str(data["code"]), "top_code"},
+		{str(object(data["error"])["error_code"]), "nested_error_code"},
+		{str(object(data["error"])["code"]), "nested_code"},
+	} {
+		if knownResponseCode(candidate.code) {
+			d.ErrorCode, d.ErrorSource = candidate.code, candidate.source
+			break
+		}
+	}
+	return d
+}
+
 func responseCode(status int, data map[string]any) string {
 	code, _ := data["error_code"].(string)
 	if code == "" {
 		code, _ = data["code"].(string)
 	}
-	switch code {
-	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request", "timeout_error":
+	if knownResponseCode(code) {
 		return code
 	}
 	switch status {
@@ -270,6 +313,8 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 	case "gemini-flash":
 		if m.ModelVersion == "nano-banana-2026-09" {
 			delete(payload, "size")
+			payload["groundSearch"] = false
+			payload["modelSpecificPayload"] = map[string]any{}
 			payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
 		} else {
 			payload["modelSpecificPayload"] = map[string]any{"aspectRatio": v.AspectRatio}
@@ -288,7 +333,12 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 	return payload
 }
 func videoPayload(m Model, v Variant, r VideoRequest, refs []referenceBlob) map[string]any {
-	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "seeds": []int{seed()}, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "duration": r.Duration, "generateAudio": r.GenerateAudio, "referenceBlobs": refs, "generationSettings": map[string]string{"aspectRatio": v.AspectRatio}, "generationMetadata": map[string]string{"module": "text2video", "submodule": "ff-video-generate"}, "output": map[string]bool{"storeInputs": true}}
+	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "seeds": []int{seed()}, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "duration": r.Duration, "generateAudio": r.GenerateAudio, "generationSettings": map[string]string{"aspectRatio": v.AspectRatio}, "generationMetadata": map[string]string{"module": "text2video", "submodule": "ff-video-generate"}, "output": map[string]bool{"storeInputs": true}}
+	// The official UGS video mapper omits this optional field for text-only
+	// requests. Keep uploaded frame handles only when references are present.
+	if len(refs) > 0 {
+		payload["referenceBlobs"] = refs
+	}
 	switch m.ModelID {
 	case "firefly-video":
 		for _, key := range []string{"duration", "resolution", "generateAudio", "generationSettings"} {
@@ -330,8 +380,11 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 	d, h, err := c.request(ctx, "submit", http.MethodPost, "https://firefly-3p.ff.adobe.io/v2/3p-"+m.Kind+"s/generate-async", a, raw, headers)
 	if err != nil {
 		j.Status = "SUBMISSION_UNKNOWN"
-		if e, ok := err.(*Error); ok && !e.SubmissionUnknown {
-			j.Status = "REJECTED"
+		if e, ok := err.(*Error); ok {
+			j.SubmissionDiagnostic = e.Diagnostic
+			if !e.SubmissionUnknown {
+				j.Status = "REJECTED"
+			}
 		}
 		return j, err
 	}

@@ -19,6 +19,21 @@ class BrowserQueueError(RuntimeError):
     pass
 
 
+class BrowserStartupError(RuntimeError):
+    """固定启动分类；原始异常可能含代理或浏览器参数，不进入队列。"""
+
+    CODES = frozenset({
+        "browser_launch_timeout", "browser_launch_proxy_error",
+        "browser_launch_profile_locked", "browser_launch_process_exited",
+        "browser_launch_profile_unavailable", "browser_launch_license_denied",
+        "browser_launch_failed",
+    })
+
+    def __init__(self, code):
+        self.code = code if isinstance(code, str) and code in self.CODES else "browser_launch_failed"
+        super().__init__(self.code)
+
+
 @dataclass
 class Entry:
     key: str
@@ -32,6 +47,7 @@ class Entry:
     closing: bool = False
     retry_at: float = 0
     error: str = ""
+    diagnostic_code: str = ""
 
 
 class ManagedBrowser:
@@ -86,7 +102,8 @@ class BrowserQueue:
             entry.touched = time.monotonic()
         state = "closing" if entry.closing else entry.state
         return {"id": key, "status": state, "code": entry.error,
-                "message": "等待浏览器会话释放" if state == "waiting_browser" else ""}
+                "message": "等待浏览器会话释放" if state == "waiting_browser" else "",
+                **({"diagnostic_code": entry.diagnostic_code} if entry.diagnostic_code else {})}
 
     def claim(self, key):
         entry = self.entries.get(key)
@@ -115,7 +132,12 @@ class BrowserQueue:
                 log.warning("browser license busy; waiting for session release")
             else:
                 entry.state, entry.error = "failed", "browser_start_failed"
-                log.warning("browser start failed type=%s", type(exc).__name__)
+                if isinstance(exc, BrowserStartupError):
+                    # Revalidate at the logging boundary, even if a caller modified the instance.
+                    entry.diagnostic_code = BrowserStartupError(exc.code).code
+                    log.warning("browser start failed type=BrowserStartupError code=%s", entry.diagnostic_code)
+                else:
+                    log.warning("browser start failed type=%s", type(exc).__name__)
         finally:
             entry.options.clear()  # drop proxy credentials as soon as no retry is needed
             # License refusal needs the same environment for its later launch.

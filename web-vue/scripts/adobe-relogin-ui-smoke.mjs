@@ -17,7 +17,7 @@ const base={provider:'adobe',disabled:false,has_profile:true,media_session_statu
 const accounts=[{...base,id:'unknown',account_id:'unknown',email:'unknown@example.test',status:'submission_unknown',submission_unknown:true,pending:true,in_flight:true},{...base,id:'ready',account_id:'ready',email:'ready@example.test',status:'active'},{...base,id:'otp',account_id:'otp',email:'otp@example.test',status:'expired'},{...base,id:'busy',account_id:'busy',email:'busy@example.test',status:'busy',pending:true,in_flight:true}]
 let loseResponse=false,rejectNext=false,lateBatch
 function acceptBatch(body){const items=body.ids.map(id=>({progress_id:`job-${jobs.length}-${id}`,request_id:body.request_id,account_ref:id,email:accounts.find(account=>account.id===id).email,stage:'running',started_at:new Date().toISOString(),updated_at:new Date().toISOString(),done:false,submission_unknown:id==='unknown'}));jobs.push(...items);batches.set(body.request_id,items);return items}
-function finish(items){for(const task of items){task.done=true;task.finished_at=task.updated_at=new Date().toISOString();if(task.account_ref==='otp'){task.stage='failed';task.error='adobe_relogin_email_verification_required'}else{task.stage='completed';task.session_updated=true;const account=accounts.find(a=>a.id===task.account_ref);account.media_session_status='refreshed';account.media_session_refreshed=true}}}
+function finish(items){for(const task of items){task.done=true;task.finished_at=task.updated_at=new Date().toISOString();if(task.account_ref==='otp'){task.stage='failed';task.error='adobe_relogin_email_verification_required'}else{task.stage='completed';task.session_updated=true;const account=accounts.find(a=>a.id===task.account_ref);account.media_session_status='refreshed';account.media_session_refreshed=true;account.login_status='valid';account.login_updated_at=Math.floor(Date.now()/1000)}}}
 await context.route('**/*',async route=>{
  const req=route.request(),url=new URL(req.url()),pathname=url.pathname
  if(url.origin!==origin){await route.abort();return}
@@ -47,9 +47,9 @@ async function clearSelection(){await page.locator('.selection-bulk-bar-host:not
 try{
  await page.goto(origin+'/#/accounts?platform=adobe')
  const unknown=row('unknown@example.test'),busy=row('busy@example.test')
- await unknown.getByText('提交结果未知，原任务保留；重新登录仅更新会话。',{exact:true}).waitFor()
+ await unknown.getByText('系统将自动查询并处理占用，原任务和结果记录保留，不重新生成。',{exact:true}).waitFor()
  assert.equal(await unknown.getByText('生成中',{exact:true}).count(),0)
- assert.equal(await unknown.getByRole('button',{name:'刷新额度',exact:true}).isDisabled(),true)
+ assert.equal(await unknown.getByRole('button',{name:'刷新额度',exact:true}).isDisabled(),false)
  assert.equal(await unknown.getByRole('button',{name:'重新登录',exact:true}).isDisabled(),false)
  assert.equal(await busy.getByRole('button',{name:'重新登录',exact:true}).isDisabled(),true)
  const fits=await unknown.locator('td').last().evaluate(cell=>{const boundary=cell.closest('table').parentElement.getBoundingClientRect();return [...cell.querySelectorAll('button')].every(button=>{const box=button.getBoundingClientRect();return box.left>=boundary.left&&box.right<=boundary.right})});assert.equal(fits,true)
@@ -62,7 +62,9 @@ try{
  assert.equal(await row('ready@example.test').getByRole('button',{name:'重新登录',exact:true}).isDisabled(),false)
  finish(jobs)
  await progress().getByText('重新登录完成，媒体会话已确认。',{exact:true}).waitFor()
- await progress().getByText('待核对任务仍保留，未重新提交。',{exact:true}).waitFor()
+ await progress().getByText('原生成任务由系统继续处理，不会重新提交。',{exact:true}).waitFor()
+ await unknown.getByText('登录态有效',{exact:true}).waitFor()
+ await unknown.getByText('系统处理中',{exact:true}).waitFor()
  assert.equal(await page.getByRole('checkbox',{name:'选择 ready@example.test'}).isChecked(),true)
  await clearSelection()
  await page.getByRole('checkbox',{name:'选择 unknown@example.test'}).check()
@@ -98,7 +100,7 @@ try{
  assert.equal(writes.length,4)
  await page.getByRole('button',{name:'卡片视图',exact:true}).click()
  const card=page.getByRole('article',{name:'Adobe 账号 unknown@example.test',exact:true})
- await card.getByText('待核对',{exact:true}).waitFor()
+ await card.getByText('系统处理中',{exact:true}).waitFor()
  assert.equal(await card.getByRole('button',{name:'重新登录',exact:true}).isDisabled(),false)
  if(process.env.CFM_UI_SCREENSHOT_DIR){await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR,{recursive:true});await page.screenshot({path:path.join(process.env.CFM_UI_SCREENSHOT_DIR,'adobe-relogin-desktop.png'),fullPage:true})}
  await page.setViewportSize({width:390,height:844});await page.waitForTimeout(250)

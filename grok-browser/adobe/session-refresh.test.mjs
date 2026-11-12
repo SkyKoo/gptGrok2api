@@ -2,8 +2,47 @@ import test from 'node:test';
 import { RegistrationError } from './core.mjs';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {identityInPage,waitForIdentity,validateIdentity,signInExistingAccount,refreshSession} from './session-refresh.mjs';
+import {identityInPage,waitForIdentity,validateIdentity,signInExistingAccount,refreshSession,prepareWorkerRefreshPage} from './session-refresh.mjs';
 const capturedMedia=(cookie='sherlockToken=runtime',mode='present')=>({cookie,media_session_arp_mode:mode,media_session_arp_source:'spl_runtime',runtime_state:{state:mode==='present'?'ready':'empty'}});
+
+test('worker refresh closes every extra restored tab before navigating its one retained page',async()=>{
+ const events=[],retained={goto:async()=>{assert.equal(pages.length,1);events.push('navigate')},url:()=> 'https://firefly.adobe.com/'};
+ let pages=[retained];
+ for(let index=0;index<8;index++){
+  const page={close:async options=>{assert.deepEqual(options,{runBeforeUnload:false});pages=pages.filter(item=>item!==page);events.push('close')}};pages.push(page);
+ }
+ const context={pages:()=>[...pages],cookies:async()=>[],newPage:async()=>assert.fail('existing page retained')};
+ await assert.rejects(refreshSession(context,{email:'fixture@example.test'},{workerMode:true,waitIdentity:async()=>null}),e=>e.code==='refresh_login_required');
+ assert.deepEqual(events,[...Array(8).fill('close'),'navigate']);assert.equal(pages[0],retained);
+});
+test('normal refresh never closes tabs without the dedicated worker opt-in',async()=>{
+ const retained={goto:async()=>{},url:()=> 'https://firefly.adobe.com/'};
+ const other={close:async()=>assert.fail('not a worker-owned context')};
+ await assert.rejects(refreshSession({pages:()=>[retained,other],cookies:async()=>[]},{email:'fixture@example.test'},{waitIdentity:async()=>null}),e=>e.code==='refresh_login_required');
+});
+test('worker page cleanup fails closed before navigation if a restored page refuses closure',async()=>{
+ let navigations=0;
+ const retained={goto:async()=>navigations++},other={close:async()=>{throw new Error('private page details')}};
+ await assert.rejects(refreshSession({pages:()=>[retained,other]},{},{workerMode:true}),e=>{
+  assert.equal(e.code,'refresh_page_cleanup_failed');assert.equal(e.message.includes('private'),false);return true;
+ });assert.equal(navigations,0);
+});
+test('worker page cleanup is bounded and rejects unconfirmed closure or newly opened tabs',async()=>{
+ const retained={};
+ for(const context of [
+  {pages:()=>[retained,{close:async()=>new Promise(()=>{})}]},
+  {pages:()=>[retained,{close:async()=>{}}]},
+ ])await assert.rejects(prepareWorkerRefreshPage(context,{closeTimeoutMs:10}),e=>e.code==='refresh_page_cleanup_failed');
+ let pages=[retained];const other={close:async()=>{pages=[retained,{}]}};pages.push(other);
+ await assert.rejects(prepareWorkerRefreshPage({pages:()=>pages}),e=>e.code==='refresh_page_cleanup_failed');
+});
+test('worker page cleanup creates one page for an empty dedicated context and honors cancellation',async()=>{
+ const page={};let pages=[],created=0;
+ const context={pages:()=>pages,newPage:async()=>{created++;pages=[page];return page}};
+ assert.equal(await prepareWorkerRefreshPage(context),page);assert.equal(created,1);
+ const abort=new AbortController();abort.abort();
+ await assert.rejects(prepareWorkerRefreshPage({pages:()=>assert.fail('cancelled'),newPage:async()=>assert.fail('cancelled')},{signal:abort.signal}),e=>e.code==='media_session_cancelled');
+});
 
 test('identity polling tolerates SDK startup without submitting or navigating',async()=>{
  let time=0,calls=0;
@@ -63,7 +102,9 @@ test('IMS success with incomplete media fails instead of completing with retaine
 });
 test('complete media refresh returns the verified final identity and explicit readiness contract',async()=>{
  const expected={account_id:'expected',email:'fixture@example.test',profile_id:'fixture'};let identities=0;
- const page={goto:async()=>{},url:()=> 'https://firefly.adobe.com/'};
+ const page={goto:async()=>{},url:()=> 'https://firefly.adobe.com/',evaluate:async(fn,args)=>{
+  assert.equal(fn.name,'mediaSessionMatchesInPage');assert.equal(identities,2);assert.equal(args.identity.token,'after-token');assert.equal(args.token,'runtime');return true;
+ }};
  const context={pages:()=>[page],cookies:async url=>url.includes('adobeid')?[{name:'ims',value:'fixture'}]:[]};
  const result=await refreshSession(context,expected,{waitIdentity:async()=>({...expected,token:++identities===1?'before-token':'after-token'}),ensureMedia:async()=> capturedMedia('other=kept; sherlockToken=runtime')});
  assert.equal(identities,2);assert.equal(result.token,'after-token');assert.equal(result.cookie,'other=kept; sherlockToken=runtime');
@@ -223,11 +264,18 @@ test('signed-in SPL identity is read from the same authentication instance insid
  h.globals.document={querySelector:()=>null,querySelectorAll:selector=>selector==='*'?[{shadowRoot}]:[]};
  const identity=await h.evaluate(50);assert.equal(identity.account_id,runtimeProfile.userId);assert.equal(identity.token,'spl-token');assert.equal(h.active,0);assert.equal(h.listeners,0);
 });
-test('refresh preserves explicit official omitted ARP with an empty Cookie only after final identity verification',async()=>{
+test('refresh cannot reuse an old omitted record as a newly collected media session',async()=>{
  const expected={account_id:'expected',email:'fixture@example.test'};let checks=0;
  const page={goto:async()=>{},url:()=> 'https://firefly.adobe.com/generate/image'},context={pages:()=>[page],cookies:async()=>[]};
- const result=await refreshSession(context,expected,{waitIdentity:async()=>{checks++;return {...expected,token:'fixture-token'}},ensureMedia:async()=>capturedMedia('','omitted')});
- assert.equal(checks,2);assert.equal(result.cookie,'');assert.equal(result.media_session_arp_mode,'omitted');assert.equal(result.media_session_arp_source,'spl_runtime');assert.equal(result.media_session_refreshed,true);
+ await assert.rejects(refreshSession(context,expected,{waitIdentity:async()=>{checks++;return {...expected,token:'fixture-token'}},ensureMedia:async()=>capturedMedia('','omitted')}),e=>e.code==='media_session_incomplete');
+ assert.equal(checks,2);
+});
+test('a runtime change after final identity verification does not return replacement credentials',async()=>{
+ const expected={account_id:'expected',email:'fixture@example.test'},events=[];
+ const page={goto:async()=>{},url:()=> 'https://firefly.adobe.com/generate/image',evaluate:async()=>{events.push('verify');return false}};
+ const context={pages:()=>[page],cookies:async()=>assert.fail('changed session must not be exported')};
+ await assert.rejects(refreshSession(context,expected,{waitIdentity:async()=>{events.push('identity');return {...expected,token:'fixture-token'}},ensureMedia:async()=>{events.push('media');return capturedMedia()}}),e=>e.code==='media_session_incomplete'&&e.diagnostics.media_runtime.state==='changed');
+ assert.deepEqual(events,['identity','media','identity','verify']);
 });
 test('refresh rejects a false omission claim carrying an old cookie or an unproven source',async()=>{
  const expected={account_id:'expected',email:'fixture@example.test'},page={goto:async()=>{},url:()=> 'https://firefly.adobe.com/'};

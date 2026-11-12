@@ -6,8 +6,6 @@ import (
 	"errors"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -95,6 +93,15 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 		s.adobeLinkMailboxes(w, r)
 	case path == "relogin" && (r.Method == http.MethodPost || r.Method == http.MethodGet):
 		s.adobeReloginAPI(w, r)
+	case path == "resolve-submission" && r.Method == http.MethodPost:
+		s.adobeResolveSubmission(w, r)
+	case path == "submission-resolutions" && r.Method == http.MethodGet:
+		items, err := s.adobeStore.SubmissionResolutions(r.URL.Query().Get("id"))
+		if err != nil {
+			writeError(w, 500, "Adobe 核对记录读取失败", "storage_error")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": items})
 	case path == "refresh" && r.Method == http.MethodPost:
 		var b struct {
 			IDs         []string `json:"ids"`
@@ -111,7 +118,13 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 		out := []map[string]any{}
 		for _, id := range ids {
 			ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
-			a, err := s.refreshAdobeAccount(ctx, id, b.Credentials)
+			var a adobe.Account
+			var err error
+			if b.Credentials {
+				a, err = s.refreshAdobeAccount(ctx, id, true)
+			} else {
+				a, err = s.queryAdobeAccountQuota(ctx, id)
+			}
 			cancel()
 			row := map[string]any{"id": id, "ok": err == nil}
 			if err != nil {
@@ -167,6 +180,75 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) queryAdobeAccountQuota(ctx context.Context, id string) (adobe.Account, error) {
+	a, err := s.adobeStore.Get(id)
+	if err != nil {
+		return a, err
+	}
+	ctx, err = s.adobeAccountContext(ctx, a)
+	if err != nil {
+		return a, err
+	}
+	return s.adobeStore.QueryQuota(ctx, s.adobeClient, id)
+}
+
+func (s *Server) adobeResolveSubmission(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID        string `json:"id"`
+		TaskKey   string `json:"expected_task_key"`
+		Revision  uint64 `json:"expected_credential_revision"`
+		Confirmed bool   `json:"confirmed"`
+		Reason    string `json:"reason"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8192)
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	// Use the same locks as resume-poll. A task can only be resolved after its
+	// local runner has stopped; an old form cannot release a new reservation.
+	s.imageTaskMu.Lock()
+	defer s.imageTaskMu.Unlock()
+	s.videoMu.Lock()
+	defer s.videoMu.Unlock()
+	found, busy := false, false
+	for _, task := range s.imageTasks {
+		if task.Route == nil || task.Route.Channel != "adobe" || task.Route.JobKey != body.TaskKey || task.Route.AccountID != body.ID {
+			continue
+		}
+		found = true
+		if task.recovering || (task.Status != "error" && task.Status != "success") {
+			busy = true
+		}
+	}
+	for _, task := range s.videoJobs {
+		if task.Route == nil || task.Route.Channel != "adobe" || task.Route.JobKey != body.TaskKey || task.Route.AccountID != body.ID {
+			continue
+		}
+		found = true
+		if task.recovering || (task.Status != "failed" && task.Status != "completed") {
+			busy = true
+		}
+	}
+	if busy {
+		writeError(w, 409, "原任务仍在运行，请结束后再核对", "adobe_submission_task_not_reviewable")
+		return
+	}
+	taskRecordState := "terminal"
+	if !found {
+		taskRecordState = "missing"
+	}
+	a, resolution, err := s.adobeStore.ResolveSubmission(body.ID, body.TaskKey, body.Revision, body.Confirmed, body.Reason, s.authIdentity(r), taskRecordState)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, adobe.ErrResolutionReview) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, adobe.SafeError(err), "adobe_submission_resolve_failed")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "account": adobe.Public(a), "resolution": resolution})
+}
+
 func (s *Server) refreshAdobeAccount(ctx context.Context, id string, credentials bool) (adobe.Account, error) {
 	a, err := s.adobeStore.Get(id)
 	if err != nil {
@@ -176,20 +258,7 @@ func (s *Server) refreshAdobeAccount(ctx context.Context, id string, credentials
 	if err != nil {
 		return a, err
 	}
-	a, err = s.adobeStore.Refresh(ctx, s.adobeClient, id, credentials)
-	if err != nil {
-		return a, err
-	}
-	generation, generationErr := s.adobeClient.GenerationPermissions(ctx, a)
-	if generationErr != nil {
-		generation.Status = "error"
-		generation.Error = adobe.SafeError(generationErr)
-	}
-	if saveErr := s.adobeStore.UpdateGenerationPermissions(a.ID, a.Revision, generation); saveErr != nil {
-		return a, saveErr
-	}
-	a.Quota.Generation = &generation
-	return a, nil
+	return s.adobeStore.RefreshWithPermissions(ctx, s.adobeClient, id, credentials)
 }
 func (s *Server) ensureAdobeAccounts(ctx context.Context, targetModel string) error {
 	if s.adobeStore == nil || s.adobeClient == nil {
@@ -199,29 +268,51 @@ func (s *Server) ensureAdobeAccounts(ctx context.Context, targetModel string) er
 	if err != nil {
 		return err
 	}
-	modelAvailable := func(a adobe.Account) bool {
-		return a.Quota.Generation == nil || a.Quota.Generation.ModelAvailable(targetModel, time.Now())
+	modelState := func(a adobe.Account) adobe.ModelSelectionState {
+		return a.Quota.Generation.ModelSelectionState(targetModel, time.Now())
 	}
 	for _, a := range items {
-		if adobe.Eligible(a, time.Now()) && modelAvailable(a) {
-			return nil
+		if modelState(a) == adobe.ModelUsable {
+			fixed, resolveErr := s.adobeAccountContext(ctx, a)
+			if resolveErr == nil && s.adobeStore.MediaAccountSelectable(fixed, a, targetModel) {
+				return nil
+			}
 		}
 	}
 	count := 0
+	var observationErr error
 	for _, a := range items {
 		// Freshly unavailable model observations need no immediate recheck.
 		// They must not prevent another account from renewing its credentials.
-		if !modelAvailable(a) || !a.Enabled || a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
+		if modelState(a) == adobe.ModelUnavailable || a.ProfileID == "" || !a.Enabled || a.Status == "invalid" || a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
 			continue
 		}
-		fresh, e := s.refreshAdobeAccount(ctx, a.ID, false)
-		count++
-		if e == nil && adobe.Eligible(fresh, time.Now()) && modelAvailable(fresh) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fixed, e := s.adobeAccountContext(ctx, a)
+		if e != nil {
+			if observationErr == nil {
+				observationErr = e
+			}
+			continue
+		}
+		fresh, attempted, e := s.adobeStore.RefreshModelPermissions(fixed, s.adobeClient, a.ID, targetModel)
+		if attempted {
+			count++
+		}
+		if e == nil && s.adobeStore.MediaAccountSelectable(fixed, fresh, targetModel) {
 			return nil
+		}
+		if e != nil && !errors.Is(e, adobe.ErrBusy) && observationErr == nil {
+			observationErr = e
 		}
 		if count >= 4 {
 			break
 		}
+	}
+	if observationErr != nil {
+		return observationErr
 	}
 	return adobe.ErrNoAccount
 }
@@ -293,7 +384,7 @@ func (s *Server) adobeAccountContext(ctx context.Context, a adobe.Account) (cont
 	}
 	fields := a.RoutingFields()
 	if s.proxyManager == nil {
-		return ctx, nil
+		return proxyruntime.WithURL(ctx, ""), nil
 	}
 	if endpoint, bound, err := s.proxyManager.ResolveBound(fields); bound || err != nil {
 		if err != nil {
@@ -328,13 +419,11 @@ func (s *Server) adobeMaintenanceScheduler() {
 	}
 }
 func (s *Server) refreshDueAdobeAccounts(ctx context.Context) {
+	if !s.adobeReconciliationAllowed() {
+		return
+	}
 	s.reconcileAdobeMediaReservations()
-	if s.adobeStore == nil {
-		return
-	}
-	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "cfm-maintenance")); !os.IsNotExist(err) {
-		return
-	}
+	s.reconcileAdobeSubmissions(ctx, time.Now())
 	cfg, err := s.store.Config()
 	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
 		return
@@ -343,25 +432,6 @@ func (s *Server) refreshDueAdobeAccounts(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	now := time.Now()
-	count := 0
-	for _, a := range items {
-		if !a.Enabled || a.InFlight != "" || a.SettlementUntil > now.Unix() || (a.NextRefreshAt > now.Unix() && a.LastError != "") {
-			continue
-		}
-		at, _ := time.Parse(time.RFC3339Nano, a.Quota.CheckedAt)
-		interval := time.Hour
-		if a.LastUsedAt > now.Add(-time.Hour).Unix() {
-			interval = 5 * time.Minute
-		}
-		due := a.ExpiresAt <= now.Add(5*time.Minute).Unix() || a.Quota.Status == "stale" || at.IsZero() || now.Sub(at) >= interval
-		if !due {
-			continue
-		}
-		_, _ = s.refreshAdobeAccount(ctx, a.ID, false)
-		count++
-		if count >= 4 || ctx.Err() != nil {
-			return
-		}
-	}
+	s.refreshAdobeMaintenanceSnapshot(ctx, items, time.Now())
+	s.warmRecentAdobeMediaSessions(ctx)
 }

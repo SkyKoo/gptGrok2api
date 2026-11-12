@@ -1,5 +1,5 @@
 import { launchPersistentBrowser } from './browser-runtime.mjs';
-import { ensureMediaSession, isCompleteMediaSession } from './media-session.mjs';
+import { ensureMediaSession, isCompleteMediaSession, verifyMediaSession } from './media-session.mjs';
 import { waitForIdentity } from './session-refresh.mjs';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir } from 'node:fs/promises';
@@ -88,17 +88,28 @@ export async function waitForFormStage(readForm, {
   accept = stage => stage !== 'needs_manual' && stage !== fromStage,
   timeoutMs = 30_000,
   pollIntervalMs = 250,
+  verificationGraceMs = 15_000,
   now = Date.now,
   pause = wait,
 } = {}) {
   const deadline = now() + timeoutMs;
+  let verificationDeadline;
   while (true) {
     try {
       const form = await readForm();
       const code = formBlockingCode(form);
-      if (code) return { form, stage: 'needs_manual', code };
+      // A visible provider frame can briefly perform its own check before the
+      // next form appears. Observe that transition without touching challenge
+      // controls or replaying the submit; explicit manual instructions stop now.
+      const transientVerification = code === 'human_verification_required' &&
+        ['visible_challenge_frame', 'upstream_captcha_response'].includes(form.humanVerification?.source);
+      if (code && !transientVerification) return { form, stage: 'needs_manual', code };
+      if (transientVerification) {
+        verificationDeadline ??= Math.min(deadline, now() + verificationGraceMs);
+        if (now() >= verificationDeadline) return { form, stage: 'needs_manual', code };
+      }
       const stage = classifyForm(form);
-      if (await accept(stage, form)) return { form, stage, code: null };
+      if (!transientVerification && await accept(stage, form)) return { form, stage, code: null };
     } catch (error) {
       // 导航期间的 DOM 替换可以继续观察，关闭页面及未知错误必须交回调用方。
       if (!/Execution context was destroyed|Frame was detached|Cannot find context with specified id/i.test(String(error.message))) throw error;
@@ -119,6 +130,7 @@ export class BrowserRegistration {
     this.context = null;
     this.page = null;
     this.network = [];
+    this.otpProgressPages = new WeakSet();
   }
 
   async waitForStage(options = {}) {
@@ -190,7 +202,8 @@ export class BrowserRegistration {
 
   async form() {
     const frame = await this.authFrame();
-    const humanVerification = await this.detectHumanVerification();
+    let humanVerification = await this.detectHumanVerification();
+    const verificationEvidence = this.activeNetwork;
     // Adobe 登录页自身也使用 Shadow DOM；由 Playwright 穿透，不能在 body 上 querySelector。
     const [fields, headings, notices, buttons, agreements, fieldErrors] = await Promise.all([
       frame.locator('input:visible,select:visible').evaluateAll(elements => elements.map(e => ({
@@ -213,9 +226,22 @@ export class BrowserRegistration {
       })),
     ]);
     notices.push(...fieldErrors.filter(message => !notices.includes(message)));
+    // A new visible OTP field proves progress beyond the old account endpoint's
+    // captcha response. Preserve the network history, but do not let that stale
+    // response hide the current form. A visible challenge still takes priority.
+    const hasOTP = fields.some(field => field.type !== 'hidden' && /one-time-code/i.test(field.autocomplete));
+    let upstreamCaptchaSuperseded = false;
+    const visibleChallenge = ['visible_challenge_frame', 'visible_instruction'].includes(humanVerification.source);
+    if (hasOTP && !visibleChallenge && !this.otpProgressPages.has(this.page)) {
+      this.otpProgressPages.add(this.page);
+      if (humanVerification.source === 'upstream_captcha_response') {
+        upstreamCaptchaSuperseded = this.networkDiagnostics?.supersedeCaptchaEvidence(this.page, verificationEvidence) > 0;
+        if (upstreamCaptchaSuperseded) humanVerification = {required:false};
+      }
+    }
     // 仅添加固定提示，不读取或输出挑战题目、令牌及解答。
     if (humanVerification.required) notices.unshift('人机验证需要手动完成');
-    const result = {fields,headings,notices,buttons,agreements,humanVerification};
+    const result = {fields,headings,notices,buttons,agreements,humanVerification,upstreamCaptchaSuperseded};
     const url = new URL(frame.url());
     const state = await this.store.load();
     // 页面错误偶尔包含邮箱；输出只保留表单结构和经脱敏的提示。
@@ -226,7 +252,8 @@ export class BrowserRegistration {
 
   async detectHumanVerification() {
     await this.networkStatus();
-    const captchaRequired = hasCaptchaRequirement(this.network);
+    const captchaRequired = hasCaptchaRequirement(this.activeNetwork ?? this.network);
+    let visibleChallengeFrame = false;
     const instruction = /verify you are human|prove you(?:'|’)re human|not a robot|start puzzle|人机验证|验证您是人|证明您是|开始拼图|完成拼图/i;
     const provider = /(?:^|\.)(?:arkoselabs\.com|funcaptcha\.com|hcaptcha\.com|recaptcha\.net)$|^challenges\.cloudflare\.com$/i;
     // 仅检查当前表单所属页面，避免旧注册标签页残留的验证框遮盖新页面状态。
@@ -249,7 +276,7 @@ export class BrowserRegistration {
           const knownProvider = url.hostname === 'arks-client.adobe.com' || provider.test(url.hostname) ||
             (/(?:^|\.)google\.com$/i.test(url.hostname) && /^\/recaptcha\//.test(url.pathname));
           if (frame.parentFrame() && knownProvider) {
-            return { required: true, code: 'human_verification_required', source: 'visible_challenge_frame' };
+            visibleChallengeFrame = true;
           }
           // 只查询固定人工验证文案是否可见，不读取页面正文或挑战交互控件的值。
           const matches = await frame.getByText(instruction).all();
@@ -261,6 +288,7 @@ export class BrowserRegistration {
         }
       }
     }
+    if (visibleChallengeFrame) return { required: true, code: 'human_verification_required', source: 'visible_challenge_frame' };
     return captchaRequired
       ? { required: true, code: 'captcha_required', source: 'upstream_captcha_response' }
       : { required: false };
@@ -272,7 +300,8 @@ export class BrowserRegistration {
     this.networkDiagnostics.attach(this.context);
     await this.networkDiagnostics.capture(this.page);
     this.network = this.networkDiagnostics.snapshot(this.page);
-    return verificationDiagnosis(this.network);
+    this.activeNetwork = this.networkDiagnostics.activeSnapshot(this.page);
+    return verificationDiagnosis(this.activeNetwork);
   }
 
   async status() {
@@ -635,6 +664,7 @@ export class BrowserRegistration {
         identity = await waitForIdentity(this.page,{timeoutMs:10000});
         if (!matchingIdentity(identity) || identity.account_id !== expectedAccountID) throw new RegistrationError('identity_not_verified');
         if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
+        await verifyMediaSession(this.page,media,identity);
         cookie = media.cookie;
       } else {
         const cookies = await this.context.cookies('https://firefly.adobe.com/');

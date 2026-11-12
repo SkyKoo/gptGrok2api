@@ -92,6 +92,46 @@ func TestPaidAndUnverifiedParametersNeverSubmit(t *testing.T) {
 		t.Fatal("unsupported tiers reached upstream")
 	}
 }
+func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
+	// Official Firefly cX/lX/Gxe builders (2026-11-11): Nano 2.1 uses
+	// resolution/aspectRatio, an empty modelSpecificPayload and explicit search=false.
+	calls := 0
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.String() != "https://firefly-3p.ff.adobe.io/v2/3p-images/generate-async" {
+			t.Fatal("unexpected Nano 2.1 submission route")
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		seeds, ok := body["seeds"].([]any)
+		if !ok || len(seeds) != 1 {
+			t.Fatal("expected one generation seed")
+		}
+		seed, ok := seeds[0].(float64)
+		if !ok || seed < 1 || seed > 999999 || seed != float64(int(seed)) {
+			t.Fatal("invalid generation seed")
+		}
+		delete(body, "seeds")
+		want := map[string]any{
+			"modelId": "gemini-flash", "modelVersion": "nano-banana-2026-09",
+			"n": float64(1), "prompt": "blue ceramic cup", "resolution": "1K",
+			"groundSearch": false, "modelSpecificPayload": map[string]any{},
+			"generationSettings": map[string]any{"aspectRatio": "1:1"},
+			"generationMetadata": map[string]any{"module": "text2image", "submodule": "ff-image-generate"},
+			"output":             map[string]any{"storeInputs": true}, "referenceBlobs": []any{},
+		}
+		if !reflect.DeepEqual(body, want) {
+			t.Fatalf("Nano 2.1 request differs from official contract: got %#v, want %#v", body, want)
+		}
+		return jsonResponse(http.StatusOK, `{"links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/nano21-fixture"}}}`), nil
+	})})
+	j, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image-2.1", Prompt: "blue ceramic cup", Width: 1024, Height: 1024, N: 1})
+	if err != nil || calls != 1 || j.Status != "SUBMITTED" {
+		t.Fatalf("calls=%d status=%s error=%v", calls, j.Status, err)
+	}
+}
 func TestPollWaitsForTerminalStatusEvenWithOutputAnd100Percent(t *testing.T) {
 	count := 0
 	c := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
@@ -175,7 +215,8 @@ func TestBalanceDistinguishesUnknownAndZero(t *testing.T) {
 }
 
 // This fixture is the successful 2026-11-10 Node Veo request, with only the
-// account identity replaced. It protects the verified external contract.
+// account identity replaced. The current official UGS mapper additionally omits
+// the optional empty referenceBlobs field; other verified fields stay unchanged.
 func TestVeoPayloadMatchesVerifiedNodeProtocol(t *testing.T) {
 	const prompt = "A single continuous studio product shot of a small matte red ceramic teapot beside one cobalt blue cup on a pale wooden table. Thin steam gently rises from the teapot spout. The camera slowly moves closer. Soft daylight, plain cream background, realistic ceramic texture. No people, no text, no logo. Quiet room ambience."
 	a := fixtureAccount(t)
@@ -211,7 +252,7 @@ func TestVeoPayloadMatchesVerifiedNodeProtocol(t *testing.T) {
 			t.Fatal("seed outside verified range")
 		}
 		got["seeds"] = []any{float64(445760)}
-		want := map[string]any{"modelId": "veo", "modelVersion": "3.1-lite-generate", "n": float64(1), "seeds": []any{float64(445760)}, "prompt": prompt, "output": map[string]any{"storeInputs": true}, "size": map[string]any{"width": float64(1920), "height": float64(1080)}, "resolution": "1080p", "duration": float64(8), "generateAudio": false, "referenceBlobs": []any{}, "generationMetadata": map[string]any{"module": "text2video", "submodule": "ff-video-generate"}, "generationSettings": map[string]any{"aspectRatio": "16:9"}}
+		want := map[string]any{"modelId": "veo", "modelVersion": "3.1-lite-generate", "n": float64(1), "seeds": []any{float64(445760)}, "prompt": prompt, "output": map[string]any{"storeInputs": true}, "size": map[string]any{"width": float64(1920), "height": float64(1080)}, "resolution": "1080p", "duration": float64(8), "generateAudio": false, "generationMetadata": map[string]any{"module": "text2video", "submodule": "ff-video-generate"}, "generationSettings": map[string]any{"aspectRatio": "16:9"}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatal("Veo request fields differ from successful Node fixture")
 		}

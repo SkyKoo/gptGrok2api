@@ -260,7 +260,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		return e.change(id, func(j *RegistrationJob) {
 			j.Status = "running"
 			j.Stage = stage
-			appendRegistrationLog(j, stage, stage, "info")
+			appendRegistrationLog(j, stage, adobeRegistrationStageText(stage), "info")
 		})
 	})
 	if err != nil {
@@ -488,7 +488,7 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		if i < start || i >= end {
 			continue
 		}
-		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && e.cancel == nil, "can_retry_registration": false})
+		jobs = append(jobs, map[string]any{"id": j.ID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && e.cancel == nil, "can_retry_registration": false, "review_hint": adobeRegistrationReviewHint(j.Error)})
 	}
 	if len(logs) > 200 {
 		logs = logs[len(logs)-200:]

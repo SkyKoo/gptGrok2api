@@ -7,6 +7,7 @@ import { BrowserRegistration } from './browser.mjs';
 import { launchPersistentBrowser } from './browser-runtime.mjs';
 import { runAutomaticRegistration } from './auto-runner.mjs';
 import { refreshSession } from './session-refresh.mjs';
+import { registrationDiagnostics } from './registration-diagnostics.mjs';
 const output = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Browser libraries may log, but stdout is a credential-bearing RPC pipe only.
 console.log = console.info = console.warn = console.error = () => {};
@@ -19,7 +20,7 @@ async function close() {
   if (store) await store.close();
   closed = true;
 }
-async function refresh(){const account=await refreshSession(context,init);return {stage:'completed',media_session_refreshed:account.media_session_refreshed,account};}
+async function refresh(){const account=await refreshSession(context,init,{workerMode:true});return {stage:'completed',media_session_refreshed:account.media_session_refreshed,account};}
 async function command(request) {
   if (request.action === 'init') {
     if (init) throw new RegistrationError('session_already_initialized');
@@ -30,7 +31,7 @@ async function command(request) {
     await mkdir(root, {recursive:true, mode:0o700}); await chmod(root, 0o700);
     if (request.mode === 'refresh') {
       const dir = path.join(root, request.profile_id, 'browser');
-      context = await launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1'});
+      context = await launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1',restoreLastSession:false});
     } else {
       store = new PrivateRunStore(root, request.profile_id);
       const state = await store.init({email:request.email, config:{profile:request.profile}});
@@ -49,7 +50,11 @@ async function command(request) {
     approveCreate:true, readInput:async () => ({profile:init.profile, ...(request.code ? {code:request.code} : {})}),
   });
   const state = await store.load();
-  return {stage:result.stage, code:result.code || '', submission_started:state.submission.started,
+  const diagnostics = registrationDiagnostics(result, state);
+  // The browser closes when this attempt ends. Keep its fixed, credential-free
+  // observation so a later investigation does not have to repeat signup.
+  await store.save({lastObservation:diagnostics});
+  return {stage:result.stage, code:result.code || '', submission_started:state.submission.started, diagnostics,
     ...(result.stage === 'completed' ? {account:{...state.result.account, profile_id:init.profile_id, password:state.config.password}} : {}),
   };
 }

@@ -21,18 +21,27 @@ import (
 )
 
 type diskState struct {
-	Accounts []Account         `json:"accounts"`
-	Bindings map[string]string `json:"bindings"`
+	Accounts           []Account                           `json:"accounts"`
+	Bindings           map[string]string                   `json:"bindings"`
+	Resolutions        map[string]SubmissionResolution     `json:"submission_resolutions,omitempty"`
+	Reconciliations    map[string]SubmissionReconciliation `json:"submission_reconciliations,omitempty"`
+	PreparedMediaTasks map[string]uint64                   `json:"media_prepared_tasks,omitempty"`
+	MediaFailures      map[string]mediaPreparationFailure  `json:"media_preparation_failures,omitempty"`
 }
 type Store struct {
 	browserRefresher func(context.Context, Account) (Account, error)
 	path, secret     string
 	mu               sync.Mutex
 	maintenance      map[string]bool
+	quotaQueries     map[string]bool
+	mediaReady       map[string]mediaReadiness
+	mediaFlights     map[string]*mediaPreparationFlight
+	accountChanged   map[string]chan struct{}
+	modelFailures    map[string]modelPermissionFailure
 }
 
 func NewStore(path, secret string) *Store {
-	return &Store{path: path, secret: secret, maintenance: map[string]bool{}}
+	return &Store{path: path, secret: secret, maintenance: map[string]bool{}, quotaQueries: map[string]bool{}, mediaReady: map[string]mediaReadiness{}, mediaFlights: map[string]*mediaPreparationFlight{}, accountChanged: map[string]chan struct{}{}, modelFailures: map[string]modelPermissionFailure{}}
 }
 func Seal(secret string, plain []byte) ([]byte, error) {
 	a, err := aead(secret)
@@ -114,6 +123,9 @@ func (s *Store) load() (diskState, error) {
 	if d.Bindings == nil {
 		d.Bindings = map[string]string{}
 	}
+	for i := range d.Accounts {
+		d.Accounts[i].TaskReconciliation = reconciliationForAccount(d, d.Accounts[i], time.Now())
+	}
 	return d, nil
 }
 func (s *Store) save(d diskState) error {
@@ -185,6 +197,8 @@ func (s *Store) BindProxy(id string, binding proxyruntime.Binding, reason string
 		if err := s.save(d); err != nil {
 			return Account{}, err
 		}
+		delete(s.mediaReady, id)
+		delete(s.modelFailures, id)
 		return *a, nil
 	}
 	return Account{}, ErrNotFound
@@ -199,6 +213,7 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 	}
 	result := make([]Account, 0, len(items))
 	for _, a := range items {
+		a.TaskReconciliation = nil
 		a.AccountID = strings.TrimSpace(a.AccountID)
 		id, expiry, e := TokenIdentity(strings.TrimSpace(a.Token))
 		if e != nil {
@@ -214,6 +229,11 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 			return nil, e
 		}
 		a.ID = "adobe:" + a.AccountID
+		// A delete/reimport cycle can reuse credential revision 1. Keep the
+		// identity incarnation stable until its outstanding quota read finishes.
+		if s.quotaQueries[a.ID] {
+			return nil, ErrBusy
+		}
 		a.Token = strings.TrimSpace(a.Token)
 		a.ExpiresAt = expiry
 		a.CreatedAt = time.Now().Unix()
@@ -264,9 +284,14 @@ func (s *Store) Import(items []Account) ([]Account, error) {
 			d.Accounts = append(d.Accounts, a)
 		}
 		result = append(result, a)
+		delete(d.MediaFailures, a.ID)
 	}
 	if err = s.save(d); err != nil {
 		return nil, err
+	}
+	for _, a := range result {
+		delete(s.mediaReady, a.ID)
+		delete(s.modelFailures, a.ID)
 	}
 	return result, nil
 }
@@ -353,13 +378,26 @@ func (s *Store) finish(taskID string, unknown bool) error {
 		if a.InFlight != taskID {
 			continue
 		}
-		a.UpdatedAt = time.Now().Unix()
+		now := time.Now()
+		a.UpdatedAt = now.Unix()
 		if unknown {
 			a.Status = "submission_unknown"
 			a.LastError = "adobe_submission_unknown"
+			delete(s.mediaReady, a.ID)
 		} else {
+			s.recordAutomaticPollResolutionLocked(&d, *a, taskID, now)
 			a.InFlight = ""
-			a.SettlementUntil = time.Now().Add(30 * time.Second).Unix()
+			if a.Status == "submission_unknown" {
+				a.Status = "pending"
+				if a.LastRefreshAt > 0 || a.Quota.LastSuccessAt != "" || a.Quota.Status == "known" {
+					a.Status = "active"
+				}
+			}
+			if a.LastError == "adobe_submission_unknown" {
+				a.LastError = ""
+			}
+			a.QuotaRevision++
+			a.SettlementUntil = now.Add(30 * time.Second).Unix()
 			a.Quota.Status = "stale"
 			if a.Quota.Generation != nil {
 				a.Quota.Generation.Status = "stale"
@@ -370,6 +408,7 @@ func (s *Store) finish(taskID string, unknown bool) error {
 }
 func (s *Store) UpdateQuota(id string, revision uint64, q Quota) error {
 	return s.update(id, revision, func(a *Account) {
+		a.QuotaRevision++
 		a.Quota = q
 		if q.Status == "known" && a.InFlight == "" {
 			a.Status = "active"
@@ -418,10 +457,26 @@ func (s *Store) ReplaceCredentials(expected Account, replacement Account) (Accou
 }
 
 func (s *Store) replaceCredentials(expected Account, replacement Account, browserVerified bool) (Account, error) {
+	return s.replaceCredentialsWithPreparation(expected, replacement, browserVerified, nil)
+}
+
+func (s *Store) replaceCredentialsWithPreparation(expected Account, replacement Account, browserVerified bool, preparation *mediaPreparationGuard) (Account, error) {
+	var readyCtx context.Context
+	if preparation != nil {
+		readyCtx = preparation.ctx
+	}
+	return s.replaceCredentialsWithContext(expected, replacement, browserVerified, preparation, readyCtx)
+}
+
+func (s *Store) replaceCredentialsWithContext(expected Account, replacement Account, browserVerified bool, preparation *mediaPreparationGuard, readyCtx context.Context) (Account, error) {
+	stage := "relogin"
+	if preparation != nil {
+		stage = "media_prepare"
+	}
 	identity, expires, err := TokenIdentity(replacement.Token)
 	if err != nil {
 		if browserVerified {
-			return Account{}, &Error{Stage: "relogin", Code: "token_invalid"}
+			return Account{}, &Error{Stage: stage, Code: "token_invalid"}
 		}
 		return Account{}, err
 	}
@@ -433,13 +488,16 @@ func (s *Store) replaceCredentials(expected Account, replacement Account, browse
 			return Account{}, ErrIdentity
 		}
 		if expires <= time.Now().Unix() {
-			return Account{}, &Error{Stage: "relogin", Code: "token_expired"}
+			return Account{}, &Error{Stage: stage, Code: "token_expired"}
+		}
+		if preparation != nil && expires <= time.Now().Add(time.Minute).Unix() {
+			return Account{}, &Error{Stage: stage, Code: "token_expiring"}
 		}
 		if !replacement.MediaSessionRefreshed || replacement.MediaSessionStatus != "complete" {
-			return Account{}, &Error{Stage: "relogin", Code: "media_session_incomplete"}
+			return Account{}, &Error{Stage: stage, Code: "media_session_incomplete"}
 		}
 		if _, _, err := MediaSessionARP(replacement); err != nil {
-			return Account{}, &Error{Stage: "relogin", Code: "media_session_incomplete"}
+			return Account{}, &Error{Stage: stage, Code: "media_session_incomplete"}
 		}
 	}
 	s.mu.Lock()
@@ -457,6 +515,17 @@ func (s *Store) replaceCredentials(expected Account, replacement Account, browse
 		}
 		if current.AccountID != identity {
 			return Account{}, ErrIdentity
+		}
+		if preparation != nil {
+			if err := s.checkMediaPreparationLocked(d, current, expected, preparation); err != nil {
+				return Account{}, err
+			}
+		}
+		trustMedia := false
+		if browserVerified && readyCtx != nil && current.Enabled {
+			before, expectedFixed := mediaContextFingerprint(readyCtx, expected)
+			after, currentFixed := mediaContextFingerprint(readyCtx, current)
+			trustMedia = expectedFixed && currentFixed && before == after
 		}
 		mediaCookie := replacement.Cookie
 		mediaStatus := "refreshed"
@@ -495,6 +564,7 @@ func (s *Store) replaceCredentials(expected Account, replacement Account, browse
 			current.RefreshCookie = replacement.RefreshCookie
 		}
 		current.Revision++
+		current.QuotaRevision++
 		current.LastRefreshAt = time.Now().Unix()
 		current.UpdatedAt = current.LastRefreshAt
 		current.NextRefreshAt = time.Now().Add(45 * time.Minute).Unix()
@@ -505,8 +575,20 @@ func (s *Store) replaceCredentials(expected Account, replacement Account, browse
 			current.Status = "active"
 		}
 		d.Accounts[i] = current
+		if preparation != nil && !preparation.warm {
+			if d.PreparedMediaTasks == nil {
+				d.PreparedMediaTasks = map[string]uint64{}
+			}
+			d.PreparedMediaTasks[preparation.taskKey] = current.Revision
+		}
+		delete(d.MediaFailures, current.ID)
 		if err = s.save(d); err != nil {
 			return Account{}, err
+		}
+		delete(s.mediaReady, current.ID)
+		delete(s.modelFailures, current.ID)
+		if trustMedia {
+			s.recordMediaReadyLocked(readyCtx, current)
 		}
 		return current, nil
 	}
@@ -530,7 +612,16 @@ func (s *Store) SetEnabled(ids []string, enabled bool) error {
 			d.Accounts[i].UpdatedAt = time.Now().Unix()
 		}
 	}
-	return s.save(d)
+	if err := s.save(d); err != nil {
+		return err
+	}
+	if !enabled {
+		for id := range set {
+			delete(s.mediaReady, id)
+			delete(s.modelFailures, id)
+		}
+	}
+	return nil
 }
 func (s *Store) Delete(ids []string) ([]Account, error) {
 	deleted, _, err := s.DeleteWithCutoff(ids)
@@ -556,10 +647,11 @@ func (s *Store) DeleteWithCutoff(ids []string) ([]Account, time.Time, error) {
 	deleted := []Account{}
 	for _, a := range d.Accounts {
 		if set[a.ID] {
-			if a.InFlight != "" || s.maintenance[a.ID] {
+			if a.InFlight != "" || s.maintenance[a.ID] || s.quotaQueries[a.ID] {
 				return nil, cutoff, ErrBusy
 			}
 			deleted = append(deleted, a)
+			delete(d.MediaFailures, a.ID)
 		} else {
 			keep = append(keep, a)
 		}
@@ -567,6 +659,10 @@ func (s *Store) DeleteWithCutoff(ids []string) ([]Account, time.Time, error) {
 	d.Accounts = keep
 	if err = s.save(d); err != nil {
 		return nil, cutoff, err
+	}
+	for _, a := range deleted {
+		delete(s.mediaReady, a.ID)
+		delete(s.modelFailures, a.ID)
 	}
 	return deleted, cutoff, nil
 }
@@ -619,7 +715,7 @@ func (s *Store) relogin(ctx context.Context, id string, revision *uint64) (Accou
 	}
 	s.maintenance[id] = true
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.maintenance, id); s.mu.Unlock() }()
+	defer s.endAccountMaintenance(id)
 	refreshed, err := browserRefresher(ctx, a)
 	if err != nil {
 		return a, err
@@ -627,7 +723,7 @@ func (s *Store) relogin(ctx context.Context, id string, revision *uint64) (Accou
 	if ctx.Err() != nil {
 		return a, &Error{Stage: "relogin", Code: "cancelled"}
 	}
-	updated, err := s.replaceCredentials(a, refreshed, true)
+	updated, err := s.replaceCredentialsWithContext(a, refreshed, true, nil, ctx)
 	if err != nil {
 		return a, err
 	}
@@ -637,6 +733,84 @@ func (s *Store) relogin(ctx context.Context, id string, revision *uint64) (Accou
 // Refresh performs bounded maintenance before selection or after settlement;
 // it never refreshes and replays a failed generation request.
 func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials bool) (Account, error) {
+	return s.refresh(ctx, c, id, credentials, false, nil)
+}
+
+// RefreshWithPermissions keeps both balance and generation-permission reads
+// behind the same maintenance gate used by preparation and account selection.
+func (s *Store) RefreshWithPermissions(ctx context.Context, c *Client, id string, credentials bool) (Account, error) {
+	return s.refresh(ctx, c, id, credentials, true, nil)
+}
+
+type maintenanceDueGuard struct {
+	now       time.Time
+	attempted bool
+	model     string
+}
+
+func MaintenanceDue(a Account, now time.Time) bool {
+	if !a.Enabled || a.InFlight != "" || a.SettlementUntil > now.Unix() || (a.NextRefreshAt > now.Unix() && a.LastError != "") {
+		return false
+	}
+	return !QuotaRefreshDueAt(a, now).After(now)
+}
+
+// QuotaRefreshDueAt orders maintenance fairly; the caller still checks enabled,
+// in-flight and settlement state through MaintenanceDue before starting work.
+func QuotaRefreshDueAt(a Account, now time.Time) time.Time {
+	at, _ := time.Parse(time.RFC3339Nano, a.Quota.CheckedAt)
+	interval := time.Hour
+	if a.LastUsedAt > now.Add(-time.Hour).Unix() {
+		interval = 5 * time.Minute
+	}
+	due := at.Add(interval)
+	if a.Quota.Status == "stale" || at.IsZero() {
+		due = time.Time{}
+	}
+	if tokenDue := time.Unix(a.ExpiresAt, 0).Add(-5 * time.Minute); tokenDue.Before(due) {
+		due = tokenDue
+	}
+	if retry := time.Unix(a.NextRefreshAt, 0); a.LastError != "" && retry.After(due) {
+		due = retry
+	}
+	return due
+}
+
+// RefreshDueWithPermissions rechecks the scheduler's due decision while holding
+// the same account gate as requests, and reports whether network work began.
+func (s *Store) RefreshDueWithPermissions(ctx context.Context, c *Client, id string, now time.Time) (Account, bool, error) {
+	guard := &maintenanceDueGuard{now: now}
+	a, err := s.refresh(ctx, c, id, false, true, guard)
+	return a, guard.attempted, err
+}
+
+// RefreshModelPermissions is request-driven and independent of background
+// maintenance settings. Concurrent readers share the existing account gate;
+// once admitted the latest model observation is checked again before any read.
+func (s *Store) RefreshModelPermissions(ctx context.Context, c *Client, id, model string) (Account, bool, error) {
+	guard := &maintenanceDueGuard{model: model, now: time.Now()}
+	a, err := s.refresh(ctx, c, id, false, true, guard)
+	if errors.Is(err, ErrBusy) {
+		s.mu.Lock()
+		var signal <-chan struct{}
+		if s.maintenance[id] || s.quotaQueries[id] {
+			signal = s.accountChangeSignalLocked(id)
+		}
+		s.mu.Unlock()
+		if signal != nil {
+			if waitErr := waitMediaSignal(ctx, signal); waitErr != nil {
+				return a, false, waitErr
+			}
+		}
+		a, err = s.refresh(ctx, c, id, false, true, guard)
+	}
+	if err == nil && a.Quota.Generation.ModelSelectionState(model, time.Now()) == ModelNeedsRefresh {
+		err = &Error{Stage: "entitlements", Code: "observation_incomplete"}
+	}
+	return a, guard.attempted, err
+}
+
+func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, includePermissions bool, due *maintenanceDueGuard) (Account, error) {
 	s.mu.Lock()
 	d, err := s.load()
 	if err != nil {
@@ -654,14 +828,40 @@ func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials b
 		s.mu.Unlock()
 		return a, ErrNotFound
 	}
-	if a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || s.maintenance[id] {
+	if a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || s.maintenance[id] || s.quotaQueries[id] {
 		s.mu.Unlock()
 		return a, ErrBusy
+	}
+	if due != nil {
+		needed := MaintenanceDue(a, due.now)
+		if due.model != "" {
+			if !a.Enabled || a.Status == "invalid" || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
+				s.mu.Unlock()
+				return a, ErrBusy
+			}
+			state := a.Quota.Generation.ModelSelectionState(due.model, time.Now())
+			needed = state == ModelNeedsRefresh || (state == ModelUsable && !Eligible(a, time.Now()))
+			if needed && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
+				s.mu.Unlock()
+				return a, &Error{Stage: "entitlements", Code: "observation_incomplete"}
+			}
+		}
+		if !needed {
+			s.mu.Unlock()
+			return a, nil
+		}
+	}
+	if ctx.Err() != nil {
+		s.mu.Unlock()
+		return a, &Error{Stage: "refresh", Code: "cancelled"}
+	}
+	if due != nil {
+		due.attempted = true
 	}
 	s.maintenance[id] = true
 	browserRefresher := s.browserRefresher
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.maintenance, id); s.mu.Unlock() }()
+	defer s.endAccountMaintenance(id)
 	refreshedOnce := false
 	refreshCredentials := func() error {
 		refreshedOnce = true
@@ -672,7 +872,7 @@ func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials b
 			refreshed, e = browserRefresher(ctx, a)
 		}
 		if e == nil {
-			updated, saveErr := s.replaceCredentials(a, refreshed, browserVerified)
+			updated, saveErr := s.replaceCredentialsWithContext(a, refreshed, browserVerified, nil, ctx)
 			e = saveErr
 			if e == nil {
 				a = updated
@@ -704,11 +904,30 @@ func (s *Store) Refresh(ctx context.Context, c *Client, id string, credentials b
 		q.Status = "error"
 		q.Error = SafeError(e)
 		q.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	} else {
+		// General credits and model pools are independent observations. Keep
+		// the previous model snapshot until the guarded permissions read ends.
+		q.Generation = a.Quota.Generation
 	}
 	if ue := s.UpdateQuota(a.ID, a.Revision, q); ue != nil {
 		return a, ue
 	}
 	a.Quota = q
+	if e == nil && includePermissions {
+		generation, generationErr := c.GenerationPermissions(ctx, a)
+		if generationErr != nil {
+			generation.Status, generation.Error = "error", SafeError(generationErr)
+		}
+		if saveErr := s.UpdateGenerationPermissions(a.ID, a.Revision, generation); saveErr != nil {
+			return a, saveErr
+		}
+		targetModel := ""
+		if due != nil {
+			targetModel = due.model
+		}
+		s.recordModelPermissionObservation(ctx, a, generation, targetModel)
+		return s.Get(a.ID)
+	}
 	return a, e
 }
 func (s *Store) EnsureAvailable(ctx context.Context, c *Client) error {
@@ -744,6 +963,13 @@ func (s *Store) jobPath(taskID string) string {
 func (s *Store) SaveJob(taskID string, job Job) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	if _, resolved := d.Resolutions[taskID]; resolved {
+		return ErrTaskResolved
+	}
 	raw, err := json.Marshal(job)
 	if err != nil {
 		return err
@@ -757,6 +983,9 @@ func (s *Store) SaveJob(taskID string, job Job) error {
 func (s *Store) LoadJob(taskID string) (Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.loadJobLocked(taskID)
+}
+func (s *Store) loadJobLocked(taskID string) (Job, error) {
 	var j Job
 	raw, err := os.ReadFile(s.jobPath(taskID))
 	if err != nil {
@@ -785,6 +1014,9 @@ func (s *Store) Resume(taskID, accountID string) (Account, error) {
 	}
 	if d.Bindings[taskID] != accountID {
 		return Account{}, errors.New("adobe_resume_binding_mismatch")
+	}
+	if _, resolved := d.Resolutions[taskID]; resolved {
+		return Account{}, ErrTaskResolved
 	}
 	for i, a := range d.Accounts {
 		if a.ID != accountID {
@@ -826,6 +1058,10 @@ func (s *Store) RefreshTask(ctx context.Context, c *Client, taskID, accountID st
 		s.mu.Unlock()
 		return Account{}, errors.New("adobe_resume_binding_mismatch")
 	}
+	if _, resolved := d.Resolutions[taskID]; resolved {
+		s.mu.Unlock()
+		return Account{}, ErrTaskResolved
+	}
 	var a Account
 	for _, v := range d.Accounts {
 		if v.ID == accountID {
@@ -844,7 +1080,7 @@ func (s *Store) RefreshTask(ctx context.Context, c *Client, taskID, accountID st
 	s.maintenance[accountID] = true
 	browserRefresher := s.browserRefresher
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.maintenance, accountID); s.mu.Unlock() }()
+	defer s.endAccountMaintenance(accountID)
 	browserVerified := false
 	refreshed, err := c.Refresh(ctx, a)
 	if err != nil && a.ProfileID != "" && browserRefresher != nil {
@@ -852,7 +1088,7 @@ func (s *Store) RefreshTask(ctx context.Context, c *Client, taskID, accountID st
 		refreshed, err = browserRefresher(ctx, a)
 	}
 	if err == nil {
-		updated, e := s.replaceCredentials(a, refreshed, browserVerified)
+		updated, e := s.replaceCredentialsWithContext(a, refreshed, browserVerified, nil, ctx)
 		err = e
 		if e == nil {
 			a = updated

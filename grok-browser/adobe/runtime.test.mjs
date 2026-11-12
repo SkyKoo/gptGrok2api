@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { launchPersistentBrowser, browserProxy } from './browser-runtime.mjs';
+import { launchPersistentBrowser, browserProxy, browserLaunchError } from './browser-runtime.mjs';
 
 test('proxy root slash is normalized and credentials remain separate from the server', () => {
   assert.equal(browserProxy(''), undefined);
@@ -169,6 +169,44 @@ test('missing or failed CloakBrowser never silently falls back to another backen
   await assert.rejects(launchPersistentBrowser('/fixture/browser', {}, {
     env: { ADOBE_BROWSER_BACKEND: 'cloakbrowser' },
     importer: async () => ({ launchPersistentContext: async () => { launches++; throw launchError; } }),
-  }), error => error === launchError);
+  }), error => error.code === 'browser_launch_failed' && !error.message.includes(launchError.message));
   assert.equal(launches, 1);
+});
+
+test('dedicated refresh opts out of tab restoration without changing stored identity or proxy', async () => {
+  for (const backend of ['playwright','cloakbrowser']) {
+    let captured, directory;
+    const context = {};
+    const result = await launchPersistentBrowser('/fixture/existing-profile', {restoreLastSession:false}, {
+      env:{ADOBE_BROWSER_BACKEND:backend,ADOBE_BROWSER_PROXY:'http://fixture:secret@proxy.test:8080'},
+      importer:async()=>backend === 'cloakbrowser'
+        ? {launchPersistentContext:async options=>{captured=options;directory=options.userDataDir;return context;}}
+        : {chromium:{launchPersistentContext:async(dir,options)=>{captured=options;directory=dir;return context;}}},
+    });
+    assert.equal(result,context);
+    assert.equal(directory,'/fixture/existing-profile');
+    assert.deepEqual(captured.args,['--window-size=1440,900']);
+    assert.equal(captured.proxy.password,'secret');
+    assert.equal(captured.viewport,null);
+  }
+});
+
+test('startup failures expose fixed categories without raw browser details', () => {
+  const fixtures = [
+    [{name:'TimeoutError',message:'private-token'},'browser_launch_timeout'],
+    [new Error('Timeout 30000ms exceeded. proxy=private-token'),'browser_launch_timeout'],
+    [new Error('net::ERR_PROXY_CONNECTION_FAILED private-token'),'browser_launch_proxy_error'],
+    [new Error('Failed to create ProcessSingleton private-token'),'browser_launch_profile_unavailable'],
+    [new Error('Profile appears to be in use private-token'),'browser_launch_profile_locked'],
+    [{name:'CloakBrowserLicenseError',message:'private-token'},'browser_launch_license_denied'],
+    [new Error('Target page, context or browser has been closed private-token'),'browser_launch_process_exited'],
+    [new Error('something private-token'),'browser_launch_failed'],
+    [{code:'private-token'},'browser_launch_failed'],
+  ];
+  for(const [raw,code] of fixtures){
+    const safe = browserLaunchError(raw);
+    assert.equal(safe.code,code);
+    assert.equal(safe.message.includes('private-token'),false);
+    assert.equal(safe.cause,undefined);
+  }
 });

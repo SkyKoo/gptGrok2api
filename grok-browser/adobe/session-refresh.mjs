@@ -1,5 +1,5 @@
 import { RegistrationError } from './core.mjs';
-import { ensureMediaSession, isCompleteMediaSession } from './media-session.mjs';
+import { ensureMediaSession, isCompleteMediaSession, verifyMediaSession } from './media-session.mjs';
 
 // Firefly's current authentication service exposes Observe<T> values. Read the
 // profile, access token and signed-in flag from one instance; the IMS SDK's
@@ -155,9 +155,33 @@ export async function signInExistingAccount(page, expected, {landingTimeoutMs=15
   }
 }
 
-export async function refreshSession(context, expected, {waitIdentity=waitForIdentity,ensureMedia=ensureMediaSession,signal}={}) {
+// Only the queue-owned persistent context may discard restored tabs. The
+// caller explicitly opts in; no other profile or user browser is discovered.
+export async function prepareWorkerRefreshPage(context, {signal, closeTimeoutMs=5000}={}) {
+  const checkCancelled=()=>{if(signal?.aborted)throw new RegistrationError('media_session_cancelled');};
+  checkCancelled();
+  const restored=context.pages(),page=restored[0]||await context.newPage();
+  let timer;
+  try {
+    const closed=await Promise.race([
+      Promise.allSettled(restored.slice(1).map(other=>Promise.resolve().then(()=>other.close({runBeforeUnload:false})))),
+      new Promise((_,reject)=>{timer=setTimeout(()=>reject(new RegistrationError('refresh_page_cleanup_failed')),closeTimeoutMs);}),
+    ]);
+    checkCancelled();
+    if(closed.some(result=>result.status==='rejected'))throw new RegistrationError('refresh_page_cleanup_failed');
+    const remaining=context.pages();
+    if(remaining.length!==1||remaining[0]!==page)throw new RegistrationError('refresh_page_cleanup_failed');
+    return page;
+  } catch(error) {
+    checkCancelled();
+    if(error instanceof RegistrationError)throw error;
+    throw new RegistrationError('refresh_page_cleanup_failed');
+  } finally {clearTimeout(timer);}
+}
+
+export async function refreshSession(context, expected, {waitIdentity=waitForIdentity,ensureMedia=ensureMediaSession,workerMode=false,signal}={}) {
   if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
-  const page=context.pages()[0]||await context.newPage();
+  const page=workerMode?await prepareWorkerRefreshPage(context,{signal}):context.pages()[0]||await context.newPage();
   await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
   let identity=await waitIdentity(page,{timeoutMs:expected.password?15000:45000});
   if(!identity&&expected.password){
@@ -184,8 +208,9 @@ export async function refreshSession(context, expected, {waitIdentity=waitForIde
   }
   if(!isCompleteMediaSession(media))throw new RegistrationError('media_session_incomplete');
   // Media initialization navigates to SPL. Re-check that current runtime identity
-  // before pairing it with the observed present/omitted ARP state.
+  // before pairing it with the observed nonempty ARP value.
   identity=validateIdentity(await waitIdentity(page,{timeoutMs:10000}),expected);
+  await verifyMediaSession(page,media,identity,{signal});
   if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
   const diagnostics={...await sessionDiagnostics(page,context),media_runtime:media.runtime_state};
   const cookieString=list=>list.map(c=>`${c.name}=${c.value}`).join('; ');

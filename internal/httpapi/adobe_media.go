@@ -11,6 +11,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/protocol"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"image"
 	"net/http"
 	"strings"
@@ -18,9 +19,17 @@ import (
 )
 
 func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, selected imageSelection, prompt, id, size, format, publicBase string, count int, inputs []provider.OpenAIImageInput, options provider.ImageOutputOptions) (result []map[string]string, resultErr error) {
+	if selected.Context != nil {
+		if endpoint, fixed := proxyruntime.URLSelectionFromContext(selected.Context); fixed {
+			ctx = proxyruntime.WithURL(ctx, endpoint)
+		} else {
+			s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
+			return nil, adobeAPIError(&adobe.Error{Stage: "media_prepare", Code: "egress_required"})
+		}
+	}
 	request, validationErr := adobeImageRequest(id, prompt, size, count, inputs)
 	if validationErr != nil {
-		s.adobeStore.Release(selected.Key)
+		s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
 		return nil, &protocol.UpstreamError{Status: 400, Message: validationErr.Error()}
 	}
 	// Synchronous calls also need a durable owner-scoped recovery handle.
@@ -36,20 +45,28 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 		}
 		task := &imageTaskState{ImageOutputOptions: options, ID: selected.Key, OwnerID: owner, Status: "running", Mode: mode, Model: id, N: count, Size: fmt.Sprintf("%dx%d", request.Width, request.Height), CreatedAt: time.Now().UTC().Format(time.RFC3339), UpdatedAt: time.Now().UTC().Format(time.RFC3339), recovering: true, Route: &mediaRoute{Channel: "adobe", AccountID: selected.Adobe.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, JobKey: selected.Key, Stage: "selected"}}
 		s.imageTaskMu.Lock()
+		if s.imageTasks[imageTaskKey(owner, task.ID)] != nil {
+			s.imageTaskMu.Unlock()
+			return nil, &protocol.UpstreamError{Status: 409, Message: "media task already exists; automatic resubmission disabled"}
+		}
 		err := s.saveImageTaskLocked(task)
 		if err == nil {
 			s.imageTasks[imageTaskKey(owner, task.ID)] = task
 		}
 		s.imageTaskMu.Unlock()
 		if err != nil {
-			s.adobeStore.Release(selected.Key)
+			s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
 			return nil, err
 		}
 		ctx = context.WithValue(ctx, mediaTaskContextKey{}, task)
 		defer func() {
 			if resultErr != nil {
 				s.finishImageTaskError(task, resultErr.Error())
-				resultErr = &protocol.UpstreamError{Status: upstreamStatus(resultErr), Message: fmt.Sprintf("%v; task_id=%s (resume existing task via /api/image-tasks/%s/resume-poll)", resultErr, task.ID, task.ID)}
+				message := fmt.Sprintf("%v; task_id=%s", resultErr, task.ID)
+				if s.adobeRouteCanResume(task.Route, task.Model, "image") {
+					message += fmt.Sprintf(" (resume existing task via /api/image-tasks/%s/resume-poll)", task.ID)
+				}
+				resultErr = &protocol.UpstreamError{Status: upstreamStatus(resultErr), Message: message}
 			} else {
 				s.imageTaskMu.Lock()
 				task.Status = "success"
@@ -70,17 +87,33 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 	var egressErr error
 	ctx, egressErr = s.adobeAccountContext(ctx, selected.Adobe)
 	if egressErr != nil {
-		s.adobeStore.Release(selected.Key)
+		s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
 		return nil, adobeAPIError(egressErr)
 	}
 
 	if format != "url" && format != "b64_json" {
-		s.adobeStore.Release(selected.Key)
+		s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
 		return nil, &protocol.UpstreamError{Status: 400, Message: "response_format must be url or b64_json"}
 	}
 	m, _ := model.AdobeModel(id)
 	s.enrichRequestMonitor(r, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion})
+	if err := s.beginAdobeImagePreparation(ctx, selected); err != nil {
+		return nil, err
+	}
+	s.stageRequestMonitor(r, "media_session_preparing", 15, nil)
+	prepareStarted := time.Now()
+	wasReady := s.adobeStore.MediaSessionReady(ctx, selected.Adobe, 0)
+	fresh, err := s.adobeStore.PrepareMediaForTask(ctx, selected.Key, selected.Adobe.ID, selected.Adobe.Revision)
+	s.enrichRequestMonitor(r, map[string]any{"metrics": map[string]any{"media_session_cache_hit": wasReady, "media_session_prepare_ms": time.Since(prepareStarted).Milliseconds()}})
+	if err != nil {
+		if diagnostic := adobe.MediaDiagnosticFromError(err); diagnostic != nil {
+			s.enrichRequestMonitor(r, map[string]any{"metrics": map[string]any{"media_session_diagnostic": diagnostic}})
+		}
+		return nil, s.adobeMediaPreparationError(selected.Key, selected.Adobe.ID, err)
+	}
+	selected.Adobe = fresh
 	if _, err := s.adobeClient.PreflightImage(ctx, selected.Adobe, request); err != nil {
+		s.invalidateRejectedAdobeMediaSession(selected.Adobe, err)
 		s.adobeStore.Release(selected.Key)
 		return nil, adobeAPIError(err)
 	}
@@ -88,9 +121,13 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 		s.adobeStore.Release(selected.Key)
 		return nil, err
 	}
+	s.stageRequestMonitor(r, "image_starting_generation", 35, nil)
 	job, err := s.adobeClient.SubmitImage(ctx, selected.Adobe, request)
 	if err != nil {
-		s.adobeSubmissionFailed(selected.Key, err)
+		s.adobeStore.InvalidateMediaSession(selected.Adobe.ID, selected.Adobe.Revision)
+		if stateErr := s.adobeSubmissionFailed(selected.Key, job, err); stateErr != nil {
+			return nil, &protocol.UpstreamError{Status: upstreamStatus(adobeAPIError(err)), Message: adobe.SafeError(err) + "; upstream request state could not be saved; automatic resubmission disabled"}
+		}
 		return nil, adobeAPIError(err)
 	}
 	if err = s.adobeStore.SaveJob(selected.Key, job); err != nil {
@@ -100,15 +137,54 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 	if err = s.imageRouteStage(ctx, "polling"); err != nil {
 		return nil, err
 	}
+	s.stageRequestMonitor(r, "image_generating", 60, nil)
 	return s.finishAdobeImage(ctx, selected.Adobe, selected.Key, job, format, publicBase)
 }
-func (s *Server) adobeSubmissionFailed(key string, err error) {
+
+func (s *Server) beginAdobeImagePreparation(ctx context.Context, selected imageSelection) error {
+	task := imageTaskFromContext(ctx)
+	if task == nil {
+		return errors.New("media task missing")
+	}
+	s.imageTaskMu.Lock()
+	defer s.imageTaskMu.Unlock()
+	if task.Route == nil || task.Route.Channel != "adobe" || task.Route.AccountID != selected.Adobe.ID || task.Route.JobKey != selected.Key || task.Route.Stage != "selected" {
+		return &protocol.UpstreamError{Status: 409, Message: "media task already started; automatic resubmission disabled"}
+	}
+	task.Route.Stage = "media_session_preparing"
+	if err := s.saveImageTaskLocked(task); err != nil {
+		return s.adobeMediaPreparationError(selected.Key, selected.Adobe.ID, err)
+	}
+	return nil
+}
+
+func (s *Server) adobeMediaPreparationError(key, accountID string, err error) error {
+	message := "media_session_prepare_failed: " + adobe.SafeError(err)
+	if releaseErr := s.adobeStore.ReleaseUnsubmittedTask(key, accountID); releaseErr != nil {
+		message += "; reservation retained: " + adobe.SafeError(releaseErr)
+	}
+	return &protocol.UpstreamError{Status: upstreamStatus(adobeAPIError(err)), Message: message}
+}
+
+func (s *Server) invalidateRejectedAdobeMediaSession(a adobe.Account, err error) {
+	var upstream *adobe.Error
+	if errors.Is(err, adobe.ErrIdentity) || errors.As(err, &upstream) && (upstream.Status == http.StatusUnauthorized || upstream.Code == "authentication_error" || upstream.Stage == "session" || upstream.Code == "session_incomplete") {
+		s.adobeStore.InvalidateMediaSession(a.ID, a.Revision)
+	}
+}
+
+func (s *Server) adobeSubmissionFailed(key string, job adobe.Job, err error) error {
+	// Even a rejected or ambiguous submission has a useful request ID. Persist
+	// that evidence without inventing a poll URL or permitting another submit.
+	var saveErr error
+	if job.RequestID != "" {
+		saveErr = s.adobeStore.SaveJob(key, job)
+	}
 	var upstream *adobe.Error
 	if errors.As(err, &upstream) && !upstream.SubmissionUnknown {
-		s.adobeStore.Release(key)
-	} else {
-		s.adobeStore.MarkUnknown(key)
+		return errors.Join(saveErr, s.adobeStore.Release(key))
 	}
+	return errors.Join(saveErr, s.adobeStore.MarkUnknown(key))
 }
 func adobeTerminal(status string) bool {
 	switch strings.ToUpper(status) {
@@ -299,6 +375,10 @@ func (s *Server) resumeAdobeImageTask(task *imageTaskState) bool {
 
 func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOptions, inputs []provider.OpenAIImageInput) {
 	s.videoMu.Lock()
+	if job.recovering || job.Route != nil {
+		s.videoMu.Unlock()
+		return
+	}
 	job.recovering = true
 	s.videoMu.Unlock()
 	defer func() { s.videoMu.Lock(); job.recovering = false; s.videoMu.Unlock() }()
@@ -310,30 +390,54 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "invalid_request", "message": err.Error()})
 		return
 	}
-	s.ensureAdobeAccounts(ctx, job.Model)
+	if err := s.ensureAdobeAccounts(ctx, job.Model); err != nil {
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_entitlements_unavailable", "message": adobe.SafeError(err)})
+		return
+	}
 	key := "video-" + job.ID
-	a, err := s.adobeStore.ReserveForModel(key, job.Model)
+	a, selectedContext, err := s.adobeStore.ReserveMediaForModel(ctx, key, job.Model, s.adobeAccountContext)
 	if err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "no_available_account", "message": adobe.SafeError(err)})
+		code := "no_available_account"
+		var upstream *adobe.Error
+		if errors.As(err, &upstream) && upstream.Stage == "routing" {
+			code = "account_proxy_unavailable"
+		}
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": adobe.SafeError(err)})
 		return
 	}
-	ctx, err = s.adobeAccountContext(ctx, a)
-	if err != nil {
-		s.adobeStore.Release(key)
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_proxy_unavailable", "message": adobe.SafeError(err)})
-		return
-	}
+	ctx = selectedContext
 	m, _ := model.AdobeModel(job.Model)
 	s.videoMu.Lock()
 	job.Route = &mediaRoute{Channel: "adobe", AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
 	err = s.saveVideoCheckpointLocked(job)
 	s.videoMu.Unlock()
 	if err != nil {
-		s.adobeStore.Release(key)
+		s.adobeStore.ReleaseUnsubmittedTask(key, a.ID)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "could not persist selected channel"})
 		return
 	}
+	s.videoMu.Lock()
+	job.Route.Stage = "media_session_preparing"
+	s.videoMu.Unlock()
+	if !s.videoStage(job, "media_session_preparing", nil) {
+		err = errors.New("could not persist media preparation state")
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": s.adobeMediaPreparationError(key, a.ID, err).Error()})
+		return
+	}
+	prepareStarted := time.Now()
+	wasReady := s.adobeStore.MediaSessionReady(ctx, a, 0)
+	fresh, err := s.adobeStore.PrepareMediaForTask(ctx, key, a.ID, a.Revision)
+	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"media_session_cache_hit": wasReady, "media_session_prepare_ms": time.Since(prepareStarted).Milliseconds()}})
+	if err != nil {
+		if diagnostic := adobe.MediaDiagnosticFromError(err); diagnostic != nil {
+			s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"media_session_diagnostic": diagnostic}})
+		}
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "media_session_prepare_failed", "message": s.adobeMediaPreparationError(key, a.ID, err).Error()})
+		return
+	}
+	a = fresh
 	if _, err := s.adobeClient.PreflightVideo(ctx, a, request); err != nil {
+		s.invalidateRejectedAdobeMediaSession(a, err)
 		s.adobeStore.Release(key)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "free_generation_unavailable", "message": adobe.SafeError(err)})
 		return
@@ -351,7 +455,11 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	s.setVideoStatus(job, "in_progress", 1, nil)
 	handle, err := s.adobeClient.SubmitVideo(ctx, a, request)
 	if err != nil {
-		s.adobeSubmissionFailed(key, err)
+		s.adobeStore.InvalidateMediaSession(a.ID, a.Revision)
+		if stateErr := s.adobeSubmissionFailed(key, handle, err); stateErr != nil {
+			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": adobe.SafeError(err) + "; upstream request state could not be saved; automatic resubmission disabled"})
+			return
+		}
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_submit_failed", "message": adobe.SafeError(err)})
 		return
 	}
@@ -456,6 +564,9 @@ func (s *Server) resumeAdobeVideoJob(job *videoJob) bool {
 // and the main task checkpoint. A missing handle never authorizes resubmission.
 func (s *Server) adobeRouteCanResume(route *mediaRoute, id, kind string) bool {
 	if route == nil || route.Channel != "adobe" || route.JobKey == "" || s.adobeStore == nil {
+		return false
+	}
+	if resolved, err := s.adobeStore.SubmissionResolved(route.JobKey); err != nil || resolved {
 		return false
 	}
 	switch route.Stage {

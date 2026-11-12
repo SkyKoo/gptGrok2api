@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/png"
 	"io"
@@ -58,7 +59,11 @@ func TestAdobeVideoRepeatedRecoveryDoesNotInterruptActivePoll(t *testing.T) {
 	id := seedAdobeRecoveryVideo(t, s, "polling", true)
 	fresh := NewWithWorkers(s.cfg, false)
 	started, release := make(chan struct{}, 1), make(chan struct{})
-	var polls, submits atomic.Int32
+	var polls, submits, prepares atomic.Int32
+	fresh.adobeStore.SetBrowserRefresher(func(_ context.Context, current adobe.Account) (adobe.Account, error) {
+		prepares.Add(1)
+		return adobe.Account{}, &adobe.Error{Stage: "media_prepare", Code: "unexpected_recovery_preparation"}
+	})
 	fresh.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method == http.MethodPost {
 			submits.Add(1)
@@ -87,8 +92,8 @@ func TestAdobeVideoRepeatedRecoveryDoesNotInterruptActivePoll(t *testing.T) {
 	if status != "in_progress" || code == "video_interrupted" {
 		t.Fatalf("second recovery interrupted live poll: status=%s code=%s", status, code)
 	}
-	if submits.Load() != 0 || polls.Load() != 1 {
-		t.Fatalf("recovery submitted=%d polled=%d", submits.Load(), polls.Load())
+	if submits.Load() != 0 || polls.Load() != 1 || prepares.Load() != 0 {
+		t.Fatalf("recovery submitted=%d polled=%d prepares=%d", submits.Load(), polls.Load(), prepares.Load())
 	}
 }
 
@@ -222,7 +227,11 @@ func TestAdobeSyncPollFailureReturnsResumableTaskWithoutResubmission(t *testing.
 	if err := png.Encode(&generated, image.NewRGBA(image.Rect(0, 0, 1024, 1024))); err != nil {
 		t.Fatal(err)
 	}
-	var submits, polls, downloads atomic.Int32
+	var submits, polls, downloads, prepares atomic.Int32
+	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+		prepares.Add(1)
+		return adobeFixtureMediaRefresh(ctx, current)
+	})
 	s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body, status, mime := `{}`, 200, "application/json"
 		switch {
@@ -273,7 +282,7 @@ func TestAdobeSyncPollFailureReturnsResumableTaskWithoutResubmission(t *testing.
 	if err != nil || released.InFlight != "" {
 		t.Fatal("successful resume did not release account")
 	}
-	if submits.Load() != 1 || polls.Load() != 2 || downloads.Load() != 1 {
-		t.Fatalf("submit=%d poll=%d download=%d", submits.Load(), polls.Load(), downloads.Load())
+	if submits.Load() != 1 || polls.Load() != 2 || downloads.Load() != 1 || prepares.Load() != 1 {
+		t.Fatalf("submit=%d poll=%d download=%d prepares=%d", submits.Load(), polls.Load(), downloads.Load(), prepares.Load())
 	}
 }

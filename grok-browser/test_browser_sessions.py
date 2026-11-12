@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from browser_sessions import BrowserQueue, BrowserQueueError
+from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -108,6 +108,45 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.3)
         self.assertEqual(self.queue.status('one')['code'],'browser_start_failed')
         self.assertEqual(launch.await_count,1)
+
+    async def test_startup_diagnostic_is_fixed_without_changing_queue_failure_or_retry(self):
+        error = BrowserStartupError('browser_launch_timeout')
+        launch = AsyncMock(side_effect=error)
+        with self.assertLogs('grok-browser.queue', level='WARNING') as logs:
+            self.queue.enqueue('one', {'proxy': 'PRIVATE_PROXY'}, launch)
+            await asyncio.sleep(.3)
+        view = self.queue.status('one')
+        self.assertEqual(view['status'], 'failed')
+        self.assertEqual(view['code'], 'browser_start_failed')
+        self.assertEqual(view['diagnostic_code'], 'browser_launch_timeout')
+        self.assertEqual(launch.await_count, 1)
+        self.assertIn('code=browser_launch_timeout', '\n'.join(logs.output))
+        self.assertNotIn('PRIVATE_PROXY', str(view) + '\n'.join(logs.output))
+
+    async def test_startup_diagnostic_revalidates_modified_exception_code(self):
+        error = BrowserStartupError('browser_launch_timeout')
+        error.code = 'PRIVATE_PROXY'
+        launch = AsyncMock(side_effect=error)
+        with self.assertLogs('grok-browser.queue', level='WARNING') as logs:
+            self.queue.enqueue('one', {}, launch)
+            await asyncio.sleep(.3)
+        self.assertEqual(self.queue.status('one')['diagnostic_code'], 'browser_launch_failed')
+        self.assertNotIn('PRIVATE_PROXY', str(self.queue.status('one')) + '\n'.join(logs.output))
+
+    async def test_adobe_profile_and_license_failures_are_diagnostic_only_and_not_retried(self):
+        for code in ('browser_launch_profile_unavailable', 'browser_launch_license_denied'):
+            with self.subTest(code=code):
+                launch = AsyncMock(side_effect=BrowserStartupError(code))
+                with self.assertLogs('grok-browser.queue', level='WARNING') as logs:
+                    self.queue.enqueue(code, {}, launch)
+                    await asyncio.sleep(.3)
+                view = self.queue.status(code)
+                self.assertEqual(view['status'], 'failed')
+                self.assertEqual(view['code'], 'browser_start_failed')
+                self.assertEqual(view['diagnostic_code'], code)
+                self.assertEqual(launch.await_count, 1)
+                self.assertEqual(self.queue.cooldown_until, 0)
+                self.assertIn('code=' + code, '\n'.join(logs.output))
 
     async def test_duplicate_reservation_does_not_start_twice(self):
         launch=AsyncMock(return_value=self.browser())

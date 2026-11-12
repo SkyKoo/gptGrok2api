@@ -2,6 +2,7 @@ import { RegistrationError } from './core.mjs';
 
 const ADVANCE_STAGES = new Set(['awaiting_email', 'awaiting_password', 'awaiting_profile']);
 const APPROVAL_STAGES = new Set(['awaiting_password', 'awaiting_profile', 'awaiting_approval']);
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const BLOCKING_CODES = new Set([
   'region_unavailable', 'upstream_rate_limited', 'account_already_exists', 'form_rejected',
   'continuation_result_unknown', 'early_agreement_requires_manual',
@@ -19,10 +20,32 @@ function needsPhone(form) {
       `${field.name ?? ''} ${field.id ?? ''} ${field.label ?? ''} ${field.autocomplete ?? ''}`));
 }
 
+// Status can catch an automatic check between form transitions. Waiting only
+// re-observes the existing browser; no challenge control or submit is invoked.
+async function observeAutomaticVerification(browser, initial, shouldStop, {
+  timeoutMs = 15_000, pollIntervalMs = 250, now = Date.now, pause = wait,
+} = {}) {
+  let status = initial;
+  const deadline = now() + timeoutMs;
+  while (!shouldStop()) {
+    const human = status.form?.humanVerification;
+    const network = status.networkDiagnosis?.code;
+    const transient = human?.required === true &&
+      ['visible_challenge_frame', 'upstream_captcha_response'].includes(human.source);
+    if (!transient || (network && network !== 'captcha_required')) return status;
+    const remaining = deadline - now();
+    if (remaining <= 0) return status;
+    await pause(Math.min(pollIntervalMs, remaining));
+    if (shouldStop()) return status;
+    status = await browser.status();
+  }
+  return status;
+}
+
 /** 有界推进正常注册阶段；动作由浏览器驱动落盘，未知提交不能在循环中重放。 */
 export async function runAutomaticRegistration(browser, store, {
   readInput = async () => ({}), approveCreate = false, onEvent = () => {},
-  shouldStop = () => false, maxSteps = 8,
+  shouldStop = () => false, maxSteps = 8, verificationWait = {},
 } = {}) {
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 12) {
     throw new RegistrationError('automatic_step_limit_invalid');
@@ -47,6 +70,11 @@ export async function runAutomaticRegistration(browser, store, {
       if (shouldStop()) return paused('automatic_interrupted');
       const state = await store.load();
       status = await browser.status();
+      // Stage waits already settled a recorded manual challenge. Do not add
+      // another waiting window or reopen a paused/unknown signup attempt.
+      if (!(state.stage === 'needs_manual' && state.code === 'human_verification_required')) {
+        status = await observeAutomaticVerification(browser, status, shouldStop, verificationWait);
+      }
       if (shouldStop()) return paused('automatic_interrupted');
 
       // 已发布的身份快照由 exportSession 离线复用，不能仅凭页面文字宣称成功。

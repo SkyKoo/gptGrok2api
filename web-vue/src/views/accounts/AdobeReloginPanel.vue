@@ -17,7 +17,7 @@
           <p v-if="task.result_unknown" class="text-xs text-amber-600">本次登录结果无法确认，请刷新账号列表核对；没有自动重试。</p>
           <p v-else-if="task.error" role="alert" class="break-words text-xs text-rose-500">{{ adobeReloginError(task.error) }}</p>
           <p v-else-if="task.done && task.session_updated" role="status" class="text-xs text-emerald-600">重新登录完成，媒体会话已确认。</p>
-          <p v-if="task.submission_unknown" class="text-xs text-muted-foreground">待核对任务仍保留，未重新提交。</p>
+          <p v-if="task.submission_unknown" class="text-xs text-muted-foreground">原生成任务由系统继续处理，不会重新提交。</p>
         </article>
       </div>
     </div>

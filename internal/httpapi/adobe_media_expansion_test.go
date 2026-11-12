@@ -34,6 +34,8 @@ type adobeMediaCapture struct {
 	preflightPaid                       bool
 	video                               bool
 	expectedProxy                       string
+	expectedBearer                      string
+	expectedARP                         string
 	afterSubmit                         func()
 }
 
@@ -58,6 +60,9 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			}
 		}
 		status, body, mime := 200, `{}`, "application/json"
+		if r.URL.Hostname() != "pre-signed-firefly-prod.s3-accelerate.amazonaws.com" && f.expectedBearer != "" && r.Header.Get("Authorization") != "Bearer "+f.expectedBearer {
+			t.Error("Adobe API request did not use the freshly prepared access token")
+		}
 		switch {
 		case r.URL.Path == "/v2/models/generation-preflight":
 			f.preflights++
@@ -102,6 +107,9 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			}
 		case strings.Contains(r.URL.Path, "generate-async"):
 			f.submits++
+			if f.expectedARP != "" && r.Header.Get("x-arp-session-id") != f.expectedARP {
+				t.Error("generation did not use the freshly prepared media session")
+			}
 			if err := json.NewDecoder(r.Body).Decode(&f.payload); err != nil {
 				t.Error(err)
 			}

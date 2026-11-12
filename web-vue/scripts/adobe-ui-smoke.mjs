@@ -25,6 +25,8 @@ const page = await context.newPage(), errors=[], requests=[], unknown=[]
 page.on('pageerror',error=>errors.push(error.message))
 const schedule={enabled:false,interval_minutes:60,next_run_at:'',last_attempt_at:'',last_started_at:'',last_result:'',last_error:''}
 const register={target:'openai',total:1,threads:1,mode:'total',enabled:false,mail:{source_id:'mail',providers:[{id:'mail',type:'icloud_hme',enable:true,label:'fixture'}]},target_settings:Object.fromEntries(['openai','grok','adobe'].map(target=>[target,{total:1,threads:1,mode:'total',mail_source_id:'mail',proxy:'direct'}])),target_runtime:Object.fromEntries(['openai','grok','adobe'].map(target=>[target,{enabled:false,stats:{},logs:[],jobs:[],registration_schedule:schedule}]))}
+const reviewHint='Adobe 自动校验未完成，本次注册已停止并保留邮箱与原提交记录。浏览器已结束，不是在等待邮件验证码；系统不会重复创建账号。请查看日志区分验证组件加载失败与持续的交互验证要求。'
+register.target_runtime.adobe.jobs=[{id:'registration-held',email:'register-held@example.test',status:'registration_pending',stage:'needs_manual',error:'adobe: human_verification_required',imported:false,verified:false,can_retry:false,can_retry_registration:false,review_hint:reviewHint}]
 const image={kind:'image',sizes:['1024x1024','1200x896'],qualities:['auto'],max_reference_images:6,output_formats:['png','jpeg'],variants:[{sizes:['1024x1024'],aspect_ratios:['1:1'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6},{sizes:['1200x896'],aspect_ratios:['4:3'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:6}]}
 const video={kind:'video',sizes:['1920x1080'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,variants:[{sizes:['1920x1080'],resolutions:['1080p'],durations:[8],max_count:1,max_reference_images:2,audio:true}]}
 const catalog={chat_models:['gpt-test'],image_models:['gemini-3.1-flash-image'],image_edit_models:['gemini-3.1-flash-image'],video_models:['veo-3.1-lite'],models:[{id:'gpt-test',name:'GPT fixture'},{id:'gemini-3.1-flash-image',name:'Gemini 3.1 Flash Image (Nano Banana 2)'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'}],media_capabilities:{'gemini-3.1-flash-image':image,'veo-3.1-lite':video}}
@@ -219,6 +221,8 @@ try {
   assert.equal(await hmeSource.getByRole('radio').isDisabled(),false)
   assert.equal(await hmeSource.getByRole('radio').isChecked(),true)
   assert.equal(await page.getByText('请选择可用来源',{exact:true}).count(),0)
+  await page.getByRole('region',{name:'注册任务记录',exact:true}).getByText(reviewHint,{exact:true}).waitFor()
+  assert.equal(await page.getByRole('button',{name:'复用此邮箱重试注册',exact:true}).count(),0)
   await screenshot('adobe-registration')
   await page.goto(origin+'/#/studio')
   await page.getByRole('button',{name:'切换模式',exact:true}).click()

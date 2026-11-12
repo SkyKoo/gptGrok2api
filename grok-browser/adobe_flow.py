@@ -7,7 +7,7 @@ import signal
 import time
 import uuid
 from pydantic import BaseModel, Field
-from browser_sessions import queue, BrowserQueueError
+from browser_sessions import queue, BrowserQueueError, BrowserStartupError
 
 class AdobeCommandRequest(BaseModel):
     browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -69,7 +69,7 @@ async def launch_adobe(**options):
     try:
         result = await handle.command({"action":"init", **options})
         if result.get("stage") != "ready":
-            raise RuntimeError("adobe_start_failed")
+            raise BrowserStartupError(result.get("code"))
         return handle
     except BaseException:
         await handle.close()

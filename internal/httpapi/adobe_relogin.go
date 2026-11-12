@@ -77,7 +77,15 @@ func (s *Server) runAdobeRelogins() {
 		}
 		s.adobeReloginMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		account, failure := s.adobeStore.ReloginRevision(ctx, task.AccountRef, task.CredentialRevision)
+		account, failure := s.adobeStore.Get(task.AccountRef)
+		if failure == nil {
+			ctx, failure = s.adobeAccountContext(ctx, account)
+		}
+		if failure == nil {
+			// The Store and browser must observe the same pinned egress so a
+			// successful login can become reusable media-session evidence.
+			account, failure = s.adobeStore.ReloginRevision(ctx, task.AccountRef, task.CredentialRevision)
+		}
 		cancel()
 		if err = s.adobeReloginJobs.Finish(task.ProgressID, account, failure); err != nil {
 			s.adobeReloginMu.Lock()

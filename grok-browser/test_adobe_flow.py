@@ -1,10 +1,38 @@
 import asyncio
 import unittest
-from unittest.mock import patch
-from browser_sessions import BrowserQueue, BrowserQueueError
-from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command
+from unittest.mock import patch, AsyncMock
+from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError
+from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe
 
 class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_init_failure_preserves_safe_code_and_closes_before_raising(self):
+        for code in BrowserStartupError.CODES:
+            handle = AsyncMock()
+            handle.command.return_value = {'stage': 'needs_manual', 'code': code}
+            with patch('adobe_flow.asyncio.create_subprocess_exec', AsyncMock()), patch('adobe_flow.AdobeProcess', return_value=handle):
+                with self.assertRaises(BrowserStartupError) as raised:
+                    await launch_adobe(proxy='PRIVATE_PROXY')
+            self.assertEqual(raised.exception.code, code)
+            handle.close.assert_awaited_once()
+
+    async def test_init_failure_drops_untrusted_error_and_diagnostics(self):
+        for code in ('PRIVATE_PROXY', 'browser_launch_timeout\nPRIVATE', None, ['PRIVATE']):
+            handle = AsyncMock()
+            handle.command.return_value = {'stage': 'needs_manual', 'code': code, 'diagnostics': {'private': 'PRIVATE'}}
+            with patch('adobe_flow.asyncio.create_subprocess_exec', AsyncMock()), patch('adobe_flow.AdobeProcess', return_value=handle):
+                with self.assertRaises(BrowserStartupError) as raised:
+                    await launch_adobe()
+            self.assertEqual(str(raised.exception), 'browser_launch_failed')
+            handle.close.assert_awaited_once()
+
+    async def test_init_close_failure_remains_failure_and_is_not_hidden_by_diagnostic(self):
+        handle = AsyncMock()
+        handle.command.return_value = {'stage': 'needs_manual', 'code': 'browser_launch_timeout'}
+        handle.close.side_effect = RuntimeError('adobe_browser_close_unconfirmed')
+        with patch('adobe_flow.asyncio.create_subprocess_exec', AsyncMock()), patch('adobe_flow.AdobeProcess', return_value=handle):
+            with self.assertRaisesRegex(RuntimeError, '^adobe_browser_close_unconfirmed$'):
+                await launch_adobe()
+
     async def test_shared_queue_retains_capacity_until_adobe_close_finishes(self):
         q = BrowserQueue(close_timeout=.01)
         gate = asyncio.Event()

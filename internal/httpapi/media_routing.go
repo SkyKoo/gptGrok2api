@@ -75,6 +75,7 @@ type imageSelection struct {
 	Lease   *accounts.Lease
 	Adobe   adobe.Account
 	Key     string
+	Context context.Context
 }
 
 func (s *Server) selectImageImplementation(ctx context.Context, id, conversation, size, quality string, count, refs int, options provider.ImageOutputOptions, masked bool, eligible func(accounts.Account) bool) (imageSelection, error) {
@@ -93,22 +94,27 @@ func (s *Server) selectImageImplementation(ctx context.Context, id, conversation
 			if s.adobeStore == nil || s.adobeClient == nil {
 				continue
 			}
-			s.ensureAdobeAccounts(ctx, id)
+			if err := s.ensureAdobeAccounts(ctx, id); err != nil {
+				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
+					continue
+				}
+				return imageSelection{}, adobeAPIError(err)
+			}
 			key := imageExecutionKey(ctx)
-			a, err := s.adobeStore.ReserveForModel(key, id)
+			a, selectedContext, err := s.adobeStore.ReserveMediaForModel(ctx, key, id, s.adobeAccountContext)
 			if err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
 					continue
 				}
-				return imageSelection{}, err
+				return imageSelection{}, adobeAPIError(err)
 			}
 			m, _ := model.AdobeModel(id)
 			route := mediaRoute{Channel: channel, AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
 			if err = s.pinImageRoute(ctx, route); err != nil {
-				s.adobeStore.Release(key)
+				s.adobeStore.ReleaseUnsubmittedTask(key, a.ID)
 				return imageSelection{}, err
 			}
-			return imageSelection{Channel: channel, Adobe: a, Key: key}, nil
+			return imageSelection{Channel: channel, Adobe: a, Key: key, Context: selectedContext}, nil
 		case "chatgpt":
 			if !isOpenAIImageModel(id) || !validOpenAIImageSize(size) || refs > 7 {
 				continue

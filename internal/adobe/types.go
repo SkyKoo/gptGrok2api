@@ -16,11 +16,14 @@ import (
 )
 
 var (
-	ErrNotFound  = errors.New("adobe_account_not_found")
-	ErrNoAccount = errors.New("adobe_no_available_account")
-	ErrBusy      = errors.New("adobe_account_busy")
-	ErrRevision  = errors.New("adobe_credentials_changed")
-	ErrIdentity  = errors.New("adobe_account_identity_mismatch")
+	ErrNotFound           = errors.New("adobe_account_not_found")
+	ErrNoAccount          = errors.New("adobe_no_available_account")
+	ErrBusy               = errors.New("adobe_account_busy")
+	ErrRevision           = errors.New("adobe_credentials_changed")
+	ErrIdentity           = errors.New("adobe_account_identity_mismatch")
+	ErrTaskResolved       = errors.New("adobe_submission_already_resolved")
+	ErrResolutionConflict = errors.New("adobe_submission_state_changed")
+	ErrResolutionReview   = errors.New("adobe_submission_review_required")
 )
 
 type Quota struct {
@@ -62,6 +65,7 @@ type Account struct {
 	Revision              uint64                `json:"credential_revision"`
 	ExpiresAt             int64                 `json:"expires_at"`
 	Quota                 Quota                 `json:"quota"`
+	QuotaRevision         uint64                `json:"quota_revision,omitempty"`
 	Status                string                `json:"status"`
 	LastError             string                `json:"last_error,omitempty"`
 	CreatedAt             int64                 `json:"created_at"`
@@ -71,6 +75,8 @@ type Account struct {
 	NextRefreshAt         int64                 `json:"next_refresh_at,omitempty"`
 	InFlight              string                `json:"in_flight,omitempty"`
 	SettlementUntil       int64                 `json:"settlement_until,omitempty"`
+	// Derived from the encrypted per-task journal; imports cannot set this state.
+	TaskReconciliation *SubmissionReconciliation `json:"-"`
 }
 
 // RoutingFields exposes only daily egress metadata to the shared proxy manager.
@@ -106,23 +112,37 @@ type VideoRequest struct {
 	GenerateAudio           bool
 	References              []ReferenceImage
 }
+
+// SubmissionDiagnostic contains only bounded transport metadata and fixed error
+// categories. It deliberately cannot retain raw headers, bodies or credentials.
+type SubmissionDiagnostic struct {
+	HTTPStatus       int    `json:"http_status,omitempty"`
+	ErrorCode        string `json:"error_code"`
+	ErrorSource      string `json:"error_source"`
+	AccessError      string `json:"access_error,omitempty"`
+	ResponseReceived bool   `json:"response_received"`
+	HTTPProto        string `json:"http_proto,omitempty"`
+	ElapsedMS        int64  `json:"elapsed_ms"`
+}
+
 type Job struct {
-	Width          int      `json:"width,omitempty"`
-	Height         int      `json:"height,omitempty"`
-	AspectRatio    string   `json:"aspect_ratio,omitempty"`
-	Resolution     string   `json:"resolution,omitempty"`
-	Duration       int      `json:"duration,omitempty"`
-	GenerateAudio  bool     `json:"generate_audio,omitempty"`
-	ReferenceCount int      `json:"reference_count,omitempty"`
-	Kind           string   `json:"kind"`
-	Model          string   `json:"model"`
-	ModelID        string   `json:"model_id"`
-	ModelVersion   string   `json:"model_version"`
-	RequestID      string   `json:"request_id"`
-	PollURL        string   `json:"poll_url,omitempty"`
-	Status         string   `json:"status"`
-	Progress       float64  `json:"progress"`
-	OutputURLs     []string `json:"output_urls,omitempty"`
+	Width                int                   `json:"width,omitempty"`
+	Height               int                   `json:"height,omitempty"`
+	AspectRatio          string                `json:"aspect_ratio,omitempty"`
+	Resolution           string                `json:"resolution,omitempty"`
+	Duration             int                   `json:"duration,omitempty"`
+	GenerateAudio        bool                  `json:"generate_audio,omitempty"`
+	ReferenceCount       int                   `json:"reference_count,omitempty"`
+	Kind                 string                `json:"kind"`
+	Model                string                `json:"model"`
+	ModelID              string                `json:"model_id"`
+	ModelVersion         string                `json:"model_version"`
+	RequestID            string                `json:"request_id"`
+	PollURL              string                `json:"poll_url,omitempty"`
+	Status               string                `json:"status"`
+	Progress             float64               `json:"progress"`
+	OutputURLs           []string              `json:"output_urls,omitempty"`
+	SubmissionDiagnostic *SubmissionDiagnostic `json:"submission_diagnostic,omitempty"`
 }
 
 // Error never includes response bodies, URLs, headers, prompts or credentials.
@@ -131,13 +151,27 @@ type Error struct {
 	Code              string
 	Status            int
 	SubmissionUnknown bool
+	Diagnostic        *SubmissionDiagnostic
+	MediaDiagnostic   *MediaPreparationDiagnostic
 }
 
 func (e *Error) Error() string {
+	message := "adobe_" + e.Stage + "_" + e.Code
 	if e.Status > 0 {
-		return fmt.Sprintf("adobe_%s_%s (HTTP %d)", e.Stage, e.Code, e.Status)
+		message += fmt.Sprintf(" (HTTP %d)", e.Status)
 	}
-	return "adobe_" + e.Stage + "_" + e.Code
+	if e.Code == "media_session_incomplete" {
+		if diagnostic := SanitizeMediaPreparationDiagnostic(e.MediaDiagnostic); diagnostic != nil {
+			reason := diagnostic.ReadinessReason
+			if reason == "" {
+				reason = diagnostic.State
+			}
+			if reason != "" {
+				message += " [" + reason + "]"
+			}
+		}
+	}
+	return message
 }
 func SafeError(err error) string {
 	var e *Error
@@ -155,6 +189,12 @@ func SafeError(err error) string {
 		return ErrNotFound.Error()
 	case errors.Is(err, ErrNoAccount):
 		return ErrNoAccount.Error()
+	case errors.Is(err, ErrTaskResolved):
+		return ErrTaskResolved.Error()
+	case errors.Is(err, ErrResolutionConflict):
+		return ErrResolutionConflict.Error()
+	case errors.Is(err, ErrResolutionReview):
+		return ErrResolutionReview.Error()
 	}
 	return "adobe_operation_failed"
 }
@@ -311,5 +351,24 @@ func Public(a Account) map[string]any {
 	} else if q.Status == "known" && q.Generation != nil && q.Generation.Exhausted() {
 		status = "exhausted"
 	}
-	return map[string]any{"id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "media_session_arp_mode": a.MediaSessionARPMode, "media_session_arp_source": a.MediaSessionARPSource, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != "", "submission_unknown": a.Status == "submission_unknown"}
+	loginStatus := "valid"
+	if a.Token == "" {
+		loginStatus = "missing"
+	} else if a.ExpiresAt <= now.Unix() {
+		loginStatus = "expired"
+	} else if a.Status == "invalid" {
+		loginStatus = "invalid"
+	} else if identity, _, err := TokenIdentity(a.Token); err != nil || identity != a.AccountID {
+		loginStatus = "invalid"
+	}
+	taskStatus := "idle"
+	if a.InFlight != "" {
+		taskStatus = "running"
+		if a.Status == "submission_unknown" {
+			taskStatus = "submission_unknown"
+		}
+	} else if a.SettlementUntil > now.Unix() {
+		taskStatus = "settling"
+	}
+	return map[string]any{"task_reconciliation": publicSubmissionReconciliation(a, now), "login_status": loginStatus, "login_updated_at": a.LastRefreshAt, "task_status": taskStatus, "task_key": a.InFlight, "can_query_quota": a.Token != "", "can_resolve_submission": a.InFlight != "" && a.Status == "submission_unknown", "id": a.ID, "account_id": a.AccountID, "email": a.Email, "provider": "adobe", "media_session_refreshed": a.MediaSessionStatus == "refreshed", "media_session_status": a.MediaSessionStatus, "media_session_updated_at": a.MediaSessionUpdatedAt, "media_session_arp_mode": a.MediaSessionARPMode, "media_session_arp_source": a.MediaSessionARPSource, "status": status, "disabled": !a.Enabled, "enabled": a.Enabled, "expires_at": a.ExpiresAt, "credential_revision": a.Revision, "has_token": a.Token != "", "has_cookie": a.Cookie != "", "has_refresh_cookie": a.RefreshCookie != "", "has_profile": a.ProfileID != "", "quota": q, "last_error": a.LastError, "created_at": a.CreatedAt, "updated_at": a.UpdatedAt, "last_used_at": a.LastUsedAt, "last_refresh_at": a.LastRefreshAt, "next_refresh_at": a.NextRefreshAt, "pending": a.InFlight != "" || a.SettlementUntil > now.Unix(), "in_flight": a.InFlight != "", "submission_unknown": a.Status == "submission_unknown"}
 }

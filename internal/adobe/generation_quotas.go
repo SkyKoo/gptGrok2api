@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,6 +39,60 @@ type GenerationPool struct {
 	RefreshPeriod string   `json:"refresh_period,omitempty"`
 	Kinds         []string `json:"kinds"`
 	Models        []string `json:"models"`
+}
+
+// ModelSelectionState distinguishes missing observations from zero entitlement.
+// Only a fresh positive observation may bind a new generation task.
+type ModelSelectionState string
+
+const (
+	ModelNeedsRefresh ModelSelectionState = "needs_refresh"
+	ModelUsable       ModelSelectionState = "available"
+	ModelUnavailable  ModelSelectionState = "unavailable"
+)
+
+func (e *GenerationEntitlements) ModelSelectionState(model string, now time.Time) ModelSelectionState {
+	if e == nil || e.Status != "known" {
+		return ModelNeedsRefresh
+	}
+	checked, err := time.Parse(time.RFC3339Nano, e.CheckedAt)
+	if err != nil || checked.After(now) || now.Sub(checked) > 5*time.Minute {
+		return ModelNeedsRefresh
+	}
+	for _, m := range e.Models {
+		if m.Model != model {
+			continue
+		}
+		if !m.Authorized {
+			return ModelUnavailable
+		}
+		if m.ResourceType == "firefly_fair_use" {
+			return ModelUsable
+		}
+		if m.ResourceType != "firefly_complimentary_generations" && m.ResourceType != "firefly_limited_taste" {
+			return ModelNeedsRefresh
+		}
+		for _, p := range e.Pools {
+			if m.PoolID == "" || p.ID != m.PoolID {
+				continue
+			}
+			if p.ResourceType != m.ResourceType || p.Available == nil || math.IsNaN(*p.Available) || math.IsInf(*p.Available, 0) || *p.Available < 0 {
+				return ModelNeedsRefresh
+			}
+			if m.Cost != nil {
+				if math.IsNaN(*m.Cost) || math.IsInf(*m.Cost, 0) || *m.Cost < 0 {
+					return ModelNeedsRefresh
+				}
+				if *p.Available >= *m.Cost {
+					return ModelUsable
+				}
+				return ModelUnavailable
+			}
+			return ModelNeedsRefresh
+		}
+		return ModelNeedsRefresh
+	}
+	return ModelNeedsRefresh
 }
 
 func freeResource(resource string) bool {
@@ -174,7 +229,7 @@ func (c *Client) GenerationPermissions(ctx context.Context, a Account) (Generati
 }
 
 func (s *Store) UpdateGenerationPermissions(id string, revision uint64, value GenerationEntitlements) error {
-	return s.update(id, revision, func(a *Account) { a.Quota.Generation = &value })
+	return s.update(id, revision, func(a *Account) { a.Quota.Generation = &value; a.QuotaRevision++ })
 }
 
 // Unknown counters never mean zero; exact request preflight remains authoritative.

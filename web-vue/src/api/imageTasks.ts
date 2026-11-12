@@ -413,6 +413,7 @@ export const IMAGE_TASK_PROGRESS_LABELS: Record<string, string> = {
   bootstrapping: '初始化',
   getting_token: '获取令牌',
   preparing_conversation: '准备会话',
+  media_session_preparing: '准备生成会话',
   starting_generation: '启动生成',
   generating: '上游生成中',
   image_stream_resolve_start: '解析结果',

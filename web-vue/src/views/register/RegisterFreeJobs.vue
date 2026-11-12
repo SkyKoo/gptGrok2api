@@ -14,6 +14,7 @@
         <span v-if="job.twofa.error"> · {{ job.twofa.error }}</span>
       </p>
       <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
+      <p v-if="target === 'adobe' && job.review_hint" class="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400" role="status">{{ job.review_hint }}</p>
       <p v-if="registrationCompensationText(job.auto_retry, running, now, target)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target) }}</p>
       <Button v-if="target !== 'adobe' && job.can_retry_registration" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">复用此邮箱重试注册</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
@@ -74,7 +75,7 @@ watch(() => props.jobs, () => {
 })
 onBeforeUnmount(() => { loadSequence++; clearInterval(clock) })
 const twoFALabels: Record<string, string> = { running: '进行中', completed: '已开启', failed: '失败，需补充开启', interrupted: '已中断，需核对', cancelled: '已取消' }
-const stages: Record<string, string> = { twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
+const stages: Record<string, string> = { needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 async function retry(id: string) {
   busy.value = true; error.value = ''
   try { if (props.target === 'adobe') await registerApi.retryAdobeResult(id); else if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }

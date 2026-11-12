@@ -288,3 +288,42 @@ test('bounded attempts stop stalled stages and cancellation prevents subsequent 
   assert.equal(result.code, 'automatic_interrupted');
   assert.equal(interrupted.calls.length, 1);
 });
+
+test('full runner observes an automatic verification transition then continues OTP and export once', async () => {
+  const f=fixture({phase:'awaiting_verification',submitted:true});
+  const normalStatus=f.browser.status;
+  let reads=0, now=0;
+  f.browser.status=async()=>{
+    const status=await normalStatus();
+    if (++reads <= 3) {
+      status.detected='needs_manual';
+      status.form.humanVerification={required:true,source:'visible_challenge_frame'};
+    }
+    return status;
+  };
+  const result=await runAutomaticRegistration(f.browser,f.store,{
+    readInput:async()=>({code:'123456'}),
+    verificationWait:{timeoutMs:1000,pollIntervalMs:100,now:()=>now,pause:async ms=>{now+=ms;}},
+  });
+  assert.equal(result.stage,'completed');
+  assert.equal(now,300);
+  assert.deepEqual(f.calls,[['verify',{code:'123456'}],['export']]);
+});
+
+test('full runner never clicks a persistent or explicit human challenge', async () => {
+  for (const source of ['visible_challenge_frame','visible_instruction']) {
+    const f=fixture({phase:'awaiting_verification',submitted:true});
+    const normalStatus=f.browser.status;
+    let now=0;
+    f.browser.status=async()=>({...await normalStatus(),detected:'needs_manual',
+      form:{humanVerification:{required:true,source}}});
+    const result=await runAutomaticRegistration(f.browser,f.store,{
+      readInput:async()=>assert.fail('Do not request email code during a challenge'),
+      verificationWait:{timeoutMs:300,pollIntervalMs:100,now:()=>now,pause:async ms=>{now+=ms;}},
+    });
+    assert.equal(result.code,'human_verification_required');
+    assert.equal(now,source==='visible_instruction'?0:300);
+    assert.deepEqual(f.calls,[]);
+    assert.equal(f.state.submission.started,true);
+  }
+});

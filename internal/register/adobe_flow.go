@@ -86,6 +86,9 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		}
 	}
 	if result.Stage != "completed" {
+		if err := adobeVerificationProgress(result, progress); err != nil {
+			return nil, err
+		}
 		return nil, fail("adobe", firstNonEmpty(result.Code, "registration_needs_review"))
 	}
 	if stringValue(result.Account["token"]) == "" || !strings.EqualFold(stringValue(result.Account["email"]), box.Email) || stringValue(result.Account["account_id"]) == "" {
@@ -95,9 +98,11 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 }
 
 type adobeBrowserResult struct {
-	Stage   string         `json:"stage"`
-	Code    string         `json:"code"`
-	Account map[string]any `json:"account"`
+	SubmissionStarted bool                         `json:"submission_started"`
+	Diagnostics       adobeRegistrationDiagnostics `json:"diagnostics"`
+	Stage             string                       `json:"stage"`
+	Code              string                       `json:"code"`
+	Account           map[string]any               `json:"account"`
 }
 
 func (f *AdobeBrowserFlow) command(ctx context.Context, cfg AdobeConfig, action, code string) (adobeBrowserResult, error) {

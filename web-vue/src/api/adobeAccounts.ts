@@ -57,6 +57,40 @@ export interface AdobeAccount {
   media_session_refreshed?: boolean
   media_session_status?: 'imported' | 'refreshed' | 'preserved' | string
   media_session_updated_at?: number
+  login_status?: 'valid' | 'expired' | 'invalid' | 'missing'
+  login_updated_at?: number
+  task_status?: 'submission_unknown' | 'running' | 'settling' | 'idle'
+  task_key?: string
+  can_query_quota?: boolean
+  can_resolve_submission?: boolean
+  task_reconciliation?: AdobeTaskReconciliation
+}
+export interface AdobeTaskReconciliation {
+  state: 'waiting' | 'checking' | 'retry_wait' | 'polling' | string
+  first_observed_at?: string
+  last_checked_at?: string
+  next_check_at?: string
+  release_after?: string
+  last_error?: string
+  quota_status?: 'known' | 'error' | 'not_checked'
+  attempts?: number
+}
+export interface AdobeSubmissionResolution {
+  task_key: string
+  resolved_at: string
+  reason: string
+  reviewed_by: string
+  task_record_state: string
+  method?: string
+  outcome?: string
+  quota_status?: string
+}
+export interface AdobeSubmissionResolutionRequest {
+  id: string
+  expected_task_key: string
+  expected_credential_revision: number
+  confirmed: true
+  reason: string
 }
 export interface AdobeAccountsResponse {
   items: AdobeAccount[]
@@ -95,6 +129,8 @@ export const adobeAccountsApi = {
   },
   relogin: (ids: string[], requestId: string) => apiClient.post<unknown, { request_id: string; items: AdobeReloginTask[] }>(`${path}/relogin`, { request_id: requestId, ids }, { timeout: 15000 }),
   listRelogins: (requestId?: string) => apiClient.get<never, { request_id?: string; items: AdobeReloginTask[] }>(`${path}/relogin`, { params: requestId ? { request_id: requestId } : undefined, timeout: 15000 }),
+  resolveSubmission: (request: AdobeSubmissionResolutionRequest) => apiClient.post<unknown, { ok: boolean; account: AdobeAccount }>(`${path}/resolve-submission`, request),
+  submissionResolutions: (id: string) => apiClient.get<never, { items: AdobeSubmissionResolution[] }>(`${path}/submission-resolutions`, { params: { id } }),
   setDisabled: (ids: string[], disabled: boolean) => apiClient.post<unknown, AdobeMutationResponse>(`${path}/disabled`, { ids, disabled }),
   linkMailboxes: (ids: string[]) => apiClient.post<unknown, AdobeMailboxLinkResponse>(`${path}/link-mailboxes`, { ids }),
   remove: (ids: string[]) => apiClient.delete<never, AdobeMutationResponse>(path, { data: { ids } }),

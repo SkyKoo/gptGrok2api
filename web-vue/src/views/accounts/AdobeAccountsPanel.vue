@@ -50,22 +50,23 @@
       <table class="w-full min-w-[960px] text-left text-sm">
         <thead class="text-xs text-muted-foreground"><tr>
           <th class="p-3"><input type="checkbox" aria-label="选择本页 Adobe 账号" :checked="allSelected" :disabled="operationLocked || !accounts.length" @change="selectPage" /></th>
-          <th class="p-3">邮箱 / 账号</th><th class="p-3">状态</th><th class="p-3">免费生成次数<div class="mt-1 font-normal">剩余 / 总量</div></th><th class="p-3">登录态有效期</th><th class="p-3 text-right">操作</th>
+          <th class="p-3">邮箱 / 账号</th><th class="p-3">账号与任务</th><th class="p-3">免费生成次数<div class="mt-1 font-normal">剩余 / 总量</div></th><th class="p-3">登录状态</th><th class="p-3 text-right">操作</th>
         </tr></thead>
         <tbody><tr v-for="account in accounts" :key="account.id" class="border-t align-top">
           <td class="p-3"><input v-model="selected" type="checkbox" :value="account.id" :disabled="operationLocked" :aria-label="`选择 ${account.email}`" /></td>
-          <td class="p-3 break-all max-w-[16rem]"><div>{{ account.email }}</div><div class="text-xs text-muted-foreground">{{ account.account_id || account.id }}</div><p v-if="account.last_error" class="text-xs text-rose-500">{{ account.last_error }}</p></td>
-          <td class="p-3 whitespace-nowrap">{{ account.disabled ? '已禁用' : statusLabel(account.status) }}<div v-if="activityLabel(account)" class="mt-1 max-w-52 whitespace-normal text-xs text-muted-foreground">{{ activityLabel(account) }}</div></td>
+          <td class="p-3 break-all max-w-[16rem]"><div>{{ account.email }}</div><div class="text-xs text-muted-foreground">{{ account.account_id || account.id }}</div></td>
+          <td class="p-3 whitespace-nowrap"><div>{{ account.disabled ? '已禁用' : statusLabel(account.status) }}</div><div class="mt-1 text-xs" :class="submissionUnknown(account) ? 'text-amber-600' : 'text-muted-foreground'">{{ taskLabel(account) }}</div><div v-if="activityLabel(account) && activityLabel(account) !== taskLabel(account)" class="mt-1 max-w-52 whitespace-normal text-xs text-muted-foreground">{{ activityLabel(account) }}</div></td>
           <td class="p-3 min-w-[11rem]">
             <AdobeAccountQuota :quota="account.quota" />
           </td>
-          <td class="p-3 text-xs max-w-[13rem]"><div>{{ time(account.expires_at ? account.expires_at * 1000 : undefined) }}</div><div class="mt-1 max-w-52 text-muted-foreground">{{ mediaSessionLabel(account.media_session_status) }}</div><div v-if="account.media_session_updated_at" class="mt-1 text-muted-foreground" :title="`最近保存完整媒体会话：${time(account.media_session_updated_at * 1000)}`">会话保存：{{ time(account.media_session_updated_at * 1000) }}</div></td>
+          <td class="p-3 text-xs max-w-[13rem]"><div class="font-medium">{{ loginLabel(account) }}</div><div class="mt-1 text-muted-foreground">有效期至：{{ time(account.expires_at ? account.expires_at * 1000 : undefined) }}</div><div class="mt-1 max-w-52 text-muted-foreground">{{ mediaSessionLabel(account.media_session_status) }}</div><div v-if="account.login_updated_at || account.media_session_updated_at" class="mt-1 text-muted-foreground">会话保存：{{ time((account.login_updated_at || account.media_session_updated_at || 0) * 1000) }}</div></td>
           <td class="p-3 text-right align-middle">
             <div class="flex min-w-[9rem] flex-wrap items-center justify-end gap-2">
-              <Button size="xs" variant="outline" :disabled="operationLocked || accountBusy(account)" @click="mutate('quota', [account.id])">
+              <Button size="xs" variant="outline" :disabled="operationLocked || quotaBlocked(account)" @click="mutate('quota', [account.id])">
                 {{ operationIds.includes(account.id) && operation === 'quota' ? '刷新中…' : '刷新额度' }}
               </Button>
               <Button size="xs" variant="outline" :disabled="operationLocked || reloginBlocked(account)" @click="mutate('relogin', [account.id])">{{ reloginBusyIds.has(account.id) ? '登录中…' : '重新登录' }}</Button>
+              <Button v-if="submissionUnknown(account)" size="xs" variant="outline" @click="openHistory(account)">处理进度</Button>
               <FloatingActionMenu
                 label="更多"
                 :items="rowActions(account)"
@@ -91,18 +92,19 @@
           </div>
           <span class="shrink-0 rounded-full border border-border px-2 py-1 text-xs">{{ account.disabled ? '已禁用' : statusLabel(account.status) }}</span>
         </div>
-        <p v-if="activityLabel(account)" class="text-xs text-muted-foreground">{{ activityLabel(account) }}</p>
-        <p v-if="account.last_error" class="break-words text-xs text-rose-500">{{ account.last_error }}</p>
+        <div class="space-y-1 text-xs"><p :class="submissionUnknown(account) ? 'text-amber-600' : 'text-muted-foreground'">{{ taskLabel(account) }}</p><p v-if="activityLabel(account) && activityLabel(account) !== taskLabel(account)" class="text-muted-foreground">{{ activityLabel(account) }}</p></div>
         <div class="border-t border-border pt-3"><h4 class="mb-2 text-xs font-medium text-muted-foreground">免费生成次数 · 剩余 / 总量</h4><AdobeAccountQuota :quota="account.quota" /></div>
         <div class="space-y-1 text-xs text-muted-foreground">
+          <p class="font-medium text-foreground">{{ loginLabel(account) }}</p>
           <p>登录态有效期：{{ time(account.expires_at ? account.expires_at * 1000 : undefined) }}</p>
           <p>{{ mediaSessionLabel(account.media_session_status) }}</p>
-          <p v-if="account.media_session_updated_at">会话保存：{{ time(account.media_session_updated_at * 1000) }}</p>
+          <p v-if="account.login_updated_at || account.media_session_updated_at">会话保存：{{ time((account.login_updated_at || account.media_session_updated_at || 0) * 1000) }}</p>
         </div>
         <div class="mt-auto border-t border-border pt-3">
           <div class="flex flex-wrap items-center justify-end gap-2">
-            <Button size="xs" variant="outline" :disabled="operationLocked || accountBusy(account)" @click="mutate('quota', [account.id])">{{ operationIds.includes(account.id) && operation === 'quota' ? '刷新中…' : '刷新额度' }}</Button>
+            <Button size="xs" variant="outline" :disabled="operationLocked || quotaBlocked(account)" @click="mutate('quota', [account.id])">{{ operationIds.includes(account.id) && operation === 'quota' ? '刷新中…' : '刷新额度' }}</Button>
             <Button size="xs" variant="outline" :disabled="operationLocked || reloginBlocked(account)" @click="mutate('relogin', [account.id])">{{ reloginBusyIds.has(account.id) ? '登录中…' : '重新登录' }}</Button>
+            <Button v-if="submissionUnknown(account)" size="xs" variant="outline" @click="openHistory(account)">处理进度</Button>
             <FloatingActionMenu label="更多" :items="rowActions(account)" :disabled="operationLocked || reloginBusyIds.has(account.id)" align="right" size="sm" trigger-class="h-7 justify-center px-2 text-[11px]" :trigger-width="64" @select="handleAction($event, [account.id])" />
           </div>
           <p v-if="operationIds.includes(account.id) && operation !== 'quota'" class="mt-1 text-right text-xs text-muted-foreground">{{ operationLabel }}</p>
@@ -119,6 +121,7 @@
       @select="handleAction($event, selected)"
       @clear="selected = []"
     />
+    <AdobeTaskHistoryModal :account="historyAccount" @close="historyTarget = null" />
   </PagePanel>
 </template>
 <script setup lang="ts">
@@ -129,8 +132,10 @@ import AccountBulkBar from '@/components/ai/AccountBulkBar.vue'
 import AccountSelectionSummary from '@/components/ai/AccountSelectionSummary.vue'
 import AdobeAccountQuota from './AdobeAccountQuota.vue'
 import AdobeReloginPanel from './AdobeReloginPanel.vue'
+import AdobeTaskHistoryModal from './AdobeTaskHistoryModal.vue'
 import { useAdobeReloginRuntime } from './adobeReloginRuntime'
-import { adobeAccountBusy as mediaBusy, adobeReloginBlocked as mediaReloginBlocked, adobeActivityLabel as activityLabel } from './adobeAccountView'
+import { adobeAccountBusy as mediaBusy, adobeReloginBlocked as mediaReloginBlocked, adobeActivityLabel as activityLabel, adobeQuotaQueryBlocked, adobeLoginLabel as loginLabel, adobeTaskLabel as taskLabel, adobeSubmissionUnknown as submissionUnknown, adobeRecoveryError, adobeAutomaticProcessing } from './adobeAccountView'
+import { startAdobeAccountAutoRefresh } from './adobeAccountAutoRefresh'
 import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
@@ -147,7 +152,7 @@ const statusOptions = [
   { value: 'pending', label: '待检查' },
   { value: 'exhausted', label: '额度耗尽' },
   { value: 'busy', label: '生成中' },
-  { value: 'submission_unknown', label: '待核对' },
+  { value: 'submission_unknown', label: '系统处理中' },
 ]
 
 type Action = 'quota' | 'credentials' | 'relogin' | 'enable' | 'disable' | 'delete' | 'link-mailboxes'
@@ -160,13 +165,18 @@ const error = ref(''), message = ref(''), showImport = ref(false), importText = 
 const confirming = ref(false), operationIds = ref<string[]>([]), operation = ref<Action | ''>('')
 const confirmDialog = useConfirmDialog()
 let mounted = true
+const historyTarget = ref<AdobeAccount | null>(null)
+const historyAccount = computed(() => historyTarget.value ? accounts.value.find(account => account.id === historyTarget.value?.id) || historyTarget.value : null)
 const operationLocked = computed(() => busy.value || confirming.value)
 const operationLabel = computed(() => ({ quota: '刷新额度中…', credentials: '刷新登录态中…', relogin: '等待浏览器并重新登录…', enable: '启用中…', disable: '禁用中…', delete: '删除中…', 'link-mailboxes': '关联邮箱资产中…' }[operation.value as Action] || '处理中…'))
 const { tasks: reloginTasks, requests: reloginRequests, pollError: reloginPollError, busyIds: reloginBusyIds, expanded: reloginExpanded, now: reloginNow, start: startRelogin, dismiss: dismissRelogin } = useAdobeReloginRuntime(() => { void load() })
 function accountBusy(account: AdobeAccount) { return mediaBusy(account) || reloginBusyIds.value.has(account.id) }
 function reloginBlocked(account: AdobeAccount) { return mediaReloginBlocked(account) || reloginBusyIds.value.has(account.id) }
+function quotaBlocked(account: AdobeAccount) { return adobeQuotaQueryBlocked(account) || reloginBusyIds.value.has(account.id) }
+function openHistory(account: AdobeAccount) { historyTarget.value = { ...account } }
 function rowActions(account: AdobeAccount): ActionMenuItem[] {
   return [
+    { key: 'task-history', label: '查看处理记录' },
     { key: 'credentials', label: '刷新登录态', disabled: accountBusy(account) },
     { key: account.disabled ? 'enable' : 'disable', label: account.disabled ? '启用账号' : '禁用账号', disabled: accountBusy(account) },
     { key: 'link-mailboxes', label: '关联邮箱资产', disabled: accountBusy(account) },
@@ -176,9 +186,10 @@ function rowActions(account: AdobeAccount): ActionMenuItem[] {
 const bulkActions = computed<ActionMenuItem[]>(() => {
   const blocked = selected.value.some(id => { const account = accounts.value.find(item => item.id === id); return !account || accountBusy(account) })
   const reloginBlockedSelection = selected.value.some(id => { const account = accounts.value.find(item => item.id === id); return !account || reloginBlocked(account) })
+  const quotaBlockedSelection = selected.value.some(id => { const account = accounts.value.find(item => item.id === id); return !account || quotaBlocked(account) })
   return [
     { key: 'relogin', label: '重新登录', disabled: reloginBlockedSelection },
-    { key: 'quota', label: '刷新额度', disabled: blocked },
+    { key: 'quota', label: '刷新额度', disabled: quotaBlockedSelection },
     { key: 'credentials', label: '刷新登录态', disabled: blocked },
     { key: 'enable', label: '启用账号', disabled: blocked },
     { key: 'disable', label: '禁用账号', disabled: blocked },
@@ -191,7 +202,7 @@ const allSelected = computed(() => accounts.value.length > 0 && accounts.value.e
 function selectPage(checked?: unknown) { if (operationLocked.value || loading.value) return; const shouldSelect = typeof checked === 'boolean' ? checked : !allSelected.value; selected.value = shouldSelect ? accounts.value.map(item => item.id) : [] }
 function toggleSelect(id: string, checked: unknown) { if (operationLocked.value) return; const next = new Set(selected.value); if (checked) next.add(id); else next.delete(id); selected.value = [...next] }
 function time(value?: string | number) { if (!value) return '未知'; const date = new Date(value); return Number.isFinite(date.getTime()) ? date.toLocaleString() : '未知' }
-function statusLabel(value: string) { return ({ active: '可用', expired: '凭据过期', invalid: '凭据异常', pending: '待检查', refreshing: '刷新中', busy: '生成中', exhausted: '额度耗尽', submission_unknown: '待核对' } as Record<string, string>)[value] || value }
+function statusLabel(value: string) { return ({ active: '可用', expired: '凭据过期', invalid: '凭据异常', pending: '待检查', refreshing: '刷新中', busy: '使用中', exhausted: '额度耗尽', submission_unknown: '暂停分配' } as Record<string, string>)[value] || value }
 function mediaSessionLabel(value?: string) {
   return ({ imported: '已保存导入的媒体会话', refreshed: '媒体会话已更新', preserved: '凭据已刷新，保留原媒体会话' } as Record<string, string>)[value || ''] || '媒体会话状态未知'
 }
@@ -201,8 +212,9 @@ async function load() {
   catch (cause) { if (current === sequence) error.value = cause instanceof Error ? cause.message : 'Adobe 账号加载失败' }
   finally { if (current === sequence) loading.value = false }
 }
-function mutationMessage(result: AdobeMutationResponse) { if (result.error) throw new Error(result.error); if (result.hme_cleanup?.failed) throw new Error(`账号已删除，但 ${result.hme_cleanup.failed} 个邮箱清理失败，请查看邮箱管理的操作日志。`); const failures = result.results?.filter(item => !item.ok) || []; if (failures.length) throw new Error(failures.map(item => item.error || '操作失败').join('；')); if ((result.summary?.fail || 0) > 0) throw new Error(`部分操作失败：成功 ${result.summary?.ok}，失败 ${result.summary?.fail}。请刷新列表查看账号状态。`); return result.summary ? `完成 ${result.summary.ok}/${result.summary.total} 个账号` : '操作已完成' }
+function mutationMessage(result: AdobeMutationResponse) { if (result.error) throw new Error(result.error); if (result.hme_cleanup?.failed) throw new Error(`账号已删除，但 ${result.hme_cleanup.failed} 个邮箱清理失败，请查看邮箱管理的操作日志。`); const failures = result.results?.filter(item => !item.ok) || []; if (failures.length) throw new Error(failures.map(item => adobeRecoveryError(item.error || '操作失败')).join('；')); if ((result.summary?.fail || 0) > 0) throw new Error(`部分操作失败：成功 ${result.summary?.ok}，失败 ${result.summary?.fail}。请刷新列表查看账号状态。`); return result.summary ? `完成 ${result.summary.ok}/${result.summary.total} 个账号` : '操作已完成' }
 async function handleAction(key: string, targets: string[]) {
+  if (key === 'task-history') { const account = accounts.value.find(item => item.id === targets[0]); if (account) openHistory(account); return }
   if (!['quota', 'credentials', 'relogin', 'enable', 'disable', 'delete', 'link-mailboxes'].includes(key) || operationLocked.value) return
   // Capture the requested rows before any dialog or asynchronous work.
   const ids = [...new Set(targets)]
@@ -223,8 +235,8 @@ async function handleAction(key: string, targets: string[]) {
 async function mutate(action: Action, targets: string[]) {
   const ids = [...new Set(targets)]
   if (!ids.length || operationLocked.value) return
-  if (ids.some(id => { const account = accounts.value.find(item => item.id === id); return !account || (action === 'relogin' ? reloginBlocked(account) : accountBusy(account)) })) {
-    error.value = '账号正在生成、等待结算或结果待核对；待核对账号仅可重新登录更新会话。'
+  if (ids.some(id => { const account = accounts.value.find(item => item.id === id); return !account || (action === 'relogin' ? reloginBlocked(account) : action === 'quota' ? quotaBlocked(account) : accountBusy(account)) })) {
+    error.value = '账号正在生成、结算或维护。结果未知的任务由系统自动处理，期间可独立查询额度或重新登录。'
     return
   }
   busy.value = true; operation.value = action; operationIds.value = ids; error.value = ''; message.value = ''
@@ -244,7 +256,7 @@ async function mutate(action: Action, targets: string[]) {
     await load()
     message.value = mutationMessage(result)
   }
-  catch (cause) { error.value = cause instanceof Error ? cause.message : '操作失败' }
+  catch (cause) { error.value = adobeRecoveryError(cause instanceof Error ? cause.message : '操作失败') }
   finally { busy.value = false; operation.value = ''; operationIds.value = [] }
 }
 function mailboxLinkMessage(result: AdobeMailboxLinkResponse) {
@@ -262,6 +274,10 @@ async function importAccounts() {
 }
 watch(page, () => { selected.value = []; void load() })
 watch([keyword, status], () => { selected.value = []; clearTimeout(searchTimer); searchTimer = setTimeout(() => { if (page.value !== 1) page.value = 1; else void load() }, 250) })
-onMounted(load)
-onBeforeUnmount(() => { mounted = false; if (confirming.value) confirmDialog.cancel(); sequence++; clearTimeout(searchTimer); importText.value = '' })
+let stopAutomaticRefresh: (() => void) | undefined
+onMounted(() => {
+  void load()
+  stopAutomaticRefresh = startAdobeAccountAutoRefresh(load, () => !loading.value && !busy.value && !confirming.value && accounts.value.some(adobeAutomaticProcessing))
+})
+onBeforeUnmount(() => { mounted = false; stopAutomaticRefresh?.(); if (confirming.value) confirmDialog.cancel(); sequence++; clearTimeout(searchTimer); importText.value = '' })
 </script>

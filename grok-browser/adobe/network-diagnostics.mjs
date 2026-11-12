@@ -86,6 +86,8 @@ export class NetworkDiagnostics {
     this.seen = new WeakSet();
     this.pending = new WeakMap();
     this.contexts = new WeakSet();
+    this.snapshotSources = new WeakMap();
+    this.supersededCaptcha = new WeakSet();
   }
 
   attach(context) {
@@ -153,7 +155,29 @@ export class NetworkDiagnostics {
   }
 
   snapshot(page) {
-    return this.events.filter(item => item.page === page).map(({ event }) => ({ ...event }))
-      .sort((left, right) => left.time.localeCompare(right.time));
+    return this.events.filter(item => item.page === page).map(({ event }) => {
+      const snapshot = {...event};
+      this.snapshotSources.set(snapshot, event);
+      return snapshot;
+    }).sort((left, right) => left.time.localeCompare(right.time));
+  }
+
+  activeSnapshot(page) {
+    return this.snapshot(page).filter(event => !this.supersededCaptcha.has(this.snapshotSources.get(event)));
+  }
+
+  // OTP progress supersedes only the exact previously observed captcha events.
+  // Preserve raw history and all network failures. A later request, even with
+  // identical metadata/timestamps, remains independent and can still block.
+  supersedeCaptchaEvidence(page, observed) {
+    const sources = new Set((observed || []).map(event => this.snapshotSources.get(event)));
+    let count = 0;
+    for (const {page:owner, event} of this.events) {
+      if (owner === page && sources.has(event) && event.errorCode === 'captcha_required') {
+        this.supersededCaptcha.add(event);
+        count++;
+      }
+    }
+    return count;
   }
 }
