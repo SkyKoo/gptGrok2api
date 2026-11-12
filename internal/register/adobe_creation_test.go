@@ -176,6 +176,7 @@ func TestAdobeRejectedAndUnsubmittedRetryUsesNewAttemptAndSameMailbox(t *testing
 			parent.AdobeRegistration.CreationOutcome = outcome
 			parent.AdobeRegistration.CreationErrorCode, parent.AdobeRegistration.CreationHTTPStatus = "captcha_required", 400
 			parent.AdobeRegistration.Proxy = "http://previous-attempt.invalid:8080"
+			parent.AdobeProfile.Country, parent.AdobeProfile.CountrySource = "GB", "ipwho_is"
 			parent.Error = "adobe: login_ui_not_ready"
 			path := filepath.Join(t.TempDir(), "jobs.enc.json")
 			mail := &adobeCompensationMail{}
@@ -191,7 +192,10 @@ func TestAdobeRejectedAndUnsubmittedRetryUsesNewAttemptAndSameMailbox(t *testing
 					if child.AdobeRegistration.FlowStarted || child.AdobeRegistration.SubmissionStarted || child.AdobeRegistration.CreationOutcome != "not_submitted" {
 						t.Error("new attempt inherited old submission")
 					}
-					if !reflect.DeepEqual(cfg.Profile, parent.AdobeProfile.fields()) {
+					expectedProfile := parent.AdobeProfile.fields()
+					expectedProfile["country"] = "US"
+					delete(expectedProfile, "countrySource")
+					if !reflect.DeepEqual(cfg.Profile, expectedProfile) {
 						t.Error("saved user profile changed")
 					}
 					if err := cfg.creationProgress(adobeCreationObservation{Outcome: "not_submitted"}, true); err != nil {

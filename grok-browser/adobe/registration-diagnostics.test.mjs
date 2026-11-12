@@ -22,6 +22,22 @@ test('untrusted diagnostics are discarded instead of copying arbitrary fields or
   assert.deepEqual(registrationDiagnostics(null, null), {submission_started:false,human_verification_required:false});
 });
 
+test('verification wait projection keeps bounded timing and fixed outcomes as a pair',()=>{
+  for(const outcome of ['still_required','resolved','network_error','interrupted','observation_error']){
+    const result=registrationDiagnostics({verificationWait:{elapsed_ms:15000,outcome,raw:'PRIVATE'}},null);
+    assert.equal(result.verification_wait_elapsed_ms,15000);
+    assert.equal(result.verification_wait_outcome,outcome);
+    assert.doesNotMatch(JSON.stringify(result),/PRIVATE|raw/);
+  }
+  for(const value of [-1,150001,NaN,Infinity,'15000',1.5]){
+    const result=registrationDiagnostics({verificationWait:{elapsed_ms:value,outcome:'still_required'}},null);
+    assert.equal(result.verification_wait_elapsed_ms,undefined);
+    assert.equal(result.verification_wait_outcome,undefined);
+  }
+  assert.equal(registrationDiagnostics({verificationWait:{elapsed_ms:0,outcome:'resolved'}},null).verification_wait_elapsed_ms,0);
+  assert.equal(registrationDiagnostics({verificationWait:{elapsed_ms:10,outcome:'PRIVATE'}},null).verification_wait_elapsed_ms,undefined);
+});
+
 test('manual challenge hints retain only fixed categories and a real boolean', () => {
   const result = registrationDiagnostics({form:{humanVerification:{required:true,
     source:'visible_instruction', instruction_kind:'start_puzzle',

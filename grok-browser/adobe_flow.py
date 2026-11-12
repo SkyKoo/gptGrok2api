@@ -21,7 +21,7 @@ def creation_result(response):
 
 class AdobeCommandRequest(BaseModel):
     browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
-    action: str = Field(default="run", pattern=r"^(run|verify|refresh|resume)$")
+    action: str = Field(default="run", pattern=r"^(prepare|run|verify|refresh|resume)$")
     code: str = Field(default="", max_length=6, pattern=r"^(|[0-9]{6})$")
 
 class AdobeProcess:

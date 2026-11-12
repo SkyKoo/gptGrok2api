@@ -1,5 +1,6 @@
 import { RegistrationError } from './core.mjs';
 import { formBlockingCode } from './browser.mjs';
+import { verificationObservation } from './verification-observation.mjs';
 
 const ADVANCE_STAGES = new Set(['awaiting_email', 'awaiting_password', 'awaiting_profile']);
 const APPROVAL_STAGES = new Set(['awaiting_password', 'awaiting_profile', 'awaiting_approval']);
@@ -28,21 +29,35 @@ export async function observeAutomaticVerification(browser, initial, shouldStop,
 } = {}) {
   let status = initial;
   const deadline = now() + timeoutMs;
-  while (!shouldStop()) {
-    const human = status.form?.humanVerification;
-    const network = status.networkDiagnosis?.code;
-    const transient = human?.required === true &&
-      ['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(human.source);
-    // Cancellation alone does not establish a failed verification. Give the
-    // current page this one observation window to show OTP/session progress.
-    if (!transient || (network && !['captcha_required', 'verification_request_aborted'].includes(network))) return status;
-    const remaining = deadline - now();
-    if (remaining <= 0) return status;
-    await pause(Math.min(pollIntervalMs, remaining));
-    if (shouldStop()) return status;
-    status = await browser.status();
+  const observation = verificationObservation(now, value => {
+    browser.verificationWait = value;
+    status = { ...status, verificationWait: value };
+  });
+  try {
+    while (!shouldStop()) {
+      const human = status.form?.humanVerification;
+      const network = status.networkDiagnosis?.code;
+      const transient = human?.required === true &&
+        ['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(human.source);
+      // Cancellation alone does not establish a failed verification. Give the
+      // current page this one observation window to show OTP/session progress.
+      if (!transient || (network && !['captcha_required', 'verification_request_aborted'].includes(network))) {
+        observation.finish(network && !['captcha_required', 'verification_request_aborted'].includes(network) ? 'network_error' : 'resolved');
+        return status;
+      }
+      observation.begin();
+      const remaining = deadline - now();
+      if (remaining <= 0) { observation.finish('still_required'); return status; }
+      await pause(Math.min(pollIntervalMs, remaining));
+      if (shouldStop()) { observation.finish('interrupted'); return status; }
+      status = await browser.status();
+    }
+    observation.finish('interrupted');
+    return status;
+  } catch (error) {
+    observation.finish('observation_error');
+    throw error;
   }
-  return status;
 }
 
 /** 有界推进正常注册阶段；动作由浏览器驱动落盘，未知提交不能在循环中重放。 */
@@ -56,8 +71,9 @@ export async function runAutomaticRegistration(browser, store, {
   const attempted = new Set();
   let steps = 0;
   let status = {};
-  const paused = code => ({ ...status, code, automatic: { paused: true, steps } });
-  const complete = result => ({ ...result, automatic: { paused: false, completed: true, steps } });
+  const observationDetails = () => browser.verificationWait ? { verificationWait: browser.verificationWait } : {};
+  const paused = code => ({ ...status, ...observationDetails(), code, automatic: { paused: true, steps } });
+  const complete = result => ({ ...result, ...observationDetails(), automatic: { paused: false, completed: true, steps } });
   const perform = async (key, action) => {
     if (steps >= maxSteps) throw new RegistrationError('automatic_step_limit_reached');
     if (attempted.has(key)) throw new RegistrationError('automatic_progress_stalled');

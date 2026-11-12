@@ -11,6 +11,7 @@ import { registrationDiagnostics } from './registration-diagnostics.mjs';
 import { resumeRegistration } from './registration-recovery.mjs';
 import { creationOutcome } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
+import { prepareRegistrationCountry } from './exit-country.mjs';
 const output = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Browser libraries may log, but stdout is a credential-bearing RPC pipe only.
 console.log = console.info = console.warn = console.error = () => {};
@@ -75,6 +76,12 @@ async function command(request) {
   if (!init) throw new RegistrationError('session_not_initialized');
   if (browserClosed) throw new RegistrationError('registration_attempt_ended');
   if (request.action === 'refresh') return refresh(request);
+  if (request.action === 'prepare') {
+    if (!store || !browser || init.mode === 'refresh') throw new RegistrationError('registration_mode_required');
+    const country = await prepareRegistrationCountry(store, { mode:init.mode, requireNew:init.require_new === true, proxy:init.proxy });
+    init.profile = (await store.load()).config.profile;
+    return {stage:'prepared', registration_country:country};
+  }
   if (!browser || !['run','verify','resume'].includes(request.action)) throw new RegistrationError('command_invalid');
   if (request.action === 'resume' && init.mode !== 'resume') throw new RegistrationError('recovery_mode_required');
   const before = await store.load();

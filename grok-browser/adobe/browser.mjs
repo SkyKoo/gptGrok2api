@@ -8,6 +8,7 @@ import { isTrustedAdobeURL, RegistrationError } from './core.mjs';
 import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from './network-diagnostics.mjs';
 import { CreationTracker } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
+import { verificationObservation } from './verification-observation.mjs';
 
 const CONTINUE = /^(Continue|Next|继续|下一步)$/i;
 const CREATE = /^(Create account|Create an account|Agree and create account|创建帐户|创建账户|同意并创建帐户|同意并创建账户)$/i;
@@ -121,8 +122,10 @@ export async function waitForFormStage(readForm, {
   verificationGraceMs = 15_000,
   now = Date.now,
   pause = wait,
+  onVerificationWait = () => {},
 } = {}) {
   const deadline = now() + timeoutMs;
+  const observation = verificationObservation(now, onVerificationWait);
   let verificationDeadline;
   while (true) {
     try {
@@ -133,19 +136,35 @@ export async function waitForFormStage(readForm, {
       // without touching challenge controls or replaying the submit.
       const transientVerification = code === 'human_verification_required' &&
         ['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(form.humanVerification?.source);
-      if (code && !transientVerification) return { form, stage: 'needs_manual', code };
+      if (code && !transientVerification) {
+        observation.finish('observation_error');
+        return { form, stage: 'needs_manual', code };
+      }
       if (transientVerification) {
+        observation.begin();
         verificationDeadline ??= Math.min(deadline, now() + verificationGraceMs);
-        if (now() >= verificationDeadline) return { form, stage: 'needs_manual', code };
+        if (now() >= verificationDeadline) {
+          observation.finish('still_required');
+          return { form, stage: 'needs_manual', code };
+        }
       }
       const stage = classifyForm(form);
-      if (!transientVerification && await accept(stage, form)) return { form, stage, code: null };
+      if (!transientVerification && await accept(stage, form)) {
+        observation.finish('resolved');
+        return { form, stage, code: null };
+      }
     } catch (error) {
       // 导航期间的 DOM 替换可以继续观察，关闭页面及未知错误必须交回调用方。
-      if (!/Execution context was destroyed|Frame was detached|Cannot find context with specified id/i.test(String(error.message))) throw error;
+      if (!/Execution context was destroyed|Frame was detached|Cannot find context with specified id/i.test(String(error.message))) {
+        observation.finish('observation_error');
+        throw error;
+      }
     }
     const remaining = deadline - now();
-    if (remaining <= 0) throw new RegistrationError('stage_transition_timeout');
+    if (remaining <= 0) {
+      observation.finish('observation_error');
+      throw new RegistrationError('stage_transition_timeout');
+    }
     await pause(Math.min(pollIntervalMs, remaining));
   }
 }
@@ -165,7 +184,8 @@ export class BrowserRegistration {
   }
 
   async waitForStage(options = {}) {
-    return waitForFormStage(() => this.form(), { ...this.stageWaitOptions, ...options });
+    return waitForFormStage(() => this.form(), { ...this.stageWaitOptions, ...options,
+      onVerificationWait: observation => { this.verificationWait = observation; } });
   }
 
   async open({ resumeOnly = false, requireExistingProfile = false } = {}) {
@@ -385,6 +405,7 @@ export class BrowserRegistration {
     return { stage: humanVerificationRequired || networkDiagnosis.code ? 'needs_manual' : state.stage,
       code: visibleChallenge ? 'human_verification_required' : networkDiagnosis.code || (humanVerificationRequired ? 'human_verification_required' : state.code),
       recordedStage: state.stage, detected, submissionStarted: state.submission.started,
+      ...(this.verificationWait ? { verificationWait: this.verificationWait } : {}),
       ...(state.code === 'login_ui_not_ready' && state.startupFailure ? { failureDiagnostics: state.startupFailure } : {}),
       form, pages, network:this.network, networkDiagnosis, screenshot };
   }

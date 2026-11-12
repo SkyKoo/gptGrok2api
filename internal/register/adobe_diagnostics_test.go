@@ -91,7 +91,7 @@ func TestAdobeChallengeReviewHintSurvivesReloadWithoutMakingRegistrationRetryabl
 	if job["status"] != "registration_pending" || job["can_retry"] != false || job["can_retry_registration"] != false {
 		t.Fatalf("challenge became retryable: %v", job)
 	}
-	if !strings.Contains(job["review_hint"].(string), "提交结果尚不明确") {
+	if !strings.Contains(job["review_hint"].(string), "本次注册失败；缺少 Adobe 创建结果，已停止自动重试") {
 		t.Fatal("missing actionable paused-state explanation")
 	}
 	if engine.RetrySavedResult(id) == nil || calls.Load() != 1 {

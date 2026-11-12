@@ -1,5 +1,6 @@
 import { formFailureDiagnostics } from './browser.mjs';
 import { STARTUP_STAGES, STARTUP_LIMIT_MS } from './startup-progress.mjs';
+import { VERIFICATION_WAIT_OUTCOMES, VERIFICATION_WAIT_LIMIT_MS } from './verification-observation.mjs';
 
 const SOURCES = new Set(['visible_challenge_frame', 'visible_instruction', 'upstream_captcha_response']);
 const INSTRUCTIONS = new Set(['start_puzzle', 'complete_puzzle', 'prove_human', 'not_robot', 'identity_instruction']);
@@ -99,6 +100,9 @@ export function registrationDiagnostics(result, state, { now } = {}) {
   const source = SOURCES.has(human?.source) ? human.source : undefined;
   const networkCode = NETWORK_CODES.has(result?.networkDiagnosis?.code)
     ? result.networkDiagnosis.code : undefined;
+  const wait = result?.verificationWait;
+  const validWait = wait && VERIFICATION_WAIT_OUTCOMES.has(wait.outcome) &&
+    Number.isSafeInteger(wait.elapsed_ms) && wait.elapsed_ms >= 0 && wait.elapsed_ms <= VERIFICATION_WAIT_LIMIT_MS;
   return {
     submission_started: state?.submission?.started === true,
     human_verification_required: human?.required === true,
@@ -108,6 +112,7 @@ export function registrationDiagnostics(result, state, { now } = {}) {
     ...(typeof human?.puzzle_entry_visible === 'boolean' ? {puzzle_entry_visible:human.puzzle_entry_visible} : {}),
     ...(networkCode ? { verification_network_code: networkCode } : {}),
     ...(FORM_STAGES.has(result?.detected) ? { detected_stage: result.detected } : {}),
+    ...(validWait ? { verification_wait_elapsed_ms: wait.elapsed_ms, verification_wait_outcome: wait.outcome } : {}),
     ...failureDiagnostics(result),
     ...networkTimeline(result, now),
   };

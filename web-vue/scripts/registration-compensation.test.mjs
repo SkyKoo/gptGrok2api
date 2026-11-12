@@ -80,21 +80,20 @@ test('Adobe failed attempts restart registration while accepted creations contin
   assert.match(registrationCompensationHelp('adobe'), /最多自动补偿 3 次.*原邮箱.*独立浏览器环境.*共用次数和冷却.*未知时暂停重试.*安全验证/)
   const text = registrationCompensationText(waiting, false, now, 'adobe', 'resume_session')
   assert.match(text, /等待自动继续账号验证.*1\/3.*5 分钟后/)
-  assert.match(text, /不再次创建账号/)
   assert.match(registrationCompensationText({ ...waiting, state: 'running', attempts: 2 }, true, now, 'adobe', 'resume_session'), /正在自动继续账号验证.*2\/3/)
-  assert.match(registrationCompensationText(waiting, false, now, 'adobe', 'retry_registration'), /等待自动重新注册.*原邮箱.*独立浏览器环境/)
+  assert.match(registrationCompensationText(waiting, false, now, 'adobe', 'retry_registration'), /等待自动重新注册.*1\/3/)
   assert.match(registrationCompensationText(waiting, true, now + 300000, 'adobe', 'resume_session'), /等待当前注册任务结束/)
-  assert.match(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'resume_session'), /等待自动继续验证/)
-  assert.match(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'retry_registration'), /等待自动重新注册/)
+  assert.equal(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'resume_session'), '账号待验证')
+  assert.equal(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'retry_registration'), '注册失败')
   assert.match(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), /账号待验证/)
   assert.doesNotMatch(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe'), /人工处理/)
 })
 
 test('Adobe exhaustion and safety verification never promise more automatic attempts', () => {
   const exhausted = registrationCompensationText({ ...waiting, state: 'exhausted', attempts: 3 }, false, now, 'adobe', 'resume_session')
-  assert.match(exhausted, /已达上限（3\/3）.*不再次创建账号/)
+  assert.match(exhausted, /次数已用完（3\/3）.*已停止自动重试/)
   assert.doesNotMatch(exhausted, /等待自动|可手动重试/)
-  assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'human_verification_required' }, false, now, 'adobe', 'resume_session'), /验证尚未完成.*已暂停.*须通过 Adobe 校验/)
+  assert.equal(registrationCompensationText({ ...waiting, state: 'manual', reason: 'human_verification_required' }, false, now, 'adobe', 'resume_session'), '当前错误不支持自动重试。')
   assert.equal(registrationCompensationText(waiting, false, now, 'adobe', 'saved_result'), '')
 })
 
@@ -117,13 +116,13 @@ test('Adobe uncertain results never advertise a restart or login even with stale
   assert.equal(registrationRecoveryAction({ recovery_mode: 'result_uncertain', can_retry_registration: true, can_resume_registration: true }, 'adobe'), '')
   for (const state of [undefined, waiting, { ...waiting, state: 'running' }, { ...waiting, state: 'manual', reason: 'registration_result_uncertain' }]) {
     const message = registrationCompensationText(state, false, now, 'adobe', 'result_uncertain')
-    assert.match(message, /尚未确认.*暂停注册重试.*不会自动转入登录/)
+    assert.match(message, /未收到 Adobe 创建结果.*已停止自动重试/)
     assert.doesNotMatch(message, /等待自动|正在自动|继续验证|恢复原会话/)
-    assert.match(registrationJobStatusText('registration_pending', state, undefined, 'adobe', 'result_uncertain'), /结果待核对.*已暂停/)
+    assert.equal(registrationJobStatusText('registration_pending', state, undefined, 'adobe', 'result_uncertain'), '注册失败')
   }
-  assert.match(registrationJobStatusText('failed', undefined, undefined, 'adobe', 'result_uncertain'), /结果待核对/)
-  assert.match(registrationJobStatusText('registration_pending', waiting, 'child', 'adobe', 'result_uncertain'), /补偿任务.*原记录/)
-  assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, false, now, 'adobe'), /暂停注册重试.*不会自动转入登录/)
+  assert.equal(registrationJobStatusText('failed', undefined, undefined, 'adobe', 'result_uncertain'), '注册失败')
+  assert.equal(registrationJobStatusText('registration_pending', waiting, 'child', 'adobe', 'result_uncertain'), '已发起后续重试')
+  assert.match(registrationCompensationText({ ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, false, now, 'adobe'), /未收到 Adobe 创建结果.*已停止自动重试/)
   const { registrationProxyFailureText } = await import('../src/lib/registrationProxy.ts')
   assert.match(registrationProxyFailureText('task: registration_result_uncertain'), /尚未确认.*已暂停.*不会自动转入登录/)
 })
@@ -137,4 +136,29 @@ test('Adobe in-flight attempts do not display the uncertainty of a failed attemp
   for (const state of ['superseded', 'completed', 'saved_result']) {
     assert.equal(registrationCompensationText({ ...waiting, state }, false, now, 'adobe', 'result_uncertain', 'registration_pending'), '')
   }
+})
+
+
+test('Adobe final failure labels preserve accepted accounts and expose the actual cause', async () => {
+  const { registrationJobStatusText, registrationFailureText } = await import('../src/lib/registrationCompensation.ts')
+  for (const status of ['registration_pending', 'failed', 'interrupted']) {
+    assert.equal(registrationJobStatusText(status, undefined, undefined, 'adobe', 'retry_registration'), '注册失败')
+    assert.equal(registrationJobStatusText(status, undefined, undefined, 'adobe', 'resume_session'), '账号待验证')
+  }
+  assert.equal(registrationJobStatusText('cancelled', undefined, undefined, 'adobe', 'result_uncertain'), '已取消')
+  assert.equal(registrationJobStatusText('cancelled', undefined, undefined, 'adobe', 'resume_session'), '已取消')
+  assert.equal(registrationJobStatusText('import_pending', undefined, undefined, 'adobe', 'saved_result'), '等待入库')
+  assert.equal(registrationJobStatusText('verification_pending', undefined, undefined, 'adobe', 'saved_result'), '等待校验')
+  assert.equal(registrationJobStatusText('registration_pending', { ...waiting, state: 'superseded' }, undefined, 'adobe', 'result_uncertain'), '已发起后续重试')
+  assert.equal(registrationFailureText('adobe: human_verification_required', 'adobe'), 'Adobe 人机验证未完成。')
+  assert.match(registrationFailureText('adobe: verification_dns_failed', 'adobe'), /域名解析失败/)
+  assert.match(registrationFailureText('adobe: verification_request_timeout', 'adobe'), /请求超时/)
+  assert.equal(registrationFailureText('adobe: verification_request_aborted', 'adobe'), '验证流程未完成，观察到组件请求取消。')
+  assert.equal(registrationFailureText('adobe: submission_result_unknown', 'adobe'), '未取得创建账户的确认结果。')
+  assert.equal(registrationFailureText('adobe: registration_country_preparation_failed', 'adobe'), '无法准备并确认本次注册的国家/地区。')
+  assert.equal(registrationFailureText('adobe: registration_country_invalid', 'adobe'), '浏览器返回的注册国家/地区无效。')
+  assert.equal(registrationFailureText('adobe: saved_registration_country_changed', 'adobe'), '本次注册的国家/地区无法与已保存资料保持一致，已停止执行。')
+  assert.equal(registrationFailureText('adobe: future_error', 'adobe'), 'adobe: future_error')
+  assert.equal(registrationFailureText('task: registration_result_uncertain', 'adobe'), '')
+  assert.equal(registrationFailureText('original OpenAI failure', 'openai'), 'original OpenAI failure')
 })

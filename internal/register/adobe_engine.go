@@ -308,6 +308,12 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			recordAdobeCreationOutcome(j, observed, registrationResponse)
 		})
 	}
+	cfg.countryProgress = func(country adobeCountrySelection) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return e.recordRegistrationCountry(id, country)
+	}
 	cfg.diagnosticProgress = func(diagnostics adobeRegistrationDiagnostics) error {
 		detail := adobeFailureDiagnosticText(diagnostics)
 		if detail == "" {
@@ -629,7 +635,7 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		state := adobeCompensationSummary(j, e.adobeMailboxAttemptsLocked(j.Mailbox.Email))
 		hint := adobeRegistrationReviewHint(j.Error)
 		if blocked {
-			hint = "创建账户的提交结果尚不明确，保留原邮箱与任务记录，不自动重新注册或改走登录。"
+			hint = "本次注册失败；缺少 Adobe 创建结果，已停止自动重试。"
 		} else if state != nil && (state.State == "waiting" || state.State == "running") {
 			switch mode {
 			case "retry_registration":

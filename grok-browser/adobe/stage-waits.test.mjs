@@ -397,6 +397,35 @@ test('default verification window stops at fifteen seconds even when frame evide
   assert.equal(result.code,'human_verification_required');assert.equal(timing.elapsed(),15000);
 });
 
+test('verification diagnostics report the actual remaining step window without extending or repeating it',async()=>{
+  const timing=clock(), observations=[];
+  const result=await waitForFormStage(async()=>timing.elapsed()<800 ? profileForm()
+    :form({humanVerification:{required:true,source:'visible_instruction'}}),
+    {...timing,accept:()=>false,onVerificationWait:value=>observations.push(value)});
+  assert.equal(result.code,'human_verification_required');
+  assert.equal(timing.elapsed(),1000);
+  assert.deepEqual(observations,[{elapsed_ms:200,outcome:'still_required'}]);
+});
+
+test('verification diagnostics distinguish progress from observation failure without leaking errors',async()=>{
+  for(const fail of [false,true]){
+    const timing=clock(),observations=[];let reads=0;
+    const pending=waitForFormStage(async()=>{
+      if(reads++===0)return form({humanVerification:{required:true,source:'visible_instruction'}});
+      if(fail)throw Error('PRIVATE page error');
+      return verificationForm();
+    },{...timing,onVerificationWait:value=>observations.push(value)});
+    if(fail)await assert.rejects(pending,/PRIVATE page error/);else assert.equal((await pending).stage,'awaiting_verification');
+    assert.deepEqual(observations,[{elapsed_ms:100,outcome:fail?'observation_error':'resolved'}]);
+  }
+  const timing=clock(),observations=[];
+  await waitForFormStage(verificationForm,{...timing,onVerificationWait:value=>observations.push(value)});
+  assert.deepEqual(observations,[]);
+  await waitForFormStage(async()=>form({humanVerification:{required:true,source:'visible_instruction'}}),
+    {...timing,onVerificationWait:()=>{throw Error('diagnostic unavailable');}});
+  assert.equal(timing.elapsed(),1000);
+});
+
 test('a completed creation-stage observation is not followed by a second runner wait or another Create',async t=>{
   const {store,browser}=await fixture(t);const timing=clock();let clicks=0;
   browser.stageWaitOptions={...timing,timeoutMs:30000};
@@ -407,6 +436,7 @@ test('a completed creation-stage observation is not followed by a second runner 
   browser.status=async()=>{const state=await store.load();return {stage:state.stage,code:state.code,detected:'needs_manual',form:await browser.form()};};
   const result=await runAutomaticRegistration(browser,store,{approveCreate:true,verificationWait:{...timing,timeoutMs:15000}});
   assert.equal(result.code,'human_verification_required');assert.equal(timing.elapsed(),15000);
+  assert.deepEqual(result.verificationWait,{elapsed_ms:15000,outcome:'still_required'});
   assert.equal(clicks,1);assert.equal((await store.load()).submission.started,true);
 });
 

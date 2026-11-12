@@ -38,6 +38,7 @@ func TestAdobeFailureDiagnosticProjectionRejectsUntrustedValues(t *testing.T) {
 
 func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 	var resumes atomic.Int32
+	var preparations atomic.Int32
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			_, _ = w.Write([]byte(`{"status":"released"}`))
@@ -50,6 +51,11 @@ func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 				t.Error("recovery changed the original flow identity")
 			}
 			_, _ = w.Write([]byte(`{"status":"ready"}`))
+			return
+		}
+		if r.URL.Path == "/v1/adobe/run" && request["action"] == "prepare" {
+			preparations.Add(1)
+			_, _ = w.Write([]byte(`{"stage":"prepared","registration_country":{"country":"US","source":"preserved"}}`))
 			return
 		}
 		if r.URL.Path != "/v1/adobe/run" || request["action"] != "resume" {
@@ -80,7 +86,7 @@ func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 	}
 	waitAdobe(t, engine)
 	child := latestAdobe(t, engine, job.ID)
-	if resumes.Load() != 1 || child.Error != "adobe: form_rejected" || child.AutoRetry.State != "manual" || child.AutoRetry.Reason != "failure_requires_review" {
+	if preparations.Load() != 1 || resumes.Load() != 1 || child.Error != "adobe: form_rejected" || child.AutoRetry.State != "manual" || child.AutoRetry.Reason != "failure_requires_review" {
 		t.Fatalf("recovery failure policy changed: %+v", child)
 	}
 	original, diagnostic := 0, 0
@@ -170,5 +176,28 @@ func TestAdobeHumanDiagnosticMetadataUsesFixedLabels(t *testing.T) {
 	diagnostic.PuzzleEntryVisible = &visible
 	if text := adobeFailureDiagnosticText(diagnostic); text != "开始拼图按钮：可见" {
 		t.Fatal("checked visible puzzle entry lost")
+	}
+}
+
+func TestAdobeVerificationWaitDiagnosticRequiresBoundedDurationAndKnownOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name, payload, want string
+	}{
+		{"waited", `{"verification_wait_elapsed_ms":15024,"verification_wait_outcome":"still_required"}`, "已等待验证 15.0 秒，页面仍要求人机验证"},
+		{"resolved", `{"verification_wait_elapsed_ms":2300,"verification_wait_outcome":"resolved"}`, "已等待验证 2.3 秒，页面已离开验证阶段"},
+		{"missing_duration", `{"verification_wait_outcome":"still_required"}`, ""},
+		{"negative", `{"verification_wait_elapsed_ms":-1,"verification_wait_outcome":"still_required"}`, ""},
+		{"unbounded", `{"verification_wait_elapsed_ms":150001,"verification_wait_outcome":"still_required"}`, ""},
+		{"private_outcome", `{"verification_wait_elapsed_ms":15000,"verification_wait_outcome":"PRIVATE_SECRET"}`, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var diagnostic adobeRegistrationDiagnostics
+			if err := json.Unmarshal([]byte(test.payload), &diagnostic); err != nil {
+				t.Fatal(err)
+			}
+			if got := adobeFailureDiagnosticText(diagnostic); got != test.want {
+				t.Fatalf("wait diagnostic = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

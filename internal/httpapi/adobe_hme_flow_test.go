@@ -76,6 +76,8 @@ func TestAdobeRegistrationReceivesCodeThroughSharedHME(t *testing.T) {
 					_, _ = w.Write([]byte(`{"status":"ready"}`))
 				case "/v1/adobe/run":
 					switch body["action"] {
+					case "prepare":
+						_, _ = w.Write([]byte(`{"stage":"prepared","registration_country":{"country":"JP","source":"ipwho_is"}}`))
 					case "run":
 						submissions.Add(1)
 						_, _ = w.Write([]byte(`{"stage":"awaiting_verification","code":"verification_required","creation_outcome":"accepted"}`))

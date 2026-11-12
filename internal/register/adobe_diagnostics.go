@@ -24,6 +24,8 @@ type adobeRegistrationDiagnostics struct {
 	ExceptionType               string   `json:"exception_type"`
 	ElapsedMS                   *int64   `json:"elapsed_ms"`
 	DurationMS                  *int64   `json:"duration_ms"`
+	VerificationWaitElapsedMS   *int64   `json:"verification_wait_elapsed_ms"`
+	VerificationWaitOutcome     string   `json:"verification_wait_outcome"`
 }
 
 // SubmissionStarted describes the original journal, not a new action performed
@@ -83,13 +85,13 @@ func adobeRegistrationStageText(stage string) string {
 	case "adobe_verification_request_timeout":
 		return "人工验证组件请求超时"
 	case "adobe_verification_request_aborted":
-		return "验证组件请求被取消，保留记录并按创建结果判断后续处理"
+		return "观察到验证组件请求被取消；单个请求取消不代表整个验证失败"
 	case "adobe_creation_submitted":
 		return "已发起创建账户操作；是否重新注册由持久保存的创建结果决定"
 	case "adobe_original_submission_recorded":
 		return "原注册流程已有创建提交记录，恢复沿用该记录，不代表本次重新创建"
 	case "adobe_registration_needs_review":
-		return "本次浏览器流程已结束，保留邮箱与任务记录，按创建结果安排后续处理"
+		return "本次注册流程失败；后续重试安排见任务状态"
 	case "adobe_recovery_started":
 		return "创建已获确认，正在继续原账号的验证与会话采集"
 	default:
@@ -132,6 +134,15 @@ func adobeStartupEventText(event browserqueue.StartupEvent) string {
 // text and unbounded lists cannot become log content or change retry policy.
 func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 	parts := []string{}
+	if d.VerificationWaitElapsedMS != nil && *d.VerificationWaitElapsedMS >= 0 && *d.VerificationWaitElapsedMS <= 150000 {
+		if result := map[string]string{
+			"still_required": "页面仍要求人机验证", "resolved": "页面已离开验证阶段",
+			"network_error": "验证请求发生网络错误", "interrupted": "等待已取消",
+			"observation_error": "无法继续读取验证页面",
+		}[d.VerificationWaitOutcome]; result != "" {
+			parts = append(parts, fmt.Sprintf("已等待验证 %.1f 秒，%s", float64(*d.VerificationWaitElapsedMS)/1000, result))
+		}
+	}
 	if label := map[string]string{
 		"start_puzzle": "开始拼图", "complete_puzzle": "完成拼图", "prove_human": "证明是人类",
 		"not_robot": "确认不是机器人", "identity_instruction": "身份验证提示，尚未确认具体拼图",
@@ -197,8 +208,14 @@ func adobeRegistrationReviewHint(failure string) string {
 	// Exact fixed codes keep unrelated or untrusted error text out of the hint.
 	code := strings.TrimPrefix(failure, "adobe: ")
 	switch code {
-	case "human_verification_required", "captcha_required", "verification_dns_failed", "verification_request_timeout", "verification_request_aborted":
-		return "Adobe 验证尚未完成，当前浏览器流程已结束。系统依据创建结果决定重新注册、继续账号验证或保留未知结果；邮箱和历史记录保留，后续仍须通过 Adobe 校验。"
+	case "human_verification_required", "captcha_required":
+		return "注册失败：Adobe 人机验证未通过。"
+	case "verification_dns_failed":
+		return "注册失败：验证服务域名解析失败。"
+	case "verification_request_timeout":
+		return "注册失败：等待验证服务超时。"
+	case "verification_request_aborted":
+		return "注册失败：验证流程未完成，观察到验证组件请求取消。"
 	default:
 		return ""
 	}

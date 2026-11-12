@@ -1,9 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runAutomaticRegistration } from './auto-runner.mjs';
+import { observeAutomaticVerification, runAutomaticRegistration } from './auto-runner.mjs';
 import { RegistrationError } from './core.mjs';
 
 const profile = { firstName: 'Fixture', lastName: 'Person', birthMonth: 6, birthYear: '1980', country: 'US' };
+
+test('runner observation reports actual elapsed time and why it ended without issuing actions',async()=>{
+  const human={form:{humanVerification:{required:true,source:'visible_instruction'}}};
+  for(const outcome of ['still_required','resolved','network_error','interrupted','observation_error']){
+    let elapsed=0,reads=0;
+    const browser={status:async()=>{
+      reads++;
+      if(outcome==='observation_error')throw Error('PRIVATE');
+      return outcome==='resolved'?{form:{humanVerification:{required:false}}}:
+        outcome==='network_error'?{...human,networkDiagnosis:{code:'verification_dns_failed'}}:human;
+    }};
+    const promise=observeAutomaticVerification(browser,human,()=>outcome==='interrupted'&&elapsed>=100,
+      {timeoutMs:300,pollIntervalMs:100,now:()=>elapsed,pause:async ms=>{elapsed+=ms;}});
+    if(outcome==='observation_error')await assert.rejects(promise,/PRIVATE/);
+    else assert.deepEqual((await promise).verificationWait,{elapsed_ms:outcome==='still_required'?300:100,outcome});
+    assert.deepEqual(browser.verificationWait,{elapsed_ms:outcome==='still_required'?300:100,outcome});
+    assert.equal(reads,outcome==='still_required'?3:outcome==='interrupted'?0:1);
+  }
+});
+
+test('runner preserves measured observation failure when both browser status and journal become unreadable',async()=>{
+  let elapsed=0,reads=0;
+  const browser={status:async()=>{
+    if(reads++>0)throw Error('PRIVATE browser error');
+    return {form:{humanVerification:{required:true,source:'visible_instruction'}}};
+  }};
+  let loads=0;
+  const store={load:async()=>{if(loads++>0)throw Error('PRIVATE journal error');return {stage:'form_ready'};}};
+  const result=await runAutomaticRegistration(browser,store,{verificationWait:{timeoutMs:300,pollIntervalMs:100,
+    now:()=>elapsed,pause:async ms=>{elapsed+=ms;}}});
+  assert.equal(result.stage,'needs_manual');
+  assert.equal(result.submissionStarted,undefined);
+  assert.deepEqual(result.verificationWait,{elapsed_ms:100,outcome:'observation_error'});
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE/);
+});
 
 function fixture({ phase = 'awaiting_email', submitted = false, patch = {}, human = false, fields = [] } = {}) {
   const state = {

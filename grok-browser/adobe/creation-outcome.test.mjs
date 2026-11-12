@@ -45,6 +45,22 @@ test('only a journal proving no Create yields not_submitted; missing or legacy s
   assert.deepEqual(await f.restart(),{creation_outcome:'unknown'});
 });
 
+test('sealed zero-request ledger cannot prove that clicking Create had no side effect',async t=>{
+  const f=await fixture(t);await f.begin();
+  // The known account endpoint may not be observed even while the page issues
+  // traffic. Neither CAPTCHA traffic nor a future endpoint proves no creation.
+  for(const url of ['https://arks-client.adobe.com/fc/gt2/public_key/fixture',
+    'https://auth.services.adobe.com/signin/v3/accounts']){
+    const r=request(f.page,{url,status:200});
+    f.context.emit('request',r);f.context.emit('requestfinished',r);
+  }
+  await f.browser.close();
+  const ledger=(await f.store.load()).creationEvidence;
+  assert.equal(ledger.requests,0);assert.equal(ledger.complete,true);assert.equal(ledger.sealed,true);
+  assert.equal((await f.outcome()).creation_outcome,'unknown');
+  assert.equal((await f.restart()).creation_outcome,'unknown');
+});
+
 test('an incomplete or differently bound persisted ledger cannot authorize registration',()=>{
   const base={submission:{started:true,startedAt:'2026-11-12T00:00:00.000Z'},creationEvidence:{version:1,
     marker:'2026-11-12T00:00:00.000Z',requests:1,finished:1,rejected:1,unknown:0,accepted:false,complete:true,sealed:true}};

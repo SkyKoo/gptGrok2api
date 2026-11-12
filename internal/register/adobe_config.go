@@ -24,6 +24,7 @@ type AdobeConfig struct {
 	diagnosticProgress             func(adobeRegistrationDiagnostics) error
 	creationProgress               func(adobeCreationObservation, bool) error
 	startupProgress                func(browserqueue.StartupEvent) error
+	countryProgress                func(adobeCountrySelection) error
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
@@ -63,14 +64,19 @@ func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
 // Adobe registration identity is generated once per task, never from shared
 // settings. The encrypted task journal retains it across result recovery.
 type adobeRegistrationProfile struct {
-	Country    string `json:"country"`
-	BirthYear  int    `json:"birthYear"`
-	BirthMonth int    `json:"birthMonth"`
-	BirthDay   int    `json:"birthDay"`
+	Country       string `json:"country"`
+	CountrySource string `json:"countrySource,omitempty"`
+	BirthYear     int    `json:"birthYear"`
+	BirthMonth    int    `json:"birthMonth"`
+	BirthDay      int    `json:"birthDay"`
 }
 
 func (p adobeRegistrationProfile) fields() map[string]any {
-	return map[string]any{"country": p.Country, "birthYear": p.BirthYear, "birthMonth": p.BirthMonth, "birthDay": p.BirthDay}
+	fields := map[string]any{"country": p.Country, "birthYear": p.BirthYear, "birthMonth": p.BirthMonth, "birthDay": p.BirthDay}
+	if p.CountrySource != "" {
+		fields["countrySource"] = p.CountrySource
+	}
+	return fields
 }
 
 // Clamp a leap-day anniversary to the last calendar day of the target month.

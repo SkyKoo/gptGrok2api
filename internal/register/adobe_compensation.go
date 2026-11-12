@@ -541,6 +541,9 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 			return err
 		}
 		job.AdobeRegistration = &AdobeRegistrationState{BrowserProfileID: job.ID, CreationOutcome: "not_submitted"}
+		if job.AdobeProfile != nil {
+			job.AdobeProfile.Country, job.AdobeProfile.CountrySource = "US", ""
+		}
 	} else {
 		raw := make([]byte, 16)
 		if _, err := rand.Read(raw); err != nil {

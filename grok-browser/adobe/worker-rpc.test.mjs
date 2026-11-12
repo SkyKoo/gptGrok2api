@@ -12,7 +12,7 @@ import { PrivateRunStore } from './core.mjs';
 // Run the actual line-oriented Worker protocol and real durable journal. Only
 // the browser dependency is replaced, so tests never launch Chromium or make
 // registration requests on the developer's host.
-async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false}={}) {
+async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false,countryProbe=false}={}) {
   const root=await mkdtemp(join(tmpdir(),'adobe-worker-rpc-'));
   const store=new PrivateRunStore(root,'original');
   if(!missing){
@@ -32,6 +32,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         await this.store.save({testOpenMode:options.resumeOnly,testRequireExistingProfile:options.requireExistingProfile});
         if(state.submission.started){this.phase='challenge';await this.store.setStage('needs_manual','human_verification_required');}
         else if(${uiFailed}){this.phase='needs_manual';await this.store.setStage('needs_manual','login_ui_not_ready');}
+        else if(${countryProbe}){this.phase='awaiting_profile';await this.store.setStage('awaiting_profile');}
         else await this.store.setStage('awaiting_approval');
       }
       async status(){
@@ -42,6 +43,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
             fields:[],headings:[],notices:[],buttons:[],agreements:[],
             humanVerification:this.phase==='challenge'?{required:true,source:'visible_instruction'}:{required:false}},networkDiagnosis:{code:null}};
       }
+      async advance(input){await this.store.save({testFilledProfile:input.profile});await this.store.setStage('awaiting_approval');}
       async approveCreate(){
         await this.store.markSubmissionStarted();
         const state=await this.store.load();await this.store.save({testCreates:(state.testCreates||0)+1,
@@ -61,6 +63,14 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         if(state.creationEvidence)await this.store.save({creationEvidence:{...state.creationEvidence,sealed:true}});
       }
     }
+  `,{mode:0o600});
+  const countryMock=join(root,'mock-country.mjs');
+  if(countryProbe)await writeFile(countryMock,`
+    import {prepareRegistrationCountry as prepare} from ${JSON.stringify(new URL('./exit-country.mjs',import.meta.url).href)};
+    export const prepareRegistrationCountry=(store,options)=>prepare(store,options,async proxy=>{
+      const state=await store.load();await store.save({testCountryProbes:(state.testCountryProbes||0)+1});
+      return {country:'JP',source:'ipwho_is'};
+    });
   `,{mode:0o600});
   const refreshMock=join(root,'mock-refresh.mjs');
   if(refresh)await writeFile(refreshMock,`
@@ -85,6 +95,8 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   await writeFile(loader,`export async function resolve(specifier,context,next){
     if(specifier==='./browser.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
       return {url:${JSON.stringify(pathToFileURL(mock).href)},shortCircuit:true};
+    if(${countryProbe}&&specifier==='./exit-country.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
+      return {url:${JSON.stringify(pathToFileURL(countryMock).href)},shortCircuit:true};
     if(${refresh}&&['./session-refresh.mjs','./browser-runtime.mjs'].includes(specifier)&&context.parentURL?.endsWith('/worker-rpc.mjs'))
       return {url:${JSON.stringify(pathToFileURL(refreshMock).href)},shortCircuit:true};
     return next(specifier,context);
@@ -127,6 +139,29 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   };
   return {initialize,command,exited,journal,startupFrames};
 }
+
+test('RPC prepares one country before creating, and passes the saved selection into form filling',async t=>{
+  const f=await rpcFixture(t,{missing:true,countryProbe:true});
+  assert.equal((await f.initialize({mode:'registration',require_new:true,profile:{country:'US',birthYear:1988,birthMonth:6}})).result.stage,'ready');
+  for(let i=0;i<2;i++)assert.deepEqual((await f.command({action:'prepare'})).result,
+    {stage:'prepared',registration_country:{country:'JP',source:'ipwho_is'}});
+  const result=(await f.command({action:'run'})).result;
+  assert.equal(result.code,'verification_required');
+  await f.command({action:'close'});await f.exited;
+  const state=await f.journal();
+  assert.equal(state.testCountryProbes,1);assert.equal(state.testCreates,1);
+  assert.equal(state.testFilledProfile.country,'JP');assert.equal(state.testFilledProfile.birthYear,1988);
+  assert.equal(state.config.profile.countrySource,'ipwho_is');
+});
+
+test('RPC country preparation preserves a submitted original profile without querying again',async t=>{
+  const f=await rpcFixture(t,{submitted:true,countryProbe:true});
+  assert.equal((await f.initialize()).result.stage,'ready');
+  assert.deepEqual((await f.command({action:'prepare'})).result,
+    {stage:'prepared',registration_country:{country:'US',source:'preserved'}});
+  await f.command({action:'close'});await f.exited;
+  const state=await f.journal();assert.equal(state.testCountryProbes,undefined);assert.equal(state.config.profile.country,'US');
+});
 
 test('init progress frames share the request id and do not consume the final RPC response',async t=>{
   const f=await rpcFixture(t,{uiFailed:true});

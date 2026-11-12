@@ -31,34 +31,31 @@ export function registrationCompensationHelp(target?: string): string {
 }
 
 export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string, recoveryMode?: RegistrationRecoveryMode, jobStatus?: string): string {
-  if (target === 'adobe' && recoveryMode === 'result_uncertain') {
-    if (['running', 'queued', 'completed'].includes(jobStatus || '') || ['superseded', 'completed', 'saved_result'].includes(state?.state || '')) return ''
-    return '创建结果尚未确认，已暂停注册重试；原邮箱和任务记录保留，不会自动转入登录。'
+  if (target === 'adobe') {
+    if (['running', 'queued', 'completed', 'import_pending', 'verification_pending'].includes(jobStatus || '') || ['superseded', 'completed', 'saved_result'].includes(state?.state || '') || recoveryMode === 'saved_result') return ''
+    if (recoveryMode === 'result_uncertain' || state?.reason === 'registration_result_uncertain') return '未收到 Adobe 创建结果，已停止自动重试。'
+    if (!state) return ''
+    const attempts = `${state.attempts}/${state.max_attempts}`
+    const action = recoveryMode === 'resume_session' ? '继续账号验证' : '重新注册'
+    if (state.state === 'running') return `正在自动${action} · 第 ${attempts} 次`
+    if (state.state === 'exhausted') return `自动重试次数已用完（${attempts}），已停止自动重试。`
+    if (state.state === 'waiting') {
+      const due = Date.parse(state.next_attempt_at || '')
+      if (!Number.isFinite(due)) return `等待自动${action} · 已尝试 ${attempts} · 下次时间未确定`
+      const seconds = Math.ceil((due - now) / 1000)
+      const remaining = seconds >= 60 ? `约 ${Math.ceil(seconds / 60)} 分钟后` : `${seconds} 秒后`
+      const next = due <= now ? (running ? '等待当前注册任务结束' : '等待后台执行') : `${remaining}执行`
+      return `等待自动${action} · 已尝试 ${attempts} · ${next}`
+    }
+    if (state.state === 'manual') {
+      if (state.reason === 'cancelled') return '已停止自动重试。'
+      if (state.reason === 'duplicate_mailbox_retry') return '同邮箱的重复重试计划已合并，请查看后续任务。'
+      return '当前错误不支持自动重试。'
+    }
+    return ''
   }
   if (!state) return ''
   const attempts = `${state.attempts}/${state.max_attempts}`
-  if (target === 'adobe') {
-    if (recoveryMode === 'saved_result') return ''
-    const resume = recoveryMode === 'resume_session'
-    const action = resume ? '继续账号验证' : '重新注册'
-    const boundary = resume ? '创建已获确认，继续原账号验证，不再次创建账号。' : '复用原邮箱，使用独立浏览器环境；同邮箱共用次数和冷却。'
-    if (state.state === 'running') return `正在自动${action} · 第 ${attempts} 次 · ${boundary}`
-    if (state.state === 'exhausted') return `自动补偿次数已达上限（${attempts}）。${boundary}可用操作以任务按钮为准。`
-    if (state.state === 'waiting') {
-      const due = Date.parse(state.next_attempt_at || '')
-      if (!Number.isFinite(due)) return `等待自动${action} · 已尝试 ${attempts} · 下次时间待确认。${boundary}`
-      const seconds = Math.ceil((due - now) / 1000)
-      const remaining = seconds >= 60 ? `约 ${Math.ceil(seconds / 60)} 分钟后` : `${seconds} 秒后`
-      const next = due <= now ? (running ? '等待当前注册任务结束' : '等待后台执行') : `${remaining}执行（${new Date(due).toLocaleString()}），有注册任务时顺延`
-      return `等待自动${action} · 已尝试 ${attempts} · ${next}。${boundary}`
-    }
-    if (state.state === 'manual') {
-      if (state.reason === 'human_verification_required') return 'Adobe 安全验证尚未完成，自动处理已暂停；请核查验证组件和网络，后续仍须通过 Adobe 校验。'
-      if (state.reason === 'registration_result_uncertain') return '创建结果尚未确认，已暂停注册重试；原邮箱和任务记录保留，不会自动转入登录。'
-      if (state.reason === 'cancelled') return '自动补偿已停止，原任务记录保留；可用操作以任务按钮为准。'
-      if (state.reason === 'failure_requires_review') return '当前错误不支持自动补偿，原任务记录保留；请查看具体失败原因和可用操作。'
-    }
-  }
   const scope = target === 'grok' ? '同邮箱累计 · ' : ''
   const retained = target === 'grok' ? '失败预留已释放，重试前重新取得。' : '邮箱仍保留。'
   if (state.state === 'running') return `${scope}正在自动补偿注册 · 第 ${attempts} 次 · 复用原邮箱和登录环境`
@@ -90,17 +87,15 @@ export function registrationCompensationText(state: RegistrationCompensation | n
 }
 
 export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null, retryJobId?: string, target?: string, recoveryMode?: RegistrationRecoveryMode): string {
-  if (retryJobId) return '已创建补偿任务，原记录已保留'
-  if (target === 'adobe' && recoveryMode === 'result_uncertain' && ['registration_pending', 'failed', 'cancelled', 'interrupted'].includes(status)) return '创建结果待核对，注册重试已暂停'
-  if (status === 'registration_pending' && target === 'adobe') {
-    const action = recoveryMode === 'resume_session' ? '继续验证' : '重新注册'
-    if (state?.state === 'waiting') return `注册尚未完成，等待自动${action}`
-    if (state?.state === 'running') return `正在自动${action}`
-    if (state?.state === 'exhausted') return '注册尚未完成，自动补偿次数已用完'
-    if (state?.reason === 'human_verification_required') return '注册尚未完成，需通过安全验证'
-    if (recoveryMode === 'resume_session') return '账号待验证，原会话保留'
-    return '注册尚未完成'
+  if (target === 'adobe') {
+    if (retryJobId || state?.state === 'superseded') return '已发起后续重试'
+    if (['registration_pending', 'failed', 'interrupted'].includes(status)) {
+      if (recoveryMode === 'resume_session') return '账号待验证'
+      if (recoveryMode === 'saved_result') return '账号已创建，等待入库 / 校验'
+      return '注册失败'
+    }
   }
+  if (retryJobId) return '已创建补偿任务，原记录已保留'
   if (status === 'registration_pending' && target === 'grok') {
     if (state?.reason === 'duplicate_mailbox_retry') return '同邮箱补偿已合并，原记录保留'
     if (state?.state === 'waiting') return '注册未成功，等待自动补偿'
@@ -116,4 +111,39 @@ export function registrationJobStatusText(status: string, state?: RegistrationCo
   }
   const labels: Record<string, string> = { queued: '等待执行', running: '进行中', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断，需核查', import_pending: '等待入库', verification_pending: '等待校验' }
   return labels[status] || status
+}
+
+// Terminal status and failure cause are separate from a future retry plan.
+// Unknown creation results do not imply the closed browser is still working.
+export function registrationFailureText(error: string | undefined, target?: string): string {
+  if (!error) return ''
+  if (target !== 'adobe') return error
+  const labels: Record<string, string> = {
+    'adobe: human_verification_required': 'Adobe 人机验证未完成。',
+    'adobe: captcha_required': 'Adobe 要求人机验证，本次验证未完成。',
+    'adobe: verification_dns_failed': '人机验证组件加载失败：域名解析失败。',
+    'adobe: verification_request_timeout': '人机验证组件加载失败：请求超时。',
+    'adobe: verification_request_aborted': '验证流程未完成，观察到组件请求取消。',
+    'adobe: submission_result_unknown': '未取得创建账户的确认结果。',
+    'adobe: worker_result_unknown': '浏览器服务未返回有效结果。',
+    'adobe: creation_result_unknown': '未取得 Adobe 创建账户的确认结果。',
+    'adobe: identity_not_verified': '无法确认返回凭据属于本次注册账号。',
+    'adobe: recovery_profile_missing': '原账号的浏览器资料缺失，无法继续验证。',
+    'adobe: login_ui_not_ready': 'Adobe 登录页面未加载完成。',
+    'adobe: registration_ui_not_ready': 'Adobe 注册表单未加载完成。',
+    'adobe: registration_form_not_ready': 'Adobe 注册表单未加载完成。',
+    'adobe: registration_country_preparation_failed': '无法准备并确认本次注册的国家/地区。',
+    'adobe: registration_country_invalid': '浏览器返回的注册国家/地区无效。',
+    'adobe: saved_registration_country_changed': '本次注册的国家/地区无法与已保存资料保持一致，已停止执行。',
+    'adobe: automatic_progress_stalled': 'Adobe 注册页面未进入下一步。',
+    'adobe: account_not_found': 'Adobe 提示账号不存在。',
+    'adobe: invalid_email': 'Adobe 拒绝了该邮箱。',
+    'adobe: invalid_password': 'Adobe 拒绝了提交的密码。',
+    'adobe: invalid_verification_code': 'Adobe 拒绝了邮件验证码。',
+    'browser: adobe_browser_unavailable': '浏览器服务无法启动 Adobe 会话。',
+    'mail: timeout': '未在规定时间内收到 Adobe 邮件验证码。',
+    'mail: network_error': '读取验证码邮件时网络请求失败。',
+  }
+  if (error === 'task: registration_result_uncertain' || error === 'adobe: registration_result_uncertain') return ''
+  return labels[error] || error
 }

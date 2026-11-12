@@ -81,6 +81,18 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		}
 		return nil, fail("browser", "adobe_browser_unavailable")
 	}
+	if cfg.countryProgress != nil {
+		prepared, err := f.command(ctx, cfg, "prepare", "")
+		if err != nil || prepared.Stage != "prepared" || !prepared.Country.valid() {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fail("adobe", "registration_country_preparation_failed")
+		}
+		if err := cfg.countryProgress(prepared.Country); err != nil {
+			return nil, err
+		}
+	}
 	before := time.Now().UTC()
 	if err := progress(stage); err != nil {
 		return nil, err
@@ -156,6 +168,7 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 }
 
 type adobeBrowserResult struct {
+	Country                 adobeCountrySelection        `json:"registration_country"`
 	CreationOutcome         string                       `json:"creation_outcome"`
 	CreationErrorCode       string                       `json:"creation_error_code"`
 	CreationHTTPStatus      int                          `json:"creation_http_status"`
