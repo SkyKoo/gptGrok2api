@@ -71,7 +71,9 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		profile["lastName"] = names[1]
 	}
 	var err error
-	f.lease, err = browserqueue.Acquire(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id}, progress)
+	// A new root must not inherit existing storage. Pre-submit compensation
+	// also uses registration mode, but must retain its original profile.
+	f.lease, err = browserqueue.Acquire(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id, "adobe_require_new": cfg.RecoveryMode == ""}, progress)
 	if err != nil {
 		var startup *browserqueue.StartupError
 		if errors.As(err, &startup) {
@@ -90,24 +92,17 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		return nil, err
 	}
 	if result.Stage != "completed" && (result.Code == "verification_required" || result.Stage == "awaiting_verification") {
-		if result.SubmissionStarted || result.Diagnostics.SubmissionStarted {
-			if err := progress("adobe_creation_submitted"); err != nil {
+		if stage := adobeSubmissionProgressStage(result, cfg.RecoveryMode); stage != "" {
+			if err := progress(stage); err != nil {
 				return nil, err
 			}
 		}
 		if err := progress("awaiting_verification"); err != nil {
 			return nil, err
 		}
-		after := before
-		if result.VerificationRequestedAt != "" {
-			requested, err := time.Parse(time.RFC3339Nano, result.VerificationRequestedAt)
-			now := time.Now().UTC()
-			if err != nil || requested.Before(now.Add(-15*time.Minute)) || requested.After(now.Add(5*time.Second)) {
-				return nil, fail("adobe", "recovery_verification_time_invalid")
-			}
-			// The Worker records its normal email/Resend action before clicking.
-			// A small clock margin includes the resulting message, not old codes.
-			after = requested.Add(-5 * time.Second)
+		after, err := AdobeVerificationMailAfter(before, result.VerificationRequestedAt)
+		if err != nil {
+			return nil, err
 		}
 		code, err := waitCode(ctx, after)
 		if err != nil {
@@ -119,7 +114,12 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		}
 	}
 	if result.Stage != "completed" {
-		if err := adobeVerificationProgress(result, progress); err != nil {
+		if cfg.diagnosticProgress != nil {
+			if err := cfg.diagnosticProgress(result.Diagnostics); err != nil {
+				return nil, err
+			}
+		}
+		if err := adobeVerificationProgress(result, cfg.RecoveryMode, progress); err != nil {
 			return nil, err
 		}
 		return nil, fail("adobe", firstNonEmpty(result.Code, "registration_needs_review"))

@@ -2,7 +2,7 @@ import { launchPersistentBrowser } from './browser-runtime.mjs';
 import { ensureMediaSession, isCompleteMediaSession, verifyMediaSession } from './media-session.mjs';
 import { waitForIdentity } from './session-refresh.mjs';
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir } from 'node:fs/promises';
+import { chmod, lstat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { isTrustedAdobeURL, RegistrationError } from './core.mjs';
 import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from './network-diagnostics.mjs';
@@ -78,8 +78,36 @@ export function formBlockingCode(form) {
   const errors = form.notices.join(' ');
   if (/too many|rate.?limit|try again later|请求过于频繁|稍后再试/i.test(errors)) return 'upstream_rate_limited';
   if (/email.{0,60}(already in use|already registered)|account.{0,40}already exists|邮箱.{0,20}(已注册|已使用)|帐户已存在|账户已存在/i.test(errors)) return 'account_already_exists';
+  // Explicit account/password errors may be notices without aria-invalid.
+  if (formFailureDiagnostics(form).form_error) return 'form_rejected';
   if (form.fields.some(field => field.invalid) || /\b(invalid|incorrect|error|failed|unable|cannot)\b|无效|不正确|错误|失败|无法|不能/i.test(errors)) return 'form_rejected';
   return null;
+}
+
+/** Only visible error notices and invalid controls classify a rejection; never headings/navigation text. */
+export function formFailureDiagnostics(form) {
+  const fields = Array.isArray(form?.fields) ? form.fields.slice(0, 100) : [];
+  const invalid = new Set();
+  for (const field of fields) {
+    if (!field || field.invalid !== true) continue;
+    const identity = `${field.name || ''} ${field.id || ''} ${field.label || ''} ${field.autocomplete || ''}`;
+    if (/one-time-code|verification.?code|验证码/i.test(identity)) invalid.add('verification_code');
+    else if (field.type === 'password') invalid.add('password');
+    else if (field.type === 'email' || /email|username|电子邮件|邮箱/i.test(identity)) invalid.add('email');
+    else if (/first.?name|last.?name|birth|country|region|名字|姓氏|出生|国家|地区|月份|年份/i.test(identity)) invalid.add('profile');
+    else invalid.add('other');
+  }
+  const errors = (Array.isArray(form?.notices) ? form.notices : [])
+    .slice(0, 20).filter(value => typeof value === 'string').map(value => value.slice(0, 300)).join(' ');
+  let classification;
+  if (/\b(?:account|adobe id) (?:does not|doesn't|doesn’t) exist\b|\bno account (?:was )?(?:found|exists)\b|\b(?:could not|couldn't|couldn’t|cannot|can't|can’t) find (?:an? |your )?account\b|(?:找不到|未找到|不存在).{0,8}(?:帐户|账户|账号)|(?:帐户|账户|账号).{0,8}不存在/i.test(errors)) classification = 'account_not_found';
+  else if (/\b(?:invalid|incorrect|wrong) (?:verification |security )?code\b|\b(?:verification|security) code (?:is )?(?:invalid|incorrect|wrong)\b|验证码.{0,8}(?:无效|不正确|错误)/i.test(errors)) classification = 'invalid_verification_code';
+  else if (/\b(?:invalid|incorrect|wrong) password\b|\bpassword (?:is )?(?:invalid|incorrect|wrong)\b|密码.{0,8}(?:无效|不正确|错误)/i.test(errors)) classification = 'invalid_password';
+  else if (/\b(?:invalid|incorrect) e-?mail(?: address)?\b|\be-?mail(?: address)? (?:is )?(?:invalid|incorrect)\b|\b(?:enter|provide) (?:a )?valid e-?mail(?: address)?\b|(?:邮箱|电子邮件).{0,8}(?:无效|不正确|错误)/i.test(errors)) classification = 'invalid_email';
+  else if (invalid.size) classification = 'invalid_field';
+  else if (/\b(invalid|incorrect|error|failed|unable|cannot)\b|无效|不正确|错误|失败|无法|不能/i.test(errors)) classification = 'generic_notice';
+  return { ...(classification ? { form_error: classification } : {}),
+    ...(invalid.size ? { invalid_fields: [...invalid] } : {}) };
 }
 
 /** 等待后置条件；只读取状态，超时或导航不确定时绝不重放提交。 */
@@ -137,11 +165,18 @@ export class BrowserRegistration {
     return waitForFormStage(() => this.form(), { ...this.stageWaitOptions, ...options });
   }
 
-  async open({ resumeOnly = false } = {}) {
+  async open({ resumeOnly = false, requireExistingProfile = false } = {}) {
     const state = await this.store.load();
     if (resumeOnly) this.focusPageOnly = true;
     const profileDir = path.join(this.store.runDir, 'browser');
-    await mkdir(profileDir, { mode: 0o700, recursive: true });
+    if (!requireExistingProfile) {
+      try { await mkdir(profileDir, { mode: 0o700 }); }
+      catch (error) { if (error.code !== 'EEXIST') throw new RegistrationError('browser_profile_unavailable'); }
+    }
+    let profile;
+    try { profile = await lstat(profileDir); }
+    catch (error) { throw new RegistrationError(error.code === 'ENOENT' ? 'browser_profile_missing' : 'browser_profile_unavailable'); }
+    if (!profile.isDirectory() || profile.isSymbolicLink()) throw new RegistrationError('browser_profile_unavailable');
     await chmod(profileDir, 0o700);
     this.context = await this.launchBrowser(profileDir, { headless: this.headless });
     this.networkDiagnostics ??= new NetworkDiagnostics();
@@ -257,7 +292,13 @@ export class BrowserRegistration {
     await this.networkStatus();
     const captchaRequired = hasCaptchaRequirement(this.activeNetwork ?? this.network);
     let visibleChallengeFrame = false;
-    const instruction = /verify you are human|prove you(?:'|’)re human|not a robot|start puzzle|人机验证|验证您是人|证明您是|开始拼图|完成拼图/i;
+    const instructions = [
+      ['start_puzzle', /start puzzle|开始拼图/i],
+      ['complete_puzzle', /完成拼图/i],
+      ['prove_human', /verify you are human|prove you(?:'|’)re human|人机验证|验证您是人/i],
+      ['not_robot', /not a robot/i],
+      ['identity_instruction', /证明您是/i],
+    ];
     const provider = /(?:^|\.)(?:arkoselabs\.com|funcaptcha\.com|hcaptcha\.com|recaptcha\.net)$|^challenges\.cloudflare\.com$/i;
     // 仅检查当前表单所属页面，避免旧注册标签页残留的验证框遮盖新页面状态。
     for (const page of this.page ? [this.page] : []) {
@@ -282,9 +323,21 @@ export class BrowserRegistration {
             visibleChallengeFrame = true;
           }
           // 只查询固定人工验证文案是否可见，不读取页面正文或挑战交互控件的值。
-          const matches = await frame.getByText(instruction).all();
-          for (const match of matches.slice(0, 10)) {
-            if (await match.isVisible()) return { required: true, code: 'human_verification_required', source: 'visible_instruction' };
+          for (const [kind, instruction] of instructions) {
+            const matches = await frame.getByText(instruction).all();
+            for (const match of matches.slice(0, 10)) {
+              if (!await match.isVisible()) continue;
+              let puzzleEntry;
+              try {
+                const buttons = await frame.getByRole('button', {name:/^(Start puzzle|开始拼图)$/i}).all();
+                puzzleEntry = false;
+                for (const button of buttons.slice(0,10)) if (await button.isVisible()) { puzzleEntry = true; break; }
+              } catch { /* Unknown is distinct from an observed missing control. */ }
+              return { required: true, code: 'human_verification_required', source: 'visible_instruction',
+                instruction_kind: kind,
+                frame_kind: url.hostname === 'arks-client.adobe.com' ? 'adobe_verification' : knownProvider ? 'challenge_provider' : isTrustedAdobeURL(frame.url()) ? 'adobe_page' : 'other_frame',
+                ...(typeof puzzleEntry === 'boolean' ? {puzzle_entry_visible:puzzleEntry} : {}) };
+            }
           }
         } catch {
           // 页面导航或 iframe 被移除时，在下一次只读状态查询中重新判定。

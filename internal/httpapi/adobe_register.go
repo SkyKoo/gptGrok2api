@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,7 +8,6 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -92,6 +90,7 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	base := strings.TrimRight(firstNonEmpty(stringValue(raw["api_base"]), os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"), "http://cfm-browser-worker:8899"), "/")
 	key := firstNonEmpty(stringValue(raw["api_key"]), os.Getenv("CFM_BROWSER_WORKER_TOKEN"), os.Getenv("GROK_BROWSER_TOKEN"))
 	client := &http.Client{Timeout: 160 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
 	ctx, err := s.adobeAccountContext(ctx, account)
 	if err != nil {
 		return failure("proxy_binding_unavailable")
@@ -105,30 +104,36 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 		return failure("browser_unavailable")
 	}
 	defer lease.Release()
-	payload, _ := json.Marshal(map[string]any{"browser_lease": lease.ID, "action": "refresh"})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/adobe/run", bytes.NewReader(payload))
+	// Keep the original browser and request budget while HME receives the code.
+	// Each call owns and closes its response before the next stage starts.
+	run := func(code string) (adobeBrowserRefreshResult, int, error) {
+		payload := map[string]any{"browser_lease": lease.ID, "action": "refresh"}
+		if code != "" {
+			payload["code"] = code
+		}
+		return runAdobeBrowserRefresh(ctx, client, base, key, payload)
+	}
+	before := time.Now().UTC()
+	result, status, err := run("")
 	if err != nil {
-		return failure("request_invalid")
+		return adobe.Account{}, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if key != "" {
-		req.Header.Set("Authorization", "Bearer "+key)
+	if status == http.StatusOK && result.Stage == "awaiting_verification" && result.Code == "refresh_email_otp_required" {
+		code, err := s.waitAdobeReloginEmailCode(ctx, account, before, result.VerificationRequestedAt)
+		if err != nil {
+			return adobe.Account{}, err
+		}
+		if ctx.Err() != nil {
+			return failure("cancelled")
+		}
+		// Exactly one continuation on this lease; a repeated OTP requirement,
+		// challenge or lost response is terminal and never resends the code.
+		result, status, err = run(code)
+		if err != nil {
+			return adobe.Account{}, err
+		}
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return failure("result_unknown")
-	}
-	defer resp.Body.Close()
-	var result struct {
-		Stage       string          `json:"stage"`
-		Code        string          `json:"code"`
-		Account     adobe.Account   `json:"account"`
-		Diagnostics json.RawMessage `json:"diagnostics"`
-	}
-	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil {
-		return failure("browser_failed")
-	}
-	if resp.StatusCode != http.StatusOK || result.Stage != "completed" {
+	if status != http.StatusOK || result.Stage != "completed" {
 		// Only known machine codes may leave the Worker. Raw diagnostics, URLs,
 		// page text and credentials are deliberately excluded from the API error.
 		switch result.Code {
@@ -136,8 +141,20 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 			return failure("login_required")
 		case "refresh_verification_required", "challenge_required", "refresh_challenge_required":
 			return failure("verification_required")
-		case "refresh_otp_required", "otp_required", "verification_code_required", "refresh_email_unverified":
+		case "refresh_otp_required", "otp_required", "verification_code_required", "refresh_email_unverified", "refresh_email_otp_required":
 			return failure("email_verification_required")
+		case "refresh_otp_expired":
+			return failure("email_verification_expired")
+		case "refresh_otp_already_submitted":
+			return failure("email_verification_already_submitted")
+		case "refresh_otp_invalid":
+			return failure("email_verification_invalid")
+		case "refresh_otp_not_pending":
+			return failure("email_verification_not_pending")
+		case "refresh_otp_form_changed":
+			return failure("email_verification_form_changed")
+		case "refresh_otp_result_unknown":
+			return failure("email_verification_result_unknown")
 		case "refresh_account_mismatch", "refresh_email_mismatch":
 			return adobe.Account{}, adobe.ErrIdentity
 		case "media_session_incomplete":
@@ -146,7 +163,7 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 			}
 			_ = json.Unmarshal(result.Diagnostics, &diagnostics)
 			return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: adobe.SanitizeMediaPreparationDiagnostic(diagnostics.MediaRuntime)}
-		case "media_session_cancelled":
+		case "media_session_cancelled", "refresh_session_ended":
 			return failure("cancelled")
 		case "refresh_login_form_unrecognized":
 			return failure("login_form_unrecognized")
@@ -156,7 +173,7 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 			return failure("login_form_unavailable")
 		case "refresh_password_form_unavailable":
 			return failure("password_form_unavailable")
-		case "refresh_login_pending", "refresh_login_completion_unconfirmed":
+		case "refresh_login_pending", "refresh_login_completion_unconfirmed", "refresh_login_result_unknown":
 			return failure("login_pending")
 		default:
 			return failure("browser_failed")

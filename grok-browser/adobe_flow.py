@@ -7,7 +7,7 @@ import signal
 import time
 import uuid
 from pydantic import BaseModel, Field
-from browser_sessions import queue, BrowserQueueError, BrowserStartupError
+from browser_sessions import queue, BrowserQueueError, BrowserStartupError, BrowserStartupCleanupPending
 
 class AdobeCommandRequest(BaseModel):
     browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
@@ -73,8 +73,14 @@ async def launch_adobe(**options):
         if result.get("stage") != "ready":
             raise BrowserStartupError(result.get("code"))
         return handle
-    except BaseException:
-        await handle.close()
+    except BaseException as error:
+        try:
+            await handle.close()
+        except BaseException:
+            # Transfer ownership even when initialization failed. Dropping the
+            # handle here would free the queue slot with a process still alive.
+            code = error.code if isinstance(error, BrowserStartupError) else None
+            raise BrowserStartupCleanupPending(handle, code) from None
         raise
 
 async def adobe_command(request):

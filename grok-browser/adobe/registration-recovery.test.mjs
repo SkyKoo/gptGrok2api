@@ -4,8 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrivateRunStore, RegistrationError } from './core.mjs';
-import { BrowserRegistration } from './browser.mjs';
+import { BrowserRegistration, waitForFormStage } from './browser.mjs';
 import { resumeRegistration, requestRecoveryCode, submitRecoveryLogin, openRecoveryLogin } from './registration-recovery.mjs';
+import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
 const form = patch => ({fields:[],headings:[],notices:[],buttons:[],agreements:[],host:'auth.services.adobe.com',humanVerification:{required:false},...patch});
 const field = (type,autocomplete=type) => ({tag:'input',type,id:type,name:type,label:type,autocomplete});
@@ -194,6 +195,95 @@ test('a failed login click is persisted before submission and cannot replay with
   for(let i=0;i<2;i++)assert.equal((await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'})).code,'recovery_login_result_unknown');
   assert.deepEqual(f.calls,['fill','login']);
   assert.ok((await f.store.load()).recoveryAttempts.attempt1.emailSubmittedAt);
+});
+
+test('disabled Continue becomes actionable after filling and the marker still precedes the sole real click',async t=>{
+  for (const kind of ['email','password']) {
+    const f=await fixture(t,{phase:`awaiting_${kind}`});
+    let filled=false;
+    f.browser.field=async()=>({fill:async()=>{filled=true;f.calls.push('fill');}});
+    f.browser.authFrame=async()=>({getByRole:()=>({count:async()=>1,click:async options=>{
+      assert.equal(filled,true,'An empty form has disabled Continue');
+      if(options?.trial){f.calls.push('trial');return;}
+      assert.ok((await f.store.load()).recoveryAttempts.attempt1[`${kind}SubmittedAt`]);
+      f.calls.push('submit');
+    }})});
+    const current=await f.browser.status();
+    await submitRecoveryLogin(f.browser,f.store,'attempt1',current);
+    assert.deepEqual(f.calls,['fill','trial','submit']);
+    await assert.rejects(submitRecoveryLogin(f.browser,f.store,'attempt1',current),error=>error.code==='recovery_login_result_unknown');
+    assert.deepEqual(f.calls,['fill','trial','submit']);
+  }
+});
+
+test('fill or trial failure records a fixed action/type without a login submission marker or raw exception',async t=>{
+  for (const failing of ['fill','trial']) {
+    const f=await fixture(t,{phase:'awaiting_email'});
+    const timeout=Object.assign(new Error('Timeout 10000ms exceeded SECRET fixture@example.test'),{name:'TimeoutError'});
+    f.browser.field=async()=>({fill:async()=>{if(failing==='fill')throw timeout;f.calls.push('fill');}});
+    f.browser.authFrame=async()=>({getByRole:()=>({count:async()=>1,click:async options=>{
+      assert.equal(options?.trial,true);throw timeout;
+    }})});
+    const result=await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'});
+    assert.equal(result.code,'recovery_step_failed');
+    assert.deepEqual(result.failureDiagnostics,{failure_action:failing==='fill'?'fill_email':'submit_email',
+      failure_phase:'before_submission',exception_type:'timeout'});
+    assert.equal((await f.store.load()).recoveryAttempts.attempt1.emailSubmittedAt,undefined);
+    assert.doesNotMatch(JSON.stringify(registrationDiagnostics(result,await f.store.load())),/SECRET|fixture@example/);
+  }
+});
+
+test('a genuine post-submit rejection keeps its error evidence even when final status shows a newer form',async t=>{
+  const f=await fixture(t,{phase:'awaiting_email'});
+  f.browser.waitForStage=async()=>{
+    f.setPhase('awaiting_password');
+    return {code:'form_rejected',form:form({notices:["We couldn't find an account with this email."],
+      fields:[{...field('email'),invalid:true}]})};
+  };
+  const result=await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'});
+  assert.equal(result.code,'form_rejected');assert.equal(result.detected,'awaiting_password');
+  assert.deepEqual(result.failureDiagnostics,{failure_action:'wait_login_result',failure_phase:'submission_started',
+    exception_type:'registration',form_error:'account_not_found',invalid_fields:['email']});
+  const diagnostic=registrationDiagnostics(result,await f.store.load());
+  assert.equal(diagnostic.form_error,'account_not_found');assert.deepEqual(diagnostic.invalid_fields,['email']);
+  assert.deepEqual(f.calls,['fill','login']);
+  f.setPhase('awaiting_email');
+  assert.equal((await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'})).code,'recovery_login_result_unknown');
+  assert.deepEqual(f.calls,['fill','login']);
+});
+
+test('explicit post-submit account/password notices without invalid controls reach fixed rejection diagnostics',async t=>{
+  for (const [kind,notice,expected] of [
+    ['email','Account does not exist.','account_not_found'],
+    ['email','No account found.','account_not_found'],
+    ['password','Wrong password.','invalid_password'],
+  ]) {
+    const f=await fixture(t,{phase:`awaiting_${kind}`});
+    f.browser.waitForStage=options=>waitForFormStage(async()=>form({notices:[notice],
+      fields:[field(kind,kind==='password'?'current-password':'email')]}),options);
+    const result=await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'});
+    assert.equal(result.code,'form_rejected');
+    const diagnostics=registrationDiagnostics(result,await f.store.load());
+    assert.equal(diagnostics.form_error,expected);assert.equal(diagnostics.invalid_fields,undefined);
+    assert.equal(diagnostics.failure_phase,'submission_started');
+    assert.deepEqual(f.calls,['fill','login']);
+  }
+});
+
+test('opening normal login preserves the failing navigation action and a fixed exception category',async t=>{
+  for (const [message,expected] of [
+    ['Execution context was destroyed SECRET','navigation'],
+    ['Target page, context or browser has been closed SECRET','page_closed'],
+    ['arbitrary private failure SECRET','unknown'],
+  ]) {
+    const f=await fixture(t,{phase:'needs_manual'});
+    f.browser.page.goto=async()=>{throw new Error(message);};
+    const result=await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'});
+    assert.equal(result.code,'recovery_step_failed');
+    assert.deepEqual(result.failureDiagnostics,{failure_action:'open_login',failure_phase:'before_submission',exception_type:expected});
+    assert.equal((await f.store.load()).recoveryAttempts.attempt1.emailSubmittedAt,undefined);
+    assert.doesNotMatch(JSON.stringify(result),/SECRET/);
+  }
 });
 
 test('a login click aborted by normal navigation proceeds only after current OTP evidence, while explicit errors stay explicit',async t=>{

@@ -16,6 +16,28 @@ async function fixture() {
 }
 const codeIs = (code) => (error) => error instanceof RegistrationError && error.code === code;
 
+test('new registration refuses every existing run without modifying its journal or lock', async () => {
+  const { root } = await fixture();
+  const first = new PrivateRunStore(root, 'first');
+  await first.init({email:'first@example.test'}, {requireNew:true});
+  await first.markSubmissionStarted();
+  await first.close();
+  const original = await readFile(first.statePath);
+  for (const email of ['first@example.test','second@example.test']) {
+    await assert.rejects(new PrivateRunStore(root, 'first').init({email}, {requireNew:true}),codeIs('run_already_exists'));
+    assert.deepEqual(await readFile(first.statePath),original);
+    await assert.rejects(lstat(first.lockPath),{code:'ENOENT'});
+  }
+  const second = new PrivateRunStore(root, 'second');
+  await second.init({email:'second@example.test'}, {requireNew:true});
+  assert.notEqual(first.runDir,second.runDir);
+  await second.close();
+  const resumed = new PrivateRunStore(root,'first');
+  const state = await resumed.init({email:'first@example.test'},{requireExisting:true});
+  assert.equal(state.submission.started,true);
+  await resumed.close();
+});
+
 test('recovery requires an existing journal and never creates a replacement profile', async t => {
   const { root } = await fixture();
   const missing = new PrivateRunStore(root, 'missing');

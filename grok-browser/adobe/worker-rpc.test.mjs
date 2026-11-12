@@ -12,7 +12,7 @@ import { PrivateRunStore } from './core.mjs';
 // Run the actual line-oriented Worker protocol and real durable journal. Only
 // the browser dependency is replaced, so tests never launch Chromium or make
 // registration requests on the developer's host.
-async function rpcFixture(t,{submitted=false,saved=false,missing=false}={}) {
+async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false}={}) {
   const root=await mkdtemp(join(tmpdir(),'adobe-worker-rpc-'));
   const store=new PrivateRunStore(root,'original');
   if(!missing){
@@ -28,7 +28,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false}={}) {
       async open(options){
         this.opened=true;
         const state=await this.store.load();
-        await this.store.save({testOpenMode:options.resumeOnly});
+        await this.store.save({testOpenMode:options.resumeOnly,testRequireExistingProfile:options.requireExistingProfile});
         if(state.submission.started){this.phase='challenge';await this.store.setStage('needs_manual','human_verification_required');}
         else await this.store.setStage('awaiting_approval');
       }
@@ -54,9 +54,30 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false}={}) {
       async close(){}
     }
   `,{mode:0o600});
+  const refreshMock=join(root,'mock-refresh.mjs');
+  if(refresh)await writeFile(refreshMock,`
+    let owned;
+    const fixed=code=>Object.assign(new Error(code),{code});
+    export async function launchPersistentBrowser(){
+      if(owned)throw fixed('test_duplicate_context');
+      owned={phase:'fresh',close:async()=>{owned.phase='closed'}};return owned;
+    }
+    export async function refreshSession(context,expected,options){
+      if(context!==owned||options.workerMode!==true)throw fixed('test_wrong_context');
+      if(context.phase==='fresh'&&options.code===''){
+        context.phase='pending';return {stage:'awaiting_verification',code:'refresh_email_otp_required',verification_requested_at:'2026-11-12T00:00:00Z'};
+      }
+      if(context.phase!=='pending')throw fixed('refresh_otp_already_submitted');
+      context.phase='submitted';
+      if(options.code!=='123456')throw fixed('refresh_otp_invalid');
+      return {email:expected.email,account_id:expected.account_id,profile_id:expected.profile_id,token:'fixture-token',media_session_refreshed:true};
+    }
+  `,{mode:0o600});
   await writeFile(loader,`export async function resolve(specifier,context,next){
     if(specifier==='./browser.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
       return {url:${JSON.stringify(pathToFileURL(mock).href)},shortCircuit:true};
+    if(${refresh}&&['./session-refresh.mjs','./browser-runtime.mjs'].includes(specifier)&&context.parentURL?.endsWith('/worker-rpc.mjs'))
+      return {url:${JSON.stringify(pathToFileURL(refreshMock).href)},shortCircuit:true};
     return next(specifier,context);
   }`,{mode:0o600});
   const child=spawn(process.execPath,['--experimental-loader',loader,fileURLToPath(new URL('./worker-rpc.mjs',import.meta.url))],{
@@ -80,7 +101,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false}={}) {
     if(child.exitCode===null){child.kill('SIGKILL');await exited;}
     await rm(root,{recursive:true,force:true});
   });
-  const initialize=()=>command({action:'init',mode:'resume',profile_id:'original',email:'fixture@example.test',profile:{country:'US'},recovery_id:'child-1'});
+  const initialize=(extra={})=>command({action:'init',mode:'resume',profile_id:'original',email:'fixture@example.test',profile:{country:'US'},recovery_id:'child-1',...extra});
   const journal=async()=>{
     const current=new PrivateRunStore(root,'original');
     await current.init({}, {requireExisting:true});
@@ -112,6 +133,7 @@ test('RPC resume for a submitted journal keeps challenge evidence and never open
   assert.equal(result.diagnostics.verification_source,'visible_instruction');
   await f.command({action:'close'});await f.exited;
   const state=await f.journal();assert.equal(state.testCreates,undefined);assert.equal(state.testOpenMode,true);
+  assert.equal(state.testRequireExistingProfile,true);
   assert.equal(state.lastObservation.captured_at,result.diagnostics.captured_at);
   const timeline=state.lastLifecycle;
   assert.equal(timeline.diagnosticsCapturedAt,result.diagnostics.captured_at);
@@ -119,6 +141,15 @@ test('RPC resume for a submitted journal keeps challenge evidence and never open
   assert.ok(Date.parse(timeline.responsePreparedAt)<=Date.parse(timeline.closeStartedAt));
   assert.ok(Date.parse(timeline.closeStartedAt)<=Date.parse(timeline.closeCompletedAt));
   assert.doesNotMatch(JSON.stringify({timeline,diagnostics:state.lastObservation}),/fixture-password|fixture-token|fixture@example/);
+});
+
+test('RPC new-registration flag cannot reuse a prior profile, while recovery remains explicit',async t=>{
+  const f=await rpcFixture(t);
+  const result=await f.initialize({mode:'registration',require_new:true});
+  assert.equal(result.ok,false);
+  assert.equal(result.code,'run_already_exists');
+  await f.command({action:'close'});await f.exited;
+  assert.equal((await f.journal()).testOpenMode,undefined);
 });
 
 test('RPC saved export is offline and missing profile cannot become a fresh registration',async t=>{
@@ -131,4 +162,19 @@ test('RPC saved export is offline and missing profile cannot become a fresh regi
   const rejected=await missing.initialize();assert.equal(rejected.ok,false);assert.equal(rejected.code,'state_missing');
   assert.equal(rejected.submission_started,undefined);
   await missing.command({action:'close'});await missing.exited;
+});
+
+test('RPC refresh preserves the waiting context and forwards one OTP without wrapping pending as a completed account',async t=>{
+  const f=await rpcFixture(t,{refresh:true});
+  assert.equal((await f.initialize({mode:'refresh',account_id:'fixture-id'})).result.stage,'ready');
+  const pending=await f.command({action:'refresh'});
+  assert.equal(pending.ok,true);assert.equal(pending.result.stage,'awaiting_verification');
+  assert.equal(pending.result.code,'refresh_email_otp_required');assert.equal(pending.result.account,undefined);
+  assert.equal(pending.result.verification_requested_at,'2026-11-12T00:00:00Z');
+  const completed=await f.command({action:'refresh',code:'123456'});
+  assert.equal(completed.result.stage,'completed');assert.equal(completed.result.account.account_id,'fixture-id');
+  assert.equal(completed.result.account.profile_id,'original');assert.equal(completed.result.media_session_refreshed,true);
+  const duplicate=await f.command({action:'refresh',code:'123456'});
+  assert.equal(duplicate.ok,false);assert.equal(duplicate.code,'refresh_otp_already_submitted');
+  await f.command({action:'close'});await f.exited;
 });

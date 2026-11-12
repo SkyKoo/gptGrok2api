@@ -1,4 +1,8 @@
+import { formFailureDiagnostics } from './browser.mjs';
+
 const SOURCES = new Set(['visible_challenge_frame', 'visible_instruction', 'upstream_captcha_response']);
+const INSTRUCTIONS = new Set(['start_puzzle', 'complete_puzzle', 'prove_human', 'not_robot', 'identity_instruction']);
+const FRAME_KINDS = new Set(['adobe_verification', 'challenge_provider', 'adobe_page', 'other_frame']);
 const NETWORK_CODES = new Set(['verification_dns_failed', 'verification_request_timeout',
   'verification_request_aborted', 'captcha_required']);
 const FORM_STAGES = new Set(['awaiting_email', 'awaiting_password', 'awaiting_profile',
@@ -20,6 +24,32 @@ const RESOURCES = new Map([
   ['https://arks-client.adobe.com/:resource', 'verification_other'],
 ]);
 const WINDOW_MS = 15 * 60 * 1000;
+const FORM_ERRORS = new Set(['account_not_found', 'invalid_email', 'invalid_password',
+  'invalid_verification_code', 'invalid_field', 'generic_notice']);
+const INVALID_FIELDS = new Set(['email', 'password', 'verification_code', 'profile', 'other']);
+const FAILURE_ACTIONS = new Set(['inspect_form', 'open_login', 'click_login_entry', 'fill_email',
+  'fill_password', 'submit_email', 'submit_password', 'wait_login_result', 'request_code',
+  'verify_code', 'export_session', 'open_firefly']);
+const FAILURE_PHASES = new Set(['before_submission', 'submission_started']);
+const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_closed', 'unknown']);
+
+function failureDiagnostics(result) {
+  if (typeof result?.code !== 'string' || !result.code) return {};
+  // A helper may preserve the exact rejecting form before a later status read.
+  // Revalidate every value at the persistence boundary, including helper output.
+  const source = result.failureDiagnostics && typeof result.failureDiagnostics === 'object'
+    && !Array.isArray(result.failureDiagnostics) ? result.failureDiagnostics : {};
+  const form = result.code === 'form_rejected' && !FAILURE_ACTIONS.has(source.failure_action)
+    ? formFailureDiagnostics(result.form) : {};
+  const classification = FORM_ERRORS.has(source.form_error) ? source.form_error : form.form_error;
+  const invalid = [...new Set((Array.isArray(source.invalid_fields) ? source.invalid_fields : form.invalid_fields || [])
+    .slice(0, 20).filter(value => INVALID_FIELDS.has(value)))].slice(0, 5);
+  return { ...(result.code === 'form_rejected' && classification ? { form_error: classification } : {}),
+    ...(result.code === 'form_rejected' && invalid.length ? { invalid_fields: invalid } : {}),
+    ...(FAILURE_ACTIONS.has(source.failure_action) ? { failure_action: source.failure_action } : {}),
+    ...(FAILURE_PHASES.has(source.failure_phase) ? { failure_phase: source.failure_phase } : {}),
+    ...(EXCEPTION_TYPES.has(source.exception_type) ? { exception_type: source.exception_type } : {}) };
+}
 
 function timestamp(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return null;
@@ -68,8 +98,12 @@ export function registrationDiagnostics(result, state, { now } = {}) {
     submission_started: state?.submission?.started === true,
     human_verification_required: human?.required === true,
     ...(source ? { verification_source: source } : {}),
+    ...(INSTRUCTIONS.has(human?.instruction_kind) ? {verification_instruction_kind:human.instruction_kind} : {}),
+    ...(FRAME_KINDS.has(human?.frame_kind) ? {verification_frame_kind:human.frame_kind} : {}),
+    ...(typeof human?.puzzle_entry_visible === 'boolean' ? {puzzle_entry_visible:human.puzzle_entry_visible} : {}),
     ...(networkCode ? { verification_network_code: networkCode } : {}),
     ...(FORM_STAGES.has(result?.detected) ? { detected_stage: result.detected } : {}),
+    ...failureDiagnostics(result),
     ...networkTimeline(result, now),
   };
 }

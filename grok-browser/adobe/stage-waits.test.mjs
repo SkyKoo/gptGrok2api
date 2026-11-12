@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
-import { BrowserRegistration, formBlockingCode, waitForFormStage } from './browser.mjs';
+import { BrowserRegistration, formBlockingCode, formFailureDiagnostics, waitForFormStage } from './browser.mjs';
 import { PrivateRunStore } from './core.mjs';
 import { NetworkDiagnostics } from './network-diagnostics.mjs';
 import { runAutomaticRegistration } from './auto-runner.mjs';
@@ -40,7 +40,11 @@ test('visible challenges and submitted field errors stop promptly, while verific
     [form({ notices: ['This email is already registered.'] }), 'account_already_exists'],
     [form({ fields: [{ invalid: true }] }), 'form_rejected'],
     [form({ notices: ['Your verification code is incorrect.'] }), 'form_rejected'],
+    [form({ notices: ['Account does not exist.'] }), 'form_rejected'],
+    [form({ notices: ['No account found.'] }), 'form_rejected'],
+    [form({ notices: ['Wrong password.'] }), 'form_rejected'],
     [form({ notices: ['Check your email for the verification code.'] }), null],
+    [form({ notices: ['Sign up with email / Already have an account?'] }), null],
   ]) assert.equal(formBlockingCode(current), code);
   const timing = clock();
   const result = await waitForFormStage(async () => form({ humanVerification: { required: true } }), timing);
@@ -59,6 +63,25 @@ test('only transient navigation exceptions are retried, with a bounded deadline'
   const closed = new Error('Target page, context or browser has been closed');
   await assert.rejects(waitForFormStage(async () => { throw closed; }, timing), error => error === closed);
   await assert.rejects(waitForFormStage(async () => emailForm(), { ...clock(), fromStage: 'awaiting_email' }), error => error.code === 'stage_transition_timeout');
+});
+
+test('rejection diagnostics classify explicit visible errors without treating normal headings as a rejection', () => {
+  for (const [notice, expected] of [
+    ["We couldn't find an account with this email.", 'account_not_found'],
+    ['Please enter a valid email address.', 'invalid_email'],
+    ['The password is incorrect.', 'invalid_password'],
+    ['Your verification code is incorrect.', 'invalid_verification_code'],
+    ['An unexpected error occurred.', 'generic_notice'],
+  ]) {
+    assert.equal(formFailureDiagnostics(form({notices:[notice]})).form_error, expected);
+    assert.deepEqual(formFailureDiagnostics(form({headings:[notice]})), {});
+  }
+  assert.deepEqual(formFailureDiagnostics(form({notices:['Sign up with email / Already have an account?']})), {});
+  assert.deepEqual(formFailureDiagnostics(form({fields:[
+    {type:'email', invalid:true}, {type:'password', invalid:true},
+    {autocomplete:'one-time-code',invalid:true}, {name:'birthYear',invalid:true},
+    {name:'SECRET',invalid:true}, {type:'email',invalid:true},
+  ]})), {form_error:'invalid_field',invalid_fields:['email','password','verification_code','profile','other']});
 });
 
 async function fixture(t) {

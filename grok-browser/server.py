@@ -517,6 +517,7 @@ class BrowserReservationRequest(BaseModel):
     email: str = Field(default="", max_length=320)
     adobe_profile: dict[str, Any] = Field(default_factory=dict)
     adobe_mode: str = Field(default="registration", pattern=r"^(registration|refresh|resume)$")
+    adobe_require_new: bool = False
     adobe_recovery_id: str = Field(default="", max_length=80, pattern=r"^[a-zA-Z0-9_-]*$")
     account_id: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=256)
@@ -539,8 +540,11 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
                 raise HTTPException(status_code=422, detail="adobe_identity_required")
             if req.adobe_mode == "resume" and not req.adobe_recovery_id:
                 raise HTTPException(status_code=422, detail="adobe_recovery_id_required")
+            if req.adobe_require_new and req.adobe_mode != "registration":
+                raise HTTPException(status_code=422, detail="adobe_profile_mode_invalid")
             return queue.enqueue(req.id, {"profile_id":req.profile_id, "email":req.email,
-                "profile":req.adobe_profile, "proxy":proxy, "mode":req.adobe_mode, "recovery_id":req.adobe_recovery_id, "account_id":req.account_id, "password":req.password}, launch_adobe)
+                "profile":req.adobe_profile, "proxy":proxy, "mode":req.adobe_mode, "require_new":req.adobe_require_new,
+                "recovery_id":req.adobe_recovery_id, "account_id":req.account_id, "password":req.password}, launch_adobe)
         options = browser_kwargs("TURNSTILE", "direct" if req.daily_direct and not proxy else proxy or None,
             timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
         if req.daily_direct and not proxy:

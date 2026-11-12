@@ -28,7 +28,12 @@ async function close() {
   if (store) await store.close();
   closed = true;
 }
-async function refresh(){const account=await refreshSession(context,init,{workerMode:true});return {stage:'completed',media_session_refreshed:account.media_session_refreshed,account};}
+async function refresh(request){
+  if(init.mode!=='refresh')throw new RegistrationError('refresh_mode_required');
+  const account=await refreshSession(context,init,{workerMode:true,code:request.code||''});
+  if(account.stage==='awaiting_verification')return account;
+  return {stage:'completed',media_session_refreshed:account.media_session_refreshed,account};
+}
 async function command(request) {
   if (request.action === 'init') {
     if (init) throw new RegistrationError('session_already_initialized');
@@ -43,19 +48,24 @@ async function command(request) {
       context = await launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1',restoreLastSession:false});
     } else {
       store = new PrivateRunStore(root, request.profile_id);
-      const state = await store.init({email:request.email, config:{profile:request.profile}}, {requireExisting:request.mode === 'resume'});
+      const state = await store.init({email:request.email, config:{profile:request.profile}}, {
+        requireExisting:request.mode === 'resume', requireNew:request.require_new === true,
+      });
       init.profile = state.config.profile;
       browser = new BrowserRegistration(store, {headless:process.env.TURNSTILE_HEADLESS === '1'});
       browser.workerMode = true;
       // A saved verified export is already sufficient for compensation. Do not
       // acquire fresh credentials or navigate a completed registration again.
-      if (!(request.mode === 'resume' && state.result?.account)) await browser.open({resumeOnly:request.mode === 'resume' && state.submission.started});
+      if (!(request.mode === 'resume' && state.result?.account)) await browser.open({
+        resumeOnly:request.mode === 'resume' && state.submission.started,
+        requireExistingProfile:request.mode === 'resume',
+      });
     }
     return {stage:'ready'};
   }
   if (request.action === 'close') { await close(); return {stage:'closed'}; }
   if (!init) throw new RegistrationError('session_not_initialized');
-  if (request.action === 'refresh') return refresh();
+  if (request.action === 'refresh') return refresh(request);
   if (!browser || !['run','verify','resume'].includes(request.action)) throw new RegistrationError('command_invalid');
   if (request.action === 'resume' && init.mode !== 'resume') throw new RegistrationError('recovery_mode_required');
   const result = init.mode === 'resume' ? await resumeRegistration(browser, store, {recoveryId:init.recovery_id,code:request.code}) : await runAutomaticRegistration(browser, store, {

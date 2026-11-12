@@ -252,9 +252,10 @@ export class PrivateRunStore {
       await unlink(this.lockPath);
     } finally { await handle.close(); }
   }
-  init(initial = {}, { requireExisting = false } = {}) {
+  init(initial = {}, { requireExisting = false, requireNew = false } = {}) {
     return this.#serial(async () => {
       if (this.#ready || this.#lock) fail('store_already_open');
+      if (requireExisting && requireNew) fail('invalid_storage_mode');
       if (!isRecord(initial)) fail('invalid_state');
       validateJSON(initial);
       // The caller creates its parent directory; do not recursively traverse untrusted paths.
@@ -266,6 +267,9 @@ export class PrivateRunStore {
         if (requireExisting && error.code === 'ENOENT') fail('state_missing');
         throw error;
       }
+      // A newly allocated account must never adopt an old profile, including
+      // one for the same email. Recovery opts into reuse separately.
+      if (requireNew && !newRun) fail('run_already_exists');
       try {
         this.#lock = await open(this.lockPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       } catch (error) {

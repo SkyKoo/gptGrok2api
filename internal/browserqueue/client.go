@@ -35,7 +35,7 @@ func (*StartupError) Error() string { return "browser_start_failed" }
 
 func startupFailure(code string) error {
 	switch code {
-	case "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage":
+	case "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "run_already_exists", "browser_profile_missing", "browser_profile_unavailable":
 		return &StartupError{Code: code}
 	default:
 		return errors.New("browser_start_failed")

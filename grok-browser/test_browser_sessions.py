@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError
+from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError, BrowserStartupCleanupPending
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -65,6 +65,30 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(BrowserQueueError):await owned.close()
         self.assertEqual(launch.await_count,1)
         done.set();await self.ready('two')
+        first.close.assert_awaited_once()
+
+    async def test_failed_initializer_retains_unconfirmed_cleanup_and_sanitizes_status(self):
+        gate = asyncio.Event()
+        first = self.browser()
+        first.close.side_effect = gate.wait
+        pending = BrowserStartupCleanupPending(first, 'browser_launch_timeout')
+        pending.code = 'PRIVATE_CREDENTIAL'
+        launch = AsyncMock(side_effect=[pending, self.browser()])
+        with self.assertLogs('grok-browser.queue', level='WARNING') as logs:
+            self.queue.enqueue('one', {'proxy':'PRIVATE_PROXY'}, launch)
+            self.queue.enqueue('two', {}, launch)
+            await asyncio.sleep(.1)
+        view = self.queue.status('one')
+        self.assertEqual(view['status'], 'closing')
+        self.assertEqual(view['diagnostic_code'], 'browser_launch_failed')
+        self.assertIs(self.queue.entries['one'].browser, first)
+        self.assertEqual(self.queue.available, 0)
+        self.assertEqual(launch.await_count, 1)
+        self.assertNotIn('PRIVATE', str(view) + '\n'.join(logs.output))
+        gate.set()
+        await self.ready('two')
+        self.assertNotIn('one', self.queue.entries)
+        self.assertEqual(launch.await_count, 2)
         first.close.assert_awaited_once()
 
     async def test_cancellation_during_launch_closes_late_browser(self):

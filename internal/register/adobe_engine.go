@@ -8,6 +8,7 @@ import (
 	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -294,6 +295,15 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			_ = releaser.Release(releaseCtx, box, "registration_not_submitted")
 		}
 	}()
+	cfg.diagnosticProgress = func(diagnostics adobeRegistrationDiagnostics) error {
+		detail := adobeFailureDiagnosticText(diagnostics)
+		if detail == "" {
+			return nil
+		}
+		return e.change(id, func(j *RegistrationJob) {
+			appendRegistrationLog(j, "adobe_registration_diagnostics", detail, "info")
+		})
+	}
 	account, err := flow.Register(ctx, id, box, cfg, func(ctx context.Context, after time.Time) (string, error) {
 		waitCtx, cancel := context.WithTimeout(ctx, cfg.MailTimeout)
 		defer cancel()
@@ -309,7 +319,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			if adobeStageMayHaveSubmitted(stage) {
 				j.AdobeRegistration.FlowStarted = true
 			}
-			if stage == "adobe_creation_submitted" {
+			if stage == "adobe_creation_submitted" || stage == "adobe_original_submission_recorded" {
 				j.AdobeRegistration.SubmissionStarted = true
 			}
 			j.Status = "running"
@@ -581,6 +591,14 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		}
 		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
 	}
+	// Older tasks can receive new compensation logs. Order events before the
+	// live-window limit; RFC3339Nano strings with unequal precision are not
+	// lexically chronological. Invalid legacy times remain first and stable.
+	sort.SliceStable(logs, func(i, j int) bool {
+		left, _ := time.Parse(time.RFC3339Nano, logs[i].Time)
+		right, _ := time.Parse(time.RFC3339Nano, logs[j].Time)
+		return left.Before(right)
+	})
 	if len(logs) > 200 {
 		logs = logs[len(logs)-200:]
 	}

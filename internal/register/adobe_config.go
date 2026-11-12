@@ -19,6 +19,7 @@ type AdobeConfig struct {
 	Profile                                            map[string]any
 	// Recovery is derived from the encrypted task journal, never user settings.
 	BrowserProfileID, RecoveryMode string
+	diagnosticProgress             func(adobeRegistrationDiagnostics) error
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {

@@ -83,7 +83,8 @@ test('existing login submits email and password once without account creation',a
  const actions=[];
  const email={first(){return this},waitFor:async()=>{},count:async()=>1,fill:async()=>actions.push('email')};
  const password={waitFor:async()=>{},count:async()=>1,fill:async()=>actions.push('password')};
- const page={goto:async()=>actions.push('navigate-account'),locator:s=>s.includes('email')?email:password,
+ const page={url:()=> 'https://auth.services.adobe.com/login',evaluate:async fn=>fn.name==='emailOTPInPage'?{kind:'none'}:null,
+  goto:async()=>actions.push('navigate-account'),locator:s=>s.includes('email')?email:password,
   getByRole:(role,{name})=>{assert.equal(name.test('Create account'),false);return {count:async()=>1,click:async()=>actions.push('continue')}},
   waitForURL:async predicate=>{assert.equal(predicate(new URL('https://account.adobe.com/')),true);actions.push('observe-account')}};
  await signInExistingAccount(page,{email:'fixture@example.test',password:'fixture-password'});
@@ -131,7 +132,7 @@ test('account homepage uses its unique Sign in link before submitting existing c
  const email={count:async()=>opened&&!passwordVisible?1:0,fill:async()=>actions.push('email')};
  const password={count:async()=>passwordVisible?1:0,waitFor:async()=>assert.equal(passwordVisible,true),fill:async()=>actions.push('password')};
  const forms={first(){return this},waitFor:async()=>{assert.equal(opened,true);actions.push('form-ready')}};
- const page={evaluate:async()=>null,goto:async()=>actions.push('account'),
+ const page={url:()=> 'https://auth.services.adobe.com/login',evaluate:async fn=>fn.name==='emailOTPInPage'?{kind:'none'}:null,goto:async()=>actions.push('account'),
   locator:selector=>selector.includes('email')&&selector.includes('password')?forms:selector.includes('email')?email:password,
   getByRole:(role,{name})=>{
    assert.equal(name.test('Create an account'),false);
@@ -169,7 +170,7 @@ test('missing password after one email submission is not mislabeled as a challen
  let emails=0,clicks=0;
  const email={count:async()=>1,fill:async()=>emails++};
  const password={count:async()=>0,waitFor:async()=>{throw new Error('password missing')}};
- const page={goto:async()=>{},evaluate:async()=>null,locator:selector=>selector.includes('email')?email:password,
+ const page={url:()=> 'https://auth.services.adobe.com/login',goto:async()=>{},evaluate:async fn=>fn.name==='emailOTPInPage'?{kind:'none'}:null,locator:selector=>selector.includes('email')?email:password,
   getByRole:()=>({count:async()=>1,click:async()=>clicks++})};
  await assert.rejects(signInExistingAccount(page,{email:'fixture@example.test',password:'fixture-password'}),e=>e.code==='refresh_password_form_unavailable');
  assert.equal(emails,1);assert.equal(clicks,1);
@@ -237,7 +238,7 @@ test('verification after one password submission is identified without resubmitt
  const actions=[];
  const email={count:async()=>1,fill:async()=>actions.push('email')};
  const password={count:async()=>1,waitFor:async()=>{},fill:async()=>actions.push('password')};
- const page={goto:async()=>{},evaluate:async()=>null,
+ const page={url:()=> 'https://auth.services.adobe.com/login',goto:async()=>{},evaluate:async fn=>fn.name==='emailOTPInPage'?{kind:'none'}:null,
   locator:selector=>selector.includes('one-time-code')?{count:async()=>1}:selector.includes('email')?email:password,
   getByRole:()=>({count:async()=>1,click:async()=>actions.push('continue')}),
   waitForURL:async()=>{throw new Error('OTP or challenge remains')}};

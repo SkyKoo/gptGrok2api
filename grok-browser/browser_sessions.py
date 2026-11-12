@@ -28,11 +28,21 @@ class BrowserStartupError(RuntimeError):
         "browser_launch_profile_unavailable", "browser_launch_license_denied",
         "browser_launch_failed",
         "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage",
+        "run_already_exists", "browser_profile_missing", "browser_profile_unavailable",
     })
 
     def __init__(self, code):
         self.code = code if isinstance(code, str) and code in self.CODES else "browser_launch_failed"
         super().__init__(self.code)
+
+
+class BrowserStartupCleanupPending(BrowserQueueError):
+    """启动失败后尚未确认关闭的内部句柄，必须继续由队列占有。"""
+
+    def __init__(self, browser, code=None):
+        self.browser = browser
+        self.code = BrowserStartupError(code).code
+        super().__init__("browser_close_pending")
 
 
 @dataclass
@@ -124,6 +134,13 @@ class BrowserQueue:
             entry.browser = await entry.launcher(**entry.options)
             entry.state = "ready"
             entry.touched = time.monotonic()
+        except BrowserStartupCleanupPending as exc:
+            # A failed initializer can still own a live process. Keep its
+            # handle and slot until cleanup succeeds; never launch it again.
+            entry.browser = exc.browser
+            entry.state, entry.error, entry.closing = "failed", "browser_start_failed", True
+            entry.diagnostic_code = BrowserStartupError(exc.code).code
+            log.warning("browser startup cleanup unconfirmed; capacity remains occupied code=%s", entry.diagnostic_code)
         except Exception as exc:
             # Only this explicit pre-launch license refusal can be retried.
             # Never retry navigation, signup, consent or a failed model call.

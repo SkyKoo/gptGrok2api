@@ -1,10 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BrowserRegistration } from './browser.mjs';
 import { PrivateRunStore } from './core.mjs';
+
+test('recovery refuses a missing or aliased browser directory before launch without replacing it', async t => {
+  for (const kind of ['missing','symlink','file']) {
+    await t.test(kind, async subtest => {
+      const directory=await mkdtemp(join(tmpdir(),'adobe-isolation-'));
+      const store=new PrivateRunStore(directory,'original');
+      await store.init({email:'fixture@example.test'});
+      await store.markSubmissionStarted();
+      subtest.after(async()=>{await store.close();await rm(directory,{recursive:true,force:true});});
+      const profile=join(store.runDir,'browser');
+      const other=join(directory,'other-account');
+      if(kind==='symlink'){await mkdir(other,{mode:0o700});await symlink(other,profile);}
+      if(kind==='file')await writeFile(profile,'unmodified',{mode:0o600});
+      const before=await readFile(store.statePath);
+      const browser=new BrowserRegistration(store,{}, {launchBrowser:async()=>assert.fail('invalid profile must not launch')});
+      await assert.rejects(browser.open({resumeOnly:true,requireExistingProfile:true}),error=>
+        error.code===(kind==='missing'?'browser_profile_missing':'browser_profile_unavailable'));
+      assert.deepEqual(await readFile(store.statePath),before);
+      if(kind==='missing')await assert.rejects(lstat(profile),{code:'ENOENT'});
+      if(kind==='symlink')assert.equal((await lstat(profile)).isSymbolicLink(),true);
+      if(kind==='file')assert.equal(await readFile(profile,'utf8'),'unmodified');
+    });
+  }
+});
 
 test('open preserves restored Adobe pages after any durable signup submission', async t => {
   for (const marker of ['emailSubmitted', 'passwordSubmitted', 'submission.started']) {

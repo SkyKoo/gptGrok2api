@@ -23,7 +23,7 @@ type AdobeRegistrationState struct {
 
 func adobeStageMayHaveSubmitted(stage string) bool {
 	switch stage {
-	case "adobe_flow_started", "adobe_recovery_started", "adobe_creation_submitted", "awaiting_verification", "adobe_registration_needs_review":
+	case "adobe_flow_started", "adobe_recovery_started", "adobe_creation_submitted", "adobe_original_submission_recorded", "awaiting_verification", "adobe_registration_needs_review":
 		return true
 	}
 	return strings.HasPrefix(stage, "adobe_verification_") || stage == "adobe_captcha_required"

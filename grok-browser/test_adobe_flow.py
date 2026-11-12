@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from unittest.mock import patch, AsyncMock
-from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError
+from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError, BrowserStartupCleanupPending
 from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe
 
 class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -55,13 +55,56 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(str(raised.exception), 'browser_launch_failed')
             handle.close.assert_awaited_once()
 
-    async def test_init_close_failure_remains_failure_and_is_not_hidden_by_diagnostic(self):
+    async def test_init_close_failure_transfers_handle_with_fixed_diagnostic(self):
         handle = AsyncMock()
         handle.command.return_value = {'stage': 'needs_manual', 'code': 'browser_launch_timeout'}
         handle.close.side_effect = RuntimeError('adobe_browser_close_unconfirmed')
         with patch('adobe_flow.asyncio.create_subprocess_exec', AsyncMock()), patch('adobe_flow.AdobeProcess', return_value=handle):
-            with self.assertRaisesRegex(RuntimeError, '^adobe_browser_close_unconfirmed$'):
+            with self.assertRaises(BrowserStartupCleanupPending) as raised:
                 await launch_adobe()
+        self.assertIs(raised.exception.browser, handle)
+        self.assertEqual(raised.exception.code, 'browser_launch_timeout')
+        self.assertEqual(str(raised.exception), 'browser_close_pending')
+
+    async def test_failed_init_keeps_queue_slot_until_original_handle_closes(self):
+        q = BrowserQueue(close_timeout=.01)
+        handle = AsyncMock()
+        handle.command.return_value = {'stage': 'needs_manual', 'code': 'browser_launch_timeout'}
+        handle.close.side_effect = RuntimeError('PRIVATE_CLOSE_FAILURE')
+        next_browser = AsyncMock()
+        next_launch = AsyncMock(return_value=next_browser)
+        try:
+            with patch('adobe_flow.asyncio.create_subprocess_exec', AsyncMock()) as spawn, \
+                 patch('adobe_flow.AdobeProcess', return_value=handle):
+                q.enqueue('adobe', {'proxy':'PRIVATE_PROXY'}, launch_adobe)
+                q.enqueue('grok', {}, next_launch)
+                for _ in range(50):
+                    if q.entries['adobe'].closing and q.entries['adobe'].close_task is not None and q.entries['adobe'].close_task.done(): break
+                    await asyncio.sleep(.01)
+                self.assertEqual(q.status('adobe')['status'], 'closing')
+                self.assertEqual(q.status('adobe')['diagnostic_code'], 'browser_launch_timeout')
+                self.assertIs(q.entries['adobe'].browser, handle)
+                self.assertEqual(q.available, 0)
+                self.assertEqual(q.status('grok')['status'], 'waiting_browser')
+                next_launch.assert_not_awaited()
+                spawn.assert_awaited_once()
+                handle.command.assert_awaited_once()
+                self.assertEqual(q.entries['adobe'].options, {})
+                self.assertNotIn('PRIVATE', str(q.status('adobe')))
+                handle.close.side_effect = None
+                q.entries['adobe'].retry_at = 0
+                await q.close('adobe')
+                for _ in range(50):
+                    if q.status('grok')['status'] == 'ready': break
+                    await asyncio.sleep(.01)
+                self.assertNotIn('adobe', q.entries)
+                next_launch.assert_awaited_once()
+                self.assertEqual(q.status('grok')['status'], 'ready')
+                handle.command.assert_awaited_once()
+        finally:
+            handle.close.side_effect = None
+            for entry in q.entries.values(): entry.retry_at = 0
+            await q.shutdown()
 
     async def test_shared_queue_retains_capacity_until_adobe_close_finishes(self):
         q = BrowserQueue(close_timeout=.01)
@@ -164,7 +207,9 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url="http://worker",
                 headers={"Authorization":"Bearer secret"}) as client:
                 for changes in ({}, {"adobe_recovery_id":"../escape"}, {"adobe_recovery_id":"x"*81},
-                    {"adobe_recovery_id":"child", "profile_id":"../escape"}):
+                    {"adobe_recovery_id":"child", "profile_id":"../escape"},
+                    {"adobe_recovery_id":"child", "adobe_require_new":True},
+                    {"adobe_mode":"refresh", "adobe_require_new":True}):
                     response = await client.post("/v1/browser/reservations", json={**base, **changes})
                     self.assertEqual(response.status_code,422)
                 launcher.assert_not_awaited()
@@ -174,6 +219,29 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
                     if q.status(base["id"])["status"] == "ready": break
                     await asyncio.sleep(.01)
                 launcher.assert_awaited_once_with(profile_id="original-profile", email="fixture@example.test",
-                    profile=profile, proxy=base["proxy"], mode="resume", recovery_id="child-1", account_id="", password="")
+                    profile=profile, proxy=base["proxy"], mode="resume", require_new=False, recovery_id="child-1", account_id="", password="")
                 await client.delete("/v1/browser/reservations/"+base["id"])
+        await q.shutdown()
+
+    async def test_new_registration_forwards_explicit_new_profile_requirement(self):
+        import httpx
+        import server
+        q = BrowserQueue(close_timeout=.1)
+        launcher = AsyncMock(return_value=AsyncMock(spec=AdobeProcess))
+        with patch.object(server, 'queue', q), patch.object(server, '_auth_token', 'secret'), \
+             patch.object(server, 'launch_adobe', launcher):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app),base_url='http://worker',
+                headers={'Authorization':'Bearer secret'}) as client:
+                for index, require_new in enumerate((True, False)):
+                    job_id = str(index) * 32
+                    response = await client.post('/v1/browser/reservations', json={'id':job_id,
+                        'provider':'adobe', 'profile_id':'fixture-profile', 'email':'fixture@example.test',
+                        'adobe_mode':'registration', 'adobe_require_new':require_new})
+                    self.assertEqual(response.status_code, 200)
+                    for _ in range(50):
+                        if q.status(job_id)['status'] == 'ready': break
+                        await asyncio.sleep(.01)
+                    self.assertEqual(launcher.await_args.kwargs['require_new'], require_new)
+                    self.assertEqual(launcher.await_args.kwargs['mode'], 'registration')
+                    await client.delete('/v1/browser/reservations/'+job_id)
         await q.shutdown()

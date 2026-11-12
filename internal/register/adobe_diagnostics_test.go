@@ -18,7 +18,7 @@ func TestAdobeRegistrationDiagnosticsAllowlist(t *testing.T) {
 	progress := func(stage string) error { stages = append(stages, stage); return nil }
 	result := adobeBrowserResult{Stage: "needs_manual", Code: "human_verification_required", SubmissionStarted: true,
 		Diagnostics: adobeRegistrationDiagnostics{VerificationSource: "visible_challenge_frame", VerificationNetworkCode: "captcha_required"}}
-	if err := adobeVerificationProgress(result, progress); err != nil {
+	if err := adobeVerificationProgress(result, "", progress); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"adobe_verification_visible_challenge_frame", "adobe_captcha_required", "adobe_creation_submitted", "adobe_registration_needs_review"}
@@ -29,7 +29,7 @@ func TestAdobeRegistrationDiagnosticsAllowlist(t *testing.T) {
 	result.Code = "PRIVATE_SECRET"
 	result.SubmissionStarted = false
 	result.Diagnostics = adobeRegistrationDiagnostics{VerificationSource: "PRIVATE_SECRET", VerificationNetworkCode: "PRIVATE_SECRET"}
-	if err := adobeVerificationProgress(result, progress); err != nil || len(stages) != 0 {
+	if err := adobeVerificationProgress(result, "", progress); err != nil || len(stages) != 0 {
 		t.Fatal("untrusted diagnostics were logged")
 	}
 	if adobeRegistrationReviewHint("PRIVATE_SECRET") != "" {

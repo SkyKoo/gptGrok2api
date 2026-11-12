@@ -1,5 +1,33 @@
-import { RegistrationError } from './core.mjs';
+import { isTrustedAdobeURL, RegistrationError } from './core.mjs';
 import { ensureMediaSession, isCompleteMediaSession, verifyMediaSession } from './media-session.mjs';
+import { fillEmailOTP, inspectEmailOTP, verificationFailure } from './session-otp.mjs';
+
+const refreshStates = new WeakMap();
+const OTP_LIFETIME_MS = 10 * 60 * 1000;
+const pendingOTP = state => ({stage:'awaiting_verification',code:'refresh_email_otp_required',verification_requested_at:state.otpRequestedAt});
+const loginEvidence = state => Object.fromEntries(['email','password','otp'].flatMap(kind => [
+  [`login_${kind}_submission_started`,state[`${kind}SubmissionStarted`] === true],
+  [`login_${kind}_submitted`,state[`${kind}Submitted`] === true],
+]));
+
+async function loginVerification(page, expected, state, now, fallback) {
+  const observed = await inspectEmailOTP(page, expected);
+  if (observed.kind === 'email_otp') {
+    if (state.otpSubmissionStarted) throw new RegistrationError('refresh_otp_already_submitted');
+    if (!state.lastSubmissionAt) throw new RegistrationError('refresh_otp_not_pending');
+    state.otpRequestedAt = state.lastSubmissionAt;
+    state.otpDeadline = Date.parse(state.otpRequestedAt) + OTP_LIFETIME_MS;
+    if (now() >= state.otpDeadline) throw new RegistrationError('refresh_otp_expired');
+    state.otpURL = page.url();
+    state.otpFields = JSON.stringify(observed.fields);
+    return pendingOTP(state);
+  }
+  if (observed.kind !== 'none') throw verificationFailure(observed.kind);
+  // A code control alone cannot identify the factor. Preserve the old fixed
+  // unknown-verification failure instead of guessing that it is email.
+  const controls = page.locator('input[autocomplete="one-time-code"]:visible, iframe[title*="captcha" i]:visible, iframe[title*="challenge" i]:visible');
+  throw new RegistrationError(await controls.count() > 0 ? 'refresh_verification_required' : fallback);
+}
 
 // Firefly's current authentication service exposes Observe<T> values. Read the
 // profile, access token and signed-in flag from one instance; the IMS SDK's
@@ -87,8 +115,8 @@ export function validateIdentity(identity, expected) {
 }
 
 // Existing-account login only: no Create Account control or challenge action is
-// ever used. Each form is submitted at most once and MFA stops the fallback.
-export async function signInExistingAccount(page, expected, {landingTimeoutMs=15000, now=Date.now, pause=ms=>new Promise(resolve=>setTimeout(resolve,ms)),signal}={}) {
+// ever used. Only a recognized email OTP can pause and continue this login.
+export async function signInExistingAccount(page, expected, {landingTimeoutMs=15000, now=Date.now, pause=ms=>new Promise(resolve=>setTimeout(resolve,ms)),signal,loginState={},resumeAfterOTP=false}={}) {
   if(!expected.password)throw new RegistrationError('refresh_login_required');
   const checkCancelled=()=>{if(signal?.aborted)throw new RegistrationError('media_session_cancelled');};
   const alreadySignedIn=async()=>{
@@ -97,6 +125,22 @@ export async function signInExistingAccount(page, expected, {landingTimeoutMs=15
     if(identity){validateIdentity(identity,expected);return true;}
     return false;
   };
+  const submitPassword=async()=>{
+    checkCancelled();
+    const verification=await inspectEmailOTP(page,expected);
+    if(verification.kind!=='none')return loginVerification(page,expected,loginState,now,'refresh_login_form_unrecognized');
+    if(loginState.passwordSubmissionStarted)throw new RegistrationError('refresh_login_result_unknown');
+    const password=page.locator('input[type="password"]:visible');
+    if(await password.count()!==1)throw new RegistrationError('refresh_login_form_unrecognized');
+    await password.fill(expected.password);
+    const button=page.getByRole('button',{name:/^(Continue|Sign in|继续|登录)$/i});
+    if(await button.count()!==1)throw new RegistrationError('refresh_login_form_unrecognized');
+    loginState.passwordSubmissionStarted=true;loginState.lastSubmissionAt=new Date(now()).toISOString();
+    try {await button.click({timeout:15000});loginState.passwordSubmitted=true;} catch { /* Observe once; never repeat the click. */ }
+    try {await page.waitForURL(url=>url.hostname==='account.adobe.com'||url.hostname==='firefly.adobe.com',{timeout:30000});}
+    catch {return loginVerification(page,expected,loginState,now,'refresh_login_completion_unconfirmed');}
+  };
+  if(resumeAfterOTP)return submitPassword();
   checkCancelled();
   await page.goto('https://account.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
   if(await alreadySignedIn())return;
@@ -132,27 +176,18 @@ export async function signInExistingAccount(page, expected, {landingTimeoutMs=15
   const proceed=()=>page.getByRole('button',{name:/^(Continue|Sign in|继续|登录)$/i});
   checkCancelled();
   if(await email.count()===1){
+    if(loginState.emailSubmissionStarted)throw new RegistrationError('refresh_login_result_unknown');
     await email.fill(expected.email);
     const button=proceed();if(await button.count()!==1)throw new RegistrationError('refresh_login_form_unrecognized');
-    await button.click({timeout:15000});
+    loginState.emailSubmissionStarted=true;loginState.lastSubmissionAt=new Date(now()).toISOString();
+    try {await button.click({timeout:15000});loginState.emailSubmitted=true;} catch { /* Observe once; never repeat the click. */ }
   }
   try {await password.waitFor({state:'visible',timeout:20000});}
   catch {
     if(await alreadySignedIn())return;
-    const verification=page.locator('input[autocomplete="one-time-code"]:visible, iframe[title*="captcha" i]:visible, iframe[title*="challenge" i]:visible');
-    throw new RegistrationError(await verification.count()>0?'refresh_verification_required':'refresh_password_form_unavailable');
+    return loginVerification(page,expected,loginState,now,'refresh_password_form_unavailable');
   }
-  checkCancelled();
-  if(await password.count()!==1)throw new RegistrationError('refresh_login_form_unrecognized');
-  await password.fill(expected.password);
-  const button=proceed();if(await button.count()!==1)throw new RegistrationError('refresh_login_form_unrecognized');
-  await button.click({timeout:15000});
-  // Observe completion before navigating; a challenge/OTP stays on Adobe auth.
-  try {await page.waitForURL(url=>url.hostname==='account.adobe.com',{timeout:30000});}
-  catch {
-    const verification=page.locator('input[autocomplete="one-time-code"]:visible, iframe[title*="captcha" i]:visible, iframe[title*="challenge" i]:visible');
-    throw new RegistrationError(await verification.count()>0?'refresh_verification_required':'refresh_login_completion_unconfirmed');
-  }
+  return submitPassword();
 }
 
 // Only the queue-owned persistent context may discard restored tabs. The
@@ -179,21 +214,81 @@ export async function prepareWorkerRefreshPage(context, {signal, closeTimeoutMs=
   } finally {clearTimeout(timer);}
 }
 
-export async function refreshSession(context, expected, {waitIdentity=waitForIdentity,ensureMedia=ensureMediaSession,workerMode=false,signal}={}) {
-  if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
-  const page=workerMode?await prepareWorkerRefreshPage(context,{signal}):context.pages()[0]||await context.newPage();
-  await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
-  let identity=await waitIdentity(page,{timeoutMs:expected.password?15000:45000});
-  if(!identity&&expected.password){
-    await signInExistingAccount(page,expected,{signal});
-    await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
-    identity=await waitIdentity(page);
+async function observeOTPCompletion(page, expected, state, {signal, now, pause}) {
+  const deadline = now() + 20000;
+  while (now() < deadline) {
+    if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
+    if (!isTrustedAdobeURL(page.url())) throw new RegistrationError('refresh_otp_form_changed');
+    const observed = await inspectEmailOTP(page, expected);
+    if (['challenge','expired','invalid'].includes(observed.kind)) throw verificationFailure(observed.kind);
+    if (observed.kind === 'none') {
+      const host = new URL(page.url()).hostname;
+      if (['account.adobe.com','firefly.adobe.com'].includes(host)) return 'signed_in';
+      if (!state.passwordSubmissionStarted && await page.locator('input[type="password"]:visible').count() === 1) return 'password';
+    }
+    await pause(Math.min(250, Math.max(1, deadline - now())));
   }
-  if(!identity){
-    const error=new RegistrationError('refresh_login_required');
-    error.diagnostics=await sessionDiagnostics(page,context);
+  throw new RegistrationError('refresh_otp_result_unknown');
+}
+
+export async function refreshSession(context, expected, {waitIdentity=waitForIdentity,ensureMedia=ensureMediaSession,workerMode=false,signal,code='',now=Date.now,pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))}={}) {
+  if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
+  const binding = JSON.stringify([expected.account_id,expected.email?.trim().toLowerCase(),expected.profile_id]);
+  let state = refreshStates.get(context);
+  if (state && state.binding !== binding) throw new RegistrationError('refresh_account_mismatch');
+  if (state && state.phase !== 'pending') throw new RegistrationError(state.otpSubmissionStarted ? 'refresh_otp_already_submitted' : 'refresh_session_ended');
+  if (!state && code !== '') throw new RegistrationError('refresh_otp_not_pending');
+  if (!state) {
+    state = {binding,phase:'running'};
+    refreshStates.set(context,state);
+  }
+  try {
+    let page = state.page, identity;
+    if (state.phase === 'pending') {
+      if (now() >= state.otpDeadline) throw new RegistrationError('refresh_otp_expired');
+      if (code === '') return pendingOTP(state);
+      if (typeof code !== 'string' || !/^\d{6}$/.test(code)) throw new RegistrationError('refresh_otp_invalid');
+      if (!page || !context.pages().includes(page) || page.url() !== state.otpURL) throw new RegistrationError('refresh_otp_form_changed');
+      const observed = await inspectEmailOTP(page,expected);
+      if (observed.kind !== 'email_otp') throw verificationFailure(observed.kind,'refresh_otp_form_changed');
+      if (JSON.stringify(observed.fields) !== state.otpFields) throw new RegistrationError('refresh_otp_form_changed');
+      state.phase = 'running';
+      state.otpSubmissionStarted = true;
+      try {await fillEmailOTP(page,code,observed);state.otpSubmitted=true;}
+      catch (error) {if(error instanceof RegistrationError)throw error; /* Navigation can interrupt fill; observe without replay. */ }
+      const next = await observeOTPCompletion(page,expected,state,{signal,now,pause});
+      if (next === 'password') {
+        const login = await signInExistingAccount(page,expected,{signal,now,pause,loginState:state,resumeAfterOTP:true});
+        if (login?.stage === 'awaiting_verification') throw new RegistrationError('refresh_otp_already_submitted');
+      }
+      await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
+      identity = await waitIdentity(page);
+    } else {
+      page = state.page = workerMode ? await prepareWorkerRefreshPage(context,{signal}) : context.pages()[0] || await context.newPage();
+      await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
+      identity = await waitIdentity(page,{timeoutMs:expected.password?15000:45000});
+      if(!identity&&expected.password){
+        const login = await signInExistingAccount(page,expected,{signal,now,pause,loginState:state});
+        if (login?.stage === 'awaiting_verification') {state.phase='pending';return login;}
+        await page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
+        identity=await waitIdentity(page);
+      }
+    }
+    if(!identity){
+      const error=new RegistrationError('refresh_login_required');
+      error.diagnostics=await sessionDiagnostics(page,context);
+      throw error;
+    }
+    const account = await collectRefreshedSession(context,page,expected,identity,{waitIdentity,ensureMedia,signal,state});
+    state.phase='completed';
+    return account;
+  } catch(error) {
+    state.phase='failed';
     throw error;
   }
+}
+
+async function collectRefreshedSession(context,page,expected,identity,{waitIdentity,ensureMedia,signal,state}) {
   validateIdentity(identity,expected);
   // A successful IMS refresh alone cannot claim that generation credentials
   // were renewed. Let incomplete/cancelled runtime ARP fail without exporting
@@ -212,7 +307,7 @@ export async function refreshSession(context, expected, {waitIdentity=waitForIde
   identity=validateIdentity(await waitIdentity(page,{timeoutMs:10000}),expected);
   await verifyMediaSession(page,media,identity,{signal});
   if(signal?.aborted)throw new RegistrationError('media_session_cancelled');
-  const diagnostics={...await sessionDiagnostics(page,context),media_runtime:media.runtime_state};
+  const diagnostics={...await sessionDiagnostics(page,context),media_runtime:media.runtime_state,...loginEvidence(state)};
   const cookieString=list=>list.map(c=>`${c.name}=${c.value}`).join('; ');
   return {...identity,profile_id:expected.profile_id,media_session_refreshed:true,media_session_status:'complete',session_diagnostics:diagnostics,
     cookie:media.cookie,media_session_arp_mode:media.media_session_arp_mode,media_session_arp_source:media.media_session_arp_source,
