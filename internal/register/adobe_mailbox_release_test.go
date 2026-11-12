@@ -106,16 +106,45 @@ func TestAdobeAcquireExcludedLegacyMailboxReleasesOnlyCurrentTask(t *testing.T) 
 }
 
 type adobeStageFailureFlow struct {
-	stage string
-	calls *atomic.Int32
+	stage   string
+	outcome string
+	calls   *atomic.Int32
 }
 
-func (f adobeStageFailureFlow) Register(_ context.Context, _ string, _ Mailbox, _ AdobeConfig, _ func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+func (f adobeStageFailureFlow) Register(_ context.Context, _ string, _ Mailbox, cfg AdobeConfig, _ func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
 	f.calls.Add(1)
 	if err := progress(f.stage); err != nil {
 		return nil, err
 	}
+	if f.outcome != "" {
+		if err := cfg.creationProgress(adobeCreationObservation{Outcome: f.outcome, ErrorCode: "captcha_required", HTTPStatus: 400}, true); err != nil {
+			return nil, err
+		}
+	}
 	return nil, fail("adobe", "fixture_failure")
+}
+
+func TestAdobeCreationOutcomeControlsMailboxReservation(t *testing.T) {
+	for _, outcome := range []string{"not_submitted", "rejected", "accepted", "unknown"} {
+		t.Run(outcome, func(t *testing.T) {
+			mail := &adobeReleaseMailbox{box: Mailbox{ID: "asset", Email: "fixture@example.test"}}
+			var calls atomic.Int32
+			engine := NewAdobeEngine(filepath.Join(t.TempDir(), "jobs.enc.json"), "test", func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
+				return mail, adobeStageFailureFlow{stage: "adobe_flow_started", outcome: outcome, calls: &calls}, nil
+			}, nil, nil)
+			if _, err := engine.Start(adobeTestConfig()); err != nil {
+				t.Fatal(err)
+			}
+			waitAdobe(t, engine)
+			want := 0
+			if outcome == "not_submitted" || outcome == "rejected" {
+				want = 1
+			}
+			if mail.releases != want || calls.Load() != 1 {
+				t.Fatalf("release=%d want=%d", mail.releases, want)
+			}
+		})
+	}
 }
 func (adobeStageFailureFlow) Close() {}
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
+	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 	"os"
 	"sort"
 	"strings"
@@ -14,8 +15,9 @@ import (
 	"time"
 )
 
-// AdobeEngine journals each recovery attempt before work. Unknown submissions
-// only resume the original browser session; saved results only resume import.
+// AdobeEngine journals each attempt before work. Rejected/unsubmitted creation
+// retries registration, accepted creation continues verification, and unknown
+// creation pauses. Saved identities only resume import and verification.
 type AdobeEngine struct {
 	mu                sync.Mutex
 	mailboxMu         sync.Mutex
@@ -282,9 +284,15 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	}
 	defer func() {
 		job, _ := e.getJob(id)
-		// Only pre-submission failures may release a reservation. Once the
-		// Worker flow begins, its outcome must be reviewed before reuse.
-		if len(job.Account) > 0 || job.Imported || adobeRegistrationRecoveryMode(job) == "resume_session" {
+		// Release only a proven unsubmitted or rejected attempt. Ancestor
+		// uncertainty and accepted creation continue holding the root claim.
+		if len(job.Account) > 0 || job.Imported || adobeRegistrationRecoveryMode(job) != "retry_registration" {
+			return
+		}
+		e.mu.Lock()
+		blocked := e.adobeMailboxCreationBlocked(job)
+		e.mu.Unlock()
+		if blocked {
 			return
 		}
 		if releaser, ok := mail.(interface {
@@ -295,6 +303,11 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			_ = releaser.Release(releaseCtx, box, "registration_not_submitted")
 		}
 	}()
+	cfg.creationProgress = func(observed adobeCreationObservation, registrationResponse bool) error {
+		return e.change(id, func(j *RegistrationJob) {
+			recordAdobeCreationOutcome(j, observed, registrationResponse)
+		})
+	}
 	cfg.diagnosticProgress = func(diagnostics adobeRegistrationDiagnostics) error {
 		detail := adobeFailureDiagnosticText(diagnostics)
 		if detail == "" {
@@ -302,6 +315,28 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		}
 		return e.change(id, func(j *RegistrationJob) {
 			appendRegistrationLog(j, "adobe_registration_diagnostics", detail, "info")
+		})
+	}
+	cfg.startupProgress = func(event browserqueue.StartupEvent) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !event.Valid() {
+			return nil
+		}
+		return e.change(id, func(j *RegistrationJob) {
+			ensureAdobeRegistrationState(j)
+			// A generic queue notification may precede the first detailed event.
+			// Keep one start line while always retaining completion/failure timing.
+			duplicateStart := event.Status == "started" && j.Stage == event.Stage && j.Status == "running"
+			j.Status, j.Stage = "running", event.Stage
+			if !duplicateStart {
+				level := "info"
+				if event.Status == "failed" {
+					level = "error"
+				}
+				appendRegistrationLog(j, event.Stage+"_"+event.Status, adobeStartupEventText(event), level)
+			}
 		})
 	}
 	account, err := flow.Register(ctx, id, box, cfg, func(ctx context.Context, after time.Time) (string, error) {
@@ -314,6 +349,9 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		}
 		return "", fail("mail", "adobe_sender_filter_required")
 	}, func(stage string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return e.change(id, func(j *RegistrationJob) {
 			ensureAdobeRegistrationState(j)
 			if adobeStageMayHaveSubmitted(stage) {
@@ -322,9 +360,12 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 			if stage == "adobe_creation_submitted" || stage == "adobe_original_submission_recorded" {
 				j.AdobeRegistration.SubmissionStarted = true
 			}
+			changed := j.Stage != stage || j.Status != "running"
 			j.Status = "running"
 			j.Stage = stage
-			appendRegistrationLog(j, stage, adobeRegistrationStageText(stage), "info")
+			if changed {
+				appendRegistrationLog(j, stage, adobeRegistrationStageText(stage), "info")
+			}
 		})
 	})
 	if err != nil {
@@ -583,13 +624,29 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		mode := adobeRegistrationRecoveryMode(j)
-		eligible := adobeCompensationPending(j) && e.cancel == nil && (j.AutoRetry == nil || j.AutoRetry.Reason != "duplicate_mailbox_retry")
+		blocked := e.adobeMailboxCreationBlocked(j)
+		eligible := adobeCompensationPending(j) && !blocked && e.cancel == nil && (j.AutoRetry == nil || j.AutoRetry.Reason != "duplicate_mailbox_retry")
 		state := adobeCompensationSummary(j, e.adobeMailboxAttemptsLocked(j.Mailbox.Email))
 		hint := adobeRegistrationReviewHint(j.Error)
-		if state != nil && (state.State == "waiting" || state.State == "running") {
-			hint = "当前不是在等待邮件验证码；系统将复用原邮箱、原浏览器资料与原出口自动恢复，保留原提交记录，不重复创建账号。"
+		if blocked {
+			hint = "创建账户的提交结果尚不明确，保留原邮箱与任务记录，不自动重新注册或改走登录。"
+		} else if state != nil && (state.State == "waiting" || state.State == "running") {
+			switch mode {
+			case "retry_registration":
+				hint = "系统将复用原邮箱并创建新的浏览器会话，重新执行注册；原失败记录、次数与冷却时间保留。"
+			case "resume_session":
+				hint = "创建账户已被接受，系统将沿用原会话继续邮箱验证和凭据采集。"
+			case "saved_result":
+				hint = "账号结果已保存，系统仅继续入库和验证，不重新注册。"
+			}
 		}
-		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
+		if j.Status == "running" || j.Status == "queued" || j.Status == "completed" || j.RetryJobID != "" {
+			hint = ""
+			if mode == "result_uncertain" {
+				mode = ""
+			}
+		}
+		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "creation_outcome": adobeCreationOutcome(j), "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
 	}
 	// Older tasks can receive new compensation logs. Order events before the
 	// live-window limit; RFC3339Nano strings with unequal precision are not

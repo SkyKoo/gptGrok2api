@@ -22,9 +22,41 @@ type Lease struct {
 	client        *http.Client
 }
 type status struct {
-	Status         string `json:"status"`
-	Code           string `json:"code"`
-	DiagnosticCode string `json:"diagnostic_code"`
+	Status         string         `json:"status"`
+	Code           string         `json:"code"`
+	DiagnosticCode string         `json:"diagnostic_code"`
+	StartupEvents  []StartupEvent `json:"startup_events"`
+}
+
+// StartupEvent contains only fixed preparation stages and bounded timings.
+// It describes the existing reservation; it never requests another launch.
+type StartupEvent struct {
+	Sequence      int    `json:"sequence"`
+	Stage         string `json:"stage"`
+	Status        string `json:"status"`
+	ElapsedMS     int64  `json:"elapsed_ms"`
+	DurationMS    int64  `json:"duration_ms"`
+	ExceptionType string `json:"exception_type,omitempty"`
+}
+
+func (e StartupEvent) Valid() bool {
+	if e.Sequence < 1 || e.Sequence > 1024 || e.ElapsedMS < 0 || e.ElapsedMS > 150000 || e.DurationMS < 0 || e.DurationMS > e.ElapsedMS {
+		return false
+	}
+	switch e.Stage {
+	case "starting_browser", "adobe_loading_account_page", "adobe_waiting_create_entry", "adobe_reloading_account_page", "adobe_opening_registration", "adobe_waiting_registration_form", "adobe_checking_registration_form":
+	default:
+		return false
+	}
+	if e.Status != "started" && e.Status != "completed" && e.Status != "failed" {
+		return false
+	}
+	switch e.ExceptionType {
+	case "", "registration", "timeout", "navigation", "page_closed", "unknown":
+		return true
+	default:
+		return false
+	}
 }
 
 // StartupError preserves only allowlisted diagnostics. The generic Error text
@@ -45,6 +77,13 @@ func startupFailure(code string) error {
 // Acquire prepares the browser before any registration or device-code action.
 // Polling only observes this reservation; it never replays a business request.
 func Acquire(ctx context.Context, client *http.Client, base, key string, options map[string]any, progress func(string) error) (*Lease, error) {
+	return AcquireWithStartupProgress(ctx, client, base, key, options, progress, nil)
+}
+
+// AcquireWithStartupProgress additionally reports retained initialization
+// transitions, including those completed between polls. The ordinary progress
+// callback still runs every second for cancellation/account guards.
+func AcquireWithStartupProgress(ctx context.Context, client *http.Client, base, key string, options map[string]any, progress func(string) error, startupProgress func(StartupEvent) error) (*Lease, error) {
 	u, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("browser_worker_config_invalid")
@@ -85,7 +124,19 @@ func Acquire(ctx context.Context, client *http.Client, base, key string, options
 		return nil, err
 	}
 	previous := ""
+	startupStage, lastSequence := "", 0
 	for {
+		if startupProgress != nil {
+			for _, event := range current.StartupEvents[:min(len(current.StartupEvents), 32)] {
+				if !event.Valid() || event.Sequence <= lastSequence {
+					continue
+				}
+				if err := startupProgress(event); err != nil {
+					return nil, err
+				}
+				startupStage, lastSequence = event.Stage, event.Sequence
+			}
+		}
 		stage := current.Status
 		if stage == "ready" {
 			keep = true
@@ -93,6 +144,9 @@ func Acquire(ctx context.Context, client *http.Client, base, key string, options
 		}
 		if stage != "waiting_browser" && stage != "starting_browser" {
 			return nil, startupFailure(current.DiagnosticCode)
+		}
+		if stage == "starting_browser" && startupStage != "" {
+			stage = startupStage
 		}
 		if progress != nil && previous != stage {
 			if err := progress(stage); err != nil {
@@ -142,7 +196,7 @@ func (l *Lease) request(ctx context.Context, method, path string, payload any) (
 		return status{}, errors.New("browser_worker_rejected")
 	}
 	var result status
-	if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&result) != nil {
+	if json.NewDecoder(io.LimitReader(resp.Body, 16384)).Decode(&result) != nil {
 		return status{}, errors.New("browser_worker_invalid_response")
 	}
 	return result, nil

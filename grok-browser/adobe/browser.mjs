@@ -6,6 +6,8 @@ import { chmod, lstat, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { isTrustedAdobeURL, RegistrationError } from './core.mjs';
 import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from './network-diagnostics.mjs';
+import { CreationTracker } from './creation-outcome.mjs';
+import { StartupProgress } from './startup-progress.mjs';
 
 const CONTINUE = /^(Continue|Next|继续|下一步)$/i;
 const CREATE = /^(Create account|Create an account|Agree and create account|创建帐户|创建账户|同意并创建帐户|同意并创建账户)$/i;
@@ -150,10 +152,11 @@ export async function waitForFormStage(readForm, {
 
 /** 沿用 CFM 的单次会话与提交前落盘规则；仅操作 Adobe 官方页面。 */
 export class BrowserRegistration {
-  constructor(store, { headless = false, onEvent = () => {} } = {}, { launchBrowser = launchPersistentBrowser } = {}) {
+  constructor(store, { headless = false, onEvent = () => {}, startupProgress = new StartupProgress() } = {}, { launchBrowser = launchPersistentBrowser } = {}) {
     this.store = store;
     this.headless = headless;
     this.onEvent = onEvent;
+    this.startupProgress = startupProgress;
     this.launchBrowser = launchBrowser;
     this.context = null;
     this.page = null;
@@ -178,7 +181,8 @@ export class BrowserRegistration {
     catch (error) { throw new RegistrationError(error.code === 'ENOENT' ? 'browser_profile_missing' : 'browser_profile_unavailable'); }
     if (!profile.isDirectory() || profile.isSymbolicLink()) throw new RegistrationError('browser_profile_unavailable');
     await chmod(profileDir, 0o700);
-    this.context = await this.launchBrowser(profileDir, { headless: this.headless });
+    this.context = await this.startupProgress.run('starting_browser', () => this.launchBrowser(profileDir, { headless: this.headless }));
+    this.creationTracker = new CreationTracker(this.store, this.context);
     this.networkDiagnostics ??= new NetworkDiagnostics();
     this.networkDiagnostics.attach(this.context);
     this.page = this.context.pages()[0] || await this.context.newPage();
@@ -189,28 +193,35 @@ export class BrowserRegistration {
         return this.status();
       }
     }
-    await this.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    try {
+      await this.startupProgress.run('adobe_loading_account_page', () => this.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }));
+    } catch (error) {
+      try { await this.store.save({ startupFailure: this.startupProgress.failureDetails(error) }); }
+      catch { /* Preserve the navigation failure if diagnostic persistence fails. */ }
+      throw error;
+    }
     if (resumeOnly || state.submission.started) return this.status();
     const createLink = this.page.getByRole('link', { name: /^(Create an account|创建[帐账]户)$/i });
     try {
-      try { await createLink.waitFor({state:'visible',timeout:20000}); }
-      catch {
+      try { await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000})); }
+      catch (error) {
         const blockedFont = new URL(this.page.url()).hostname === 'auth.services.adobe.com' && await this.page.evaluate(() =>
           document.readyState === 'loading' && !!document.querySelector('link[rel="stylesheet"][href="https://use.typekit.net/znu8cfp.css"]') &&
           !performance.getEntriesByName('https://use.typekit.net/znu8cfp.css').length,
         );
-        if (!blockedFont) throw new RegistrationError('login_ui_not_ready');
+        if (!blockedFont) throw error;
         await this.page.route('https://use.typekit.net/znu8cfp.css', route=>route.abort('failed'));
-        await this.page.reload({waitUntil:'domcontentloaded',timeout:30000});
-        await createLink.waitFor({state:'visible',timeout:20000});
+        await this.startupProgress.run('adobe_reloading_account_page', () => this.page.reload({waitUntil:'domcontentloaded',timeout:30000}));
+        await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000}));
         this.onEvent({code:'optional_font_load_skipped'});
       }
-      await createLink.click();
-      await this.page.locator('input[autocomplete="new-password"]').waitFor({state:'visible',timeout:20000});
-      const outcome = await this.waitForStage();
+      await this.startupProgress.run('adobe_opening_registration', () => createLink.click());
+      await this.startupProgress.run('adobe_waiting_registration_form', () => this.page.locator('input[autocomplete="new-password"]').waitFor({state:'visible',timeout:20000}));
+      const outcome = await this.startupProgress.run('adobe_checking_registration_form', () => this.waitForStage());
       await this.store.setStage(outcome.code ? 'needs_manual' : 'form_ready', outcome.code);
-    } catch {
-      await this.store.setStage('needs_manual', 'login_ui_not_ready');
+    } catch (error) {
+      await this.store.save({ stage: 'needs_manual', code: 'login_ui_not_ready',
+        startupFailure: this.startupProgress.failureDetails(error) });
     }
     return this.status();
   }
@@ -270,6 +281,7 @@ export class BrowserRegistration {
     const visibleChallenge = ['visible_challenge_frame', 'visible_instruction'].includes(humanVerification.source);
     const documentVersion = this.networkDiagnostics?.documentVersion(this.page) || 0;
     if (hasOTP && !visibleChallenge && this.otpProgressPages.get(this.page) !== documentVersion) {
+      await this.creationTracker?.accepted();
       this.otpProgressPages.set(this.page, documentVersion);
       const superseded = this.networkDiagnostics?.supersedeProgressEvidence(this.page, verificationEvidence, { includeAborted: true }) > 0;
       if (humanVerification.source === 'upstream_captcha_response') {
@@ -373,6 +385,7 @@ export class BrowserRegistration {
     return { stage: humanVerificationRequired || networkDiagnosis.code ? 'needs_manual' : state.stage,
       code: visibleChallenge ? 'human_verification_required' : networkDiagnosis.code || (humanVerificationRequired ? 'human_verification_required' : state.code),
       recordedStage: state.stage, detected, submissionStarted: state.submission.started,
+      ...(state.code === 'login_ui_not_ready' && state.startupFailure ? { failureDiagnostics: state.startupFailure } : {}),
       form, pages, network:this.network, networkDiagnosis, screenshot };
   }
 
@@ -609,6 +622,8 @@ export class BrowserRegistration {
     const button = frame.getByRole('button', { name: CREATE });
     if (await button.count() !== 1 || !await button.isEnabled()) throw new RegistrationError('create_button_not_ready');
     await this.store.markSubmissionStarted();
+    this.creationTracker ??= new CreationTracker(this.store, this.context);
+    await this.creationTracker.begin(this.page);
     try {
       await button.click({ timeout: 15000 });
       const outcome = await this.waitForStage({ accept: (stage, form) => stage === 'awaiting_verification' ||
@@ -718,6 +733,7 @@ export class BrowserRegistration {
         };
       });
       if (!matchingIdentity(identity)) throw new RegistrationError('identity_not_verified');
+      await this.creationTracker?.accepted();
       if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
       let media, cookie;
       if (this.workerMode) {
@@ -762,5 +778,6 @@ export class BrowserRegistration {
   async close() {
     if (this.context) await this.context.close();
     this.context = null;
+    await this.creationTracker?.closed();
   }
 }

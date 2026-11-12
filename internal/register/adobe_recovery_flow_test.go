@@ -53,7 +53,7 @@ func TestAdobeRecoveryUsesOriginalProfileAndNormalOTPWithoutSignup(t *testing.T)
 					if scenario == "invalid_timestamp" {
 						timestamp = time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"stage": "awaiting_verification", "code": "verification_required", "submission_started": true, "verification_requested_at": timestamp})
+					_ = json.NewEncoder(w).Encode(map[string]any{"stage": "awaiting_verification", "code": "verification_required", "creation_outcome": "accepted", "submission_started": true, "verification_requested_at": timestamp})
 					return
 				}
 				if scenario == "saved_session" && action != "resume" || scenario == "otp" && (action != "verify" || body["code"] != "246810") {
@@ -129,7 +129,7 @@ func TestAdobeAcquireRequiresNewStorageOnlyForNewRegistration(t *testing.T) {
 	}{
 		{"new_root", "", "", "task", "registration", "run", true},
 		{"new_root_saved_profile_id", "", "new-profile", "new-profile", "registration", "run", true},
-		{"pre_submit_compensation", "retry_registration", "original-profile", "original-profile", "registration", "run", false},
+		{"pre_submit_compensation", "retry_registration", "new-child-profile", "new-child-profile", "registration", "run", true},
 		{"resume_original_session", "resume_session", "original-profile", "original-profile", "resume", "resume", false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {

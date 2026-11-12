@@ -37,6 +37,7 @@ func TestAdobeCompensationSchedulerAndAPIGuards(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"id":"adobe-original","status":"registration_pending","stage":"adobe_creation_submitted","error":"adobe: submission_result_unknown","mailbox":{"email":"fixture@example.test","account_id":"adobe-source"},"mailbox_api_base":"https://adobe-mail.example.test","adobe_profile":{"country":"US","birthYear":1988,"birthMonth":10,"birthDay":2},"adobe_registration":{"browser_profile_id":"adobe-original","proxy":"direct","proxy_recorded":true,"flow_started":true,"submission_started":true}}`), &job); err != nil {
 		t.Fatal(err)
 	}
+	job.AdobeRegistration.CreationOutcome = "accepted"
 	plain, _ := json.Marshal([]registerruntime.RegistrationJob{job})
 	sealed, err := adobe.Seal("fixture-key", plain)
 	if err != nil {
@@ -129,5 +130,37 @@ func TestAdobeCompensationSchedulerAndAPIGuards(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatal("compensation launched during shutdown")
+	}
+}
+
+func TestAdobeUnknownRegistrationAPIRefusesSignupAndLogin(t *testing.T) {
+	s := scheduleServer(t)
+	job := registerruntime.RegistrationJob{ID: "unknown-registration", Status: "registration_pending", Stage: "adobe_flow_started", Error: "adobe: login_ui_not_ready", Mailbox: registerruntime.Mailbox{Email: "fixture@example.test"}, AdobeRegistration: &registerruntime.AdobeRegistrationState{BrowserProfileID: "original", FlowStarted: true}}
+	plain, _ := json.Marshal([]registerruntime.RegistrationJob{job})
+	sealed, err := adobe.Seal("fixture-key", plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"version": 1, "data": sealed})
+	path := filepath.Join(t.TempDir(), "adobe.enc.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	s.adobeRegister = registerruntime.NewAdobeEngine(path, "fixture-key", func(registerruntime.AdobeConfig) (registerruntime.MailSource, registerruntime.AdobeRegistrationFlow, error) {
+		calls.Add(1)
+		return nil, nil, &registerruntime.Failure{Stage: "test", Code: "unexpected"}
+	}, nil, nil)
+	response := adminRequest(s.Handler(), http.MethodPost, "/api/register/adobe/retry-registration", strings.NewReader(`{"id":"unknown-registration"}`))
+	if response.Code < 400 || !strings.Contains(response.Body.String(), "registration_result_uncertain") || calls.Load() != 0 {
+		t.Fatalf("unknown request admitted: %d", response.Code)
+	}
+	response = adminRequest(s.Handler(), http.MethodGet, "/api/register/adobe/jobs", nil)
+	if response.Code != 200 || !strings.Contains(response.Body.String(), `"recovery_mode":"result_uncertain"`) || !strings.Contains(response.Body.String(), `"can_retry_registration":false`) || !strings.Contains(response.Body.String(), `"can_resume_registration":false`) {
+		t.Fatal("unknown state has wrong public capabilities")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(raw) {
+		t.Fatal("rejected API request changed original journal")
 	}
 }

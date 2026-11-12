@@ -19,6 +19,7 @@ export function registrationProxyFailureText(value: string): string {
   }
   if (value === 'task: mailbox_registration_cooldown') return '该邮箱仍在注册限流冷却中，请等待后再重试；新任务和手动操作不会提前解除冷却。'
   if (value === 'task: mailbox_retry_already_scheduled') return '同邮箱的重复补偿计划已合并，请使用该邮箱的有效任务。'
+  if (value === 'task: registration_result_uncertain' || value === 'adobe: registration_result_uncertain') return '账号创建结果尚未确认，注册重试已暂停；请先核对原任务结果，不会自动转入登录。'
   if (value === 'proxy: binding_unavailable') return '注册代理绑定不可用，请检查所选渠道或节点配置；应用不会主动更换已绑定代理；Resin 内部故障切换仍由 Resin 管理。'
   if (value === 'config: invalid_resin_channel') return 'Resin 配置不完整或格式错误，请检查网关地址、Platform 和代理 Token。'
   return value

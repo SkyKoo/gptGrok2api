@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 )
 
 type AdobeConfig struct {
@@ -20,6 +22,8 @@ type AdobeConfig struct {
 	// Recovery is derived from the encrypted task journal, never user settings.
 	BrowserProfileID, RecoveryMode string
 	diagnosticProgress             func(adobeRegistrationDiagnostics) error
+	creationProgress               func(adobeCreationObservation, bool) error
+	startupProgress                func(browserqueue.StartupEvent) error
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {

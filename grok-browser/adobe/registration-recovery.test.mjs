@@ -12,12 +12,16 @@ const form = patch => ({fields:[],headings:[],notices:[],buttons:[],agreements:[
 const field = (type,autocomplete=type) => ({tag:'input',type,id:type,name:type,label:type,autocomplete});
 const status = (stage,patch={}) => ({detected:stage,form:form(patch),networkDiagnosis:{code:null}});
 
-async function fixture(t,{phase='awaiting_verification',submitted=true}={}) {
+async function fixture(t,{phase='awaiting_verification',submitted=true,accepted=true}={}) {
   const root=await mkdtemp(join(tmpdir(),'adobe-recovery-'));
   const store=new PrivateRunStore(root,'profile');
   t.after(async()=>{await store.close();await rm(root,{recursive:true,force:true});});
   await store.init({email:'fixture@example.test',config:{password:'fixture-password'}});
-  if(submitted)await store.markSubmissionStarted();
+  if(submitted){
+    await store.markSubmissionStarted();
+    if(accepted)await store.save({creationEvidence:{version:1,marker:(await store.load()).submission.startedAt,
+      requests:1,finished:1,rejected:0,unknown:0,accepted:true,complete:true,sealed:true}});
+  }
   const calls=[];
   let challenge=false,network=null,resend=true;
   const control=(kind)=>({count:async()=>kind==='link'?0:kind==='resend'&&!resend?0:1,
@@ -62,12 +66,23 @@ test('resume requires a bounded recovery identity before changing any journal',a
   assert.equal((await f.store.load()).submission.started,false);
 });
 
+test('legacy unknown creation cannot default to login or another registration',async t=>{
+  const f=await fixture(t,{accepted:false,phase:'awaiting_email'});
+  const result=await resumeRegistration(f.browser,f.store,{recoveryId:'attempt1'});
+  assert.equal(result.code,'creation_result_unknown');
+  assert.deepEqual(f.calls,[]);
+  assert.equal((await f.store.load()).recoveryAttempts,undefined);
+});
+
 test('an authoritative unsubmitted journal continues its original registration and creates only once across commands',async t=>{
   const f=await fixture(t,{submitted:false,phase:'awaiting_password'});
   await f.store.setStage('awaiting_approval');
   let created=0,verified=0,phase='awaiting_password';
   f.browser.status=async()=>{const state=await f.store.load();return {...status(phase),stage:state.stage,code:state.code};};
-  f.browser.approveCreate=async()=>{created++;await f.store.markSubmissionStarted();phase='awaiting_verification';};
+  f.browser.approveCreate=async()=>{created++;await f.store.markSubmissionStarted();
+    await f.store.save({creationEvidence:{version:1,marker:(await f.store.load()).submission.startedAt,
+      requests:1,finished:1,rejected:0,unknown:0,accepted:true,complete:true,sealed:false}});
+    phase='awaiting_verification';};
   f.browser.verify=async input=>{assert.equal(input.code,'123456');verified++;await f.store.save({verificationSubmitted:true});phase='firefly';};
   const statusBefore=f.browser.status;
   f.browser.status=async()=>{const current=await statusBefore();if(phase==='firefly')current.form.host='firefly.adobe.com';return current;};

@@ -59,7 +59,7 @@ func adobeCompensationFixture(t *testing.T, now time.Time) RegistrationJob {
 		CreatedAt: now.Add(-time.Hour).UTC().Format(time.RFC3339Nano), UpdatedAt: now.Add(-time.Hour).UTC().Format(time.RFC3339Nano),
 		Mailbox: Mailbox{ID: "saved-asset", Email: "existing@example.test", AccountID: cfg.HME.AccountID, SourceID: cfg.MailboxSourceID}, MailboxAPIBase: cfg.HME.BaseURL,
 		AdobeProfile:      &adobeRegistrationProfile{Country: "US", BirthYear: 1988, BirthMonth: 10, BirthDay: 2},
-		AdobeRegistration: &AdobeRegistrationState{BrowserProfileID: "original-adobe-profile", Proxy: "direct", ProxyRecorded: true, FlowStarted: true, SubmissionStarted: true},
+		AdobeRegistration: &AdobeRegistrationState{BrowserProfileID: "original-adobe-profile", Proxy: "direct", ProxyRecorded: true, FlowStarted: true, SubmissionStarted: true, CreationOutcome: "accepted"},
 		AutoRetry:         &RegistrationCompensation{State: "waiting", NextAttemptAt: now.Add(-time.Second).UTC().Format(time.RFC3339Nano)},
 	}
 }
@@ -231,24 +231,24 @@ func TestAdobePreSubmissionRecoveryCanRegisterButNotAfterFlowFence(t *testing.T)
 			job := adobeCompensationFixture(t, now)
 			job.Stage, job.Error = "waiting_browser", "browser: adobe_browser_unavailable"
 			job.AdobeRegistration.FlowStarted, job.AdobeRegistration.SubmissionStarted = submitted, false
-			want := "retry_registration"
-			if submitted {
-				want = "resume_session"
-			}
+			job.AdobeRegistration.CreationOutcome = ""
 			e := NewAdobeEngine(filepath.Join(t.TempDir(), "adobe.enc.json"), "key", func(cfg AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
-				if cfg.RecoveryMode != want {
-					t.Errorf("mode=%s want=%s", cfg.RecoveryMode, want)
+				if cfg.RecoveryMode != "retry_registration" {
+					t.Errorf("mode=%s want=retry_registration", cfg.RecoveryMode)
 				}
-				return &adobeCompensationMail{}, adobeCompensationFlow{run: func(_ context.Context, _ AdobeConfig, _ Progress) (map[string]any, error) {
+				return &adobeCompensationMail{}, adobeCompensationFlow{run: func(_ context.Context, cfg AdobeConfig, _ Progress) (map[string]any, error) {
+					if err := cfg.creationProgress(adobeCreationObservation{Outcome: "unknown"}, false); err != nil {
+						return nil, err
+					}
 					return nil, fail("adobe", "submission_result_unknown")
 				}}, nil
 			}, nil, nil)
 			seedAdobeCompensation(t, e, job)
-			if started, err := e.RunCompensation(adobeTestConfig(), now); !started || err != nil {
+			if started, err := e.RunCompensation(adobeTestConfig(), now); started == submitted || err != nil {
 				t.Fatal(err)
 			}
 			waitAdobe(t, e)
-			if adobeRegistrationRecoveryMode(latestAdobe(t, e, job.ID)) != "resume_session" {
+			if adobeRegistrationRecoveryMode(latestAdobe(t, e, job.ID)) != "result_uncertain" {
 				t.Fatal("unknown result lost its no-Create fence")
 			}
 		})
@@ -280,7 +280,7 @@ func TestAdobeLegacyRecoveryWaitsAndDoesNotMutatePausedConstruction(t *testing.T
 		t.Fatal("historical job replayed immediately", err)
 	}
 	got := latestAdobe(t, e, job.ID)
-	if got.AutoRetry.State != "waiting" || got.AutoRetry.NextAttemptAt != now.Add(5*time.Minute).UTC().Format(time.RFC3339Nano) || adobeRegistrationRecoveryMode(got) != "resume_session" {
+	if got.AutoRetry.State != "manual" || got.AutoRetry.Reason != "registration_result_uncertain" || got.AutoRetry.NextAttemptAt != "" || adobeRegistrationRecoveryMode(got) != "result_uncertain" {
 		t.Fatalf("legacy migration=%+v", got.AutoRetry)
 	}
 }
@@ -497,10 +497,14 @@ func TestAdobeGracefulShutdownDefersInitialAndManualWorkButStopStaysStopped(t *t
 			e = NewAdobeEngine(path, "key", nil, nil, nil)
 			got := latestAdobe(t, e, rootID)
 			want := "waiting"
-			if mode == "stop_then_shutdown" {
+			if mode != "manual" {
 				want = "manual"
 			}
-			if got.AutoRetry == nil || got.AutoRetry.State != want || adobeRegistrationRecoveryMode(got) != "resume_session" {
+			wantMode := "result_uncertain"
+			if mode == "manual" {
+				wantMode = "resume_session"
+			}
+			if got.AutoRetry == nil || got.AutoRetry.State != want || adobeRegistrationRecoveryMode(got) != wantMode {
 				t.Fatalf("shutdown=%s recovery=%+v", mode, got.AutoRetry)
 			}
 			if mode == "stop_then_shutdown" && got.AutoRetry.Reason != "cancelled" {

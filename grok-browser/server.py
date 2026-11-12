@@ -544,7 +544,8 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
                 raise HTTPException(status_code=422, detail="adobe_profile_mode_invalid")
             return queue.enqueue(req.id, {"profile_id":req.profile_id, "email":req.email,
                 "profile":req.adobe_profile, "proxy":proxy, "mode":req.adobe_mode, "require_new":req.adobe_require_new,
-                "recovery_id":req.adobe_recovery_id, "account_id":req.account_id, "password":req.password}, launch_adobe)
+                "recovery_id":req.adobe_recovery_id, "account_id":req.account_id, "password":req.password}, launch_adobe,
+                startup_progress=True)
         options = browser_kwargs("TURNSTILE", "direct" if req.daily_direct and not proxy else proxy or None,
             timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
         if req.daily_direct and not proxy:
@@ -588,4 +589,5 @@ async def run_adobe(req: AdobeCommandRequest, authorization: str | None = Header
         raise HTTPException(status_code=409, detail="adobe_session_unavailable") from None
     except (TimeoutError, RuntimeError):
         # A lost reply is never retried; the durable Node journal owns its outcome.
-        return {"stage":"outcome_unknown", "code":"adobe_worker_result_unknown", "submission_started":True}
+        return {"stage":"outcome_unknown", "code":"adobe_worker_result_unknown", "submission_started":True,
+                "creation_outcome":"unknown"}

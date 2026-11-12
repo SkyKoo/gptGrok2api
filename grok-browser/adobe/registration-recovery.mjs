@@ -1,6 +1,7 @@
 import { RegistrationError, isTrustedAdobeURL } from './core.mjs';
 import { formBlockingCode, formFailureDiagnostics } from './browser.mjs';
 import { runAutomaticRegistration, observeAutomaticVerification } from './auto-runner.mjs';
+import { creationOutcome } from './creation-outcome.mjs';
 
 const LOGIN = /^(Continue|Next|Sign in|Log in|继续|下一步|登录)$/i;
 const SIGN_IN = /^(Sign in|Log in|登录)$/i;
@@ -197,6 +198,9 @@ export async function resumeRegistration(browser, store, { recoveryId, code = ''
     if (state.result?.account || state.stage === 'completed' || state.stage === 'credentials_saved') {
       action = 'export_session';
       return await browser.exportSession();
+    }
+    if (state.submission.started && creationOutcome(state).creation_outcome !== 'accepted') {
+      return stopped('creation_result_unknown');
     }
     if (!state.recoveryAttempts?.[recoveryId]) {
       if (Object.keys(state.recoveryAttempts || {}).length >= 32) throw new RegistrationError('recovery_attempt_limit');

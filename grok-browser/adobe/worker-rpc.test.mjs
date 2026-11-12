@@ -12,7 +12,7 @@ import { PrivateRunStore } from './core.mjs';
 // Run the actual line-oriented Worker protocol and real durable journal. Only
 // the browser dependency is replaced, so tests never launch Chromium or make
 // registration requests on the developer's host.
-async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false}={}) {
+async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false}={}) {
   const root=await mkdtemp(join(tmpdir(),'adobe-worker-rpc-'));
   const store=new PrivateRunStore(root,'original');
   if(!missing){
@@ -24,12 +24,14 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   const mock=join(root,'mock-browser.mjs'),loader=join(root,'loader.mjs');
   await writeFile(mock,`
     export class BrowserRegistration {
-      constructor(store){this.store=store;this.opened=false;this.phase='awaiting_password';}
+      constructor(store,options={}){this.store=store;this.startupProgress=options.startupProgress;this.opened=false;this.phase='awaiting_password';}
       async open(options){
+        await this.startupProgress.run('starting_browser',async()=>{});
         this.opened=true;
         const state=await this.store.load();
         await this.store.save({testOpenMode:options.resumeOnly,testRequireExistingProfile:options.requireExistingProfile});
         if(state.submission.started){this.phase='challenge';await this.store.setStage('needs_manual','human_verification_required');}
+        else if(${uiFailed}){this.phase='needs_manual';await this.store.setStage('needs_manual','login_ui_not_ready');}
         else await this.store.setStage('awaiting_approval');
       }
       async status(){
@@ -42,8 +44,10 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
       }
       async approveCreate(){
         await this.store.markSubmissionStarted();
-        const state=await this.store.load();await this.store.save({testCreates:(state.testCreates||0)+1});
-        this.phase='awaiting_verification';
+        const state=await this.store.load();await this.store.save({testCreates:(state.testCreates||0)+1,
+          creationEvidence:{version:1,marker:state.submission.startedAt,requests:1,finished:1,rejected:${rejected}?1:0,unknown:0,accepted:!${rejected},complete:true,sealed:false}});
+        this.phase=${rejected}?'challenge':'awaiting_verification';
+        if(${rejected})await this.store.setStage('needs_manual','human_verification_required');
       }
       async verify(){await this.store.save({verificationSubmitted:true});this.phase='firefly';}
       async exportSession(){
@@ -51,7 +55,11 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         const result=state.result||{account:{email:state.email,account_id:'fixture-id',token:'fixture-token'}};
         await this.store.save({stage:'completed',result});return {stage:'completed'};
       }
-      async close(){}
+      async close(){
+        if(${closeFailed})throw new Error('PRIVATE close failure');
+        const state=await this.store.load();
+        if(state.creationEvidence)await this.store.save({creationEvidence:{...state.creationEvidence,sealed:true}});
+      }
     }
   `,{mode:0o600});
   const refreshMock=join(root,'mock-refresh.mjs');
@@ -59,6 +67,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
     let owned;
     const fixed=code=>Object.assign(new Error(code),{code});
     export async function launchPersistentBrowser(){
+      if(${launchFailed})throw Object.assign(new Error('PRIVATE browser failure'),{code:'browser_launch_timeout'});
       if(owned)throw fixed('test_duplicate_context');
       owned={phase:'fresh',close:async()=>{owned.phase='closed'}};return owned;
     }
@@ -87,14 +96,23 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   const exited=once(child,'exit');
   const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
   let serial=0;
+  const startupFrames=[];
   const command=async request=>{
     const id=String(++serial);child.stdin.write(JSON.stringify({...request,id})+'\n');
     let timer;
     try{
-      const line=await Promise.race([lines.next(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('RPC test timeout')),22000);})]);
-      assert.equal(line.done,false);const response=JSON.parse(line.value);assert.equal(response.id,id);
-      if(request.action==='close')child.stdin.end();
-      return response;
+      const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('RPC test timeout')),22000);});
+      let count=0;
+      while(true){
+        const line=await Promise.race([lines.next(),deadline]);
+        assert.equal(line.done,false);const response=JSON.parse(line.value);assert.equal(response.id,id);
+        if(response.event==='startup_progress'){
+          assert.equal(request.action,'init');assert.ok(++count<=32);
+          assert.equal(response.progress.sequence,count);startupFrames.push(response);continue;
+        }
+        if(request.action==='close')child.stdin.end();
+        return response;
+      }
     }finally{clearTimeout(timer);}
   };
   t.after(async()=>{
@@ -107,17 +125,48 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
     await current.init({}, {requireExisting:true});
     const state=await current.load();await current.close();return state;
   };
-  return {initialize,command,exited,journal};
+  return {initialize,command,exited,journal,startupFrames};
 }
+
+test('init progress frames share the request id and do not consume the final RPC response',async t=>{
+  const f=await rpcFixture(t,{uiFailed:true});
+  const initialized=await f.initialize({mode:'registration'});
+  assert.equal(initialized.ok,true);assert.equal(initialized.result.stage,'ready');
+  assert.equal(f.startupFrames.length,2);
+  assert.deepEqual(f.startupFrames.map(frame=>frame.id),[initialized.id,initialized.id]);
+  assert.deepEqual(f.startupFrames.map(frame=>frame.progress.status),['started','completed']);
+  assert.ok(f.startupFrames.every(frame=>frame.progress.stage==='starting_browser'));
+  const before=f.startupFrames.length;
+  assert.equal((await f.command({action:'run'})).result.code,'login_ui_not_ready');
+  assert.equal(f.startupFrames.length,before);
+  await f.command({action:'close'});await f.exited;
+});
+
+test('refresh initialization emits only launch progress and preserves launch failures',async t=>{
+  for(const launchFailed of [false,true])await t.test(String(launchFailed),async sub=>{
+    const f=await rpcFixture(sub,{refresh:true,launchFailed});
+    const initialized=await f.initialize({mode:'refresh'});
+    assert.equal(initialized.ok,!launchFailed);
+    if(launchFailed)assert.equal(initialized.code,'browser_launch_timeout');
+    assert.equal(f.startupFrames.length,2);
+    assert.deepEqual(f.startupFrames.map(frame=>frame.progress.stage),['starting_browser','starting_browser']);
+    assert.deepEqual(f.startupFrames.map(frame=>frame.progress.status),['started',launchFailed?'failed':'completed']);
+    if(launchFailed)assert.equal(f.startupFrames[1].progress.exception_type,'timeout');
+    assert.doesNotMatch(JSON.stringify(f.startupFrames),/PRIVATE|fixture@|fixture-password/);
+    await f.command({action:'close'});await f.exited;
+  });
+});
 
 test('RPC init opens a proven unsubmitted existing profile and resume creates at most once across verify',async t=>{
   const f=await rpcFixture(t);
   assert.equal((await f.initialize()).result.stage,'ready');
   const first=(await f.command({action:'resume'})).result;
   assert.equal(first.code,'verification_required');assert.equal(first.submission_started,true);
+  assert.equal(first.creation_outcome,'accepted');
   assert.equal(first.recovery_mode,'continue_registration');
   const completed=(await f.command({action:'verify',code:'123456'})).result;
   assert.equal(completed.stage,'completed');assert.equal(completed.submission_started,true);
+  assert.equal(completed.creation_outcome,'accepted');
   assert.equal(completed.account.profile_id,'original');
   assert.equal((await f.command({action:'resume'})).result.stage,'completed');
   await f.command({action:'close'});await f.exited;
@@ -125,12 +174,36 @@ test('RPC init opens a proven unsubmitted existing profile and resume creates at
   assert.equal(state.config.password,'fixture-password');assert.equal(state.submission.started,true);
 });
 
-test('RPC resume for a submitted journal keeps challenge evidence and never opens registration mode',async t=>{
+test('RPC initial UI failure returns not_submitted and seals the browser before allowing another attempt',async t=>{
+  const f=await rpcFixture(t,{uiFailed:true});await f.initialize({mode:'registration'});
+  const result=(await f.command({action:'run'})).result;
+  assert.equal(result.code,'login_ui_not_ready');assert.equal(result.creation_outcome,'not_submitted');
+  const ended=await f.command({action:'run'});assert.equal(ended.ok,false);assert.equal(ended.code,'registration_attempt_ended');
+  await f.command({action:'close'});await f.exited;
+  const state=await f.journal();assert.equal(state.submission.started,false);assert.ok(state.lastLifecycle.closeCompletedAt);
+});
+
+test('RPC rejected creation is sent only after closure; a failed close preserves unknown',async t=>{
+  for(const closeFailed of [false,true])await t.test(String(closeFailed),async sub=>{
+    const f=await rpcFixture(sub,{rejected:true,closeFailed});await f.initialize({mode:'registration'});
+    const response=await f.command({action:'run'});
+    const result=response.ok?response.result:response;
+    assert.equal(result.creation_outcome,closeFailed?'unknown':'rejected');
+    assert.equal(result.submission_started,true);
+    if(!closeFailed){
+      assert.equal(result.creation_error_code,'captcha_required');assert.equal(result.creation_http_status,400);
+      await f.command({action:'close'});await f.exited;
+      assert.ok((await f.journal()).lastLifecycle.closeCompletedAt);
+    }
+  });
+});
+
+test('RPC resume for a legacy submitted journal remains unknown without opening login or registration',async t=>{
   const f=await rpcFixture(t,{submitted:true});
   assert.equal((await f.initialize()).result.stage,'ready');
   const result=(await f.command({action:'resume'})).result;
-  assert.equal(result.code,'human_verification_required');assert.equal(result.submission_started,true);
-  assert.equal(result.diagnostics.verification_source,'visible_instruction');
+  assert.equal(result.code,'creation_result_unknown');assert.equal(result.submission_started,true);
+  assert.equal(result.creation_outcome,'unknown');
   await f.command({action:'close'});await f.exited;
   const state=await f.journal();assert.equal(state.testCreates,undefined);assert.equal(state.testOpenMode,true);
   assert.equal(state.testRequireExistingProfile,true);

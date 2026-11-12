@@ -15,8 +15,8 @@
         <span v-if="job.twofa.error"> · {{ job.twofa.error }}</span>
       </p>
       <p v-if="job.error" class="text-xs break-all">{{ registrationProxyFailureText(job.error) }}</p>
-      <p v-if="target === 'adobe' && job.review_hint && !['waiting', 'running'].includes(job.auto_retry?.state || '')" class="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400" role="status">{{ job.review_hint }}</p>
-      <p v-if="registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode) }}</p>
+      <p v-if="target === 'adobe' && job.review_hint && !['queued', 'running', 'completed'].includes(job.status) && !['waiting', 'running', 'superseded'].includes(job.auto_retry?.state || '')" class="rounded-md border border-amber-500/25 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-700 dark:text-amber-400" role="status">{{ job.review_hint }}</p>
+      <p v-if="registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode, job.status)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode, job.status) }}</p>
       <Button v-if="registrationRecoveryAction(job, target)" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">{{ registrationRecoveryAction(job, target) }}</Button>
       <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
@@ -76,7 +76,16 @@ watch(() => props.jobs, () => {
 })
 onBeforeUnmount(() => { loadSequence++; clearInterval(clock) })
 const twoFALabels: Record<string, string> = { running: '进行中', completed: '已开启', failed: '失败，需补充开启', interrupted: '已中断，需核对', cancelled: '已取消' }
-const stages: Record<string, string> = { adobe_original_submission_recorded: '原注册提交记录已保留', adobe_registration_diagnostics: '注册失败诊断', compensation_stopped: '已停止自动补偿', adobe_recovery_started: '恢复原会话并检查登录', needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
+const stages: Record<string, string> = {
+  waiting_browser: '等待浏览器会话释放',
+  starting_browser: '启动浏览器',
+  adobe_loading_account_page: '加载 Adobe 账户页',
+  adobe_waiting_create_entry: '等待创建账户入口',
+  adobe_reloading_account_page: '重新加载 Adobe 账户页',
+  adobe_opening_registration: '打开 Adobe 注册页',
+  adobe_waiting_registration_form: '等待 Adobe 注册表单',
+  adobe_checking_registration_form: '识别 Adobe 注册表单',
+  adobe_flow_started: '执行 Adobe 注册', adobe_creation_submitted: '已发起创建，等待结果', awaiting_verification: '等待邮箱验证码', adobe_registration_needs_review: '本次流程已结束，检查创建结果', adobe_original_submission_recorded: '原注册提交记录已保留', adobe_registration_diagnostics: '注册失败诊断', compensation_stopped: '已停止自动补偿', adobe_recovery_started: '继续已创建账号的验证', needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 async function retry(id: string) {
   busy.value = true; error.value = ''
   try { if (props.target === 'adobe') await registerApi.retryAdobeResult(id); else if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }

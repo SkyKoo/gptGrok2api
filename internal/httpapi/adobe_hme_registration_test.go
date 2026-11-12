@@ -169,7 +169,7 @@ func TestAdobeRegistrationUsesHMESourceAndIndependentClaims(t *testing.T) {
 					writeJSON(w, 200, map[string]string{"status": "ready"})
 				case "/v1/adobe/run":
 					if body["action"] == "run" {
-						writeJSON(w, 200, map[string]string{"stage": "awaiting_verification", "code": "verification_required"})
+						writeJSON(w, 200, map[string]string{"stage": "awaiting_verification", "code": "verification_required", "creation_outcome": "accepted"})
 						return
 					}
 					if body["action"] != "verify" || body["code"] != "654321" {

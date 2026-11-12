@@ -10,15 +10,18 @@ import (
 	"time"
 )
 
-// AdobeRegistrationState is encrypted with the private task journal. A child
-// keeps the original browser and actual egress, independently of UI settings.
-// FlowStarted is a monotonic fence: later browser errors cannot clear it.
+// AdobeRegistrationState is encrypted with the private task journal. Flow and
+// submission markers are monotonic within an attempt; only the creation result
+// decides whether a child may register again or continue the original session.
 type AdobeRegistrationState struct {
-	BrowserProfileID  string `json:"browser_profile_id"`
-	Proxy             string `json:"proxy,omitempty"`
-	ProxyRecorded     bool   `json:"proxy_recorded,omitempty"`
-	FlowStarted       bool   `json:"flow_started,omitempty"`
-	SubmissionStarted bool   `json:"submission_started,omitempty"`
+	BrowserProfileID   string `json:"browser_profile_id"`
+	Proxy              string `json:"proxy,omitempty"`
+	ProxyRecorded      bool   `json:"proxy_recorded,omitempty"`
+	FlowStarted        bool   `json:"flow_started,omitempty"`
+	SubmissionStarted  bool   `json:"submission_started,omitempty"`
+	CreationOutcome    string `json:"creation_outcome,omitempty"`
+	CreationErrorCode  string `json:"creation_error_code,omitempty"`
+	CreationHTTPStatus int    `json:"creation_http_status,omitempty"`
 }
 
 func adobeStageMayHaveSubmitted(stage string) bool {
@@ -78,10 +81,14 @@ func adobeRegistrationRecoveryMode(job RegistrationJob) string {
 	if len(job.Account) > 0 || job.Imported || job.Verified {
 		return "saved_result"
 	}
-	if job.AdobeRegistration != nil && (job.AdobeRegistration.FlowStarted || job.AdobeRegistration.SubmissionStarted) || adobeLegacyMayHaveSubmitted(job) {
+	switch adobeCreationOutcome(job) {
+	case "accepted":
 		return "resume_session"
+	case "not_submitted", "rejected":
+		return "retry_registration"
+	default:
+		return "result_uncertain"
 	}
-	return "retry_registration"
 }
 
 func adobeCompensationPending(job RegistrationJob) bool {
@@ -105,15 +112,21 @@ func adobeAutomaticFailure(job RegistrationJob) bool {
 	if len(job.Account) > 0 && job.Error != "task_cancelled" && job.Error != "import: account_writer_not_configured" && job.Error != "verify: account_verifier_not_configured" {
 		return true // The identity is already captured; import/verify is idempotent.
 	}
+	if adobeRegistrationRecoveryMode(job) == "result_uncertain" {
+		return false
+	}
+	if adobeCreationOutcome(job) == "rejected" {
+		return true
+	}
 	if transientRegistrationFailure(job.Error) {
 		return true
 	}
 	switch job.Error {
 	case "process_restarted_no_automatic_registration_retry", "process_restarted_compensation_delayed":
 		return true
-	case "adobe: submission_result_unknown", "adobe: worker_result_unknown", "adobe: human_verification_required", "adobe: captcha_required", "adobe: verification_dns_failed", "adobe: verification_request_timeout", "adobe: verification_request_aborted", "adobe: registration_needs_review":
-		return true // Recovery is session/login only; this never authorizes Create.
-	case "browser: adobe_browser_unavailable", "adobe: browser_unavailable", "adobe: resume_login_pending", "adobe: resume_login_completion_unconfirmed", "adobe: resume_otp_required", "adobe: resume_verification_required", "adobe: resume_challenge_required":
+	case "adobe: submission_result_unknown", "adobe: worker_result_unknown", "adobe: adobe_worker_result_unknown", "adobe: creation_result_unknown", "adobe: human_verification_required", "adobe: captcha_required", "adobe: verification_dns_failed", "adobe: verification_request_timeout", "adobe: verification_request_aborted", "adobe: registration_needs_review":
+		return true // The separate creation outcome already excludes uncertainty.
+	case "browser: adobe_browser_unavailable", "adobe: browser_unavailable", "adobe: login_ui_not_ready", "adobe: resume_login_pending", "adobe: resume_login_completion_unconfirmed", "adobe: resume_otp_required", "adobe: resume_verification_required", "adobe: resume_challenge_required":
 		return true
 	case "adobe: recovery_login_entry_unrecognized", "adobe: recovery_login_form_unavailable", "adobe: recovery_login_form_unrecognized", "adobe: recovery_login_result_unknown", "adobe: recovery_verification_unavailable", "adobe: recovery_verification_result_unknown", "adobe: recovery_progress_stalled", "adobe: recovery_step_failed", "adobe: verification_result_unknown", "adobe: verification_not_ready", "adobe: continuation_result_unknown", "adobe: stage_transition_timeout", "adobe: firefly_session_not_ready", "adobe: media_session_incomplete":
 		return true
@@ -143,6 +156,10 @@ func planAdobeRegistrationCompensation(job *RegistrationJob, cause error, now ti
 	}
 	if state.Attempts >= len(compensationDelays) {
 		state.State, state.Reason = "exhausted", "retry_limit_reached"
+		return
+	}
+	if adobeRegistrationRecoveryMode(*job) == "result_uncertain" {
+		state.Reason = "registration_result_uncertain"
 		return
 	}
 	if !adobeCompensationEnvironment(*job) {
@@ -186,7 +203,19 @@ func recoverAdobeRegistrationCompensation(job *RegistrationJob, now time.Time) {
 }
 
 func adobeNeedsCompensationPlan(job RegistrationJob) bool {
-	return adobeCompensationPending(job) && job.AutoRetry == nil && adobeAutomaticFailure(job)
+	if !adobeCompensationPending(job) {
+		return false
+	}
+	if job.AutoRetry == nil {
+		return adobeAutomaticFailure(job) || adobeRegistrationRecoveryMode(job) == "result_uncertain"
+	}
+	if job.AutoRetry.State == "waiting" && adobeRegistrationRecoveryMode(job) == "result_uncertain" {
+		return true
+	}
+	// Only explicit pre-submit evidence can revive the former generic review
+	// decision. Stop, exhausted, duplicate and cooldown decisions remain intact.
+	return job.AdobeRegistration != nil && job.AdobeRegistration.CreationOutcome == "not_submitted" &&
+		job.AutoRetry.State == "manual" && job.AutoRetry.Reason == "failure_requires_review" && adobeAutomaticFailure(job)
 }
 
 func adobeCompensationSummary(job RegistrationJob, attempts int) *RegistrationCompensation {
@@ -229,10 +258,14 @@ func (e *AdobeEngine) normalizeAdobeMailboxRetriesLocked(now time.Time) bool {
 	for email, indices := range groups {
 		attempts := e.adobeMailboxAttemptsLocked(email)
 		owner, saved, active := -1, -1, false
-		complete, stopped := false, false
+		complete, stopped, uncertain, accepted := false, false, false, false
 		var latest time.Time
 		for _, i := range indices {
 			job := e.jobs[i]
+			// Ancestors still describe real upstream attempts. An old recovery
+			// child cannot erase their unknown outcome by claiming no new Create.
+			uncertain = uncertain || adobeRegistrationRecoveryMode(job) == "result_uncertain"
+			accepted = accepted || adobeRegistrationRecoveryMode(job) == "resume_session"
 			if job.ProxyBinding != nil && job.ProxyBinding.BlockedUntil.After(latest) {
 				latest = job.ProxyBinding.BlockedUntil
 			}
@@ -288,6 +321,8 @@ func (e *AdobeEngine) normalizeAdobeMailboxRetriesLocked(now time.Time) bool {
 				state.State, state.Reason, state.NextAttemptAt = "manual", "saved_account_exists", ""
 			case stopped:
 				state.State, state.Reason, state.NextAttemptAt = "manual", "cancelled", ""
+			case saved < 0 && (uncertain || accepted && adobeRegistrationRecoveryMode(job) == "retry_registration"):
+				state.State, state.Reason, state.NextAttemptAt = "manual", "registration_result_uncertain", ""
 			case active || i != owner:
 				state.State, state.Reason, state.NextAttemptAt = "manual", "duplicate_mailbox_retry", ""
 			case attempts >= len(compensationDelays):
@@ -427,6 +462,9 @@ func (e *AdobeEngine) retryAdobeWithConfig(raw map[string]any, id string, savedO
 	}
 	for i, job := range e.jobs {
 		if job.ID == id {
+			if e.adobeMailboxCreationBlocked(job) {
+				return fail("task", "registration_result_uncertain")
+			}
 			if savedOnly && len(job.Account) == 0 {
 				return fail("task", "no_saved_result")
 			}
@@ -449,7 +487,11 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 	if !adobeCompensationPending(parent) {
 		return fail("task", "no_saved_mailbox")
 	}
-	if adobeRegistrationRecoveryMode(parent) != "saved_result" && !adobeSavedSourceMatches(parent, cfg) {
+	mode := adobeRegistrationRecoveryMode(parent)
+	if mode == "result_uncertain" {
+		return fail("task", "registration_result_uncertain")
+	}
+	if mode != "saved_result" && !adobeSavedSourceMatches(parent, cfg) {
 		return fail("config", "saved_mailbox_source_unavailable")
 	}
 	if !adobeCompensationEnvironment(parent) {
@@ -462,6 +504,18 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 		if grokMailboxKey(other.Mailbox.Email) != grokMailboxKey(parent.Mailbox.Email) {
 			continue
 		}
+		if mode != "saved_result" && adobeRegistrationRecoveryMode(other) == "result_uncertain" {
+			return fail("task", "registration_result_uncertain")
+		}
+		if mode == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
+			return fail("task", "registration_result_uncertain")
+		}
+		if i != index && (other.Verified || other.Imported || len(other.Account) > 0) {
+			// Saved-result children legitimately keep the parent's same account.
+			if mode != "saved_result" || mailboxClaimJobID(other) != mailboxClaimJobID(parent) {
+				return fail("task", "mailbox_already_has_saved_account")
+			}
+		}
 		if other.ProxyBinding != nil && now.Before(other.ProxyBinding.BlockedUntil) {
 			return fail("proxy", "registration_cooldown")
 		}
@@ -469,15 +523,6 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 			if due, err := time.Parse(time.RFC3339Nano, other.AutoRetry.NotBeforeAt); err == nil && now.Before(due) {
 				return fail("task", "mailbox_registration_cooldown")
 			}
-		}
-		if i == index || other.RetryJobID != "" {
-			continue
-		}
-		if other.Verified || other.Imported || len(other.Account) > 0 {
-			return fail("task", "mailbox_already_has_saved_account")
-		}
-		if adobeRegistrationRecoveryMode(parent) == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
-			return fail("task", "mailbox_registration_requires_resume")
 		}
 	}
 	attempts := e.adobeMailboxAttemptsLocked(parent.Mailbox.Email)
@@ -488,24 +533,32 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 		return fail("task", "invalid_retry_state")
 	}
 	ensureAdobeRegistrationState(&parent)
-	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
-		return fail("task", "random_failed")
+	var job RegistrationJob
+	if mode == "retry_registration" {
+		var err error
+		job, err = newRegistrationAttempt(parent, now)
+		if err != nil {
+			return err
+		}
+		job.AdobeRegistration = &AdobeRegistrationState{BrowserProfileID: job.ID, CreationOutcome: "not_submitted"}
+	} else {
+		raw := make([]byte, 16)
+		if _, err := rand.Read(raw); err != nil {
+			return fail("task", "random_failed")
+		}
+		job = cloneJob(parent)
+		job.ID, job.ParentJobID, job.RootJobID, job.RetryJobID = hex.EncodeToString(raw), parent.ID, mailboxClaimJobID(parent), ""
+		job.Status, job.Stage, job.Error = "running", "compensation", ""
+		job.CreatedAt, job.UpdatedAt = now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)
+		job.Logs = []JobLog{}
 	}
-	job := cloneJob(parent)
-	job.ID, job.ParentJobID, job.RootJobID, job.RetryJobID = hex.EncodeToString(raw), parent.ID, mailboxClaimJobID(parent), ""
-	job.Status, job.Stage, job.Error = "running", "compensation", ""
-	job.CreatedAt, job.UpdatedAt = now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)
-	job.Logs = []JobLog{}
-	ensureAdobeRegistrationState(&job)
-	job.AdobeRegistration.BrowserProfileID = adobeBrowserProfileID(parent)
-	if adobeRegistrationRecoveryMode(parent) != "saved_result" {
+	if mode != "saved_result" {
 		job.MailboxAPIBase = cfg.HME.BaseURL
 	}
 	if job.AutoRetry == nil {
 		job.AutoRetry = &RegistrationCompensation{}
 	}
-	action, detail := "manual_compensation", "复用原邮箱与原环境，开始恢复 Adobe 账号"
+	action, detail := "manual_compensation", "复用原邮箱，开始 Adobe 补偿任务"
 	job.AutoRetry.State, job.AutoRetry.Reason = "manual_running", ""
 	job.AutoRetry.NextAttemptAt = ""
 	if automatic {
@@ -513,7 +566,7 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 		job.AutoRetry.State, job.AutoRetry.LastAttemptAt = "running", job.CreatedAt
 		delay := compensationDelays[min(attempts+1, len(compensationDelays)-1)]
 		job.AutoRetry.NextAttemptAt = now.Add(cfg.Timeout + delay).UTC().Format(time.RFC3339Nano)
-		action, detail = "automatic_compensation", fmt.Sprintf("复用原邮箱与原环境，开始第 %d/%d 次 Adobe 自动恢复", attempts+1, len(compensationDelays))
+		action, detail = "automatic_compensation", fmt.Sprintf("复用原邮箱，开始第 %d/%d 次 Adobe 自动补偿", attempts+1, len(compensationDelays))
 	}
 	appendRegistrationLogAt(&job, job.CreatedAt, action, detail+"；恢复方式 "+adobeRegistrationRecoveryMode(job)+"；原任务 "+parent.ID, "info")
 	before := append([]RegistrationJob(nil), e.jobs...)

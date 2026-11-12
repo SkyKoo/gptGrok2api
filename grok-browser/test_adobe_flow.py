@@ -1,10 +1,129 @@
 import asyncio
+import json
 import unittest
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, ANY
 from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError, BrowserStartupCleanupPending
-from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe
+from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe, creation_result
+
+
+def startup_event(sequence, **changes):
+    return {"sequence":sequence, "stage":"starting_browser", "status":"started",
+        "elapsed_ms":0, "duration_ms":0, **changes}
+
+
+class RPCProcess:
+    returncode = None
+
+    def __init__(self, frames, *, delay=0):
+        self.stdin = self.stdout = self
+        self.frames = iter(frames)
+        self.delay = delay
+        self.writes = 0
+
+    def write(self, raw):
+        self.request = json.loads(raw)
+        self.writes += 1
+
+    async def drain(self):
+        pass
+
+    async def readline(self):
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return json.dumps({"id":self.request["id"], **next(self.frames)}).encode()+b"\n"
+
 
 class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_init_streams_fixed_progress_and_keeps_one_final_response(self):
+        frames = [
+            {"event":"startup_progress", "progress":startup_event(1, private="PRIVATE")},
+            {"event":"startup_progress", "progress":startup_event(1)},
+            {"event":"startup_progress", "progress":startup_event(2, stage="PRIVATE")},
+            {"event":"startup_progress", "progress":startup_event(2, duration_ms=True)},
+            {"event":"startup_progress", "progress":startup_event(2, elapsed_ms=150001)},
+            {"event":"startup_progress", "progress":startup_event(2, status="completed", elapsed_ms=12, duration_ms=12)},
+            {"event":"startup_progress", "progress":startup_event(3, stage="adobe_loading_account_page")},
+            {"event":"startup_progress", "progress":startup_event(4, stage="adobe_loading_account_page", status="failed", exception_type="timeout")},
+            {"ok":True, "result":{"stage":"ready"}},
+        ]
+        process = RPCProcess(frames)
+        events = []
+        handle = AdobeProcess(process)
+        result = await handle.command({"action":"init"}, startup_progress=events.append)
+        self.assertEqual(result, {"stage":"ready"})
+        self.assertEqual([event["sequence"] for event in events], [1,2,3,4])
+        self.assertEqual(events[-1]["exception_type"], "timeout")
+        self.assertNotIn("PRIVATE", str(events))
+        self.assertEqual(process.writes, 1)
+        self.assertFalse(handle.tainted)
+
+    async def test_progress_is_optional_and_final_error_is_preserved(self):
+        process = RPCProcess([
+            {"event":"startup_progress", "progress":startup_event(1)},
+            {"ok":False, "code":"browser_launch_timeout", "creation_outcome":"not_submitted"},
+        ])
+        result = await AdobeProcess(process).command({"action":"init"})
+        self.assertEqual(result, {"stage":"needs_manual", "code":"browser_launch_timeout", "creation_outcome":"not_submitted"})
+        self.assertEqual(process.writes, 1)
+
+    async def test_progress_identity_and_action_are_checked_before_callback(self):
+        for action, frame in (
+            ("init", {"id":"wrong", "event":"startup_progress", "progress":startup_event(1)}),
+            ("run", {"event":"startup_progress", "progress":startup_event(1)}),
+            ("init", {"event":"PRIVATE", "progress":startup_event(1)}),
+        ):
+            with self.subTest(action=action, frame=frame):
+                process = RPCProcess([frame])
+                handle, events = AdobeProcess(process), []
+                with self.assertRaises(RuntimeError):
+                    await handle.command({"action":action}, startup_progress=events.append)
+                self.assertTrue(handle.tainted)
+                self.assertEqual(events, [])
+
+    async def test_progress_does_not_restart_command_deadline(self):
+        real_timeout = asyncio.timeout
+        frames = [{"event":"startup_progress", "progress":startup_event(index)} for index in range(1, 20)]
+        process = RPCProcess(frames, delay=.025)
+        handle, events = AdobeProcess(process), []
+        with patch("adobe_flow.asyncio.timeout", side_effect=lambda _: real_timeout(.08)) as timeout:
+            with self.assertRaises(TimeoutError):
+                await handle.command({"action":"init"}, startup_progress=events.append)
+        timeout.assert_called_once_with(150)
+        self.assertGreater(len(events), 0)
+        self.assertLess(len(events), len(frames))
+        self.assertTrue(handle.tainted)
+        with self.assertRaises(RuntimeError):
+            await handle.command({"action":"init"})
+        self.assertEqual(process.writes, 1)
+
+    async def test_launcher_keeps_callback_out_of_rpc_payload(self):
+        handle = AsyncMock()
+        handle.command.return_value = {"stage":"ready"}
+        events = []
+        with patch("adobe_flow.asyncio.create_subprocess_exec", AsyncMock()), patch("adobe_flow.AdobeProcess", return_value=handle):
+            self.assertIs(await launch_adobe(profile_id="fixture", startup_progress=events.append), handle)
+        handle.command.assert_awaited_once_with({"action":"init", "profile_id":"fixture"}, startup_progress=events.append)
+
+    async def test_http_lost_reply_reports_unknown_creation_without_replaying(self):
+        import httpx
+        import server
+        command = AsyncMock(side_effect=RuntimeError("PRIVATE"))
+        with patch.object(server, "adobe_command", command), patch.object(server, "_auth_token", "fixture"):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://worker") as client:
+                response = await client.post("/v1/adobe/run", headers={"Authorization":"Bearer fixture"},
+                    json={"browser_lease":"a"*32,"action":"run"})
+        self.assertEqual(response.json(), {"stage":"outcome_unknown", "code":"adobe_worker_result_unknown",
+            "submission_started":True, "creation_outcome":"unknown"})
+        command.assert_awaited_once()
+
+    async def test_creation_result_fixed_projection_and_missing_fail_closed(self):
+        for outcome in ("not_submitted", "accepted", "unknown"):
+            self.assertEqual(creation_result({"creation_outcome":outcome, "creation_error_code":"PRIVATE"}), {"creation_outcome":outcome})
+        rejected = {"creation_outcome":"rejected", "creation_error_code":"captcha_required", "creation_http_status":400}
+        self.assertEqual(creation_result(rejected), rejected)
+        for bad in ({}, {"creation_outcome":[]}, {"creation_outcome":"rejected"}, {**rejected,"creation_http_status":True}, {**rejected,"creation_error_code":"PRIVATE"}):
+            self.assertEqual(creation_result(bad), {"creation_outcome":"unknown"})
+
     async def test_resume_action_uses_the_same_claimed_profile_process(self):
         from types import SimpleNamespace
         handle = AdobeProcess(None)
@@ -29,9 +148,13 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
                 async def drain(self): pass
                 async def readline(self):
                     return json.dumps({"id":self.request["id"], "ok":False,
-                        "code":"recovery_login_result_unknown", "submission_started":marker}).encode()+b"\n"
+                        "code":"recovery_login_result_unknown", "submission_started":marker,
+                        "creation_outcome":"rejected", "creation_error_code":"captcha_required", "creation_http_status":400}).encode()+b"\n"
             result = await AdobeProcess(Process()).command({"action":"resume"})
             self.assertEqual(result["code"], "recovery_login_result_unknown")
+            self.assertEqual(result["creation_outcome"], "rejected")
+            self.assertEqual(result["creation_error_code"], "captcha_required")
+            self.assertEqual(result["creation_http_status"], 400)
             if isinstance(marker, bool): self.assertIs(result["submission_started"], marker)
             else: self.assertNotIn("submission_started", result)
 
@@ -219,7 +342,8 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
                     if q.status(base["id"])["status"] == "ready": break
                     await asyncio.sleep(.01)
                 launcher.assert_awaited_once_with(profile_id="original-profile", email="fixture@example.test",
-                    profile=profile, proxy=base["proxy"], mode="resume", require_new=False, recovery_id="child-1", account_id="", password="")
+                    profile=profile, proxy=base["proxy"], mode="resume", require_new=False, recovery_id="child-1", account_id="", password="", startup_progress=ANY)
+                self.assertTrue(callable(launcher.await_args.kwargs["startup_progress"]))
                 await client.delete("/v1/browser/reservations/"+base["id"])
         await q.shutdown()
 

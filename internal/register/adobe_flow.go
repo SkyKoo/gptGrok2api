@@ -71,9 +71,9 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		profile["lastName"] = names[1]
 	}
 	var err error
-	// A new root must not inherit existing storage. Pre-submit compensation
-	// also uses registration mode, but must retain its original profile.
-	f.lease, err = browserqueue.Acquire(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id, "adobe_require_new": cfg.RecoveryMode == ""}, progress)
+	// Every registration attempt owns new storage; only an accepted creation
+	// continues the original profile and verification session.
+	f.lease, err = browserqueue.AcquireWithStartupProgress(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id, "adobe_require_new": mode == "registration"}, progress, cfg.startupProgress)
 	if err != nil {
 		var startup *browserqueue.StartupError
 		if errors.As(err, &startup) {
@@ -87,11 +87,36 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 	}
 	// The Node driver persists its own submission fence before clicking Create.
 	// Go retains ownership on any loss of contact from this point onwards.
-	result, err := f.command(ctx, cfg, action, "")
+	command := func(action, code string) (adobeBrowserResult, error) {
+		if cfg.creationProgress != nil {
+			// Persist uncertainty before sending, including after a prior explicit
+			// not_submitted response. A crash cannot leave false retry evidence.
+			if err := cfg.creationProgress(adobeCreationObservation{Outcome: "unknown"}, false); err != nil {
+				return adobeBrowserResult{}, err
+			}
+		}
+		result, err := f.command(ctx, cfg, action, code)
+		if err == nil {
+			if result.CreationOutcome == "not_submitted" && (result.SubmissionStarted || result.Diagnostics.SubmissionStarted) {
+				result.CreationOutcome = "unknown"
+			}
+			if result.Stage != "completed" && (result.Stage == "awaiting_verification" || result.Code == "verification_required") && result.CreationOutcome != "accepted" {
+				result.CreationOutcome = "unknown"
+			}
+			if cfg.creationProgress != nil {
+				err = cfg.creationProgress(adobeCreationObservation{Outcome: result.CreationOutcome, ErrorCode: result.CreationErrorCode, HTTPStatus: result.CreationHTTPStatus}, action == "run" && mode == "registration")
+			}
+		}
+		return result, err
+	}
+	result, err := command(action, "")
 	if err != nil {
 		return nil, err
 	}
 	if result.Stage != "completed" && (result.Code == "verification_required" || result.Stage == "awaiting_verification") {
+		if result.CreationOutcome != "accepted" {
+			return nil, fail("adobe", "creation_result_unknown")
+		}
 		if stage := adobeSubmissionProgressStage(result, cfg.RecoveryMode); stage != "" {
 			if err := progress(stage); err != nil {
 				return nil, err
@@ -108,7 +133,7 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		if err != nil {
 			return nil, err
 		}
-		result, err = f.command(ctx, cfg, "verify", code)
+		result, err = command("verify", code)
 		if err != nil {
 			return nil, err
 		}
@@ -131,6 +156,9 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 }
 
 type adobeBrowserResult struct {
+	CreationOutcome         string                       `json:"creation_outcome"`
+	CreationErrorCode       string                       `json:"creation_error_code"`
+	CreationHTTPStatus      int                          `json:"creation_http_status"`
 	VerificationRequestedAt string                       `json:"verification_requested_at"`
 	SubmissionStarted       bool                         `json:"submission_started"`
 	Diagnostics             adobeRegistrationDiagnostics `json:"diagnostics"`

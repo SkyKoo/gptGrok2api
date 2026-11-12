@@ -6,7 +6,7 @@ export type RegistrationCompensation = {
   last_attempt_at?: string
   reason?: string
 }
-export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'saved_result'
+export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'saved_result' | 'result_uncertain'
 type RegistrationRecoveryActions = {
   can_retry?: boolean
   can_retry_registration?: boolean
@@ -19,25 +19,29 @@ type RegistrationRecoveryActions = {
 export function registrationRecoveryAction(job: RegistrationRecoveryActions, target?: string): string {
   if (target !== 'adobe') return job.can_retry_registration ? '复用此邮箱重试注册' : ''
   if (job.can_retry || job.recovery_mode === 'saved_result') return ''
-  if (job.can_resume_registration) return '恢复注册'
-  return job.can_retry_registration ? '补偿注册' : ''
+  if (job.recovery_mode === 'resume_session' && job.can_resume_registration) return '继续验证'
+  return job.recovery_mode === 'retry_registration' && job.can_retry_registration ? '重新注册' : ''
 }
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 可恢复的临时失败最多自动补偿 3 次，沿用原邮箱和登录环境。创建结果未知时只恢复原会话，不再次创建账号；已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
+  if (target === 'adobe') return 'Adobe 可重试的注册失败最多自动补偿 3 次，复用原邮箱，在独立浏览器环境中重新注册；同一邮箱共用次数和冷却。已进入账号验证的任务继续验证，创建结果未知时暂停重试，已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'
 }
 
-export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string, recoveryMode?: RegistrationRecoveryMode): string {
+export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string, recoveryMode?: RegistrationRecoveryMode, jobStatus?: string): string {
+  if (target === 'adobe' && recoveryMode === 'result_uncertain') {
+    if (['running', 'queued', 'completed'].includes(jobStatus || '') || ['superseded', 'completed', 'saved_result'].includes(state?.state || '')) return ''
+    return '创建结果尚未确认，已暂停注册重试；原邮箱和任务记录保留，不会自动转入登录。'
+  }
   if (!state) return ''
   const attempts = `${state.attempts}/${state.max_attempts}`
   if (target === 'adobe') {
     if (recoveryMode === 'saved_result') return ''
     const resume = recoveryMode === 'resume_session'
-    const action = resume ? '恢复原注册会话' : '补偿注册'
-    const boundary = resume ? '仅继续原会话和结果检查，不再次创建账号。' : '沿用原邮箱和登录环境。'
+    const action = resume ? '继续账号验证' : '重新注册'
+    const boundary = resume ? '创建已获确认，继续原账号验证，不再次创建账号。' : '复用原邮箱，使用独立浏览器环境；同邮箱共用次数和冷却。'
     if (state.state === 'running') return `正在自动${action} · 第 ${attempts} 次 · ${boundary}`
     if (state.state === 'exhausted') return `自动补偿次数已达上限（${attempts}）。${boundary}可用操作以任务按钮为准。`
     if (state.state === 'waiting') {
@@ -49,8 +53,8 @@ export function registrationCompensationText(state: RegistrationCompensation | n
       return `等待自动${action} · 已尝试 ${attempts} · ${next}。${boundary}`
     }
     if (state.state === 'manual') {
-      if (state.reason === 'human_verification_required') return 'Adobe 安全验证尚未完成，自动处理已暂停；请核查验证组件和网络，恢复仍须通过 Adobe 校验。'
-      if (state.reason === 'registration_result_uncertain') return '创建结果尚未确认，保留原邮箱和会话；恢复仅检查原会话与账号结果，不会再次创建账号。'
+      if (state.reason === 'human_verification_required') return 'Adobe 安全验证尚未完成，自动处理已暂停；请核查验证组件和网络，后续仍须通过 Adobe 校验。'
+      if (state.reason === 'registration_result_uncertain') return '创建结果尚未确认，已暂停注册重试；原邮箱和任务记录保留，不会自动转入登录。'
       if (state.reason === 'cancelled') return '自动补偿已停止，原任务记录保留；可用操作以任务按钮为准。'
       if (state.reason === 'failure_requires_review') return '当前错误不支持自动补偿，原任务记录保留；请查看具体失败原因和可用操作。'
     }
@@ -87,13 +91,14 @@ export function registrationCompensationText(state: RegistrationCompensation | n
 
 export function registrationJobStatusText(status: string, state?: RegistrationCompensation | null, retryJobId?: string, target?: string, recoveryMode?: RegistrationRecoveryMode): string {
   if (retryJobId) return '已创建补偿任务，原记录已保留'
+  if (target === 'adobe' && recoveryMode === 'result_uncertain' && ['registration_pending', 'failed', 'cancelled', 'interrupted'].includes(status)) return '创建结果待核对，注册重试已暂停'
   if (status === 'registration_pending' && target === 'adobe') {
-    const action = recoveryMode === 'resume_session' ? '恢复原会话' : '补偿'
+    const action = recoveryMode === 'resume_session' ? '继续验证' : '重新注册'
     if (state?.state === 'waiting') return `注册尚未完成，等待自动${action}`
     if (state?.state === 'running') return `正在自动${action}`
     if (state?.state === 'exhausted') return '注册尚未完成，自动补偿次数已用完'
     if (state?.reason === 'human_verification_required') return '注册尚未完成，需通过安全验证'
-    if (recoveryMode === 'resume_session') return '创建结果尚未确认，原会话保留'
+    if (recoveryMode === 'resume_session') return '账号待验证，原会话保留'
     return '注册尚未完成'
   }
   if (status === 'registration_pending' && target === 'grok') {

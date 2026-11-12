@@ -78,7 +78,7 @@ func TestAdobeRegistrationReceivesCodeThroughSharedHME(t *testing.T) {
 					switch body["action"] {
 					case "run":
 						submissions.Add(1)
-						_, _ = w.Write([]byte(`{"stage":"awaiting_verification","code":"verification_required"}`))
+						_, _ = w.Write([]byte(`{"stage":"awaiting_verification","code":"verification_required","creation_outcome":"accepted"}`))
 					case "verify":
 						verifications.Add(1)
 						if body["code"] != "246810" {

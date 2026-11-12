@@ -1,4 +1,5 @@
 import { formFailureDiagnostics } from './browser.mjs';
+import { STARTUP_STAGES, STARTUP_LIMIT_MS } from './startup-progress.mjs';
 
 const SOURCES = new Set(['visible_challenge_frame', 'visible_instruction', 'upstream_captcha_response']);
 const INSTRUCTIONS = new Set(['start_puzzle', 'complete_puzzle', 'prove_human', 'not_robot', 'identity_instruction']);
@@ -29,7 +30,7 @@ const FORM_ERRORS = new Set(['account_not_found', 'invalid_email', 'invalid_pass
 const INVALID_FIELDS = new Set(['email', 'password', 'verification_code', 'profile', 'other']);
 const FAILURE_ACTIONS = new Set(['inspect_form', 'open_login', 'click_login_entry', 'fill_email',
   'fill_password', 'submit_email', 'submit_password', 'wait_login_result', 'request_code',
-  'verify_code', 'export_session', 'open_firefly']);
+  'verify_code', 'export_session', 'open_firefly', ...STARTUP_STAGES]);
 const FAILURE_PHASES = new Set(['before_submission', 'submission_started']);
 const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_closed', 'unknown']);
 
@@ -48,7 +49,11 @@ function failureDiagnostics(result) {
     ...(result.code === 'form_rejected' && invalid.length ? { invalid_fields: invalid } : {}),
     ...(FAILURE_ACTIONS.has(source.failure_action) ? { failure_action: source.failure_action } : {}),
     ...(FAILURE_PHASES.has(source.failure_phase) ? { failure_phase: source.failure_phase } : {}),
-    ...(EXCEPTION_TYPES.has(source.exception_type) ? { exception_type: source.exception_type } : {}) };
+    ...(EXCEPTION_TYPES.has(source.exception_type) ? { exception_type: source.exception_type } : {}),
+    ...(STARTUP_STAGES.has(source.failure_action) && Number.isSafeInteger(source.elapsed_ms) && source.elapsed_ms >= 0 && source.elapsed_ms <= STARTUP_LIMIT_MS
+      ? { elapsed_ms: source.elapsed_ms } : {}),
+    ...(STARTUP_STAGES.has(source.failure_action) && Number.isSafeInteger(source.duration_ms) && source.duration_ms >= 0 && source.duration_ms <= STARTUP_LIMIT_MS
+      ? { duration_ms: source.duration_ms } : {}) };
 }
 
 function timestamp(value) {

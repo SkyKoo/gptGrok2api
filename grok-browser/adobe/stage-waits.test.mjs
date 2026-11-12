@@ -472,6 +472,17 @@ function observedBrowserFixture() {
   return {browser,addRequest,setPhase:value=>{phase=value;},setChallenge:value=>{challenge=value;}};
 }
 
+test('only visible OTP progress without a visible challenge records creation acceptance',async()=>{
+  for(const kind of ['otp','challenge','firefly']){
+    const f=observedBrowserFixture();let accepted=0;
+    f.browser.creationTracker={accepted:async()=>{accepted++;}};
+    if(kind==='challenge')f.setChallenge(true);
+    if(kind==='firefly')f.setPhase('firefly');
+    await f.browser.status();await f.browser.status();
+    assert.equal(accepted,kind==='otp'?1:0);
+  }
+});
+
 test('real form/status keep an old captcha superseded through OTP to Firefly on the same page, but a new event blocks', async () => {
   const f=observedBrowserFixture();
   f.addRequest();

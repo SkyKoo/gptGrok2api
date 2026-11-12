@@ -62,6 +62,29 @@ test('captured rejection evidence is not combined with unrelated later form fiel
   assert.equal(success.form_error,undefined);assert.equal(success.failure_action,undefined);
 });
 
+test('startup diagnostics retain exact fixed actions and bounded zero-inclusive step timing', () => {
+  for (const action of ['starting_browser', 'adobe_loading_account_page', 'adobe_waiting_create_entry',
+    'adobe_reloading_account_page', 'adobe_opening_registration', 'adobe_waiting_registration_form', 'adobe_checking_registration_form']) {
+    const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
+      failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout',
+      elapsed_ms: 150_000, duration_ms: 0, message: 'PRIVATE', url: 'PRIVATE',
+    } }, { submission: { started: false } });
+    assert.deepEqual(result, { submission_started: false, human_verification_required: false,
+      failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout', elapsed_ms: 150_000, duration_ms: 0 });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE|message|url/);
+  }
+  for (const value of [-1, 150_001, NaN, Infinity, '100', 1.5]) {
+    const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
+      failure_action: 'adobe_waiting_create_entry', elapsed_ms: value, duration_ms: value,
+    } }, null);
+    assert.equal(result.elapsed_ms, undefined); assert.equal(result.duration_ms, undefined);
+  }
+  const other = registrationDiagnostics({ code: 'form_rejected', failureDiagnostics: {
+    failure_action: 'submit_email', elapsed_ms: 100, duration_ms: 100,
+  } }, null);
+  assert.equal(other.elapsed_ms, undefined); assert.equal(other.duration_ms, undefined);
+});
+
 const start = Date.parse('2026-11-12T05:27:00Z');
 const safeEvent = (patch = {}) => ({path:'https://arks-client.adobe.com/fc/gt2/public_key/:key',
   method:'POST',time:'2026-11-12T05:27:00.000Z', observedAt:'2026-11-12T05:27:02.000Z',

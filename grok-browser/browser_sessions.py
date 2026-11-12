@@ -15,6 +15,34 @@ from typing import Any
 log = logging.getLogger("grok-browser.queue")
 
 
+STARTUP_PROGRESS_LIMIT = 32
+STARTUP_PROGRESS_STAGES = frozenset({
+    "starting_browser", "adobe_loading_account_page", "adobe_waiting_create_entry",
+    "adobe_reloading_account_page", "adobe_opening_registration",
+    "adobe_waiting_registration_form", "adobe_checking_registration_form",
+})
+STARTUP_EXCEPTION_TYPES = frozenset({"registration", "timeout", "navigation", "page_closed", "unknown"})
+
+
+def startup_progress_event(value):
+    """只投影固定步骤和有界耗时，不将 RPC 原文带入公开队列状态。"""
+    if not isinstance(value, dict):
+        return None
+    if not isinstance(value.get("stage"), str) or value["stage"] not in STARTUP_PROGRESS_STAGES:
+        return None
+    if not isinstance(value.get("status"), str) or value["status"] not in {"started", "completed", "failed"}:
+        return None
+    if type(value.get("sequence")) is not int or not 1 <= value["sequence"] <= STARTUP_PROGRESS_LIMIT:
+        return None
+    if any(type(value.get(key)) is not int or not 0 <= value[key] <= 150000 for key in ("elapsed_ms", "duration_ms")):
+        return None
+    result = {key: value[key] for key in ("sequence", "stage", "status", "elapsed_ms", "duration_ms")}
+    exception = value.get("exception_type")
+    if isinstance(exception, str) and exception in STARTUP_EXCEPTION_TYPES:
+        result["exception_type"] = exception
+    return result
+
+
 class BrowserQueueError(RuntimeError):
     pass
 
@@ -59,6 +87,8 @@ class Entry:
     retry_at: float = 0
     error: str = ""
     diagnostic_code: str = ""
+    report_startup: bool = False
+    startup_events: list = field(default_factory=list)
 
 
 class ManagedBrowser:
@@ -92,7 +122,7 @@ class BrowserQueue:
         if self.runner is None or self.runner.done():
             self.runner = asyncio.create_task(self._run())
 
-    def enqueue(self, key, options, launcher):
+    def enqueue(self, key, options, launcher, *, startup_progress=False):
         if self.stopping:
             raise BrowserQueueError("browser_worker_stopping")
         existing = self.entries.get(key)
@@ -101,7 +131,7 @@ class BrowserQueue:
             return self.status(key)
         if len(self.entries) >= 128:
             raise BrowserQueueError("browser_queue_full")
-        self.entries[key] = Entry(key, dict(options), launcher)
+        self.entries[key] = Entry(key, dict(options), launcher, report_startup=startup_progress)
         self.start()
         return self.status(key)
 
@@ -114,6 +144,7 @@ class BrowserQueue:
         state = "closing" if entry.closing else entry.state
         return {"id": key, "status": state, "code": entry.error,
                 "message": "等待浏览器会话释放" if state == "waiting_browser" else "",
+                **({"startup_events": [dict(event) for event in entry.startup_events]} if entry.startup_events else {}),
                 **({"diagnostic_code": entry.diagnostic_code} if entry.diagnostic_code else {})}
 
     def claim(self, key):
@@ -131,7 +162,24 @@ class BrowserQueue:
 
     async def _launch(self, entry):
         try:
-            entry.browser = await entry.launcher(**entry.options)
+            options = dict(entry.options)
+            if entry.report_startup:
+                # Only explicitly opted-in launchers receive this Python callback.
+                # Local init sequences restart on a pre-launch license retry;
+                # preserve their observations with reservation-wide sequences.
+                previous_sequence = 0
+
+                def record_progress(value):
+                    nonlocal previous_sequence
+                    event = startup_progress_event(value)
+                    if event is None or event["sequence"] <= previous_sequence or len(entry.startup_events) >= STARTUP_PROGRESS_LIMIT:
+                        return
+                    previous_sequence = event["sequence"]
+                    event["sequence"] = len(entry.startup_events) + 1
+                    entry.startup_events.append(event)
+
+                options["startup_progress"] = record_progress
+            entry.browser = await entry.launcher(**options)
             entry.state = "ready"
             entry.touched = time.monotonic()
         except BrowserStartupCleanupPending as exc:
