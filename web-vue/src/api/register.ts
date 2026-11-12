@@ -233,7 +233,7 @@ export type LegacyRegisterConfig = {
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
   openai_free: { timeout_seconds: number; auto_twofa?: boolean }
-  jobs?: Array<{ id: string; parent_job_id?: string; root_job_id?: string; retry_job_id?: string; status: string; stage: string; error?: string; review_hint?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_resume_registration?: boolean; recovery_mode?: RegistrationRecoveryMode; creation_outcome?: 'not_submitted' | 'rejected' | 'accepted' | 'unknown'; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; twofa?: { status: string; stage: string; message: string; error?: string; pending: boolean } | null; auto_retry?: RegistrationCompensation | null }>
+  jobs?: Array<{ id: string; parent_job_id?: string; root_job_id?: string; retry_job_id?: string; status: string; stage: string; error?: string; review_hint?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_resume_registration?: boolean; can_reregister?: boolean; reregister_not_before?: string; recovery_mode?: RegistrationRecoveryMode; creation_outcome?: 'not_submitted' | 'rejected' | 'accepted' | 'unknown'; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; twofa?: { status: string; stage: string; message: string; error?: string; pending: boolean } | null; auto_retry?: RegistrationCompensation | null }>
   jobs_total?: number
   jobs_page?: number
   jobs_page_size?: number
@@ -350,6 +350,9 @@ export const registerApi = {
   },
   retryAdobeRegistration(id: string) {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/adobe/retry-registration', { id })
+  },
+  reregisterAdobe(id: string) {
+    return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/adobe/reregister', { id })
   },
   getFreeJobs(page: number) {
     return apiClient.get<any, RegistrationHistoryPage>('/api/register/openai/jobs', { params: { page } })

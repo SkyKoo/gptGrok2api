@@ -50,6 +50,13 @@ func (p *hmeMailboxProvider) WaitCode(ctx context.Context, box mailboxstore.Mail
 	return p.client.WaitCodeFor(ctx, registerMailbox(box), after, matcher)
 }
 
+func (p *hmeMailboxProvider) WaitCodeForPlatform(ctx context.Context, box mailboxstore.Mailbox, after time.Time, platform string, matcher func(string) bool) (string, error) {
+	if platform == "adobe" {
+		return p.client.WaitAdobeCode(ctx, registerMailbox(box), after)
+	}
+	return p.WaitCode(ctx, box, after, matcher)
+}
+
 func (p *hmeMailboxProvider) Delete(ctx context.Context, box mailboxstore.Mailbox) error {
 	err := p.client.DeleteMailbox(ctx, registerMailbox(box))
 	if isHMEErrorCode(err, "mailbox_not_found") {
@@ -137,6 +144,10 @@ func (s *mailboxResourceSource) WaitCode(ctx context.Context, box registerruntim
 
 func (s *mailboxResourceSource) WaitCodeFor(ctx context.Context, box registerruntime.Mailbox, after time.Time, matcher func(string) bool) (string, error) {
 	return s.session.WaitCode(ctx, mailboxFromRegister(box), after, matcher)
+}
+
+func (s *mailboxResourceSource) WaitAdobeCode(ctx context.Context, box registerruntime.Mailbox, after time.Time) (string, error) {
+	return s.session.WaitCodeForPlatform(ctx, mailboxFromRegister(box), after, "adobe", registerruntime.IsAdobeVerificationSender)
 }
 
 func (s *mailboxResourceSource) Commit(ctx context.Context, accountID string, box registerruntime.Mailbox) error {

@@ -44,7 +44,7 @@ func (e StartupEvent) Valid() bool {
 		return false
 	}
 	switch e.Stage {
-	case "starting_browser", "adobe_loading_account_page", "adobe_waiting_create_entry", "adobe_reloading_account_page", "adobe_opening_registration", "adobe_waiting_registration_form", "adobe_checking_registration_form":
+	case "starting_browser", "adobe_loading_account_page", "adobe_waiting_create_entry", "adobe_reloading_account_page", "adobe_opening_registration", "adobe_waiting_registration_form", "adobe_checking_registration_form", "adobe_restoring_registration_page":
 	default:
 		return false
 	}
@@ -67,7 +67,7 @@ func (*StartupError) Error() string { return "browser_start_failed" }
 
 func startupFailure(code string) error {
 	switch code {
-	case "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "run_already_exists", "browser_profile_missing", "browser_profile_unavailable":
+	case "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "run_already_exists", "browser_profile_missing", "browser_profile_unavailable", "recovery_page_observation_timeout", "recovery_page_observation_failed", "recovery_page_closed", "recovery_page_untrusted":
 		return &StartupError{Code: code}
 	default:
 		return errors.New("browser_start_failed")

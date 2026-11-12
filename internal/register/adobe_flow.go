@@ -31,9 +31,28 @@ func (f *AdobeBrowserFlow) Close() {
 	}
 }
 
-// HME preserves some original senders in its iCloud forwarding address. Keep
-// the encoded Adobe domain anchored before the opaque suffix, not a substring.
-var adobeHMESender = regexp.MustCompile(`^(?:account[-_]?)?noreply_at_(?:[a-z0-9]+_)*adobe_com_[a-z0-9-]+$`)
+// Support the observed iCloud 14+8 opaque suffix as well as the legacy suffix.
+// Arbitrary underscore segments can encode a domain after adobe.com; do not
+// accept those as opaque data or trust the message's display name instead.
+var adobeHMESender = regexp.MustCompile(`^(?:account[-_]?)?noreply_at_(?:[a-z0-9]+_)*adobe_com_(?:[a-z0-9-]+|[a-z0-9]{14}_[a-z0-9]{8})$`)
+
+// Adobe messages may also contain unrelated six-digit footer numbers. Select
+// an explicitly labelled code; conflicting labelled codes remain ambiguous.
+var adobeLabeledCode = regexp.MustCompile(`(?i)\b(?:verification|security) code(?: is)?[\s:：]*([0-9]{6})(?:$|[^0-9])`)
+
+func adobeMailCode(text string) string {
+	matches := adobeLabeledCode.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return mailCode(text)
+	}
+	code := matches[0][1]
+	for _, match := range matches[1:] {
+		if match[1] != code {
+			return ""
+		}
+	}
+	return code
+}
 
 func isAdobeSender(sender string) bool {
 	addr, err := mail.ParseAddress(sender)

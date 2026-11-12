@@ -18,7 +18,7 @@ import (
 // Exercise the real engine -> resource manager -> HME adapter -> browser-code
 // callback, with only the external HME and browser endpoints replaced locally.
 func TestAdobeRegistrationReceivesCodeThroughSharedHME(t *testing.T) {
-	for _, sender := range []string{"Adobe <account-noreply@adobe.com>", "Adobe <account-noreply_at_adobe_com_opaque123@icloud.com>"} {
+	for _, sender := range []string{"Adobe <account-noreply@adobe.com>", "Adobe <account-noreply_at_adobe_com_opaque123@icloud.com>", "Adobe <noreply_at_adobe_com_a1b2c3d4e5f6g7_h8i9j0k1@icloud.com>"} {
 		t.Run(sender, func(t *testing.T) {
 			var aliases, inboxes, details, submissions, verifications, releases, imports atomic.Int32
 			const email = "adobe-fixture@icloud.com"
@@ -53,7 +53,7 @@ func TestAdobeRegistrationReceivesCodeThroughSharedHME(t *testing.T) {
 					}})
 				case "/api/inbox/adobe":
 					details.Add(1)
-					respond(map[string]string{"from": sender, "to": email, "date": time.Now().Add(time.Second).UTC().Format(time.RFC3339), "body": "Your Adobe verification code is 246810."})
+					respond(map[string]string{"from": sender, "to": email, "date": time.Now().Add(time.Second).UTC().Format(time.RFC3339), "body": "Your Adobe verification code is 246810. Reference 654321."})
 				default:
 					t.Errorf("unexpected HME path %s", r.URL.Path)
 					http.NotFound(w, r)

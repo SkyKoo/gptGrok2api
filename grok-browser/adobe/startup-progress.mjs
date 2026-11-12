@@ -4,6 +4,7 @@ export const STARTUP_STAGES = new Set([
   'starting_browser', 'adobe_loading_account_page', 'adobe_waiting_create_entry',
   'adobe_reloading_account_page', 'adobe_opening_registration',
   'adobe_waiting_registration_form', 'adobe_checking_registration_form',
+  'adobe_restoring_registration_page',
 ]);
 export const STARTUP_LIMIT_MS = 150_000;
 
@@ -11,7 +12,7 @@ export const STARTUP_LIMIT_MS = 150_000;
 // launch arguments are retained in progress frames or the private journal.
 export function startupExceptionType(error) {
   const message = typeof error?.message === 'string' ? error.message : '';
-  if (error?.name === 'TimeoutError' || ['browser_launch_timeout', 'stage_transition_timeout'].includes(error?.code) || /Timeout \d+ms exceeded/i.test(message)) return 'timeout';
+  if (error?.name === 'TimeoutError' || ['browser_launch_timeout', 'stage_transition_timeout', 'recovery_page_observation_timeout'].includes(error?.code) || /Timeout \d+ms exceeded/i.test(message)) return 'timeout';
   if (/Target page, context or browser has been closed|page has been closed|Browser closed/i.test(message)) return 'page_closed';
   if (/Execution context was destroyed|Frame was detached|Cannot find context with specified id|navigation.*(?:aborted|interrupted)/i.test(message)) return 'navigation';
   return typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(error.code) ? 'registration' : 'unknown';

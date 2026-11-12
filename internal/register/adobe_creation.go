@@ -66,12 +66,16 @@ func (e *AdobeEngine) adobeMailboxCreationBlocked(job RegistrationJob) bool {
 	if mode == "saved_result" {
 		return false
 	}
+	priorUnknownAncestors := e.adobeAcceptedReregistrationAncestors(job)
 	for _, other := range e.jobs {
 		if grokMailboxKey(other.Mailbox.Email) != grokMailboxKey(job.Mailbox.Email) {
 			continue
 		}
 		otherMode := adobeRegistrationRecoveryMode(other)
-		if otherMode == "result_uncertain" || mode == "retry_registration" && otherMode == "resume_session" {
+		if otherMode == "result_uncertain" && !priorUnknownAncestors[other.ID] || mode == "retry_registration" && otherMode == "resume_session" {
+			return true
+		}
+		if other.ID != job.ID && (other.Status == "running" || other.Status == "queued") {
 			return true
 		}
 	}

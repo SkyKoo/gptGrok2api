@@ -358,8 +358,8 @@ test('an already submitted recovery OTP returns unknown instead of prompting ano
 });
 
 test('resume-only browser startup never enters the account-creation link even without restored pages',async t=>{
-  const f=await fixture(t);const calls=[];
-  const page={url:()=> 'about:blank',goto:async url=>calls.push(url),getByRole:()=>assert.fail('No Create account entry')};
+  const f=await fixture(t);const calls=[];let currentURL='about:blank';
+  const page={url:()=>currentURL,goto:async url=>{calls.push(url);currentURL=url;},getByRole:()=>assert.fail('No Create account entry')};
   const browser=new BrowserRegistration(f.store,{}, {launchBrowser:async()=>({pages:()=>[page]})});
   browser.status=async()=>({stage:'outcome_unknown'});
   await browser.open({resumeOnly:true});

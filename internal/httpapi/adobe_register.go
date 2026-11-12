@@ -34,19 +34,43 @@ func (s *Server) initAdobeRegistration() {
 		return mail, &registerruntime.AdobeBrowserFlow{Client: &http.Client{Timeout: cfg.RequestTimeout, Transport: &http.Transport{Proxy: nil}}}, nil
 	}
 	s.adobeRegister = registerruntime.NewAdobeEngine(filepath.Join(journalDir, "adobe_registration_tasks.enc.json"), firstNonEmpty(s.cfg.AdminKey, s.cfg.APIKey, "gptgrok2api"), factory, s.importRegisteredAdobeAccount, s.verifyRegisteredAdobeAccount)
+	s.adobeRegister.SetReregistrationAccountCheck(s.adobeReregistrationAccountExists)
 	s.adobeRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
 	s.adobeRegistrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "adobe_registration_schedule.json"))
 	_ = s.adobeRegistrationSchedule.BindTarget("adobe")
 }
+
+// Manually imported accounts may not yet have a mailbox asset association or
+// registration journal. Check the account store before starting a fresh signup.
+func (s *Server) adobeReregistrationAccountExists(email string) (bool, error) {
+	if s.adobeStore == nil {
+		return false, errors.New("adobe account store unavailable")
+	}
+	accounts, err := s.adobeStore.List()
+	if err != nil {
+		return false, err
+	}
+	for _, account := range accounts {
+		if strings.EqualFold(strings.TrimSpace(account.Email), strings.TrimSpace(email)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *Server) retryAdobeRegistration(w http.ResponseWriter, r *http.Request) {
-	s.retryAdobeRegistrationAction(w, r, true)
+	s.retryAdobeRegistrationAction(w, r, "saved_result")
 }
 
 func (s *Server) retryAdobeRegistrationTask(w http.ResponseWriter, r *http.Request) {
-	s.retryAdobeRegistrationAction(w, r, false)
+	s.retryAdobeRegistrationAction(w, r, "retry_registration")
 }
 
-func (s *Server) retryAdobeRegistrationAction(w http.ResponseWriter, r *http.Request, savedResultOnly bool) {
+func (s *Server) reregisterAdobeRegistrationTask(w http.ResponseWriter, r *http.Request) {
+	s.retryAdobeRegistrationAction(w, r, "reregister")
+}
+
+func (s *Server) retryAdobeRegistrationAction(w http.ResponseWriter, r *http.Request, action string) {
 	s.registrationMu.Lock()
 	defer s.registrationMu.Unlock()
 	if s.registrationClosing {
@@ -65,10 +89,16 @@ func (s *Server) retryAdobeRegistrationAction(w http.ResponseWriter, r *http.Req
 	}
 	config := s.registerStore.ConfigForTarget("adobe")
 	var err error
-	if savedResultOnly {
+	switch action {
+	case "saved_result":
 		err = s.adobeRegister.RetrySavedResultWithConfig(config, body.ID)
-	} else {
+	case "retry_registration":
 		err = s.adobeRegister.RetryRegistration(config, body.ID)
+	case "reregister":
+		err = s.adobeRegister.Reregister(config, body.ID)
+	default:
+		writeError(w, http.StatusBadRequest, "无效的注册操作", "invalid_request_error")
+		return
 	}
 	if err != nil {
 		registrationError(w, err)

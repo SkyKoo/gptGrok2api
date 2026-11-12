@@ -199,6 +199,20 @@ func (c *CoordinatedMailSource) WaitCodeFor(ctx context.Context, box Mailbox, af
 	return c.source.WaitCode(ctx, box, after)
 }
 
+func (c *CoordinatedMailSource) WaitAdobeCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
+	if source, ok := c.source.(interface {
+		WaitAdobeCode(context.Context, Mailbox, time.Time) (string, error)
+	}); ok {
+		return source.WaitAdobeCode(ctx, box, after)
+	}
+	if source, ok := c.source.(interface {
+		WaitCodeFor(context.Context, Mailbox, time.Time, func(string) bool) (string, error)
+	}); ok {
+		return source.WaitCodeFor(ctx, box, after, isAdobeSender)
+	}
+	return "", fail("mail", "adobe_sender_filter_required")
+}
+
 func (c *CoordinatedMailSource) Close() { c.source.Close() }
 
 // HME talks to the deployed icloud-hme API, not the legacy Privacy Mail API.
@@ -491,6 +505,15 @@ func (h *HME) WaitCodeFor(ctx context.Context, box Mailbox, after time.Time, sen
 	if senderMatcher == nil {
 		senderMatcher = isOpenAISender
 	}
+	return h.waitCodeFor(ctx, box, after, senderMatcher, mailCode)
+}
+
+// WaitAdobeCode keeps Adobe's labelled-code parsing separate from GPT/Grok.
+func (h *HME) WaitAdobeCode(ctx context.Context, box Mailbox, after time.Time) (string, error) {
+	return h.waitCodeFor(ctx, box, after, isAdobeSender, adobeMailCode)
+}
+
+func (h *HME) waitCodeFor(ctx context.Context, box Mailbox, after time.Time, senderMatcher func(string) bool, extractCode func(string) string) (string, error) {
 	query := url.Values{"account_id": {box.AccountID}, "alias": {box.Email}, "folder": {"all"}, "limit": {"30"}, "days": {"1"}}
 	for {
 		var inbox struct {
@@ -523,10 +546,10 @@ func (h *HME) WaitCodeFor(ctx context.Context, box Mailbox, after time.Time, sen
 			if !suitableMessage(m, box, after, senderMatcher) {
 				continue
 			}
-			if code := mailCode(m.Subject); code != "" {
+			if code := extractCode(m.Subject); code != "" {
 				return consume(code), nil
 			}
-			if code := mailCode(m.Preview); code != "" {
+			if code := extractCode(m.Preview); code != "" {
 				return consume(code), nil
 			}
 			if m.ID == "" || (m.Folder != "inbox" && m.Folder != "junk") || (inbox.Method != "imap" && inbox.Method != "web_api") {
@@ -538,7 +561,7 @@ func (h *HME) WaitCodeFor(ctx context.Context, box Mailbox, after time.Time, sen
 				return "", err
 			}
 			if suitableMessage(full, box, after, senderMatcher) {
-				if code := mailCode(full.Body); code != "" {
+				if code := extractCode(full.Body); code != "" {
 					return consume(code), nil
 				}
 			}

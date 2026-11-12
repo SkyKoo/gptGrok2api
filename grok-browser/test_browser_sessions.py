@@ -64,6 +64,20 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status['startup_events'][-1]['exception_type'], 'timeout')
         launcher.assert_awaited_once()
 
+    async def test_restored_adobe_page_failure_preserves_stage_and_fixed_code(self):
+        async def launch(*, startup_progress):
+            startup_progress({"stage":"adobe_restoring_registration_page", "sequence":1,
+                "status":"failed", "elapsed_ms":15000, "duration_ms":15000, "exception_type":"timeout"})
+            raise BrowserStartupError('recovery_page_observation_timeout')
+        launcher = AsyncMock(side_effect=launch)
+        self.queue.enqueue('adobe', {}, launcher, startup_progress=True)
+        await asyncio.sleep(.1)
+        status = self.queue.status('adobe')
+        self.assertEqual(status['status'], 'failed')
+        self.assertEqual(status['diagnostic_code'], 'recovery_page_observation_timeout')
+        self.assertEqual(status['startup_events'][0]['stage'], 'adobe_restoring_registration_page')
+        launcher.assert_awaited_once()
+
     async def test_unopted_launcher_receives_original_signature_only(self):
         async def launch(*, proxy):
             self.assertEqual(proxy, 'PRIVATE')

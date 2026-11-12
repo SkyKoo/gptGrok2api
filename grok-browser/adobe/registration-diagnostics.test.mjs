@@ -128,7 +128,7 @@ test('field diagnostics bound input before filtering and retain no more than one
 
 test('startup diagnostics retain exact fixed actions and bounded zero-inclusive step timing', () => {
   for (const action of ['starting_browser', 'adobe_loading_account_page', 'adobe_waiting_create_entry',
-    'adobe_reloading_account_page', 'adobe_opening_registration', 'adobe_waiting_registration_form', 'adobe_checking_registration_form']) {
+    'adobe_reloading_account_page', 'adobe_opening_registration', 'adobe_waiting_registration_form', 'adobe_checking_registration_form', 'adobe_restoring_registration_page']) {
     const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
       failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout',
       elapsed_ms: 150_000, duration_ms: 0, message: 'PRIVATE', url: 'PRIVATE',

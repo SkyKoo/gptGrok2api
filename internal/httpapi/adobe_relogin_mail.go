@@ -98,7 +98,7 @@ func (s *Server) waitAdobeReloginEmailCode(ctx context.Context, account adobe.Ac
 	if err := mail.Prepare(waitCtx, box); err != nil {
 		return "", failure("email_verification_unavailable")
 	}
-	code, err := mail.WaitCodeFor(waitCtx, box, after, registerruntime.IsAdobeVerificationSender)
+	code, err := mail.WaitAdobeCode(waitCtx, box, after)
 	if err != nil {
 		return "", failure("email_verification_unavailable")
 	}

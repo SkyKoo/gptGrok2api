@@ -115,13 +115,14 @@ func adobeRegistrationStageText(stage string) string {
 
 func adobeStartupStageText(stage string) string {
 	return map[string]string{
-		"starting_browser":                 "启动浏览器",
-		"adobe_loading_account_page":       "加载 Adobe 账户页",
-		"adobe_waiting_create_entry":       "等待创建账户入口",
-		"adobe_reloading_account_page":     "重新加载 Adobe 账户页",
-		"adobe_opening_registration":       "打开 Adobe 注册页",
-		"adobe_waiting_registration_form":  "等待 Adobe 注册表单",
-		"adobe_checking_registration_form": "识别 Adobe 注册表单",
+		"starting_browser":                  "启动浏览器",
+		"adobe_loading_account_page":        "加载 Adobe 账户页",
+		"adobe_waiting_create_entry":        "等待创建账户入口",
+		"adobe_reloading_account_page":      "重新加载 Adobe 账户页",
+		"adobe_opening_registration":        "打开 Adobe 注册页",
+		"adobe_waiting_registration_form":   "等待 Adobe 注册表单",
+		"adobe_checking_registration_form":  "识别 Adobe 注册表单",
+		"adobe_restoring_registration_page": "恢复原 Adobe 注册页面",
 	}[stage]
 }
 

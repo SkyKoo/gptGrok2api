@@ -7,7 +7,7 @@ import path from 'node:path';
 import { isTrustedAdobeURL, RegistrationError } from './core.mjs';
 import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from './network-diagnostics.mjs';
 import { CreationTracker } from './creation-outcome.mjs';
-import { StartupProgress } from './startup-progress.mjs';
+import { StartupProgress, startupExceptionType } from './startup-progress.mjs';
 import { verificationObservation } from './verification-observation.mjs';
 import { KOREA_REQUIRED_GROUP, KOREA_REQUIRED_CONSENTS, regionalConsentPlan, regionalConsentPreflight } from './regional-consent.mjs';
 import { registrationButtonAction, registrationLinkAction, isRegistrationButton,
@@ -282,7 +282,7 @@ export class BrowserRegistration {
       const restored = this.context.pages().filter(p => isTrustedAdobeURL(p.url()));
       if (restored.length) {
         this.page = restored.at(-1);
-        return this.status();
+        return this.observeRestoredPage(state);
       }
     }
     try {
@@ -292,7 +292,7 @@ export class BrowserRegistration {
       catch { /* Preserve the navigation failure if diagnostic persistence fails. */ }
       throw error;
     }
-    if (resumeOnly || state.submission.started) return this.status();
+    if (resumeOnly || state.submission.started) return this.observeRestoredPage(state);
     const createLink = locateCreateAccountLink(this.page);
     try {
       try { await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000})); }
@@ -319,6 +319,47 @@ export class BrowserRegistration {
         startupFailure: this.startupProgress.failureDetails(error) });
     }
     return this.status();
+  }
+
+  /** 恢复标签仍可能导航；只重新读取，不刷新页面或重放任何注册动作。 */
+  async observeRestoredPage(state) {
+    const { timeoutMs = 15000, pollIntervalMs = 250, now = Date.now, pause = wait } = this.restorationWaitOptions || {};
+    try {
+      return await this.startupProgress.run('adobe_restoring_registration_page', async () => {
+        const deadline = now() + timeoutMs;
+        while (true) {
+          const remaining = deadline - now();
+          if (remaining <= 0) throw new RegistrationError('recovery_page_observation_timeout');
+          let timer;
+          try {
+            const result = await Promise.race([
+              this.status(),
+              new Promise((_, reject) => { timer = setTimeout(() => reject(new RegistrationError('recovery_page_observation_timeout')), remaining); }),
+            ]);
+            // 状态读取完成时也核对当前目的页，不能把跳出 Adobe 当作恢复成功。
+            if (!isTrustedAdobeURL(this.page.url())) throw new RegistrationError('untrusted_page');
+            return result;
+          } catch (error) {
+            const url = this.page.url();
+            const pendingDocument = error?.code === 'untrusted_page' &&
+              (url === 'about:blank' || isTrustedAdobeURL(url));
+            if (startupExceptionType(error) !== 'navigation' && !pendingDocument) throw error;
+          } finally { clearTimeout(timer); }
+          const remainingAfterRead = deadline - now();
+          if (remainingAfterRead <= 0) throw new RegistrationError('recovery_page_observation_timeout');
+          await pause(Math.min(pollIntervalMs, remainingAfterRead));
+        }
+      });
+    } catch (error) {
+      const details = { ...this.startupProgress.failureDetails(error),
+        failure_phase: state.submission.started ? 'submission_started' : 'before_submission' };
+      const code = error?.code === 'recovery_page_observation_timeout' ? error.code
+        : details.exception_type === 'page_closed' ? 'recovery_page_closed'
+        : error?.code === 'untrusted_page' ? 'recovery_page_untrusted' : 'recovery_page_observation_failed';
+      try { await this.store.save({ startupFailure: details }); }
+      catch { /* Retain the original fixed failure when diagnostics cannot be saved. */ }
+      throw new RegistrationError(code);
+    }
   }
 
   async authFrame() {

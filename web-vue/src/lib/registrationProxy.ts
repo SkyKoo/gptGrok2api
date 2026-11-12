@@ -17,7 +17,14 @@ export function registrationProxyFailureText(value: string): string {
     const time = parsed && Number.isFinite(parsed.getTime()) ? parsed.toLocaleString() : ''
     return `注册代理冷却中${time ? `，可在 ${time} 后重试` : '，请稍后重试'}。到期不代表上游已恢复。`
   }
-  if (value === 'task: mailbox_registration_cooldown') return '该邮箱仍在注册限流冷却中，请等待后再重试；新任务和手动操作不会提前解除冷却。'
+  if (/^task: mailbox_registration_cooldown(?:\s|$)/.test(value)) {
+    const until = value.match(/retry_after="([^"]+)"/)?.[1]
+    const parsed = until ? new Date(until) : null
+    const time = parsed && Number.isFinite(parsed.getTime()) ? parsed.toLocaleString() : ''
+    return `该邮箱仍在注册冷却中${time ? `，请等待至 ${time}（本地时间）后再试` : '，请等待后再重试'}；新任务和手动操作不会提前解除冷却。`
+  }
+  if (value === 'task: mailbox_already_has_saved_account') return '该邮箱已有保存的账号，请前往账号管理查看；没有启动重新注册。'
+  if (value === 'storage: account_lookup_failed') return '暂时无法核对该邮箱是否已有账号，请稍后刷新状态；没有启动重新注册。'
   if (value === 'task: mailbox_retry_already_scheduled') return '同邮箱的重复补偿计划已合并，请使用该邮箱的有效任务。'
   if (value === 'task: registration_result_uncertain' || value === 'adobe: registration_result_uncertain') return '账号创建结果尚未确认，注册重试已暂停；请先核对原任务结果，不会自动转入登录。'
   if (value === 'proxy: binding_unavailable') return '注册代理绑定不可用，请检查所选渠道或节点配置；应用不会主动更换已绑定代理；Resin 内部故障切换仍由 Resin 管理。'

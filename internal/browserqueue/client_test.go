@@ -13,7 +13,7 @@ import (
 )
 
 func TestAcquirePreservesOnlyFixedStartupDiagnostics(t *testing.T) {
-	for _, code := range []string{"state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "run_already_exists", "browser_profile_missing", "browser_profile_unavailable", "PRIVATE-RAW-ERROR"} {
+	for _, code := range []string{"state_missing", "run_email_mismatch", "run_locked", "unsafe_storage", "run_already_exists", "browser_profile_missing", "browser_profile_unavailable", "recovery_page_observation_timeout", "recovery_page_observation_failed", "recovery_page_closed", "recovery_page_untrusted", "PRIVATE-RAW-ERROR"} {
 		t.Run(code, func(t *testing.T) {
 			var closes atomic.Int32
 			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

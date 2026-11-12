@@ -19,21 +19,22 @@ import (
 // retries registration, accepted creation continues verification, and unknown
 // creation pauses. Saved identities only resume import and verification.
 type AdobeEngine struct {
-	mu                sync.Mutex
-	mailboxMu         sync.Mutex
-	path, secret      string
-	jobs              []RegistrationJob
-	factory           AdobeFactory
-	importer          ImportAccount
-	verifier          VerifyAccount
-	ProxyRouting      *ProxyRouting
-	cancel            context.CancelFunc
-	done              chan struct{}
-	active            int
-	closing           bool
-	stopRequested     bool
-	loadError         error
-	compensationError string
+	mu                         sync.Mutex
+	mailboxMu                  sync.Mutex
+	path, secret               string
+	jobs                       []RegistrationJob
+	factory                    AdobeFactory
+	importer                   ImportAccount
+	verifier                   VerifyAccount
+	ProxyRouting               *ProxyRouting
+	cancel                     context.CancelFunc
+	done                       chan struct{}
+	active                     int
+	closing                    bool
+	stopRequested              bool
+	loadError                  error
+	compensationError          string
+	reregistrationAccountCheck func(string) (bool, error)
 }
 
 func NewAdobeEngine(path, secret string, factory AdobeFactory, importer ImportAccount, verifier VerifyAccount) *AdobeEngine {
@@ -346,14 +347,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		})
 	}
 	account, err := flow.Register(ctx, id, box, cfg, func(ctx context.Context, after time.Time) (string, error) {
-		waitCtx, cancel := context.WithTimeout(ctx, cfg.MailTimeout)
-		defer cancel()
-		if m, ok := mail.(interface {
-			WaitCodeFor(context.Context, Mailbox, time.Time, func(string) bool) (string, error)
-		}); ok {
-			return m.WaitCodeFor(waitCtx, box, after, isAdobeSender)
-		}
-		return "", fail("mail", "adobe_sender_filter_required")
+		return waitAdobeVerificationCode(ctx, mail, box, after, cfg.MailTimeout)
 	}, func(stage string) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -630,6 +624,13 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 			continue
 		}
 		mode := adobeRegistrationRecoveryMode(j)
+		canReregister := e.loadError == nil && !e.closing && e.adobeReregistrationEligibleLocked(i) == nil
+		reregisterNotBefore := ""
+		if canReregister {
+			if due := e.adobeReregistrationNotBeforeLocked(j.Mailbox.Email); !due.IsZero() {
+				reregisterNotBefore = due.UTC().Format(time.RFC3339Nano)
+			}
+		}
 		blocked := e.adobeMailboxCreationBlocked(j)
 		eligible := adobeCompensationPending(j) && !blocked && e.cancel == nil && (j.AutoRetry == nil || j.AutoRetry.Reason != "duplicate_mailbox_retry")
 		state := adobeCompensationSummary(j, e.adobeMailboxAttemptsLocked(j.Mailbox.Email))
@@ -652,7 +653,7 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 				mode = ""
 			}
 		}
-		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "creation_outcome": adobeCreationOutcome(j), "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
+		jobs = append(jobs, map[string]any{"id": j.ID, "parent_job_id": j.ParentJobID, "root_job_id": j.RootJobID, "retry_job_id": j.RetryJobID, "status": j.Status, "stage": j.Stage, "error": j.Error, "email": j.Mailbox.Email, "imported": j.Imported, "verified": j.Verified, "created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "can_retry": len(j.Account) > 0 && eligible, "can_retry_registration": eligible && mode == "retry_registration", "can_resume_registration": eligible && mode == "resume_session", "can_reregister": canReregister, "reregister_not_before": reregisterNotBefore, "creation_outcome": adobeCreationOutcome(j), "recovery_mode": mode, "auto_retry": compensationSummary(state), "review_hint": hint})
 	}
 	// Older tasks can receive new compensation logs. Order events before the
 	// live-window limit; RFC3339Nano strings with unequal precision are not

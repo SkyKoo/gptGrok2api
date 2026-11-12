@@ -47,6 +47,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.retryAdobeRegistration(w, r)
 	case path == "/adobe/retry-registration" && r.Method == http.MethodPost:
 		s.retryAdobeRegistrationTask(w, r)
+	case path == "/adobe/reregister" && r.Method == http.MethodPost:
+		s.reregisterAdobeRegistrationTask(w, r)
 	case path == "/grok/jobs" && r.Method == http.MethodGet:
 		writeRegistrationJSON(w, http.StatusOK, s.grokRegister.SnapshotPage(positiveInt(r.URL.Query().Get("page"), 1)))
 	case path == "/openai/retry-result" && r.Method == http.MethodPost:

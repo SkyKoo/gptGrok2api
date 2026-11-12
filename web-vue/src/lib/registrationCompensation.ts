@@ -8,23 +8,55 @@ export type RegistrationCompensation = {
 }
 export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'saved_result' | 'result_uncertain'
 type RegistrationRecoveryActions = {
+  status?: string
+  imported?: boolean
+  retry_job_id?: string
   can_retry?: boolean
   can_retry_registration?: boolean
   can_resume_registration?: boolean
+  can_reregister?: boolean
+  reregister_not_before?: string
+  creation_outcome?: 'not_submitted' | 'rejected' | 'accepted' | 'unknown'
   recovery_mode?: RegistrationRecoveryMode
+  auto_retry?: RegistrationCompensation | null
 }
 
-// Capability flags come from the server. A recovery mode is descriptive, never
-// permission to retry an unknown submission or replace an already saved result.
+export function registrationHasSuccessor(job: RegistrationRecoveryActions): boolean {
+  return Boolean(job.retry_job_id || job.auto_retry?.state === 'superseded')
+}
+
+// Explicit server permission permits a new manual flow even when the old
+// submission is unknown. It never grants automatic retry or replaces a result.
+export function adobeManualReregistration(job: RegistrationRecoveryActions, target?: string): boolean {
+  return target === 'adobe' && job.can_reregister === true
+    && ['registration_pending', 'failed', 'interrupted', 'cancelled'].includes(job.status || '')
+    && !registrationHasSuccessor(job) && !job.imported && !job.can_retry
+    && job.creation_outcome !== 'accepted'
+    && job.recovery_mode !== 'saved_result' && job.recovery_mode !== 'resume_session'
+}
+
+export function adobeReregistrationCooldown(job: RegistrationRecoveryActions, now: number): { blocked: boolean; text: string } {
+  if (!job.reregister_not_before) return { blocked: false, text: '' }
+  const due = Date.parse(job.reregister_not_before)
+  if (!Number.isFinite(due)) return { blocked: true, text: '邮箱冷却截止时间无法识别，请刷新任务状态。' }
+  if (due <= now) return { blocked: false, text: '' }
+  const seconds = Math.ceil((due - now) / 1000)
+  const remaining = seconds >= 60 ? `约 ${Math.ceil(seconds / 60)} 分钟` : `${seconds} 秒`
+  return { blocked: true, text: `邮箱注册冷却中，可于 ${new Date(due).toLocaleString()}（本地时间）后重新注册，剩余${remaining}。` }
+}
+
+// Recovery modes describe prior progress; only server capability flags enable actions.
 export function registrationRecoveryAction(job: RegistrationRecoveryActions, target?: string): string {
   if (target !== 'adobe') return job.can_retry_registration ? '复用此邮箱重试注册' : ''
+  if (registrationHasSuccessor(job)) return ''
+  if (adobeManualReregistration(job, target)) return '手动重新注册'
   if (job.can_retry || job.recovery_mode === 'saved_result') return ''
   if (job.recovery_mode === 'resume_session' && job.can_resume_registration) return '继续验证'
   return job.recovery_mode === 'retry_registration' && job.can_retry_registration ? '重新注册' : ''
 }
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 可重试的注册失败最多自动补偿 3 次，复用原邮箱，在独立浏览器环境中重新注册；同一邮箱共用次数和冷却。已进入账号验证的任务继续验证，创建结果未知时暂停重试，已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
+  if (target === 'adobe') return 'Adobe 可重试的注册失败最多自动补偿 3 次，复用原邮箱，在独立浏览器环境中重新注册；同一邮箱共用次数和冷却。失败后可点击“手动重新注册”，用原邮箱启动新的注册流程，旧失败记录保留；创建结果未知时停止自动重试。已明确创建账号的任务继续验证，已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'
@@ -129,6 +161,10 @@ export function registrationFailureText(error: string | undefined, target?: stri
     'adobe: creation_result_unknown': '未取得 Adobe 创建账户的确认结果。',
     'adobe: identity_not_verified': '无法确认返回凭据属于本次注册账号。',
     'adobe: recovery_profile_missing': '原账号的浏览器资料缺失，无法继续验证。',
+    'adobe: recovery_page_observation_timeout': '恢复原浏览器页面超时，未能继续账号验证。',
+    'adobe: recovery_page_observation_failed': '恢复原浏览器页面失败，未能继续账号验证。',
+    'adobe: recovery_page_closed': '恢复原浏览器页面失败：页面已关闭。',
+    'adobe: recovery_page_untrusted': '恢复原浏览器页面失败：页面地址不受信任。',
     'adobe: login_ui_not_ready': 'Adobe 登录页面未加载完成。',
     'adobe: registration_ui_not_ready': 'Adobe 注册表单未加载完成。',
     'adobe: registration_form_not_ready': 'Adobe 注册表单未加载完成。',

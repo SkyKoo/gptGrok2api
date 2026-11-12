@@ -16,8 +16,12 @@
       </p>
       <p v-if="registrationFailureText(job.error, target)" class="text-xs break-all" :class="target === 'adobe' ? 'text-red-600 dark:text-red-400' : ''">{{ registrationProxyFailureText(registrationFailureText(job.error, target)) }}</p>
       <p v-if="!job.retry_job_id && registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode, job.status)" class="text-xs text-amber-600" role="status">{{ registrationCompensationText(job.auto_retry, running, now, target, job.recovery_mode, job.status) }}</p>
-      <Button v-if="registrationRecoveryAction(job, target)" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">{{ registrationRecoveryAction(job, target) }}</Button>
-      <Button v-if="job.can_retry" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
+      <template v-if="adobeManualReregistration(job, target)">
+        <p v-if="adobeReregistrationCooldown(job, now).text" class="text-xs text-amber-600" role="status">{{ adobeReregistrationCooldown(job, now).text }}</p>
+        <Button size="sm" variant="outline" :disabled="running || busy || adobeReregistrationCooldown(job, now).blocked" @click="reregisterAdobe(job)">手动重新注册</Button>
+      </template>
+      <Button v-else-if="registrationRecoveryAction(job, target)" size="sm" variant="outline" :disabled="running || busy" @click="retryRegistration(job.id)">{{ registrationRecoveryAction(job, target) }}</Button>
+      <Button v-if="job.can_retry && (target !== 'adobe' || (!registrationHasSuccessor(job) && !registrationRecoveryAction(job, target)))" size="sm" variant="outline" :disabled="running || busy" @click="retry(job.id)">重试入库 / 校验</Button>
     </div>
     <div v-if="totalCount > pageSize" class="flex flex-wrap items-center justify-between gap-3 pt-4 text-sm">
       <span class="text-muted-foreground">每页 {{ pageSize }} 条 · 共 {{ totalCount }} 条</span>
@@ -36,7 +40,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationProxyFailureText } from '@/lib/registrationProxy'
-import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText, registrationRecoveryAction, registrationFailureText } from '@/lib/registrationCompensation'
+import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText, registrationRecoveryAction, registrationFailureText, adobeManualReregistration, adobeReregistrationCooldown, registrationHasSuccessor } from '@/lib/registrationCompensation'
 const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' | 'adobe' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
@@ -84,6 +88,7 @@ const stages: Record<string, string> = {
   adobe_opening_registration: '打开 Adobe 注册页',
   adobe_waiting_registration_form: '等待 Adobe 注册表单',
   adobe_checking_registration_form: '识别 Adobe 注册表单',
+  adobe_restoring_registration_page: '恢复原注册页面',
   adobe_flow_started: '执行 Adobe 注册', adobe_creation_submitted: '已发起创建，等待结果', awaiting_verification: '等待邮箱验证码', adobe_registration_needs_review: '本次流程已结束，检查创建结果', adobe_original_submission_recorded: '原注册提交记录已保留', adobe_registration_diagnostics: '注册失败诊断', compensation_stopped: '已停止自动补偿', adobe_recovery_started: '继续已创建账号的验证', needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 function jobStageText(job: NonNullable<LegacyRegisterConfig['jobs']>[number]): string {
   const label = stages[job.stage] || job.stage
@@ -92,15 +97,24 @@ function jobStageText(job: NonNullable<LegacyRegisterConfig['jobs']>[number]): s
   return `结束于：${label}`
 }
 async function retry(id: string) {
+  if (busy.value || props.running) return
   busy.value = true; error.value = ''
   try { if (props.target === 'adobe') await registerApi.retryAdobeResult(id); else if (props.target === 'grok') await registerApi.retryGrokResult(id); else await registerApi.retryFreeResult(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
   catch (e: any) { error.value = e?.message || '重试失败' }
   finally { busy.value = false }
 }
 async function retryRegistration(id: string) {
+  if (busy.value || props.running) return
   busy.value = true; error.value = ''
   try { if (props.target === 'adobe') await registerApi.retryAdobeRegistration(id); else if (props.target === 'grok') await registerApi.retryGrokRegistration(id); else await registerApi.retryFreeRegistration(id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
   catch (e: any) { error.value = registrationProxyFailureText(e?.message || '补偿注册失败') }
+  finally { busy.value = false }
+}
+async function reregisterAdobe(job: NonNullable<LegacyRegisterConfig['jobs']>[number]) {
+  if (busy.value || props.running || !adobeManualReregistration(job, props.target) || adobeReregistrationCooldown(job, Date.now()).blocked) return
+  busy.value = true; error.value = ''
+  try { await registerApi.reregisterAdobe(job.id); emit('changed'); if (page.value > 1) await loadPage(page.value) }
+  catch (e: any) { error.value = registrationProxyFailureText(e?.message || '重新注册未启动，请刷新任务状态后重试。'); emit('changed'); if (page.value > 1) await loadPage(page.value) }
   finally { busy.value = false }
 }
 </script>

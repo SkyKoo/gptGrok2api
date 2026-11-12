@@ -197,6 +197,20 @@ func (s *ResourceSession) WaitCode(ctx context.Context, box Mailbox, after time.
 	return s.provider.WaitCode(ctx, box, after, matcher)
 }
 
+// WaitCodeForPlatform lets a provider select a platform's code format without
+// changing other flows' sender matching or generic extraction behavior.
+func (s *ResourceSession) WaitCodeForPlatform(ctx context.Context, box Mailbox, after time.Time, platform string, matcher func(string) bool) (string, error) {
+	if s == nil || s.provider == nil {
+		return "", errors.New("mailbox resource session is not configured")
+	}
+	if provider, ok := s.provider.(interface {
+		WaitCodeForPlatform(context.Context, Mailbox, time.Time, string, func(string) bool) (string, error)
+	}); ok {
+		return provider.WaitCodeForPlatform(ctx, box, after, strings.ToLower(strings.TrimSpace(platform)), matcher)
+	}
+	return s.provider.WaitCode(ctx, box, after, matcher)
+}
+
 func (s *ResourceSession) Delete(ctx context.Context, box Mailbox) error {
 	if s == nil || s.provider == nil {
 		return errors.New("mailbox resource session is not configured")

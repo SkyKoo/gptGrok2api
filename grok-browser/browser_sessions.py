@@ -20,6 +20,7 @@ STARTUP_PROGRESS_STAGES = frozenset({
     "starting_browser", "adobe_loading_account_page", "adobe_waiting_create_entry",
     "adobe_reloading_account_page", "adobe_opening_registration",
     "adobe_waiting_registration_form", "adobe_checking_registration_form",
+    "adobe_restoring_registration_page",
 })
 STARTUP_EXCEPTION_TYPES = frozenset({"registration", "timeout", "navigation", "page_closed", "unknown"})
 
@@ -57,6 +58,8 @@ class BrowserStartupError(RuntimeError):
         "browser_launch_failed",
         "state_missing", "run_email_mismatch", "run_locked", "unsafe_storage",
         "run_already_exists", "browser_profile_missing", "browser_profile_unavailable",
+        "recovery_page_observation_timeout", "recovery_page_observation_failed",
+        "recovery_page_closed", "recovery_page_untrusted",
     })
 
     def __init__(self, code):

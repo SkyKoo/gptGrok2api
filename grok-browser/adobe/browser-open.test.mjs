@@ -4,7 +4,8 @@ import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { BrowserRegistration } from './browser.mjs';
-import { PrivateRunStore } from './core.mjs';
+import { PrivateRunStore, RegistrationError } from './core.mjs';
+import { creationOutcome } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
 import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
@@ -75,6 +76,84 @@ test('open preserves restored Adobe pages after any durable signup submission', 
       assert.deepEqual(await store.load(), stateBefore);
     });
   }
+});
+
+async function restoredFixture(t, readStatus, { timeoutMs = 1000 } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'adobe-restored-page-'));
+  const store = new PrivateRunStore(directory, 'fixture');
+  await store.init({ email: 'fixture@example.test' });
+  await store.markSubmissionStarted();
+  const state = await store.load();
+  await store.save({ creationEvidence: { version: 1, marker: state.submission.startedAt,
+    requests: 1, finished: 1, rejected: 0, unknown: 0, accepted: true, complete: true, sealed: true } });
+  t.after(async () => { await store.close(); await rm(directory, { recursive: true, force: true }); });
+  let clock = 0, reads = 0, url = 'https://auth.services.adobe.com/verify';
+  const page = { url: () => url, goto: () => assert.fail('recovery observation must not navigate'),
+    getByRole: () => assert.fail('recovery observation must not click or resend') };
+  const context = { pages: () => [page], on: () => {}, off: () => {} };
+  const frames = [], startupProgress = new StartupProgress({ emit: frame => frames.push(frame), now: () => clock });
+  const browser = new BrowserRegistration(store, { startupProgress }, { launchBrowser: async () => context });
+  browser.restorationWaitOptions = { timeoutMs, pollIntervalMs: 250, now: () => clock, pause: async ms => { clock += ms; } };
+  browser.status = async () => readStatus({ reads: ++reads, setURL: value => { url = value; } });
+  return { store, browser, frames, readCount: () => reads };
+}
+
+test('restored page navigation is re-observed without reopening registration or losing accepted evidence', async t => {
+  const f = await restoredFixture(t, ({ reads, setURL }) => {
+    if (reads === 1) throw new Error('PRIVATE Execution context was destroyed');
+    if (reads === 2) { setURL('about:blank'); throw new RegistrationError('untrusted_page'); }
+    setURL('https://auth.services.adobe.com/verify');
+    return { stage: 'awaiting_verification' };
+  });
+  assert.deepEqual(await f.browser.open({ resumeOnly: true }), { stage: 'awaiting_verification' });
+  assert.equal(f.readCount(), 3);
+  const state = await f.store.load();
+  assert.deepEqual(creationOutcome(state), { creation_outcome: 'accepted' });
+  assert.equal(state.verificationSubmitted, undefined);
+  assert.equal(state.recoveryAttempts, undefined);
+  assert.equal(state.startupFailure, undefined);
+  assert.deepEqual(f.frames.filter(frame => frame.stage === 'adobe_restoring_registration_page').map(frame => frame.status), ['started', 'completed']);
+  assert.doesNotMatch(JSON.stringify(f.frames), /PRIVATE|fixture@/);
+});
+
+test('continuous restored navigation and a stalled status read both have one bounded observation window', async t => {
+  for (const stalled of [false, true]) await t.test(String(stalled), async sub => {
+    const f = await restoredFixture(sub, () => {
+      if (stalled) return new Promise(() => {});
+      throw new Error('PRIVATE Frame was detached');
+    }, { timeoutMs: stalled ? 20 : 1000 });
+    await assert.rejects(f.browser.open({ resumeOnly: true }), error => error.code === 'recovery_page_observation_timeout');
+    assert.equal(f.readCount(), stalled ? 1 : 4);
+    const state = await f.store.load();
+    assert.deepEqual(creationOutcome(state), { creation_outcome: 'accepted' });
+    assert.equal(state.startupFailure.failure_action, 'adobe_restoring_registration_page');
+    assert.equal(state.startupFailure.failure_phase, 'submission_started');
+    assert.equal(state.startupFailure.exception_type, 'timeout');
+    assert.equal(f.frames.at(-1).status, 'failed');
+    assert.doesNotMatch(JSON.stringify({ failure: state.startupFailure, frames: f.frames }), /PRIVATE|fixture@/);
+  });
+});
+
+test('closed, unknown and untrusted restored pages stop immediately with fixed diagnostics', async t => {
+  for (const [kind, code, type] of [
+    ['closed', 'recovery_page_closed', 'page_closed'],
+    ['unknown', 'recovery_page_observation_failed', 'unknown'],
+    ['untrusted', 'recovery_page_untrusted', 'registration'],
+  ]) await t.test(kind, async sub => {
+    const f = await restoredFixture(sub, ({ setURL }) => {
+      if (kind === 'closed') throw new Error('PRIVATE Target page, context or browser has been closed');
+      if (kind === 'unknown') throw new Error('PRIVATE unexpected browser error');
+      setURL('https://unrelated.example.invalid/?token=PRIVATE');
+      return { stage: 'awaiting_verification' };
+    });
+    await assert.rejects(f.browser.open({ resumeOnly: true }), error => error.code === code && !error.message.includes('PRIVATE'));
+    assert.equal(f.readCount(), 1);
+    const state = await f.store.load();
+    assert.deepEqual(creationOutcome(state), { creation_outcome: 'accepted' });
+    assert.equal(state.startupFailure.exception_type, type);
+    assert.equal(state.startupFailure.failure_action, 'adobe_restoring_registration_page');
+    assert.doesNotMatch(JSON.stringify(state.startupFailure), /PRIVATE|unrelated|fixture@/);
+  });
 });
 
 async function startupFixture(t, failureStage, { blockedFont = false } = {}) {

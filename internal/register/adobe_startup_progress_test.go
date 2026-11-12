@@ -24,8 +24,10 @@ func (adobeStartupTestFlow) Register(_ context.Context, _ string, _ Mailbox, cfg
 	for _, event := range []browserqueue.StartupEvent{
 		{Sequence: 1, Stage: "starting_browser", Status: "started"},
 		{Sequence: 2, Stage: "starting_browser", Status: "completed", ElapsedMS: 7000, DurationMS: 7000},
-		{Sequence: 3, Stage: "adobe_waiting_registration_form", Status: "started", ElapsedMS: 7000},
-		{Sequence: 4, Stage: "adobe_waiting_registration_form", Status: "failed", ElapsedMS: 27000, DurationMS: 20000, ExceptionType: "timeout"},
+		{Sequence: 3, Stage: "adobe_restoring_registration_page", Status: "started", ElapsedMS: 7000},
+		{Sequence: 4, Stage: "adobe_restoring_registration_page", Status: "completed", ElapsedMS: 8000, DurationMS: 1000},
+		{Sequence: 5, Stage: "adobe_waiting_registration_form", Status: "started", ElapsedMS: 8000},
+		{Sequence: 6, Stage: "adobe_waiting_registration_form", Status: "failed", ElapsedMS: 28000, DurationMS: 20000, ExceptionType: "timeout"},
 	} {
 		if err := cfg.startupProgress(event); err != nil {
 			return nil, err
@@ -48,7 +50,19 @@ func TestAdobeStartupHeartbeatsDoNotFloodDurableLog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitAdobe(t, engine)
+	// Hundreds of durable heartbeat writes exercise deduplication, not latency.
+	// Wait for the actual runner so constrained parallel CI does not time out
+	// while another package is using the same disk and CPU budget.
+	engine.mu.Lock()
+	done := engine.done
+	engine.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("startup heartbeat runner did not finish")
+		}
+	}
 	engine = NewAdobeEngine(path, "test-key", nil, nil, nil)
 	job, err := engine.getJob(id)
 	if err != nil {
@@ -57,11 +71,14 @@ func TestAdobeStartupHeartbeatsDoNotFloodDurableLog(t *testing.T) {
 	counts := map[string]int{}
 	for _, log := range job.Logs {
 		counts[log.Action]++
-		if log.Action == "adobe_waiting_registration_form_failed" && (!strings.Contains(log.Text, "本步 20.0 秒") || !strings.Contains(log.Text, "累计 27.0 秒") || !strings.Contains(log.Text, "等待超时")) {
+		if log.Action == "adobe_waiting_registration_form_failed" && (!strings.Contains(log.Text, "本步 20.0 秒") || !strings.Contains(log.Text, "累计 28.0 秒") || !strings.Contains(log.Text, "等待超时")) {
 			t.Fatalf("missing failure timing: %+v", log)
 		}
+		if log.Action == "adobe_restoring_registration_page_completed" && (!strings.Contains(log.Text, "恢复原 Adobe 注册页面完成") || !strings.Contains(log.Text, "本步 1.0 秒")) {
+			t.Fatalf("missing recovery observation stage: %+v", log)
+		}
 	}
-	for _, action := range []string{"waiting_browser", "starting_browser", "starting_browser_completed", "adobe_waiting_registration_form_started", "adobe_waiting_registration_form_failed"} {
+	for _, action := range []string{"waiting_browser", "starting_browser", "starting_browser_completed", "adobe_restoring_registration_page_started", "adobe_restoring_registration_page_completed", "adobe_waiting_registration_form_started", "adobe_waiting_registration_form_failed"} {
 		if counts[action] != 1 {
 			t.Fatalf("%s: %d logs; %+v", action, counts[action], counts)
 		}

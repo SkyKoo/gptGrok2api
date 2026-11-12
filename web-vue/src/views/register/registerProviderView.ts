@@ -1268,6 +1268,8 @@ const registerRuntimeActionLabels: Record<string, string> = {
   mailbox: '准备邮箱资源',
   mailbox_acquired: '分配邮箱资源',
   manual_compensation: '手动补偿注册',
+  manual_reregistration: '手动重新注册',
+  adobe_restoring_registration_page: '恢复原注册页面',
   retry_created: '创建补偿任务',
   automatic_compensation: '自动补偿注册',
   waiting_browser: '等待浏览器会话释放',

@@ -22,6 +22,9 @@ type AdobeRegistrationState struct {
 	CreationOutcome    string `json:"creation_outcome,omitempty"`
 	CreationErrorCode  string `json:"creation_error_code,omitempty"`
 	CreationHTTPStatus int    `json:"creation_http_status,omitempty"`
+	// Written only by the explicit administrator action, then retained by
+	// accepted-session continuations using this same BrowserProfileID.
+	ManualReregistration bool `json:"manual_reregistration,omitempty"`
 }
 
 func adobeStageMayHaveSubmitted(stage string) bool {
@@ -122,6 +125,8 @@ func adobeAutomaticFailure(job RegistrationJob) bool {
 		return true
 	}
 	switch job.Error {
+	case "mail: timeout", "adobe: recovery_page_observation_timeout", "adobe: recovery_page_observation_failed", "adobe: recovery_page_closed":
+		return true
 	case "process_restarted_no_automatic_registration_retry", "process_restarted_compensation_delayed":
 		return true
 	case "adobe: submission_result_unknown", "adobe: worker_result_unknown", "adobe: adobe_worker_result_unknown", "adobe: creation_result_unknown", "adobe: human_verification_required", "adobe: captcha_required", "adobe: verification_dns_failed", "adobe: verification_request_timeout", "adobe: verification_request_aborted", "adobe: registration_needs_review":
@@ -258,14 +263,10 @@ func (e *AdobeEngine) normalizeAdobeMailboxRetriesLocked(now time.Time) bool {
 	for email, indices := range groups {
 		attempts := e.adobeMailboxAttemptsLocked(email)
 		owner, saved, active := -1, -1, false
-		complete, stopped, uncertain, accepted := false, false, false, false
+		complete, stopped := false, false
 		var latest time.Time
 		for _, i := range indices {
 			job := e.jobs[i]
-			// Ancestors still describe real upstream attempts. An old recovery
-			// child cannot erase their unknown outcome by claiming no new Create.
-			uncertain = uncertain || adobeRegistrationRecoveryMode(job) == "result_uncertain"
-			accepted = accepted || adobeRegistrationRecoveryMode(job) == "resume_session"
 			if job.ProxyBinding != nil && job.ProxyBinding.BlockedUntil.After(latest) {
 				latest = job.ProxyBinding.BlockedUntil
 			}
@@ -321,7 +322,7 @@ func (e *AdobeEngine) normalizeAdobeMailboxRetriesLocked(now time.Time) bool {
 				state.State, state.Reason, state.NextAttemptAt = "manual", "saved_account_exists", ""
 			case stopped:
 				state.State, state.Reason, state.NextAttemptAt = "manual", "cancelled", ""
-			case saved < 0 && (uncertain || accepted && adobeRegistrationRecoveryMode(job) == "retry_registration"):
+			case saved < 0 && e.adobeMailboxCreationBlocked(job):
 				state.State, state.Reason, state.NextAttemptAt = "manual", "registration_result_uncertain", ""
 			case active || i != owner:
 				state.State, state.Reason, state.NextAttemptAt = "manual", "duplicate_mailbox_retry", ""
@@ -483,11 +484,27 @@ func (e *AdobeEngine) retryAdobeWithConfig(raw map[string]any, id string, savedO
 }
 
 func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, automatic bool, now time.Time) error {
+	return e.startAdobeAttemptLocked(index, cfg, automatic, false, now)
+}
+
+func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automatic, manualReregister bool, now time.Time) error {
 	parent := cloneJob(e.jobs[index])
 	if !adobeCompensationPending(parent) {
 		return fail("task", "no_saved_mailbox")
 	}
 	mode := adobeRegistrationRecoveryMode(parent)
+	if manualReregister {
+		if automatic {
+			return fail("task", "invalid_retry_state")
+		}
+		if err := e.adobeReregistrationEligibleLocked(index); err != nil {
+			return err
+		}
+		if due := e.adobeReregistrationNotBeforeLocked(parent.Mailbox.Email); now.Before(due) {
+			return &Failure{Stage: "task", Code: "mailbox_registration_cooldown", RetryAfter: due.UTC().Format(time.RFC3339Nano)}
+		}
+		mode = "retry_registration"
+	}
 	if mode == "result_uncertain" {
 		return fail("task", "registration_result_uncertain")
 	}
@@ -497,15 +514,19 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 	if !adobeCompensationEnvironment(parent) {
 		return fail("task", "saved_environment_missing")
 	}
-	if parent.AutoRetry != nil && parent.AutoRetry.Reason == "duplicate_mailbox_retry" {
+	if !manualReregister && parent.AutoRetry != nil && parent.AutoRetry.Reason == "duplicate_mailbox_retry" {
 		return fail("task", "mailbox_retry_already_scheduled")
 	}
+	priorUnknownAncestors := e.adobeAcceptedReregistrationAncestors(parent)
 	for i, other := range e.jobs {
 		if grokMailboxKey(other.Mailbox.Email) != grokMailboxKey(parent.Mailbox.Email) {
 			continue
 		}
-		if mode != "saved_result" && adobeRegistrationRecoveryMode(other) == "result_uncertain" {
+		if !manualReregister && mode != "saved_result" && adobeRegistrationRecoveryMode(other) == "result_uncertain" && !priorUnknownAncestors[other.ID] {
 			return fail("task", "registration_result_uncertain")
+		}
+		if i != index && (other.Status == "running" || other.Status == "queued") {
+			return fail("task", "already_running")
 		}
 		if mode == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
 			return fail("task", "registration_result_uncertain")
@@ -540,7 +561,7 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 		if err != nil {
 			return err
 		}
-		job.AdobeRegistration = &AdobeRegistrationState{BrowserProfileID: job.ID, CreationOutcome: "not_submitted"}
+		job.AdobeRegistration = &AdobeRegistrationState{BrowserProfileID: job.ID, CreationOutcome: "not_submitted", ManualReregistration: manualReregister}
 		if job.AdobeProfile != nil {
 			job.AdobeProfile.Country, job.AdobeProfile.CountrySource = "US", ""
 		}
@@ -562,6 +583,9 @@ func (e *AdobeEngine) startAdobeCompensationLocked(index int, cfg AdobeConfig, a
 		job.AutoRetry = &RegistrationCompensation{}
 	}
 	action, detail := "manual_compensation", "复用原邮箱，开始 Adobe 补偿任务"
+	if manualReregister {
+		action, detail = "manual_reregistration", "手动重新注册：使用原邮箱和新浏览器会话，原任务结果及提交记录保留"
+	}
 	job.AutoRetry.State, job.AutoRetry.Reason = "manual_running", ""
 	job.AutoRetry.NextAttemptAt = ""
 	if automatic {
