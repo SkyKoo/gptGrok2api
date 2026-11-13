@@ -106,35 +106,11 @@ const menuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
       disabled: !canManageRuntime.value || props.toggling,
     },
   ],
-  !props.oauthAccount ? [
+  [
     {
       key: 'oauth-authorize',
-      label: props.authorizing ? 'OAuth 排队中...' : 'OAuth 授权',
-      disabled: oauthActionBusy.value || props.authorizing || !props.item.has_password || !props.item.has_sso,
-    },
-  ] : [
-    {
-      key: 'oauth-sync',
-      label: props.oauthAction === 'sync' ? 'OAuth 探测中...' : 'OAuth 探测模型',
-      disabled: oauthActionBusy.value,
-    },
-    {
-      key: 'oauth-refresh',
-      label: props.oauthAction === 'refresh' ? 'OAuth 刷新中...' : 'OAuth 刷新 Token',
-      disabled: oauthActionBusy.value,
-    },
-    {
-      key: 'oauth-toggle',
-      label: props.oauthAction === 'toggle'
-        ? 'OAuth 处理中...'
-        : (props.oauthAccount.status === 'disabled' ? '启用 OAuth' : '禁用 OAuth'),
-      disabled: oauthActionBusy.value,
-    },
-    {
-      key: 'oauth-remove',
-      label: props.oauthAction === 'remove' ? 'OAuth 移除中...' : '移除 OAuth',
-      disabled: oauthActionBusy.value,
-      danger: true,
+      label: 'OAuth 授权与 CPA',
+      disabled: oauthActionBusy.value || props.authorizing,
     },
   ],
   [

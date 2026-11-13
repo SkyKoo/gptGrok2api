@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ func (s *Server) refreshOAuthQuota(ctx context.Context, id string) (oauth.Accoun
 	if !found {
 		return account, errors.New("OAuth 账号不存在")
 	}
+	unlock := s.oauthStore.LockIdentity(account.Email)
+	defer unlock()
+	account, found, err = s.oauthStore.Get(id)
+	if err != nil || !found {
+		return account, errors.New("无法读取 OAuth 凭据")
+	}
+	if oauth.CPAManaged(account) {
+		return account, errors.New("该 OAuth 已交给 CPA 续期，请在 CPA 查看额度和状态")
+	}
 	if account.Status == "disabled" {
 		return account, errors.New("OAuth 账号已禁用")
 	}
@@ -29,6 +39,10 @@ func (s *Server) refreshOAuthQuota(ctx context.Context, id string) (oauth.Accoun
 	probe := *s.xaiProbe
 	if account.TokenEndpoint != "" {
 		probe.TokenURL = account.TokenEndpoint
+	}
+	ctx, err = s.oauthRequestContext(ctx, account)
+	if err != nil {
+		return account, err
 	}
 	result := probe.QueryQuota(ctx, map[string]any{"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt})
 	updated, applied, err := s.oauthStore.UpdateIfCredential(account, func(current *oauth.Account) {
@@ -93,4 +107,33 @@ func (s *Server) oauthQuotaAPI(w http.ResponseWriter, r *http.Request, id string
 	}
 	// Even a failed query returns its stored diagnostic; it must not erase authorization.
 	writeJSON(w, http.StatusOK, map[string]any{"account": oauth.Public(item), "ok": stringValue(item.Quota["status"]) != "error"})
+}
+
+// OAuth upkeep follows the same daily route as the source Grok account. Imported
+// OAuth identities without a local SSO account inherit the current global exit.
+func (s *Server) oauthRequestContext(ctx context.Context, account oauth.Account) (context.Context, error) {
+	var source map[string]any
+	rows, err := s.registerStore.ExportAccounts(nil)
+	if err != nil {
+		return ctx, errors.New("无法读取账号日常出口")
+	}
+	for _, row := range rows {
+		if strings.EqualFold(stringValue(row["email"]), account.Email) && account.Email != "" {
+			source = row
+			break
+		}
+	}
+	route := ""
+	if s.proxyManager != nil {
+		value, bound, err := s.proxyManager.ResolveBound(source)
+		if err != nil {
+			return ctx, errors.New("账号日常出口不可用")
+		}
+		if bound {
+			route = value
+		} else {
+			route = s.proxyManager.Resolve(source, false)
+		}
+	}
+	return proxyruntime.WithURL(ctx, route), nil
 }

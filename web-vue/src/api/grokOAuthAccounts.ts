@@ -1,5 +1,17 @@
 import apiClient from '@/api/client'
 
+export type GrokOAuthCPASync = {
+  status: string
+  pool_id?: string
+  pool_name?: string
+  file_name?: string
+  at?: number
+  verified_at?: number
+  attempted_at?: number
+  managed?: boolean
+  error?: string
+}
+
 export type GrokOAuthCandidate = {
   id: string
   email: string
@@ -10,6 +22,8 @@ export type GrokOAuthCandidate = {
   oauth_account_id: string
   has_access_token: boolean
   has_refresh_token: boolean
+  cpa_sync?: GrokOAuthCPASync
+  cpa_managed?: boolean
   updated_at?: string
 }
 
@@ -93,7 +107,8 @@ export type GrokOAuthAccount = {
   models: string[]
   probe?: GrokOAuthProbe
   quota?: GrokOAuthQuota
-  cpa_sync?: { status: string; pool_id?: string; pool_name?: string; file_name?: string; at?: number; error?: string }
+  cpa_sync?: GrokOAuthCPASync
+  cpa_managed?: boolean
   recovery?: GrokOAuthRecovery
   use_count: number
   fail_count: number
@@ -146,6 +161,9 @@ export type GrokOAuthProtocolJob = {
   account?: GrokOAuthAccount
   models: string[]
   delivery?: GrokOAuthDeliveryResults
+  cpa_pool_id?: string
+  cpa_pool_name?: string
+  cpa_error?: string
 }
 
 export type GrokOAuthImportRequest = {
@@ -154,7 +172,10 @@ export type GrokOAuthImportRequest = {
   id_token?: string
   email?: string
   subject?: string
+  expires_in?: number
+  models?: string[]
   credential?: Record<string, unknown>
+  cpa_pool_id?: string
 }
 
 export type GrokOAuthAccountTestResponse = {
@@ -184,8 +205,8 @@ export const grokOAuthAccountsApi = {
     )
   },
 
-  startDevice() {
-    return apiClient.post<Record<string, never>, GrokOAuthDeviceSession>(`${BASE_PATH}/device/start`, {})
+  startDevice(accountId: string, poolId: string) {
+    return apiClient.post<{ account_id: string; cpa_pool_id: string }, GrokOAuthDeviceSession>(`${BASE_PATH}/device/start`, { account_id: accountId, cpa_pool_id: poolId })
   },
 
   pollDevice(sessionId: string) {
@@ -194,10 +215,10 @@ export const grokOAuthAccountsApi = {
     })
   },
 
-  startProtocol(accountId: string) {
-    return apiClient.post<{ account_id: string }, { reused: boolean; job: GrokOAuthProtocolJob }>(
+  startProtocol(accountId: string, poolId: string) {
+    return apiClient.post<{ account_id: string; cpa_pool_id: string }, { reused: boolean; job: GrokOAuthProtocolJob }>(
       `${BASE_PATH}/protocol/start`,
-      { account_id: accountId },
+      { account_id: accountId, cpa_pool_id: poolId },
     )
   },
 
@@ -217,6 +238,10 @@ export const grokOAuthAccountsApi = {
 
   syncCPA(id: string, poolId: string) {
     return apiClient.post<{ cpa_pool_id: string }, { account: GrokOAuthAccount; ok: boolean }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/cpa/sync`, { cpa_pool_id: poolId })
+  },
+
+  checkCPA(id: string, poolId?: string) {
+    return apiClient.post<{ cpa_pool_id?: string }, { account: GrokOAuthAccount; ok: boolean }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/cpa/check`, { cpa_pool_id: poolId })
   },
 
   syncModels(id: string) {

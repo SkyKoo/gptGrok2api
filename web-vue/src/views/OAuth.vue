@@ -4,7 +4,7 @@
       <PanelHeader title="OAuth 授权" align="start">
         <template #copy>
           <p class="mt-1 text-sm text-muted-foreground">
-            统一管理不同上游的 OAuth 凭据。每个提供商保持独立授权、刷新、模型探测和外部同步流程。
+            管理各上游账号的 OAuth 授权与 CPA 交付状态。
           </p>
         </template>
         <template #actions>

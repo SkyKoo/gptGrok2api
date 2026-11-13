@@ -17,12 +17,17 @@ import (
 )
 
 type CPASync struct {
-	Status   string `json:"status"`
-	PoolID   string `json:"pool_id,omitempty"`
-	PoolName string `json:"pool_name,omitempty"`
-	FileName string `json:"file_name,omitempty"`
-	At       int64  `json:"at,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Status              string `json:"status"`
+	PoolID              string `json:"pool_id,omitempty"`
+	PoolName            string `json:"pool_name,omitempty"`
+	FileName            string `json:"file_name,omitempty"`
+	At                  int64  `json:"at,omitempty"`
+	Error               string `json:"error,omitempty"`
+	Managed             bool   `json:"managed,omitempty"`
+	AttemptedAt         int64  `json:"attempted_at,omitempty"`
+	VerifiedAt          int64  `json:"verified_at,omitempty"`
+	ReplaceExisting     bool   `json:"replace_existing,omitempty"`
+	AuthorizationTaskID string `json:"authorization_task_id,omitempty"`
 }
 
 type Account struct {
@@ -47,14 +52,24 @@ type Account struct {
 }
 
 type Store struct {
-	path string
-	key  []byte
-	mu   sync.Mutex
+	path       string
+	key        []byte
+	mu         sync.Mutex
+	identities sync.Map
 }
 
 func NewStore(path, secret string) *Store {
 	sum := sha256.Sum256([]byte(secret))
 	return &Store{path: path, key: sum[:]}
+}
+
+// LockIdentity serializes remote delivery/renewal with importing a replacement
+// for the same identity. File writes retain their independent short store lock.
+func (s *Store) LockIdentity(email string) func() {
+	value, _ := s.identities.LoadOrStore(strings.ToLower(strings.TrimSpace(email)), &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
 }
 
 func (s *Store) List() ([]Account, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.load() }
@@ -75,6 +90,8 @@ func (s *Store) Import(item Account) (Account, error) {
 	if strings.TrimSpace(item.AccessToken) == "" && strings.TrimSpace(item.RefreshToken) == "" {
 		return Account{}, errors.New("access_token or refresh_token is required")
 	}
+	unlock := s.LockIdentity(item.Email)
+	defer unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items, err := s.load()
@@ -320,7 +337,17 @@ func public(item Account) map[string]any {
 	if quota == nil && item.Probe != nil {
 		quota, _ = item.Probe["quota"].(map[string]any)
 	}
-	return map[string]any{"id": item.ID, "provider": "xai_cli_oauth", "auth_kind": "oauth", "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "has_id_token": item.IDToken != "", "token_type": item.TokenType, "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "quota": cloneProbe(quota), "cpa_sync": item.CPASync, "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
+	return map[string]any{"id": item.ID, "provider": "xai_cli_oauth", "auth_kind": "oauth", "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "has_id_token": item.IDToken != "", "token_type": item.TokenType, "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "quota": cloneProbe(quota), "cpa_sync": item.CPASync, "cpa_managed": CPAManaged(item), "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
+}
+
+// CPAManaged includes historical delivery receipts and uncertain uploads. A
+// retained credential must not be refreshed while CPA may own its refresh chain.
+func CPAManaged(item Account) bool {
+	cp := item.CPASync
+	if cp == nil {
+		return false
+	}
+	return cp.Managed || cp.AttemptedAt > 0 || (cp.PoolID != "" && (cp.Status == "synced" || (cp.At > 0 && cp.FileName != "")))
 }
 
 // SameCredential excludes telemetry so a quota query does not invalidate CPA delivery state.
@@ -330,6 +357,21 @@ func SameCredential(a, b Account) bool {
 
 // UpdateIfCredential prevents a delayed request from overwriting a new authorization.
 func (s *Store) UpdateIfCredential(expected Account, apply func(*Account)) (Account, bool, error) {
+	return s.updateIf(expected, false, apply)
+}
+
+// UpdateIfDelivery also binds an asynchronous CPA result to its target and grant
+// generation, even when an imported credential happens to contain equal tokens.
+func (s *Store) UpdateIfDelivery(expected Account, apply func(*Account)) (Account, bool, error) {
+	return s.updateIf(expected, true, apply)
+}
+func sameDelivery(a, b *CPASync) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+func (s *Store) updateIf(expected Account, delivery bool, apply func(*Account)) (Account, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items, err := s.load()
@@ -340,7 +382,7 @@ func (s *Store) UpdateIfCredential(expected Account, apply func(*Account)) (Acco
 		if current.ID != expected.ID {
 			continue
 		}
-		if !SameCredential(current, expected) {
+		if !SameCredential(current, expected) || (delivery && !sameDelivery(current.CPASync, expected.CPASync)) {
 			return current, false, nil
 		}
 		apply(&current)

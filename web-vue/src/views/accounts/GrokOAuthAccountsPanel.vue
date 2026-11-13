@@ -1,209 +1,81 @@
 <template>
-  <ModalShell :open="props.open" :inline="props.embedded" max-width="48rem" :z-index="150" @close="emit('close')">
-    <ModalHeader
-      title="OAuth 接入"
-      :subtitle="`${accounts.length} 个 OAuth 账号 · ${availableModels.length ? availableModels.join('、') : '暂无已探测模型'}`"
-      compact
-      :show-close="!props.embedded"
-      @close="emit('close')"
-    />
-    <ModalBody density="compact" class="space-y-4">
-      <GrokOAuthCandidates :items="candidates" :loading="loading" :busy="busy || Boolean(device) || protocolRunning" :error="candidateError" @authorize="startProtocolAuthorization" />
-      <p class="text-xs text-muted-foreground">点击账号的“后台授权”后，系统使用该账号登录态自动处理。若 xAI 要求额外验证，会显示具体原因；手动设备码作为备用入口。</p>
-      <div class="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" :disabled="busy || loading" @click="loadAccounts">
-          {{ loading ? '刷新中...' : '刷新列表' }}
-        </Button>
-        <Button size="sm" variant="outline" :disabled="busy || loading || !accounts.length" @click="openModelTest">
-          账号测试
-        </Button>
-        <Button size="sm" variant="outline" :disabled="busy" @click="showImport = !showImport">
-          导入凭据
-        </Button>
-        <Button size="sm" variant="outline" :disabled="busy || protocolRunning" @click="startDeviceAuthorization()">
-          手动设备码
-        </Button>
-
+  <ModalShell :open="props.open" :inline="props.embedded" max-width="76rem" :z-index="150" @close="emit('close')">
+    <ModalHeader title="xAI OAuth" subtitle="授权、CPA 交付和后续操作在同一账号行完成。" compact :show-close="!props.embedded" @close="emit('close')" />
+    <ModalBody density="compact" class="min-w-0 space-y-5">
+      <div class="flex flex-wrap items-end justify-between gap-3">
+        <div class="min-w-0 flex-1 basis-64 space-y-2 md:max-w-sm">
+          <label class="ui-field-label">授权后自动同步到</label>
+          <GroupedSelectMenu v-model="cpaPoolId" :options="cpaPoolOptions" placeholder="选择 CPA 连接" aria-label="CPA 同步目标" block />
+          <p v-if="cpaLoadError" class="text-xs text-rose-600">{{ cpaLoadError }}</p>
+          <p v-else-if="!cpaPools.length && !loading" class="text-xs text-muted-foreground">请先在账号导入中配置 CPA 连接。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button size="sm" variant="outline" :disabled="loading" @click="loadAccounts()">{{ loading ? '刷新中…' : '刷新列表' }}</Button>
+          <Button size="sm" variant="outline" :disabled="!cpaPoolId || modalBusy" @click="openImport">导入凭据</Button>
+        </div>
       </div>
-
-      <div class="space-y-2">
-        <label class="ui-field-label">CPA 同步目标</label>
-        <GroupedSelectMenu v-model="cpaPoolId" :options="cpaPoolOptions" placeholder="选择已配置的 CPA 连接" aria-label="CPA 同步目标" block />
-        <p v-if="cpaLoadError" class="text-xs text-rose-600">{{ cpaLoadError }}</p>
-        <p v-else-if="!cpaPools.length" class="text-xs text-muted-foreground">请先在账号导入中配置 CPA 连接。</p>
+      <SurfaceBox tone="muted" density="compact" wrap>
+        开始授权后自动同步到所选 CPA，由 CPA 负责后续续期。同步失败可在原账号行单独处理；Grok 图片和视频仍使用 SSO 登录态。
+      </SurfaceBox>
+      <div v-if="rowScopeIds.length" class="flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+        <span>已定位 {{ rowScopeIds.length }} 个所选账号；请选择 CPA 目标后，在各账号行开始授权。</span>
+        <Button size="xs" variant="outline" @click="rowScopeIds = []">查看全部账号</Button>
       </div>
-      <section class="space-y-2" aria-label="OAuth 额度与有效期">
-        <h3 class="text-sm font-medium text-foreground">已授权凭据 · 额度与有效期</h3>
-        <p class="text-xs text-muted-foreground">这里显示上游返回的 OAuth 月度额度；月度上限为 0 不代表无法调用，也无法据此计算可用总量。实际调用结果在模型测试中确认。SSO 图片和视频额度仍在账号管理中查看。</p>
-        <p v-if="!accounts.length" class="py-3 text-xs text-muted-foreground">暂无 OAuth 凭据，完成授权后显示。</p>
-        <div v-else class="overflow-x-auto">
-          <table class="w-full min-w-[700px] text-left text-xs">
-            <thead class="text-muted-foreground"><tr>
-              <th class="py-2 pr-4">邮箱 / OAuth 账号 ID</th><th class="py-2 pr-4">状态</th>
-              <th class="py-2 pr-4">月度额度 / 剩余</th><th class="py-2 pr-4">账期结束时间</th>
-              <th class="py-2 pr-4">凭据到期时间</th><th class="py-2 pr-4">CPA 同步</th><th class="py-2">操作</th>
-            </tr></thead>
-            <tbody><tr v-for="account in accounts" :key="account.id" class="border-t border-border">
-              <td class="max-w-[18rem] break-all py-3 pr-4"><p>{{ account.email || '未返回邮箱' }}</p><p class="mt-1 font-mono text-muted-foreground">{{ account.id }}</p></td>
-              <td class="py-3 pr-4">{{ grokOAuthAuthorizationText(oauthView(account)) }}</td>
-              <td class="max-w-[18rem] py-3 pr-4"><p>{{ grokOAuthRemainingQuotaText(oauthView(account)) === '-' ? '待查询' : grokOAuthRemainingQuotaText(oauthView(account)) }}</p><p v-if="account.quota?.error" class="mt-1 break-words text-rose-600">{{ account.quota.error }}</p></td>
-              <td class="whitespace-nowrap py-3 pr-4">{{ grokOAuthQuotaResetText(oauthView(account)) === '-' ? (account.quota?.status === 'error' ? '查询失败' : account.quota ? '上游未提供' : '待查询') : grokOAuthQuotaResetText(oauthView(account)) }}</td>
-              <td class="whitespace-nowrap py-3 pr-4">{{ formatGrokAccountDate(account.expires_at) }}</td>
-              <td class="max-w-[18rem] py-3 pr-4"><p>{{ cpaSyncText(account) }}</p><p v-if="account.cpa_sync?.pool_name" class="mt-1 text-muted-foreground">{{ account.cpa_sync.pool_name }}</p><p v-if="account.cpa_sync?.error" class="mt-1 break-words text-rose-600">{{ account.cpa_sync.error }}</p></td>
-              <td class="py-3"><div class="flex gap-2 whitespace-nowrap"><Button size="xs" variant="outline" :disabled="busy || account.status === 'disabled'" @click="refreshAccount(account.id)">刷新额度</Button><Button size="xs" variant="outline" :disabled="busy || !cpaPoolId || !account.has_access_token || !account.has_refresh_token || ['disabled','invalid'].includes(account.status)" @click="syncCPA(account)">{{ account.cpa_sync?.status === 'synced' ? '重新同步 CPA' : '同步 CPA' }}</Button></div></td>
-            </tr></tbody>
-          </table>
-        </div>
-      </section>
-
-      <SurfaceBox v-if="protocolJob" tone="muted" density="compact" class="space-y-2">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="text-sm font-medium text-foreground">后台授权 · {{ protocolStageLabel }}</span>
-          <StateBadge :tone="protocolJobTone" size="xs">{{ protocolPollError ? '状态待确认' : protocolStatusLabel }}</StateBadge>
-        </div>
-        <p class="text-xs text-muted-foreground">{{ protocolJob.message }}</p><p v-if="protocolPollError" class="text-xs text-amber-600">{{ protocolPollError }}</p>
-        <p v-if="protocolJob.error" class="break-words text-xs text-rose-600">{{ protocolJob.error }}</p>
-        <div v-if="protocolDeliveryItems.length" class="grid gap-1 border-t border-border pt-2">
-          <div v-for="item in protocolDeliveryItems" :key="item.target" class="flex min-w-0 items-center justify-between gap-3 text-xs">
-            <span class="truncate text-muted-foreground">{{ item.label }}</span>
-            <StateBadge :tone="item.status === 'success' ? 'success' : 'danger'" size="xs">
-              {{ item.status === 'success' ? '已上传' : '上传失败' }}
-            </StateBadge>
-          </div>
-        </div>
-      </SurfaceBox>
-
-      <SurfaceBox v-if="device" tone="muted" density="compact" class="space-y-3">
-        <p v-if="deviceTarget" class="text-sm text-foreground">正在授权：{{ deviceTarget.email }}。请在 xAI 页面确认登录的是此邮箱。</p>
-        <p class="text-xs text-muted-foreground">完成后点击“检查授权”。仅当返回凭据的邮箱与账号邮箱一致时，列表才显示该账号已授权。</p>
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="font-mono text-sm text-foreground">{{ device.user_code }}</span>
-          <div class="flex flex-wrap gap-2">
-            <Button size="xs" variant="outline" @click="openDeviceAuthorization">打开授权页</Button>
-            <Button size="xs" variant="primary" :disabled="busy" @click="pollDeviceAuthorization">检查授权</Button>
-          </div>
-        </div>
-        <p class="truncate font-mono text-xs text-muted-foreground" :title="device.verification_uri_complete">
-          {{ device.verification_uri_complete }}
-        </p>
-      </SurfaceBox>
-
-      <SurfaceBox v-if="showImport" tone="muted" density="compact" class="space-y-3">
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <label class="text-xs md:col-span-2">
-            <span class="ui-field-label">CPA OAuth JSON</span>
-            <textarea v-model.trim="credentialText" rows="5" class="ui-textarea-sm font-mono" placeholder="粘贴 xAI OAuth CPA JSON"></textarea>
-          </label>
-          <label class="text-xs">
-            <span class="ui-field-label">Access Token</span>
-            <textarea v-model.trim="accessToken" rows="3" class="ui-textarea-sm font-mono" placeholder="可选：直接粘贴"></textarea>
-          </label>
-          <label class="text-xs">
-            <span class="ui-field-label">Refresh Token</span>
-            <textarea v-model.trim="refreshToken" rows="3" class="ui-textarea-sm font-mono" placeholder="可选：直接粘贴"></textarea>
-          </label>
-        </div>
-        <div class="flex justify-end gap-2">
-          <Button size="xs" variant="outline" :disabled="busy" @click="showImport = false">取消</Button>
-          <Button size="xs" variant="primary" :disabled="busy || !hasImportValue" @click="importCredential">
-            {{ busy ? '导入中...' : '导入' }}
-          </Button>
-        </div>
-      </SurfaceBox>
-
-      <SurfaceBox v-if="showModelTest" tone="muted" density="compact" class="space-y-3">
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div class="text-xs">
-            <span class="ui-field-label">测试范围</span>
-            <ConsoleSegmentedTabs v-model="testScope" :options="testScopeOptions" aria-label="OAuth 账号测试范围" />
-          </div>
-          <div v-if="testScope === 'single'" class="text-xs">
-            <span class="ui-field-label">指定账号</span>
-            <GroupedSelectMenu
-              v-model="testAccountId"
-              :options="accountTestOptions"
-              placeholder="选择 OAuth 账号"
-              selected-indicator="none"
-              aria-label="指定 OAuth 测试账号"
-              block
-            />
-          </div>
-        </div>
-        <div class="grid grid-cols-1 gap-3 md:grid-cols-[minmax(12rem,0.35fr)_1fr]">
-          <div class="text-xs">
-            <span class="ui-field-label">模型</span>
-            <GroupedSelectMenu
-              v-model="testModel"
-              :options="modelTestOptions"
-              placeholder="选择模型"
-              selected-indicator="none"
-              aria-label="Grok 测试模型"
-              block
-            />
-          </div>
-          <label class="text-xs">
-            <span class="ui-field-label">测试提示词</span>
-            <textarea v-model.trim="testPrompt" rows="2" class="ui-textarea-sm" placeholder="输入测试提示词"></textarea>
-          </label>
-        </div>
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <p v-if="testTotal" class="text-xs text-muted-foreground">
-            已完成 {{ testCompleted }} / {{ testTotal }} · 成功 {{ testSuccessCount }} · 失败 {{ testFailureCount }}
-          </p>
-          <span v-else></span>
-          <div class="flex gap-2">
-            <Button size="xs" variant="outline" :disabled="busy" @click="closeModelTest">收起</Button>
-            <Button size="xs" variant="primary" :disabled="busy || !canRunModelTest" @click="runModelTest">
-              {{ testRunning ? `测试中 ${testCompleted}/${testTotal}` : testScope === 'all' ? '测试全部账号' : '测试指定账号' }}
-            </Button>
-          </div>
-        </div>
-        <div v-if="testResults.length" class="max-h-72 divide-y divide-border overflow-auto border-t border-border">
-          <div v-for="item in testResults" :key="item.accountId" class="space-y-1 py-2.5">
-            <div class="flex min-w-0 items-center justify-between gap-3">
-              <div class="min-w-0">
-                <p class="truncate text-xs font-medium text-foreground" :title="item.label">{{ item.label }}</p>
-                <p class="truncate font-mono text-[11px] text-muted-foreground" :title="item.accountId">{{ item.accountId }}</p>
-              </div>
-              <div class="flex shrink-0 items-center gap-2">
-                <span v-if="item.elapsedMs !== null" class="text-[11px] text-muted-foreground">{{ (item.elapsedMs / 1000).toFixed(1) }}s</span>
-                <StateBadge :tone="testResultTone(item.status)" size="xs">{{ testResultStatusLabel(item.status) }}</StateBadge>
-              </div>
-            </div>
-            <p v-if="item.error" class="break-words text-xs text-rose-600">{{ item.error }}</p>
-            <p v-else-if="item.content" class="break-words text-xs text-foreground">{{ item.content }}</p>
-          </div>
-        </div>
-      </SurfaceBox>
+      <GrokOAuthCandidates :items="visibleRows" :loading="loading" :busy-rows="busyRows" :target-selected="Boolean(cpaPoolId)" :error="candidateError" @authorize="startProtocolAuthorization" @cpa="handleCPA" @device="startDeviceAuthorization" @details="openDetails" @toggle="toggleAccount" @remove="removeAccount" />
     </ModalBody>
-    <ModalFooter v-if="!props.embedded">
-      <Button size="sm" variant="outline" :disabled="busy" @click="emit('close')">完成</Button>
-    </ModalFooter>
+    <ModalFooter v-if="!props.embedded" density="compact"><Button size="sm" variant="outline" @click="emit('close')">完成</Button></ModalFooter>
+  </ModalShell>
+
+  <ModalShell :open="dialog === 'device'" max-width="40rem" :z-index="160" @close="closeDialog">
+    <ModalHeader title="手动设备码授权" :subtitle="deviceTarget?.email" compact @close="closeDialog" />
+    <ModalBody density="compact" class="space-y-4">
+      <p class="text-sm text-muted-foreground">请在 xAI 页面使用此账号完成授权，再检查结果。成功后自动同步到 {{ dialogPoolName }}。</p>
+      <template v-if="device">
+        <div class="rounded-lg border border-border p-4 text-center font-mono text-xl tracking-widest">{{ device.user_code }}</div>
+        <div class="flex flex-wrap justify-end gap-2"><Button size="sm" variant="outline" @click="openDeviceAuthorization">打开授权页</Button><Button size="sm" variant="primary" :disabled="modalBusy" @click="pollDeviceAuthorization">{{ modalBusy ? '检查中…' : '检查授权' }}</Button></div>
+      </template>
+      <p v-if="dialogError" role="alert" class="break-words text-sm text-rose-600">{{ dialogError }}</p>
+    </ModalBody>
+  </ModalShell>
+
+  <ModalShell :open="dialog === 'import'" max-width="42rem" :z-index="160" @close="closeDialog">
+    <ModalHeader title="导入 xAI OAuth" :subtitle="`导入后自动同步到 ${dialogPoolName}`" compact @close="closeDialog" />
+    <ModalBody density="compact" class="space-y-4">
+      <label class="block space-y-2"><span class="ui-field-label">xAI OAuth JSON</span><textarea v-model.trim="credentialText" rows="8" class="ui-textarea-sm font-mono" placeholder="粘贴包含账号身份与 Token 的 xAI OAuth JSON"></textarea></label>
+      <p v-if="dialogError" role="alert" class="break-words text-sm text-rose-600">{{ dialogError }}</p>
+    </ModalBody>
+    <ModalFooter density="compact"><Button size="sm" variant="outline" :disabled="modalBusy" @click="closeDialog">取消</Button><Button size="sm" variant="primary" :disabled="modalBusy || !credentialText" @click="importCredential">{{ modalBusy ? '导入中…' : '导入并同步' }}</Button></ModalFooter>
+  </ModalShell>
+
+  <ModalShell :open="dialog === 'details'" max-width="44rem" :z-index="160" @close="closeDialog">
+    <ModalHeader title="OAuth 额度与测试" :subtitle="detailAccount?.email" compact @close="closeDialog" />
+    <ModalBody v-if="detailAccount" density="compact" class="space-y-4">
+      <p class="text-sm text-muted-foreground">月度上限为 0 不代表无法调用；SSO 图片和视频额度仍在账号管理中查看。</p>
+      <dl class="grid grid-cols-2 gap-3 text-sm"><div><dt class="text-muted-foreground">月度额度</dt><dd class="mt-1">{{ grokOAuthRemainingQuotaText({ oauth: detailAccount } as GrokAccount) }}</dd></div><div><dt class="text-muted-foreground">Access Token 到期</dt><dd class="mt-1">{{ formatGrokAccountDate(detailAccount.expires_at) }}</dd></div></dl>
+      <p v-if="detailAccount.quota?.error" class="text-sm text-rose-600">{{ detailAccount.quota.error }}</p>
+      <Button size="sm" variant="outline" :disabled="modalBusy" @click="refreshAccount(detailAccount.id)">刷新额度</Button>
+      <Button size="sm" variant="outline" :disabled="modalBusy" @click="syncModels(detailAccount.id)">探测模型</Button>
+      <div class="space-y-3 border-t border-border pt-4">
+        <label class="block space-y-2"><span class="ui-field-label">测试模型</span><input v-model.trim="testModel" class="ui-input-sm w-full" placeholder="输入模型 ID" /></label>
+        <label class="block space-y-2"><span class="ui-field-label">测试提示词</span><textarea v-model.trim="testPrompt" rows="2" class="ui-textarea-sm" /></label>
+        <p class="text-xs text-muted-foreground">模型测试会向上游发送一次请求并使用账号额度。</p>
+        <Button size="sm" variant="outline" :disabled="modalBusy || !testModel || !testPrompt" @click="runModelTest">测试此账号</Button>
+        <pre v-if="testResult" class="whitespace-pre-wrap break-words text-sm">{{ testResult }}</pre>
+      </div>
+      <p v-if="dialogError" role="alert" class="break-words text-sm text-rose-600">{{ dialogError }}</p>
+    </ModalBody>
   </ModalShell>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Button } from 'nanocat-ui'
-
-import {
-  grokOAuthAccountsApi,
-  type GrokOAuthAccount,
-  type GrokOAuthCandidate,
-  type GrokOAuthDeviceSession,
-  type GrokOAuthProtocolJob,
-} from '@/api/grokOAuthAccounts'
-import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
+import { grokOAuthAccountsApi, type GrokOAuthAccount, type GrokOAuthCandidate, type GrokOAuthDeviceSession, type GrokOAuthProtocolJob } from '@/api/grokOAuthAccounts'
 import { accountImportsApi, type CPAPool } from '@/api/accountImports'
 import type { GrokAccount } from '@/api/grokAccounts'
-import { formatGrokAccountDate, grokOAuthQuotaResetText, grokOAuthRemainingQuotaText, grokOAuthAuthorizationText } from './grokAccountView'
-
-function oauthView(account: GrokOAuthAccount): GrokAccount {
-  return { oauth: account } as GrokAccount
-}
-
-import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
-import StateBadge from '@/components/ai/StateBadge.vue'
+import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
+import { cpaAction, grokOAuthImportPayload, isCPAManaged, mergeGrokOAuthRows, type GrokOAuthRow } from './grokOAuthCandidates'
+import { formatGrokAccountDate, grokOAuthRemainingQuotaText } from './grokAccountView'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
@@ -211,423 +83,253 @@ import ModalHeader from '@/components/ai/ModalHeader.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useToast } from '@/composables/useToast'
+import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { errorMessage } from '@/lib/errorMessage'
 
 const toast = useToast()
-const props = withDefaults(defineProps<{ open?: boolean; embedded?: boolean }>(), { open: false, embedded: false })
-const emit = defineEmits<{
-  (e: 'close'): void
-  (e: 'changed'): void
-}>()
-const accounts = ref<GrokOAuthAccount[]>([])
-const candidates = ref<GrokOAuthCandidate[]>([])
-const candidateError = ref('')
-const deviceTarget = ref<GrokOAuthCandidate | null>(null)
-const availableModels = ref<string[]>([])
-const loading = ref(false)
-const busy = ref(false)
-const showImport = ref(false)
-const device = ref<GrokOAuthDeviceSession | null>(null)
-const protocolJob = ref<GrokOAuthProtocolJob | null>(null)
-const protocolPollError = ref('')
-let protocolPollFailures = 0
-let disposed = false
-const cpaPools = ref<CPAPool[]>([])
-const cpaPoolId = ref('')
-const cpaLoadError = ref('')
+const confirmDialog = useConfirmDialog()
+const props = withDefaults(defineProps<{ open?: boolean; embedded?: boolean; focusAccountIds?: string[] }>(), { open: false, embedded: false, focusAccountIds: () => [] })
+const emit = defineEmits<{ close: []; changed: [] }>()
+const accounts = ref<GrokOAuthAccount[]>([]), candidates = ref<GrokOAuthCandidate[]>([])
+const jobs = ref<Record<string, GrokOAuthProtocolJob>>({}), pollErrors = ref<Record<string, string>>({})
+const busyRows = ref<Record<string, string>>({}), rowErrors = ref<Record<string, string>>({})
+const loading = ref(false), candidateError = ref(''), cpaLoadError = ref('')
+const cpaPools = ref<CPAPool[]>([]), cpaPoolId = ref('')
 const cpaPoolOptions = computed(() => cpaPools.value.map(pool => ({ label: pool.name || pool.base_url, value: pool.id })))
-function cpaSyncText(account: GrokOAuthAccount) {
- return ({ synced: '已同步', failed: '同步失败', pending: '凭据已更新，待同步' } as Record<string,string>)[account.cpa_sync?.status || ''] || '未同步'
-}
-async function syncCPA(account: GrokOAuthAccount) {
- if (!cpaPoolId.value) return
- busy.value = true
- try {
-  await grokOAuthAccountsApi.syncCPA(account.id, cpaPoolId.value)
-  toast.success('xAI OAuth 凭据已同步到 CPA')
- } catch(error) { toast.error(errorMessage(error, 'CPA 同步失败')) }
- finally { await loadAccounts(); busy.value = false }
-}
-const credentialText = ref('')
-const accessToken = ref('')
-const refreshToken = ref('')
-const showModelTest = ref(false)
-const testModel = ref('')
-const testPrompt = ref('你好，请只回复 OK。')
-const testScope = ref<'all' | 'single'>('all')
-const testAccountId = ref('')
-const testRunning = ref(false)
-const testCompleted = ref(0)
-const testTotal = ref(0)
-type OAuthAccountTestStatus = 'pending' | 'success' | 'failed'
-type OAuthAccountTestItem = {
-  accountId: string
-  label: string
-  status: OAuthAccountTestStatus
-  elapsedMs: number | null
-  content: string
-  error: string
-}
-const testResults = ref<OAuthAccountTestItem[]>([])
-let protocolPollTimer: number | null = null
+const rows = computed(() => mergeGrokOAuthRows(candidates.value, accounts.value, Object.values(jobs.value), pollErrors.value).map(row => ({ ...row, action_error: rowErrors.value[row.id] })))
+const rowScopeIds = ref<string[]>([])
+const visibleRows = computed(() => rowScopeIds.value.length ? rows.value.filter(row => rowScopeIds.value.includes(row.source_account_id || row.id)) : rows.value)
+watch(() => [props.open, props.focusAccountIds] as const, () => { if (props.open) rowScopeIds.value = [...props.focusAccountIds] }, { immediate: true })
+const dialog = ref<'device' | 'import' | 'details' | null>(null), dialogError = ref(''), modalBusy = ref(false)
+const dialogPoolId = ref(''), dialogPoolName = ref(''), credentialText = ref('')
+const device = ref<GrokOAuthDeviceSession | null>(null), deviceTarget = ref<GrokOAuthRow | null>(null)
+const devicePoolId = ref(''), devicePoolName = ref('')
+const detailAccountId = ref(''), testModel = ref(''), testPrompt = ref('你好，请只回复 OK。'), testResult = ref('')
+const detailAccount = computed(() => accounts.value.find(item => item.id === detailAccountId.value))
+const pollFailures: Record<string, number> = {}
+const jobReadVersions: Record<string, number> = {}
+let pollTimer: number | null = null, disposed = false, loadVersion = 0
 
-const hasImportValue = computed(() => Boolean(credentialText.value || (accessToken.value && refreshToken.value)))
-const testScopeOptions = [
-  { label: '全部账号', value: 'all' },
-  { label: '指定账号', value: 'single' },
-]
-const modelTestOptions = computed(() => Array.from(new Set([
-  ...availableModels.value,
-  ...accounts.value.flatMap((account) => account.models || []),
-])).map((model) => ({ label: model, value: model })))
-const accountTestOptions = computed(() => accounts.value.map((account) => ({
-  label: `${account.email || account.subject_preview || account.id} · ${account.status}`,
-  value: account.id,
-})))
-const canRunModelTest = computed(() => Boolean(
-  testModel.value
-  && testPrompt.value.trim()
-  && (testScope.value === 'all' ? accounts.value.length : testAccountId.value),
-))
-const testSuccessCount = computed(() => testResults.value.filter((item) => item.status === 'success').length)
-const testFailureCount = computed(() => testResults.value.filter((item) => item.status === 'failed').length)
-const protocolRunning = computed(() => ['pending', 'running'].includes(protocolJob.value?.status || ''))
-const protocolJobTone = computed(() => {
-  if (protocolJob.value?.status === 'authorized') return 'success'
-  if (protocolJob.value?.status === 'failed') return 'danger'
-  return 'warning'
-})
-const protocolStatusLabel = computed(() => ({
-  pending: '等待',
-  running: '运行中',
-  authorized: '已完成',
-  failed: '失败',
-  manual_action_required: '需处理',
-}[protocolJob.value?.status || 'pending'] || protocolJob.value?.status || '等待'))
-const protocolStageLabel = computed(() => ({
-  queued: '排队', authorize: '授权处理中', completed: '完成', failed: '失败', attention: '需处理',
-}[protocolJob.value?.stage || 'queued'] || protocolJob.value?.stage || '排队'))
-const protocolDeliveryItems = computed(() => Object.entries(protocolJob.value?.delivery || {})
-  .filter(([, result]) => result?.status === 'success' || result?.status === 'failed')
-  .map(([target, result]) => ({
-    target,
-    label: target === 'sub2api' ? 'Sub2API' : target === 'cpa' ? 'CPA' : '外部投递',
-    status: result.status,
-  })))
+function activeJob(job: GrokOAuthProtocolJob) { return ['pending', 'running'].includes(job.status) }
+function poolName(id: string) { return cpaPools.value.find(pool => pool.id === id)?.name || '所选 CPA' }
+function setRowBusy(id: string, action: string) { busyRows.value = { ...busyRows.value, [id]: action } }
+function clearRowBusy(id: string) { const next = { ...busyRows.value }; delete next[id]; busyRows.value = next }
 
-async function loadAccounts() {
+async function loadAccounts(readJobs = true) {
+  const version = ++loadVersion
   loading.value = true
+  const results = await Promise.allSettled([grokOAuthAccountsApi.list(), grokOAuthAccountsApi.candidates(), accountImportsApi.listCPAPools()])
+  if (disposed || version !== loadVersion) return
+  const [accountResult, candidateResult, poolResult] = results
+  if (accountResult.status === 'fulfilled') accounts.value = accountResult.value.items || []
+  if (candidateResult.status === 'fulfilled') candidates.value = candidateResult.value.items || []
+  candidateError.value = accountResult.status === 'rejected' || candidateResult.status === 'rejected' ? '账号读取不完整，请刷新列表重试。' : ''
+  if (poolResult.status === 'fulfilled') {
+    cpaPools.value = poolResult.value.pools || []; cpaLoadError.value = ''
+    if (!cpaPools.value.some(pool => pool.id === cpaPoolId.value)) cpaPoolId.value = cpaPools.value.length === 1 ? cpaPools.value[0].id : ''
+  } else { cpaLoadError.value = 'CPA 连接读取失败，请刷新列表'; cpaPoolId.value = '' }
+  if (readJobs) {
+    const ids = new Set([...Object.keys(jobs.value), ...candidates.value.map(item => item.oauth_job_id).filter((id): id is string => Boolean(id))])
+    await Promise.allSettled([...ids].map(id => readJob(id)))
+  }
+  if (disposed || version !== loadVersion) return
+  loading.value = false
+  schedulePoll()
+}
+
+async function readJob(id: string) {
+  const version = jobReadVersions[id] = (jobReadVersions[id] || 0) + 1
   try {
-    const [result] = await Promise.all([
-      grokOAuthAccountsApi.list(),
-      accountImportsApi.listCPAPools().then(result => {
-        cpaPools.value = result.pools || []; cpaLoadError.value = ''
-        if (!cpaPools.value.some(pool => pool.id === cpaPoolId.value)) cpaPoolId.value = cpaPools.value.length === 1 ? cpaPools.value[0].id : ''
-      }).catch(() => { cpaLoadError.value = 'CPA 连接加载失败，请刷新列表'; cpaPoolId.value = '' }),
-      grokOAuthAccountsApi.candidates().then(result => { candidates.value = result.items || []; candidateError.value = '' }).catch(() => { candidateError.value = 'Grok 待授权账号加载失败，请刷新重试' }),
-    ])
-    const active = candidates.value.find(item => item.oauth_job_id && ['queued', 'running'].includes(item.oauth_status))
-    const trackedJobId = protocolJob.value?.id || active?.oauth_job_id
-    if (trackedJobId) {
-      try {
-        const resumed = await grokOAuthAccountsApi.getProtocolJob(trackedJobId)
-        if (disposed || (protocolJob.value && protocolJob.value.id !== trackedJobId)) return
-        protocolJob.value = resumed.job
-        protocolPollError.value = ''; protocolPollFailures = 0
-        if (['pending', 'running'].includes(resumed.job.status)) scheduleProtocolPoll()
-        else if (protocolPollTimer !== null) { window.clearTimeout(protocolPollTimer); protocolPollTimer = null }
-      } catch { protocolPollError.value = '任务状态读取失败，请刷新列表核对；页面状态不代表后台仍在运行' }
-    }
-    if (disposed) return
-    accounts.value = result.items || []
-    availableModels.value = result.available_models || Array.from(new Set(accounts.value.flatMap(account => account.models || [])))
-    const modelIds = modelTestOptions.value.map((option) => option.value)
-    if (!modelIds.includes(testModel.value)) testModel.value = modelIds[0] || ''
-    if (!accounts.value.some((account) => account.id === testAccountId.value)) {
-      testAccountId.value = accounts.value[0]?.id || ''
-    }
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : 'OAuth 账号加载失败')
-  } finally {
-    loading.value = false
+    const result = await grokOAuthAccountsApi.getProtocolJob(id)
+    if (disposed || jobReadVersions[id] !== version) return false
+    const previous = jobs.value[id]
+    jobs.value = { ...jobs.value, [id]: result.job }
+    pollFailures[id] = 0
+    pollErrors.value = { ...pollErrors.value, [id]: '' }
+    return Boolean(previous && activeJob(previous) && !activeJob(result.job))
+  } catch {
+    if (disposed || jobReadVersions[id] !== version) return false
+    pollFailures[id] = (pollFailures[id] || 0) + 1
+    pollErrors.value = { ...pollErrors.value, [id]: pollFailures[id] < 3 ? '任务状态读取失败，正在重新查询。' : '任务状态待确认，请刷新列表核对；页面状态不代表后台仍在运行。' }
+    return false
   }
 }
 
-function openModelTest() {
-  if (!testModel.value) testModel.value = modelTestOptions.value[0]?.value || ''
-  if (!testAccountId.value) testAccountId.value = accounts.value[0]?.id || ''
-  showModelTest.value = true
+function schedulePoll() {
+  if (pollTimer !== null) window.clearTimeout(pollTimer)
+  pollTimer = null
+  if (!disposed && Object.values(jobs.value).some(job => activeJob(job) && (pollFailures[job.id] || 0) < 3)) pollTimer = window.setTimeout(pollJobs, 1500)
 }
 
-function closeModelTest() {
-  showModelTest.value = false
-  testResults.value = []
-  testCompleted.value = 0
-  testTotal.value = 0
-}
-
-async function runModelTest() {
-  const model = testModel.value.trim()
-  const prompt = testPrompt.value.trim()
-  const targets = testScope.value === 'all'
-    ? [...accounts.value]
-    : accounts.value.filter((account) => account.id === testAccountId.value)
-  if (!model || !prompt || !targets.length) return
-
-  busy.value = true
-  testRunning.value = true
-  testCompleted.value = 0
-  testTotal.value = targets.length
-  testResults.value = targets.map((account) => ({
-    accountId: account.id,
-    label: account.email || account.subject_preview || account.id,
-    status: 'pending',
-    elapsedMs: null,
-    content: '',
-    error: '',
-  }))
-  let nextIndex = 0
-  try {
-    const worker = async () => {
-      while (nextIndex < targets.length) {
-        const index = nextIndex
-        nextIndex += 1
-        const account = targets[index]
-        const startedAt = performance.now()
-        try {
-          const result = await grokOAuthAccountsApi.testAccount(account.id, { model, prompt })
-          testResults.value[index] = {
-            ...testResults.value[index],
-            status: 'success',
-            elapsedMs: result.elapsed_ms,
-            content: result.content,
-          }
-        } catch (error) {
-          testResults.value[index] = {
-            ...testResults.value[index],
-            status: 'failed',
-            elapsedMs: Math.round(performance.now() - startedAt),
-            error: errorMessage(error, '账号测试失败'),
-          }
-        } finally {
-          testCompleted.value += 1
-        }
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(3, targets.length) }, () => worker()))
-    if (testFailureCount.value) {
-      toast.warning(`账号测试完成：成功 ${testSuccessCount.value}，失败 ${testFailureCount.value}`)
-    } else {
-      toast.success(`账号测试完成：${testSuccessCount.value} 个账号全部可用`)
-    }
-    await loadAccounts()
-    emit('changed')
-  } finally {
-    testRunning.value = false
-    busy.value = false
-  }
-}
-
-function testResultTone(status: OAuthAccountTestStatus) {
-  if (status === 'success') return 'success'
-  if (status === 'failed') return 'danger'
-  return 'warning'
-}
-
-function testResultStatusLabel(status: OAuthAccountTestStatus) {
-  if (status === 'success') return '可用'
-  if (status === 'failed') return '失败'
-  return '等待'
-}
-
-async function startDeviceAuthorization(candidate?: GrokOAuthCandidate) {
-  if (device.value) { toast.info('请先完成当前设备码授权'); return }
-  busy.value = true
-  try {
-    device.value = await grokOAuthAccountsApi.startDevice()
-    deviceTarget.value = candidate || null
-    window.open(device.value.verification_uri_complete, '_blank', 'noopener,noreferrer')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : '无法创建设备授权')
-  } finally {
-    busy.value = false
-  }
-}
-
-function scheduleProtocolPoll() {
+async function pollJobs() {
+  pollTimer = null
+  const active = Object.values(jobs.value).filter(job => activeJob(job) && (pollFailures[job.id] || 0) < 3)
+  const changed = await Promise.all(active.map(job => readJob(job.id)))
   if (disposed) return
-  if (protocolPollTimer !== null) window.clearTimeout(protocolPollTimer)
-  protocolPollTimer = window.setTimeout(pollProtocolAuthorization, 1500)
-}
-
-async function pollProtocolAuthorization() {
-  const jobId = protocolJob.value?.id
-  if (disposed || !jobId) return
-  protocolPollTimer = null
-  try {
-    const result = await grokOAuthAccountsApi.getProtocolJob(jobId)
-    if (disposed || protocolJob.value?.id !== jobId) return
-    protocolJob.value = result.job
-    protocolPollError.value = ''; protocolPollFailures = 0
-    candidates.value = candidates.value.map(item => item.id === result.job.source_account_id
-      ? { ...item, oauth_status: result.job.status === 'pending' ? 'queued' : result.job.status }
-      : item)
-    if (result.job.status === 'authorized') {
-      toast.success(`后台授权成功${result.job.models.length ? `：${result.job.models.join('、')}` : ''}`)
-      await loadAccounts()
-      emit('changed')
-      return
+  if (changed.some(Boolean)) {
+    for (let i = 0; i < active.length; i++) {
+      if (!changed[i]) continue
+      const job = jobs.value[active[i].id]
+      if (job.status === 'authorized') notifyDelivery(job.account, job.stage)
+      else toast.warning(job.error || job.message || '后台授权需要处理')
     }
-    if (['failed', 'manual_action_required'].includes(result.job.status)) {
-      toast.warning(result.job.error || '后台授权需要处理')
-      await loadAccounts()
-      return
-    }
-    scheduleProtocolPoll()
-  } catch (error) {
-    if (disposed || protocolJob.value?.id !== jobId) return
-    protocolPollError.value = '任务状态读取失败，正在重新查询；可点击刷新列表核对'
-    protocolPollFailures += 1
-    if (protocolPollFailures < 3) scheduleProtocolPoll()
-    else protocolPollError.value = '任务状态读取失败，请刷新列表核对；页面状态不代表后台仍在运行'
-  }
+    await loadAccounts(false)
+    emit('changed')
+  } else schedulePoll()
 }
 
-async function startProtocolAuthorization(candidate: GrokOAuthCandidate) {
-  busy.value = true
+function notifyDelivery(account?: GrokOAuthAccount, stage = '') {
+  if (stage === 'cpa_sync_failed' || (account?.cpa_sync && account.cpa_sync.status !== 'synced')) toast.warning('授权已保存，CPA 交付待处理。请在账号行核对或重试同步。')
+  else if (account?.cpa_sync?.status === 'synced') toast.success('授权成功，已同步到 CPA')
+  else toast.info('授权已保存，请在账号行确认 CPA 交付状态')
+}
+
+async function startProtocolAuthorization(row: GrokOAuthRow) {
+  const target = cpaPoolId.value
+  if (!row.source_account_id || !target) return
+  setRowBusy(row.id, 'authorize'); rowErrors.value = { ...rowErrors.value, [row.id]: '' }
   try {
-    const result = await grokOAuthAccountsApi.startProtocol(candidate.id)
-    protocolJob.value = result.job
-    await loadAccounts()
-    if (protocolRunning.value) scheduleProtocolPoll()
-  } catch (error) {
-    toast.error(errorMessage(error, '无法启动后台授权'))
-  } finally {
-    busy.value = false
-  }
+    const result = await grokOAuthAccountsApi.startProtocol(row.source_account_id, target)
+    if (disposed) return
+    jobs.value = { ...jobs.value, [result.job.id]: result.job }
+    pollFailures[result.job.id] = 0
+    await loadAccounts(false)
+  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, '无法启动后台授权') } }
+  finally { clearRowBusy(row.id) }
 }
 
-function openDeviceAuthorization() {
-  if (device.value?.verification_uri_complete) {
-    window.open(device.value.verification_uri_complete, '_blank', 'noopener,noreferrer')
-  }
+async function handleCPA(row: GrokOAuthRow) {
+  if (!row.oauth_account_id) return
+  const action = cpaAction(row), target = row.cpa_sync?.pool_id || cpaPoolId.value
+  if (!action || !target) return
+  setRowBusy(row.id, 'cpa'); rowErrors.value = { ...rowErrors.value, [row.id]: '' }
+  try {
+    const result = action === 'check'
+      ? await grokOAuthAccountsApi.checkCPA(row.oauth_account_id, target)
+      : await grokOAuthAccountsApi.syncCPA(row.oauth_account_id, target)
+    if (result.ok) toast.success(action === 'check' ? 'CPA 交付记录已确认' : '已同步到 CPA')
+    else rowErrors.value = { ...rowErrors.value, [row.id]: result.account?.cpa_sync?.error || 'CPA 交付尚未确认，请核对后处理。' }
+    await loadAccounts(false); emit('changed')
+  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'CPA 操作失败') }; await loadAccounts(false) }
+  finally { clearRowBusy(row.id) }
 }
 
+function pinDialogTarget() { dialogPoolId.value = cpaPoolId.value; dialogPoolName.value = poolName(cpaPoolId.value); dialogError.value = '' }
+function openImport() { if (!cpaPoolId.value) return; pinDialogTarget(); dialog.value = 'import' }
+function closeDialog() { if (!modalBusy.value) { dialog.value = null; dialogError.value = ''; credentialText.value = '' } }
+
+async function startDeviceAuthorization(row: GrokOAuthRow) {
+  if (!row.source_account_id || !cpaPoolId.value) return
+  if (device.value && device.value.expires_at <= Date.now() / 1000) { device.value = null; deviceTarget.value = null }
+  if (device.value) {
+    if (deviceTarget.value?.id === row.id) {
+      dialogPoolId.value = devicePoolId.value; dialogPoolName.value = devicePoolName.value
+      dialogError.value = ''; dialog.value = 'device'
+    }
+    else toast.info('请先完成已创建的设备码授权。')
+    return
+  }
+  pinDialogTarget(); deviceTarget.value = row; dialog.value = 'device'; modalBusy.value = true
+  devicePoolId.value = dialogPoolId.value; devicePoolName.value = dialogPoolName.value
+  try { device.value = await grokOAuthAccountsApi.startDevice(row.source_account_id, dialogPoolId.value) }
+  catch (error) { dialogError.value = errorMessage(error, '无法创建设备授权') }
+  finally { modalBusy.value = false }
+}
+function openDeviceAuthorization() { if (device.value?.verification_uri_complete) window.open(device.value.verification_uri_complete, '_blank', 'noopener,noreferrer') }
 async function pollDeviceAuthorization() {
   if (!device.value) return
-  busy.value = true
+  if (device.value.expires_at <= Date.now() / 1000) { device.value = null; dialogError.value = '设备码已过期，请关闭后从账号行重新发起。'; return }
+  modalBusy.value = true; dialogError.value = ''
   try {
     const result = await grokOAuthAccountsApi.pollDevice(device.value.id)
     if (result.status === 'authorized') {
-      device.value = null
-      if (deviceTarget.value && result.account.email?.trim().toLowerCase() !== deviceTarget.value.email.trim().toLowerCase()) {
-        toast.warning('OAuth 凭据已保存，但返回邮箱与所选账号不一致或缺失；未将所选账号标记为已授权。')
-      } else { toast.success('xAI OAuth 凭据已保存') }
-      deviceTarget.value = null
-      await loadAccounts()
-      emit('changed')
-      return
-    }
-    toast.info('授权仍在等待中')
+      notifyDelivery(result.account)
+      device.value = null; deviceTarget.value = null; dialog.value = null
+      await loadAccounts(false); emit('changed')
+    } else toast.info('授权仍在等待中')
   } catch (error) {
-    device.value = null
-    toast.error(error instanceof Error ? error.message : '授权状态检查失败')
-  } finally {
-    busy.value = false
+    const message = errorMessage(error, '授权状态检查失败；请核对当前授权结果。')
+    if (/device authorization (?:has expired|failed:)|oauth_identity_(?:missing|mismatch)|oauth_account_changed/i.test(message)) device.value = null
+    dialogError.value = message
   }
+  finally { modalBusy.value = false }
 }
 
 async function importCredential() {
-  busy.value = true
+  modalBusy.value = true; dialogError.value = ''
   try {
-    let credential: Record<string, unknown> | undefined
-    if (credentialText.value) {
-      const parsed = JSON.parse(credentialText.value)
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('CPA OAuth JSON 必须是对象')
-      }
-      credential = parsed as Record<string, unknown>
-    }
-    await grokOAuthAccountsApi.importCredential({
-      credential,
-      access_token: accessToken.value || undefined,
-      refresh_token: refreshToken.value || undefined,
-    })
-    credentialText.value = ''
-    accessToken.value = ''
-    refreshToken.value = ''
-    showImport.value = false
-    toast.success('Grok Build OAuth 凭据已导入')
-    await loadAccounts()
-    emit('changed')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : 'OAuth 凭据导入失败')
-  } finally {
-    busy.value = false
-  }
+    const result = await grokOAuthAccountsApi.importCredential(grokOAuthImportPayload(JSON.parse(credentialText.value), dialogPoolId.value))
+    notifyDelivery(result.account)
+    credentialText.value = ''; dialog.value = null
+    await loadAccounts(false); emit('changed')
+  } catch (error) { dialogError.value = errorMessage(error, '凭据导入失败') }
+  finally { modalBusy.value = false }
 }
 
+function openDetails(row: GrokOAuthRow) {
+  if (!row.account || isCPAManaged(row)) return
+  detailAccountId.value = row.account.id; testModel.value = row.account.models?.[0] || ''; testResult.value = ''; dialogError.value = ''; dialog.value = 'details'
+}
 async function refreshAccount(id: string) {
-  busy.value = true
+  const account = accounts.value.find(item => item.id === id)
+  if (!account || isCPAManaged(account)) return
+  modalBusy.value = true; dialogError.value = ''
   try {
     const result = await grokOAuthAccountsApi.queryQuota(id)
-    if (result.ok) toast.success('OAuth 额度已更新')
-    else toast.warning(result.account.quota?.error || 'OAuth 额度查询失败，已保留具体原因')
-    await loadAccounts()
-    emit('changed')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : 'OAuth 额度查询失败')
-  } finally {
-    busy.value = false
-  }
+    if (!result.ok) dialogError.value = result.account.quota?.error || '额度查询失败'
+    await loadAccounts(false); emit('changed')
+  } catch (error) { dialogError.value = errorMessage(error, '额度查询失败') }
+  finally { modalBusy.value = false }
 }
-
 async function syncModels(id: string) {
-  busy.value = true
+  const account = accounts.value.find(item => item.id === id)
+  if (!account || isCPAManaged(account)) return
+  modalBusy.value = true; dialogError.value = ''
+  try { await grokOAuthAccountsApi.syncModels(id); await loadAccounts(false); emit('changed') }
+  catch (error) { dialogError.value = errorMessage(error, '模型探测失败') }
+  finally { modalBusy.value = false }
+}
+async function toggleAccount(row: GrokOAuthRow) {
+  if (!row.account || busyRows.value[row.id]) return
+  const disabled = row.account.status !== 'disabled'
+  const confirmed = await confirmDialog.ask({
+    title: disabled ? '禁用 OAuth' : '启用 OAuth',
+    message: `将${disabled ? '禁用' : '启用'} ${row.email || row.id} 在 CFM 中的 OAuth。CPA 中已交付的账号由 CPA 独立管理。是否继续？`,
+    confirmText: disabled ? '禁用 OAuth' : '启用 OAuth', cancelText: '取消',
+  })
+  if (!confirmed) return
+  setRowBusy(row.id, 'toggle')
+  try { await grokOAuthAccountsApi.setDisabled([row.account.id], disabled); await loadAccounts(false); emit('changed') }
+  catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'OAuth 状态更新失败') } }
+  finally { clearRowBusy(row.id) }
+}
+async function removeAccount(row: GrokOAuthRow) {
+  if (!row.account || busyRows.value[row.id]) return
+  const confirmed = await confirmDialog.ask({
+    title: '移除 OAuth',
+    message: `将移除 ${row.email || row.id} 在 CFM 中保存的 OAuth 凭据。注册账号、SSO 登录态和 CPA 中的凭据保留。是否继续？`,
+    confirmText: '移除 OAuth', cancelText: '取消',
+  })
+  if (!confirmed) return
+  setRowBusy(row.id, 'remove')
   try {
-    await grokOAuthAccountsApi.syncModels(id)
-    toast.success('可用模型已更新')
-    await loadAccounts()
-    emit('changed')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : '模型探测失败')
-  } finally {
-    busy.value = false
-  }
+    await grokOAuthAccountsApi.remove([row.account.id])
+    jobs.value = Object.fromEntries(Object.entries(jobs.value).filter(([, job]) => job.account?.id !== row.account?.id))
+    await loadAccounts(false); emit('changed')
+  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'OAuth 移除失败') } }
+  finally { clearRowBusy(row.id) }
+}
+async function runModelTest() {
+  const account = detailAccount.value
+  if (!account || isCPAManaged(account) || !testModel.value || !testPrompt.value) return
+  modalBusy.value = true; dialogError.value = ''; testResult.value = ''
+  try { const result = await grokOAuthAccountsApi.testAccount(account.id, { model: testModel.value, prompt: testPrompt.value }); testResult.value = result.content; await loadAccounts(false) }
+  catch (error) { dialogError.value = errorMessage(error, '模型测试失败') }
+  finally { modalBusy.value = false }
 }
 
-async function setDisabled(account: GrokOAuthAccount) {
-  busy.value = true
-  try {
-    await grokOAuthAccountsApi.setDisabled([account.id], account.status !== 'disabled')
-    await loadAccounts()
-    emit('changed')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : '账号状态更新失败')
-  } finally {
-    busy.value = false
-  }
-}
-
-async function removeAccount(id: string) {
-  busy.value = true
-  try {
-    await grokOAuthAccountsApi.remove([id])
-    toast.success('OAuth 账号已删除')
-    await loadAccounts()
-    emit('changed')
-  } catch (error) {
-    toast.error(error instanceof Error ? error.message : '账号删除失败')
-  } finally {
-    busy.value = false
-  }
-}
-
-onMounted(loadAccounts)
-onBeforeUnmount(() => {
-  disposed = true
-  if (protocolPollTimer !== null) window.clearTimeout(protocolPollTimer)
-})
-
-defineExpose({ loadAccounts, refreshAccount, syncModels, setDisabled, removeAccount })
+watch(() => props.open, open => { if (open) void loadAccounts() })
+onMounted(() => { if (props.open) void loadAccounts() })
+onBeforeUnmount(() => { disposed = true; loadVersion++; if (pollTimer !== null) window.clearTimeout(pollTimer) })
+defineExpose({ loadAccounts, refreshAccount })
 </script>

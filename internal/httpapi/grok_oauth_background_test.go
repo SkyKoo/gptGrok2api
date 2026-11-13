@@ -80,6 +80,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 			cfg.OAuthDeviceURL = upstream.URL + "/device"
 			cfg.OAuthTokenURL = upstream.URL + "/token"
 			s = New(cfg)
+			cpa := installXAITestCPA(t, s)
 			_, _, err := s.registerStore.AddAccount(map[string]any{"id": "selected", "email": "selected@example.test", "sso": "SSO-SECRET", "status": "active", "proxy_binding": map[string]any{"reference": "direct"}})
 			if err != nil {
 				t.Fatal(err)
@@ -140,8 +141,11 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			if tc.want == "authorized" && billing.Load() != 1 {
-				t.Fatalf("authorization did not query billing exactly once: %d", billing.Load())
+			if billing.Load() != 0 {
+				t.Fatal("authorization queried billing before CPA handoff")
+			}
+			if tc.want == "authorized" && cpa.uploads != 1 {
+				t.Fatal("authorized credential not automatically delivered")
 			}
 			stored, err := s.oauthStore.List()
 			if err != nil {
@@ -175,6 +179,7 @@ func slicesContains(items []string, value string) bool {
 
 func TestGrokBackgroundOAuthRejectsMissingAndAbnormalAccounts(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
+	installXAITestCPA(t, s)
 	for _, row := range []map[string]any{
 		{"id": "missing-email", "sso": "fake"}, {"id": "missing-sso", "email": "a@example.test"},
 		{"id": "disabled", "email": "a@example.test", "sso": "disabled", "status": "disabled"},
@@ -197,6 +202,7 @@ func TestGrokBackgroundOAuthRejectsMissingAndAbnormalAccounts(t *testing.T) {
 
 func TestGrokBackgroundOAuthInterruptedGrantIsNotReplayed(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
+	installXAITestCPA(t, s)
 	_, _, _ = s.registerStore.AddAccount(map[string]any{"id": "selected", "email": "selected@example.test", "sso": "SSO-SECRET"})
 	_, _ = s.registerStore.SetOAuthAuthorization("selected", "running", "")
 	task := s.taskQueue.Submit("grok_oauth_authorize", map[string]any{"account_id": "selected"})
@@ -208,6 +214,7 @@ func TestGrokBackgroundOAuthInterruptedGrantIsNotReplayed(t *testing.T) {
 
 func TestGrokBackgroundConcurrentStartsAndReload(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
+	installXAITestCPA(t, s)
 	_, _, _ = s.registerStore.AddAccount(map[string]any{"id": "selected", "email": "selected@example.test", "sso": "SSO-SECRET"})
 	ids := make(chan string, 10)
 	for i := 0; i < 10; i++ {
@@ -282,6 +289,7 @@ func TestGrokOAuthBrowserUsesCurrentDailyDefaultOrManualOverride(t *testing.T) {
 			cfg := adminTestConfig(t.TempDir())
 			cfg.ProxyURL = "http://default.invalid:8080"
 			s := NewWithWorkers(cfg, false)
+			installXAITestCPA(t, s)
 			_, _, err := s.registerStore.AddAccount(map[string]any{"id": "selected", "email": "selected@example.test", "sso": "SSO-SECRET", "proxy": tc.override})
 			if err != nil {
 				t.Fatal(err)
@@ -322,6 +330,7 @@ func TestGrokOAuthWaitingCancelsBeforeAnyDeviceGrant(t *testing.T) {
 	cfg := adminTestConfig(t.TempDir())
 	cfg.OAuthDeviceURL = upstream.URL + "/device"
 	s := New(cfg)
+	installXAITestCPA(t, s)
 	s.registerStore.AddAccount(map[string]any{"id": "waiting", "email": "selected@example.test", "sso": "SECRET", "status": "active"})
 	s.registerStore.Update(map[string]any{"grok": map[string]any{"api_base": upstream.URL}})
 	job, _, err := s.startGrokOAuth("waiting")

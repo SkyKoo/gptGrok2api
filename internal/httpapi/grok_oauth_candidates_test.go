@@ -14,6 +14,7 @@ import (
 
 func TestGrokOAuthCandidatesIncludePendingAndNeverExposeCredentials(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
+	installXAITestCPA(t, s)
 	for _, item := range []map[string]any{
 		{"id": "pending", "email": "pending@example.test", "sso": "secret-sso", "web_cookies": "secret-cookies", "status": "active"},
 		{"id": "authorized", "email": "Known@Example.Test", "status": "active"},
@@ -87,6 +88,7 @@ func TestGrokDevicePollAcceptsFrontendSessionID(t *testing.T) {
 	}))
 	defer upstream.Close()
 	s := New(adminTestConfig(t.TempDir()))
+	installXAITestCPA(t, s)
 	s.deviceOAuth = oauth.NewDeviceService(upstream.Client(), upstream.URL+"/device", upstream.URL+"/token", s.oauthStore)
 	start := adminRequest(s.Handler(), "POST", "/api/grok/oauth/device/start", strings.NewReader(`{}`))
 	var session struct {

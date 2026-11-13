@@ -299,8 +299,7 @@
               size="sm"
               variant="outline"
               :root-class="accountToolbarSecondaryClass"
-              :disabled="Boolean(grokOAuthRowAction.accountId)"
-              @click="showGrokOAuthAccess = true"
+              @click="openGrokOAuthPanel([])"
             >
               OAuth 接入 ({{ grokOAuthTotal }})
             </Button>
@@ -403,7 +402,6 @@
               :toggling="grokTogglingAccountId === item.id"
               :deleting="grokRemovingAccountId === item.id"
               :authorizing="grokAuthorizingAccountId === item.id"
-              :oauth-action="grokOAuthActionFor(item)"
               @toggle-select="toggleGrokAccountSelection"
               @credentials="openGrokLoginCredentials"
               @sync="syncGrokAccount"
@@ -411,11 +409,7 @@
               @test="testGrokAccount"
               @toggle-disabled="toggleGrokAccountDisabled"
               @remove="removeGrokAccount"
-              @oauth-sync="syncGrokOAuthAccount"
               @oauth-authorize="authorizeGrokOAuthAccount"
-              @oauth-refresh="refreshGrokOAuthAccount"
-              @oauth-toggle="toggleGrokOAuthAccount"
-              @oauth-remove="removeGrokOAuthAccount"
             />
           </tbody>
         </table>
@@ -443,7 +437,6 @@
           :toggling="grokTogglingAccountId === item.id"
           :deleting="grokRemovingAccountId === item.id"
           :authorizing="grokAuthorizingAccountId === item.id"
-          :oauth-action="grokOAuthActionFor(item)"
           @toggle-select="toggleGrokAccountSelection"
           @credentials="openGrokLoginCredentials"
           @sync="syncGrokAccount"
@@ -451,11 +444,7 @@
           @test="testGrokAccount"
           @toggle-disabled="toggleGrokAccountDisabled"
           @remove="removeGrokAccount"
-          @oauth-sync="syncGrokOAuthAccount"
           @oauth-authorize="authorizeGrokOAuthAccount"
-          @oauth-refresh="refreshGrokOAuthAccount"
-          @oauth-toggle="toggleGrokOAuthAccount"
-          @oauth-remove="removeGrokOAuthAccount"
         />
       </div>
 
@@ -499,7 +488,7 @@
 
 
     <GrokOAuthAccountsPanel
-      ref="grokOAuthPanelRef"
+      :focus-account-ids="focusedGrokOAuthIds"
       :open="activeAccountPlatform === 'grok' && showGrokOAuthAccess"
       @close="showGrokOAuthAccess = false"
       @changed="handleGrokOAuthChanged"
@@ -1138,7 +1127,7 @@
 
 <script setup lang="ts">
 import AdobeAccountsPanel from './accounts/AdobeAccountsPanel.vue'
-import { computed, defineAsyncComponent, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Icon } from '@iconify/vue'
 import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
@@ -1165,7 +1154,6 @@ import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import TableShell from '@/components/ai/TableShell.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
-import type { GrokOAuthAccount } from '@/api/grokOAuthAccounts'
 import {
   grokAccountsApi,
   type GrokAccount,
@@ -1183,7 +1171,6 @@ import GrokOAuthAccountsPanel from './accounts/GrokOAuthAccountsPanel.vue'
 import { useAccountsPage } from './accounts/useAccountsPage'
 import { useAccountActionMenuRuntime } from './accounts/accountActionMenuRuntime'
 import { useGrokAccountsPage } from './accounts/useGrokAccountsPage'
-import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { errorMessage } from '@/lib/errorMessage'
 import {
@@ -1198,7 +1185,6 @@ import {
 defineOptions({ name: 'Accounts' })
 
 const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components/ai/RemoteAccountImportPanel.vue'))
-const confirmDialog = useConfirmDialog()
 const toast = useToast()
 const showLoginPassword = ref(false)
 const showTwoFactorSecret = ref(false)
@@ -1425,7 +1411,7 @@ const {
   runBulkAction: runGrokBulkAction,
   exportAccounts: exportGrokAccounts,
   exportSsoAccounts: grokExportSsoAccounts,
-} = useGrokAccountsPage()
+} = useGrokAccountsPage({ onOpenOAuth: openGrokOAuthPanel })
 
 const adobeAccountTotal = ref<number | null>(null)
 type AccountPlatformView = 'gpt' | 'grok' | 'adobe'
@@ -1440,19 +1426,8 @@ function accountPlatformFromQuery(value: unknown): AccountPlatformView {
 
 const activeAccountPlatform = ref<AccountPlatformView>(accountPlatformFromQuery(route.query.platform))
 const grokCredentialsAccount = ref<GrokAccount | null>(null)
-type GrokOAuthPanelRef = {
-  refreshAccount: (id: string) => Promise<void>
-  syncModels: (id: string) => Promise<void>
-  setDisabled: (account: GrokOAuthAccount) => Promise<void>
-  removeAccount: (id: string) => Promise<void>
-}
-type GrokOAuthRowAction = 'sync' | 'refresh' | 'toggle' | 'remove'
-const grokOAuthPanelRef = ref<GrokOAuthPanelRef | null>(null)
 const showGrokOAuthAccess = ref(false)
-const grokOAuthRowAction = reactive<{ accountId: string; action: GrokOAuthRowAction | '' }>({
-  accountId: '',
-  action: '',
-})
+const focusedGrokOAuthIds = ref<string[]>([])
 const accountPlatformOptions = computed(() => [
   { value: 'gpt', label: `GPT (${accountAllTotal.value})` },
   { value: 'grok', label: `Grok (${grokAccountAllTotal.value})` },
@@ -1649,49 +1624,9 @@ function authorizeGrokOAuthAccount(item: GrokAccount) {
   return authorizeGrokOAuth([item.id])
 }
 
-function grokOAuthActionFor(item: GrokAccount) {
-  if (!grokOAuthRowAction.accountId) return ''
-  return grokOAuthRowAction.accountId === item.id ? grokOAuthRowAction.action : 'busy'
-}
-
-async function runGrokOAuthAccountAction(item: GrokAccount, action: GrokOAuthRowAction) {
-  const oauth = item.oauth
-  const panel = grokOAuthPanelRef.value
-  if (!oauth || !panel || grokOAuthRowAction.accountId) return
-  grokOAuthRowAction.accountId = item.id
-  grokOAuthRowAction.action = action
-  try {
-    if (action === 'sync') await panel.syncModels(oauth.id)
-    if (action === 'refresh') await panel.refreshAccount(oauth.id)
-    if (action === 'toggle') await panel.setDisabled(oauth)
-    if (action === 'remove') await panel.removeAccount(oauth.id)
-  } finally {
-    grokOAuthRowAction.accountId = ''
-    grokOAuthRowAction.action = ''
-  }
-}
-
-function syncGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'sync')
-}
-
-function refreshGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'refresh')
-}
-
-function toggleGrokOAuthAccount(item: GrokAccount) {
-  return runGrokOAuthAccountAction(item, 'toggle')
-}
-
-async function removeGrokOAuthAccount(item: GrokAccount) {
-  if (!item.oauth) return
-  const confirmed = await confirmDialog.ask({
-    title: '移除 OAuth',
-    message: `将移除 ${item.email || item.id} 的 OAuth 凭据，注册账号和 SSO 登录态会保留。是否继续？`,
-    confirmText: '移除 OAuth',
-    cancelText: '取消',
-  })
-  if (confirmed) await runGrokOAuthAccountAction(item, 'remove')
+function openGrokOAuthPanel(ids: string[] = []) {
+  focusedGrokOAuthIds.value = [...ids]
+  showGrokOAuthAccess.value = true
 }
 
 function handleGrokOAuthChanged() {

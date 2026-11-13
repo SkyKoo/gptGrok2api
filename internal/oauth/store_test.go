@@ -73,3 +73,15 @@ func TestProbeRotationInvalidatesCPASyncWithoutOverwritingNewAuthorization(t *te
 		t.Fatal("delayed probe overwrote a newer credential")
 	}
 }
+
+func TestDeliveryCASRejectsSameTokensFromDifferentGrant(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oauth.enc"), "key")
+	original, _ := store.Import(Account{Email: "same@example.test", AccessToken: "same-access", RefreshToken: "same-refresh", CPASync: &CPASync{Status: "pending", PoolID: "pool-a", AuthorizationTaskID: "grant-a"}})
+	replacement := original
+	replacement.CPASync = &CPASync{Status: "pending", PoolID: "pool-b", AuthorizationTaskID: "grant-b"}
+	store.Import(replacement)
+	current, applied, err := store.UpdateIfDelivery(original, func(a *Account) { a.CPASync = &CPASync{Status: "synced", PoolID: "pool-a"} })
+	if err != nil || applied || current.CPASync.PoolID != "pool-b" {
+		t.Fatal("old receipt overwrote new grant with identical tokens")
+	}
+}

@@ -58,7 +58,7 @@ function exportFilename(format: GrokAccountExportFormat) {
     : `grok-accounts-sub2api-${stamp}.json`
 }
 
-export function useGrokAccountsPage() {
+export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => void } = {}) {
   const loading = ref(false)
   const hasLoadedOnce = ref(false)
   const keyword = ref('')
@@ -288,33 +288,8 @@ export function useGrokAccountsPage() {
     if (batchBusy.value) return false
     const ids = uniqueIds(accountIds)
     if (!ids.length) return false
-    const confirmed = await confirmDialog.ask({
-      title: ids.length === 1 ? 'OAuth 授权' : '批量 OAuth 授权',
-      message: `即将把 ${ids.length} 个 Grok 账号加入 OAuth 协议授权队列。授权完成后会探测 Grok 4.5，并按现有配置自动上传到 NovaApi / CPA。是否继续？`,
-      confirmText: '开始授权',
-      cancelText: '取消',
-    })
-    if (!confirmed) return false
-
-    beginAction(ids, '正在排队 OAuth 授权...', authorizingAccountId)
-    try {
-      const result = await grokAccountsApi.authorizeOAuth(ids)
-      const queued = Number(result.summary?.queued || 0)
-      const reused = Number(result.summary?.reused || 0)
-      const skipped = Number(result.summary?.skipped || 0)
-      const failed = Number(result.summary?.failed || 0)
-      const detail = String(result.results?.find((item) => item.error)?.error || '').trim()
-      const message = `OAuth 授权：新排队 ${queued}，队列中 ${reused}，已授权跳过 ${skipped}，失败 ${failed}`
-      if (failed > 0) toast.warning(`${message}${detail ? `；${detail}` : ''}`)
-      else toast.success(message)
-      await loadData({ silentErrorToast: true })
-      return failed === 0
-    } catch (error) {
-      toast.error(`OAuth 授权排队失败：${errorMessage(error)}`)
-      return false
-    } finally {
-      endAction(authorizingAccountId)
-    }
+    options.onOpenOAuth?.(ids)
+    return Boolean(options.onOpenOAuth)
   }
 
   async function refreshRuntime(accountIds: readonly string[]) {

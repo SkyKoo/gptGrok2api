@@ -14,6 +14,8 @@ import (
 )
 
 var grokOAuthMessages = map[string]string{
+	"oauth_cpa_required":             "请先选择已配置的 CPA，同步目标会随本次授权固定",
+	"oauth_cpa_conflict":             "该账号已有发往其他 CPA 的授权任务，请等待完成",
 	"oauth_browser_unavailable":      "浏览器准备失败或等待超时，请检查后台浏览器服务",
 	"browser_wait_timeout":           "等待浏览器会话释放超时，本次尚未申请设备授权码",
 	"oauth_in_progress":              "该账号的后台授权仍在收尾，请稍后重试",
@@ -91,14 +93,29 @@ func (s *Server) grokOAuthSource(id string) (map[string]any, error) {
 	return item, nil
 }
 
-func (s *Server) startGrokOAuth(id string) (*tasks.Task, bool, error) {
+func (s *Server) startGrokOAuth(id string, poolIDs ...string) (*tasks.Task, bool, error) {
 	s.authStartMu.Lock()
 	defer s.authStartMu.Unlock()
-	if _, err := s.grokOAuthSource(id); err != nil {
+	source, sourceErr := s.grokOAuthSource(id)
+	if sourceErr != nil {
+		return nil, false, sourceErr
+	}
+	if s.deviceOAuth.HasAccountSession(stringValue(source["email"])) {
+		return nil, false, errors.New("oauth_in_progress")
+	}
+	target := ""
+	if len(poolIDs) > 0 {
+		target = poolIDs[0]
+	}
+	pool, err := s.xaiCPATarget(target)
+	if err != nil {
 		return nil, false, err
 	}
 	for _, task := range s.taskQueue.List() {
 		if task.Kind == "grok_oauth_authorize" && stringValue(task.Payload["account_id"]) == id && (task.Status == "queued" || task.Status == "running") {
+			if stringValue(task.Payload["cpa_pool_id"]) != pool.ID {
+				return nil, false, errors.New("oauth_cpa_conflict")
+			}
 			copy := task
 			return &copy, true, nil
 		}
@@ -109,7 +126,7 @@ func (s *Server) startGrokOAuth(id string) (*tasks.Task, bool, error) {
 	if found, err := s.registerStore.SetOAuthAuthorization(id, "queued", ""); err != nil || !found {
 		return nil, false, errors.New("oauth_storage_failed")
 	}
-	return s.taskQueue.Submit("grok_oauth_authorize", map[string]any{"account_id": id}), false, nil
+	return s.taskQueue.Submit("grok_oauth_authorize", map[string]any{"account_id": id, "cpa_pool_id": pool.ID, "cpa_pool_name": pool.Name}), false, nil
 }
 
 func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, finalErr error) {
@@ -135,16 +152,46 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 	if err != nil {
 		return nil, err
 	}
+	// A saved token is a durable checkpoint. A recovered task may complete its
+	// delivery/readback, but must never issue a second device authorization.
+	credentials, loadErr := s.oauthStore.List()
+	if loadErr != nil {
+		return nil, errors.New("oauth_storage_failed")
+	}
+	for _, credential := range credentials {
+		if credential.CPASync != nil && credential.CPASync.AuthorizationTaskID == task.ID {
+			current, present := s.taskQueue.Get(task.ID)
+			if !present || current.Status == "cancelled" {
+				return nil, errors.New("oauth_cancelled")
+			}
+			if !strings.EqualFold(credential.Email, stringValue(account["email"])) || credential.CPASync.PoolID != stringValue(task.Payload["cpa_pool_id"]) {
+				return nil, errors.New("oauth_account_changed")
+			}
+			value := map[string]any{"status": "authorized", "account": oauth.Public(credential)}
+			recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer recoveryCancel()
+			s.finishOAuthCPADelivery(recoveryCtx, value)
+			if _, err := finish("authorized", ""); err != nil {
+				return nil, err
+			}
+			return value, nil
+		}
+	}
 	// Queue recovery must not replay an authorization whose confirmation may
 	// already have reached xAI before the process stopped.
 	if stringValue(mapValue(account["oauth_authorization"])["status"]) == "running" {
 		return finish("manual_action_required", "oauth_interrupted")
+	}
+	pool, poolErr := s.xaiCPATarget(stringValue(task.Payload["cpa_pool_id"]))
+	if poolErr != nil || stringValue(task.Payload["cpa_pool_id"]) == "" {
+		return finish("manual_action_required", "oauth_cpa_required")
 	}
 	if found, err := s.registerStore.SetOAuthAuthorization(id, "running", ""); err != nil || !found {
 		return nil, errors.New("oauth_storage_failed")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute)
 	defer cancel()
+	overallCtx := ctx
 	email, sso := stringValue(account["email"]), stringValue(account["sso"])
 	guard := func() error {
 		if ctx.Err() != nil {
@@ -210,6 +257,9 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 	}
 	sessionID := stringValue(started["id"])
 	defer s.deviceOAuth.Discard(sessionID)
+	if err := s.deviceOAuth.SetCPATarget(sessionID, oauth.CPASync{Status: "pending", PoolID: pool.ID, PoolName: pool.Name, ReplaceExisting: true, AuthorizationTaskID: task.ID}); err != nil {
+		return nil, errors.New("oauth_storage_failed")
+	}
 	outcome, err := oauth.ConfirmDeviceInBrowser(ctx, s.requestClient, base, stringValue(config["api_key"]), oauth.BrowserDeviceRequest{
 		BrowserLease: lease.ID, VerificationURL: stringValue(started["verification_uri_complete"]), UserCode: stringValue(started["user_code"]), SSO: sso, SSORW: stringValue(account["sso_rw"]), Email: email, Proxy: proxyURL, Timeout: 120,
 	})
@@ -240,8 +290,12 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 			if _, err := finish("authorized", ""); err != nil {
 				return nil, err
 			}
-			s.finishOAuthQuota(ctx, value)
-			return map[string]any{"status": "authorized", "account": value["account"]}, nil
+			if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
+				queue.SetStage(task.ID, "syncing_cpa")
+			}
+			// The grant deadline no longer applies after its tokens are saved.
+			s.finishOAuthCPADelivery(overallCtx, value)
+			return value, nil
 		}
 		if seconds := intValue(value["interval"]); seconds > 0 {
 			interval = time.Duration(seconds) * time.Second
@@ -262,6 +316,8 @@ func grokOAuthPublicJob(task tasks.Task) map[string]any {
 	case "running":
 		status, stage, message = "running", "authorize", "正在使用所选账号完成授权"
 		switch stringValue(task.Result["stage"]) {
+		case "syncing_cpa":
+			stage, message = "syncing_cpa", "OAuth 已授权，正在同步 CPA"
 		case "waiting_browser":
 			stage, message = "waiting_browser", "等待浏览器会话释放"
 		case "starting_browser":
@@ -270,7 +326,10 @@ func grokOAuthPublicJob(task tasks.Task) map[string]any {
 	case "completed":
 		status = stringValue(task.Result["status"])
 		if status == "authorized" {
-			stage, message = "completed", "OAuth 凭据已保存"
+			stage, message = "completed", "OAuth 已授权并同步 CPA，由 CPA 自动续期"
+			if stringValue(task.Result["cpa_error"]) != "" {
+				stage, message = "cpa_sync_failed", "OAuth 已授权，CPA 同步未完成，可单独处理"
+			}
 		} else {
 			status, stage = "manual_action_required", "attention"
 			message = grokOAuthMessages[stringValue(task.Result["code"])]
@@ -281,9 +340,12 @@ func grokOAuthPublicJob(task tasks.Task) map[string]any {
 		status, stage = "failed", "failed"
 		message = grokOAuthMessages[grokOAuthErrorCode(errors.New(task.Error))]
 	}
-	item := map[string]any{"id": task.ID, "status": status, "stage": stage, "message": message, "error": "", "source_account_id": task.Payload["account_id"], "created_at": task.CreatedAt, "updated_at": task.UpdatedAt, "models": []string{}}
+	item := map[string]any{"id": task.ID, "status": status, "stage": stage, "message": message, "error": "", "source_account_id": task.Payload["account_id"], "cpa_pool_id": task.Payload["cpa_pool_id"], "cpa_pool_name": task.Payload["cpa_pool_name"], "created_at": task.CreatedAt, "updated_at": task.UpdatedAt, "models": []string{}}
 	if status == "failed" || status == "manual_action_required" {
 		item["error"] = message
+	}
+	if message := stringValue(task.Result["cpa_error"]); message != "" {
+		item["cpa_error"] = message
 	}
 	if account, ok := task.Result["account"]; ok {
 		item["account"] = account
@@ -296,11 +358,12 @@ func (s *Server) grokOAuthBackgroundAPI(w http.ResponseWriter, r *http.Request, 
 	case path == "start" && r.Method == http.MethodPost:
 		var body struct {
 			AccountID string `json:"account_id"`
+			PoolID    string `json:"cpa_pool_id"`
 		}
 		if !decodeJSON(w, r, &body) {
 			return
 		}
-		job, reused, err := s.startGrokOAuth(strings.TrimSpace(body.AccountID))
+		job, reused, err := s.startGrokOAuth(strings.TrimSpace(body.AccountID), strings.TrimSpace(body.PoolID))
 		if err != nil {
 			writeError(w, http.StatusBadRequest, grokOAuthMessages[grokOAuthErrorCode(err)], "invalid_request_error")
 			return

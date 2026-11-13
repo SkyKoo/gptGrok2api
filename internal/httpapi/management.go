@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -94,8 +95,8 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"provider": "xai_cli_oauth", "items": items, "total": len(items)})
-	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/cpa/sync") && r.Method == http.MethodPost:
-		s.grokOAuthCPASync(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/cpa/sync"))
+	case strings.HasPrefix(path, "accounts/") && (strings.HasSuffix(path, "/cpa/sync") || strings.HasSuffix(path, "/cpa/check")) && r.Method == http.MethodPost:
+		s.grokOAuthCPASync(w, r, strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/cpa/sync"), "/cpa/check"))
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/quota") && r.Method == http.MethodPost:
 		s.oauthQuotaAPI(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/quota"))
 	case path == "accounts/import" && r.Method == http.MethodPost:
@@ -107,35 +108,88 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 			Subject      string   `json:"subject"`
 			ExpiresIn    int      `json:"expires_in"`
 			Models       []string `json:"models"`
+			PoolID       string   `json:"cpa_pool_id"`
 		}
 		if !decodeJSON(w, r, &request) {
+			return
+		}
+		pool, poolErr := s.xaiCPATarget(request.PoolID)
+		if poolErr != nil {
+			writeError(w, 400, grokOAuthMessages["oauth_cpa_required"], "invalid_request_error")
 			return
 		}
 		expiry := int64(0)
 		if request.ExpiresIn > 0 {
 			expiry = time.Now().Add(time.Duration(request.ExpiresIn) * time.Second).Unix()
 		}
-		item, err := s.oauthStore.Import(oauth.Account{Email: request.Email, Subject: request.Subject, AccessToken: request.AccessToken, RefreshToken: request.RefreshToken, IDToken: request.IDToken, ExpiresAt: expiry, Models: request.Models})
+		item, err := s.oauthStore.Import(oauth.Account{Email: request.Email, Subject: request.Subject, AccessToken: request.AccessToken, RefreshToken: request.RefreshToken, IDToken: request.IDToken, ExpiresAt: expiry, Models: request.Models, CPASync: &oauth.CPASync{Status: "pending", PoolID: pool.ID, PoolName: pool.Name}})
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
 			return
 		}
-		if refreshed, refreshErr := s.refreshOAuthQuota(r.Context(), item.ID); refreshErr == nil {
-			item = refreshed
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"account": oauthPublic(item)})
+		value := map[string]any{"status": "authorized", "account": oauthPublic(item)}
+		s.finishOAuthCPADelivery(r.Context(), value)
+		value["ok"] = stringValue(value["cpa_error"]) == ""
+		writeJSON(w, http.StatusOK, value)
 	case path == "device/start" && r.Method == http.MethodPost:
 		var request struct {
-			Proxy string `json:"proxy"`
+			Proxy     string `json:"proxy"`
+			AccountID string `json:"account_id"`
+			PoolID    string `json:"cpa_pool_id"`
 		}
 		if r.Body != nil && r.ContentLength != 0 && !decodeJSON(w, r, &request) {
 			return
 		}
-		result, err := s.deviceOAuth.Start(r.Context(), request.Proxy)
+		pool, poolErr := s.xaiCPATarget(request.PoolID)
+		if poolErr != nil {
+			writeError(w, 400, grokOAuthMessages["oauth_cpa_required"], "invalid_request_error")
+			return
+		}
+		var result map[string]any
+		var err error
+		if request.AccountID != "" {
+			source, sourceErr := s.grokOAuthSource(strings.TrimSpace(request.AccountID))
+			if sourceErr != nil {
+				writeError(w, 400, grokOAuthMessages[grokOAuthErrorCode(sourceErr)], "invalid_request_error")
+				return
+			}
+			route := ""
+			if s.proxyManager != nil {
+				bound, boundOK, routeErr := s.proxyManager.ResolveBound(source)
+				if routeErr != nil {
+					writeError(w, 409, grokOAuthMessages["oauth_proxy_unavailable"], "oauth_proxy_unavailable")
+					return
+				}
+				if boundOK {
+					route = bound
+				} else {
+					route = s.proxyManager.Resolve(source, false)
+				}
+			}
+			email, sso := stringValue(source["email"]), stringValue(source["sso"])
+			result, err = s.deviceOAuth.StartForAccount(r.Context(), route, email, func() error {
+				latest, e := s.grokOAuthSource(strings.TrimSpace(request.AccountID))
+				if e != nil || stringValue(latest["email"]) != email || stringValue(latest["sso"]) != sso {
+					return errors.New("oauth_account_changed")
+				}
+				return nil
+			})
+		} else {
+			route := request.Proxy
+			if route == "" && s.proxyManager != nil {
+				route = s.proxyManager.Resolve(nil, false)
+			}
+			result, err = s.deviceOAuth.Start(r.Context(), route)
+		}
 		if err != nil {
 			writeError(w, http.StatusBadGateway, err.Error(), "upstream_error")
 			return
 		}
+		if err = s.deviceOAuth.SetCPATarget(stringValue(result["id"]), oauth.CPASync{Status: "pending", PoolID: pool.ID, PoolName: pool.Name, ReplaceExisting: true}); err != nil {
+			writeError(w, 500, "设备授权目标保存失败", "server_error")
+			return
+		}
+		result["cpa_pool_id"], result["cpa_pool_name"] = pool.ID, pool.Name
 		writeJSON(w, http.StatusOK, result)
 	case path == "device/poll" && r.Method == http.MethodPost:
 		var request struct {
@@ -155,7 +209,7 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-		s.finishOAuthQuota(r.Context(), result)
+		s.finishOAuthCPADelivery(r.Context(), result)
 		writeJSON(w, http.StatusOK, result)
 	case path == "accounts/status" && r.Method == http.MethodPost:
 		var request struct {
@@ -218,6 +272,18 @@ func (s *Server) handleOAuthAccountAction(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotFound, "OAuth account not found", "not_found")
 		return
 	}
+	unlock := s.oauthStore.LockIdentity(account.Email)
+	defer unlock()
+	latest, exists, readErr := s.oauthStore.Get(id)
+	if readErr != nil || !exists {
+		writeError(w, 409, "OAuth 账号已变化，请刷新后再操作", "conflict")
+		return
+	}
+	account = &latest
+	if oauth.CPAManaged(*account) {
+		writeError(w, 409, "该 OAuth 已交给 CPA 续期，请在 CPA 测试或查询", "cpa_managed")
+		return
+	}
 	model, prompt := "", ""
 	if action == "test" {
 		var request struct {
@@ -233,7 +299,12 @@ func (s *Server) handleOAuthAccountAction(w http.ResponseWriter, r *http.Request
 	if account.TokenEndpoint != "" {
 		probeClient.TokenURL = account.TokenEndpoint
 	}
-	result := probeClient.Test(r.Context(), map[string]any{
+	ctx, routeErr := s.oauthRequestContext(r.Context(), *account)
+	if routeErr != nil {
+		writeError(w, 409, routeErr.Error(), "oauth_proxy_unavailable")
+		return
+	}
+	result := probeClient.Test(ctx, map[string]any{
 		"access_token": account.AccessToken, "refresh_token": account.RefreshToken, "id_token": account.IDToken, "expires_at": account.ExpiresAt,
 	}, model, prompt)
 	probe := map[string]any{"status": result.Status, "http_status": result.HTTPStatus, "code": result.Code, "quota": result.Quota, "checked_at": time.Now().UTC()}

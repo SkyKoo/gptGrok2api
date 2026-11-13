@@ -465,7 +465,9 @@ func TestRegistrationManagementEndpoints(t *testing.T) {
 	if err := os.WriteFile(cfg.GrokAccountsPath, []byte(account), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	handler := New(cfg).Handler()
+	s := New(cfg)
+	installXAITestCPA(t, s)
+	handler := s.Handler()
 
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/register", nil))

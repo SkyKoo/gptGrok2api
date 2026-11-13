@@ -50,7 +50,7 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 		state := "pending"
 		if matched && (credential.AccessToken != "" || credential.RefreshToken != "") {
 			state = "authorized"
-			if credential.Status == "invalid" || credential.Status == "expired" || credential.Status == "disabled" || credential.ExpiresAt > 0 && credential.ExpiresAt <= time.Now().Unix() {
+			if !oauth.CPAManaged(credential) && (credential.Status == "invalid" || credential.Status == "expired" || credential.Status == "disabled" || credential.ExpiresAt > 0 && credential.ExpiresAt <= time.Now().Unix()) {
 				state = "requires_renewal"
 			}
 		} else if stringValue(mapValue(item["oauth_authorization"])["status"]) == "failed" {
@@ -79,6 +79,8 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 			"id": stringValue(item["id"]), "email": email, "login_status": loginStatus,
 			"oauth_status": state, "oauth_account_id": credential.ID,
 			"oauth_job_id": jobID, "oauth_message": message,
+			"cpa_sync": credential.CPASync, "cpa_managed": oauth.CPAManaged(credential),
+			"oauth":            oauth.Public(credential),
 			"has_access_token": credential.AccessToken != "", "has_refresh_token": credential.RefreshToken != "",
 			"updated_at": item["updated_at"],
 		})

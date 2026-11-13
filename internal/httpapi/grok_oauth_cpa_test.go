@@ -45,7 +45,7 @@ func TestGrokOAuthQuotaActionProjectsActualBilling(t *testing.T) {
 }
 
 func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
-	for _, mode := range []string{"success", "upload_failed", "conflicting_identity", "redirect", "reauthorized", "missing_identity", "unrecognized", "invalid_list"} {
+	for _, mode := range []string{"success", "upload_failed", "conflicting_identity", "redirect", "missing_identity", "unrecognized", "invalid_list"} {
 		t.Run(mode, func(t *testing.T) {
 			s := New(adminTestConfig(t.TempDir()))
 			expiry := time.Now().Add(time.Hour).Unix()
@@ -56,7 +56,12 @@ func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
 			}
 			uploads, lists := 0, 0
 			exists := mode == "conflicting_identity"
+			var remotePayload map[string]any
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v0/management/auth-files/download" {
+					json.NewEncoder(w).Encode(remotePayload)
+					return
+				}
 				if r.URL.Path != "/v0/management/auth-files" {
 					t.Error("followed redirect")
 					w.WriteHeader(500)
@@ -106,10 +111,8 @@ func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
 				if _, ok := payload["sso"]; ok {
 					t.Error("SSO incorrectly uploaded")
 				}
+				remotePayload = payload
 				exists = mode != "unrecognized"
-				if mode == "reauthorized" {
-					s.oauthStore.Import(oauth.Account{Email: account.Email, AccessToken: "NEW_ACCESS", RefreshToken: "NEW_REFRESH"})
-				}
 				w.Write([]byte(`{"status":"ok"}`))
 			}))
 			defer upstream.Close()
@@ -129,15 +132,11 @@ func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
 					t.Fatalf("sync failed: %s uploads=%d lists=%d", response.Body.String(), uploads, lists)
 				}
 			case "missing_identity":
-				if response.Code != 400 || uploads != 0 || lists != 0 {
+				if response.Code != 502 || uploads != 0 || lists != 0 {
 					t.Fatal("missing identity reached CPA")
 				}
-			case "reauthorized":
-				if response.Code != 409 || saved.AccessToken != "NEW_ACCESS" || saved.CPASync != nil {
-					t.Fatalf("old sync overwrote new credential: code=%d", response.Code)
-				}
 			default:
-				if response.Code != 502 || saved.CPASync == nil || saved.CPASync.Status != "failed" {
+				if response.Code != 502 || saved.CPASync == nil || (saved.CPASync.Status != "failed" && saved.CPASync.Status != "unknown") {
 					t.Fatalf("failure not persisted: %s", response.Body.String())
 				}
 				if (mode == "conflicting_identity" || mode == "invalid_list") && uploads != 0 {
@@ -156,7 +155,7 @@ func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
 	}
 }
 
-func TestGrokOAuthRefreshRotationMarksCPAPending(t *testing.T) {
+func TestGrokOAuthRefreshDoesNotRotateCPAManagedCopy(t *testing.T) {
 	s := New(adminTestConfig(t.TempDir()))
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/token" {
@@ -173,8 +172,8 @@ func TestGrokOAuthRefreshRotationMarksCPAPending(t *testing.T) {
 	item, _ := s.oauthStore.Import(oauth.Account{Email: "rotate@example.test", AccessToken: "OLD", RefreshToken: "REFRESH", ExpiresAt: time.Now().Add(-time.Minute).Unix(), CPASync: &oauth.CPASync{Status: "synced", PoolID: "pool"}})
 	response := adminRequest(s.Handler(), "POST", "/api/grok/oauth/accounts/"+item.ID+"/quota", strings.NewReader(`{}`))
 	saved, _, _ := s.oauthStore.Get(item.ID)
-	if response.Code != 200 || saved.AccessToken != "NEW" || saved.CPASync.Status != "pending" || saved.ExpiresAt < time.Now().Unix()+3500 {
-		t.Fatal("quota refresh did not persist new credential or CPA pending status")
+	if response.Code != 409 || saved.AccessToken != "OLD" || saved.CPASync.Status != "synced" {
+		t.Fatal("CFM rotated a CPA-managed credential")
 	}
 }
 

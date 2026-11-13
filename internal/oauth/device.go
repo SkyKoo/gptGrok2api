@@ -28,6 +28,7 @@ type DeviceService struct {
 	tokenURL  string
 	store     *Store
 	mu        sync.Mutex
+	accountMu sync.Mutex
 	sessions  map[string]*deviceSession
 }
 
@@ -42,6 +43,8 @@ type deviceSession struct {
 	LastPollAtUnix int64
 	ExpectedEmail  string
 	BeforeSave     func() error
+	CPATarget      *CPASync
+	Polling        bool
 }
 
 func NewDeviceService(client *http.Client, deviceURL, tokenURL string, store *Store) *DeviceService {
@@ -97,6 +100,11 @@ func (s *DeviceService) StartForAccount(ctx context.Context, proxy, email string
 	if strings.TrimSpace(email) == "" {
 		return nil, errors.New("oauth_email_required")
 	}
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
+	if s.HasAccountSession(email) {
+		return nil, errors.New("oauth_in_progress")
+	}
 	result, err := s.Start(ctx, proxy)
 	if err != nil {
 		return nil, err
@@ -109,6 +117,31 @@ func (s *DeviceService) StartForAccount(ctx context.Context, proxy, email string
 	return result, nil
 }
 
+func (s *DeviceService) HasAccountSession(email string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	for _, session := range s.sessions {
+		if strings.EqualFold(session.ExpectedEmail, email) && email != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// SetCPATarget pins delivery metadata before a grant can be exchanged. No CPA
+// credentials are kept in the device session or task payload.
+func (s *DeviceService) SetCPATarget(id string, target CPASync) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessions[id]
+	if session == nil {
+		return errors.New("OAuth device authorization has expired or does not exist")
+	}
+	session.CPATarget = &target
+	return nil
+}
+
 func (s *DeviceService) Discard(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -119,11 +152,23 @@ func (s *DeviceService) Poll(ctx context.Context, id string) (map[string]any, er
 	s.mu.Lock()
 	s.pruneLocked()
 	session, ok := s.sessions[strings.TrimSpace(id)]
+	if ok && session.Polling {
+		s.mu.Unlock()
+		return nil, errors.New("OAuth device authorization poll already in progress")
+	}
 	if ok {
+		session.Polling = true
 		copy := *session
 		session = &copy
 	}
 	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if current := s.sessions[strings.TrimSpace(id)]; current != nil {
+			current.Polling = false
+		}
+		s.mu.Unlock()
+	}()
 	if !ok {
 		return nil, errors.New("OAuth device authorization has expired or does not exist")
 	}
@@ -154,6 +199,10 @@ func (s *DeviceService) Poll(ctx context.Context, id string) (map[string]any, er
 				}
 			}
 			account.SourceType = "background_device_authorization"
+		}
+		if session.CPATarget != nil {
+			cp := *session.CPATarget
+			account.CPASync = &cp
 		}
 		if session.BeforeSave != nil {
 			if err := session.BeforeSave(); err != nil {

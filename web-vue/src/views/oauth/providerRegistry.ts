@@ -17,7 +17,7 @@ export const oauthProviderDefinitions: readonly OAuthProviderDefinition[] = [
   {
     key: 'xai',
     label: 'xAI OAuth',
-    description: '管理 Grok/xAI OAuth 凭据、模型探测与授权方式。',
+    description: '管理 Grok/xAI OAuth 授权与 CPA 交付状态。',
   },
 ]
 

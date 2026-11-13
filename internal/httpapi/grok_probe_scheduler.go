@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 )
 
 func grokProbeInterval(config map[string]any) time.Duration {
@@ -111,7 +112,7 @@ func (s *Server) runGrokProbeCycle() {
 		})
 	}
 	for _, account := range credentials {
-		if strings.EqualFold(account.Status, "disabled") || (account.AccessToken == "" && account.RefreshToken == "") {
+		if oauth.CPAManaged(account) || strings.EqualFold(account.Status, "disabled") || (account.AccessToken == "" && account.RefreshToken == "") {
 			continue
 		}
 		id := account.ID

@@ -765,13 +765,21 @@ func (s *Server) syncRegisteredGrokRuntimeAccountLocked(item map[string]any, tok
 }
 
 func (s *Server) authorizeRegisteredGrokAccounts(w http.ResponseWriter, r *http.Request) {
-	ids, ok := decodeIDs(w, r)
-	if !ok {
+	var request struct {
+		IDs    []string `json:"ids"`
+		PoolID string   `json:"cpa_pool_id"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	ids := uniqueIDs(request.IDs)
+	if len(ids) == 0 {
+		writeError(w, http.StatusBadRequest, "ids is required", "invalid_request_error")
 		return
 	}
 	results := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
-		task, reused, err := s.startGrokOAuth(id)
+		task, reused, err := s.startGrokOAuth(id, strings.TrimSpace(request.PoolID))
 		if err != nil {
 			results = append(results, map[string]any{"id": id, "ok": false, "status": "failed", "error": grokOAuthMessages[grokOAuthErrorCode(err)]})
 			continue
