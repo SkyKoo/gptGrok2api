@@ -1,0 +1,10 @@
+{
+  "files": {
+    "backup_catalog.py": "b2bfc67a941a1e3dcdaa08ca95d938cd45325b68ba0227da834a8bd6b4a5277f",
+    "backup_retention.py": "7c636677b64e8587695ad842d07d6e75360d144d23a40417023ee9f11617ec75",
+    "oracle-backup-daily.py": "f07defce553147f7090b21fae1544f9e3215abf9617dd46799823bc19ad64923",
+    "oracle-backup-maintenance.py": "f705aab31e8645d63b7f10c9834b9d0a8d5f91566652ac84895f67349459df8e"
+  },
+  "format": "ogg-backup-local-package-v1",
+  "service": "gptgrok2api"
+}

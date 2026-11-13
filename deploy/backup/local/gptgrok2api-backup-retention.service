@@ -1,0 +1,15 @@
+[Unit]
+Description=gptgrok2api verified local backup retention
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=100%
+MemoryMax=2G
+TimeoutStartSec=7200
+ExecStart=/usr/bin/python3 -B /opt/gptgrok2api/tools/backup-local/current/oracle-backup-maintenance.py --execute
