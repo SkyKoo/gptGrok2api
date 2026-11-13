@@ -65,6 +65,25 @@ export const VIDEO_PRESET_OPTIONS = [
 ]
 export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { model: 'grok-imagine-video', audio: false, seconds: 6, size: '720x1280', resolution: '720p', preset: 'custom' }
 
+export function studioVideoAspectLabel(size: string, capability?: MediaCapability) {
+  if (!capability) return VIDEO_SIZE_OPTIONS.find(option => option.value === size)?.label || ''
+  // Display the model's named ratio, not a fraction inferred from rounded pixels.
+  const variants = matchingMediaVariants(capability, { size })
+  if (!variants.length || variants.some(variant => variant.aspect_ratios?.length !== 1)) return ''
+  const ratios = [...new Set(variants.map(variant => variant.aspect_ratios![0]!))]
+  if (ratios.length !== 1) return ''
+  const ratio = ratios[0]!
+  const [width, height] = ratio.split(':').map(Number)
+  const orientation = width && height ? width === height ? '方形' : width > height ? '横屏' : '竖屏' : ''
+  return orientation ? `${ratio} ${orientation}` : ratio
+}
+
+export function studioVideoSizeLabel(size: string, capability?: MediaCapability) {
+  const aspect = studioVideoAspectLabel(size, capability)
+  const pixels = size.replace('x', '×')
+  return aspect ? `${aspect} · ${pixels}` : pixels
+}
+
 type VideoSelectionKey = 'size' | 'resolution' | 'seconds' | 'audio'
 
 export function studioVideoSelection(options: StudioVideoOptions): MediaSelection {
