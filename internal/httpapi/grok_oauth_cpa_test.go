@@ -48,6 +48,7 @@ func TestGrokOAuthCPASyncIdentityPayloadAndFailure(t *testing.T) {
 	for _, mode := range []string{"success", "upload_failed", "conflicting_identity", "redirect", "missing_identity", "unrecognized", "invalid_list"} {
 		t.Run(mode, func(t *testing.T) {
 			s := New(adminTestConfig(t.TempDir()))
+			installQualityUpstream(t, s, nil)
 			expiry := time.Now().Add(time.Hour).Unix()
 			account, _ := s.oauthStore.Import(oauth.Account{Email: "person@example.test", Subject: "subject-1", AccessToken: "ACCESS_PRIVATE", RefreshToken: "REFRESH_PRIVATE", IDToken: "ID_PRIVATE", TokenType: "Bearer", ExpiresAt: expiry})
 			if mode == "missing_identity" {

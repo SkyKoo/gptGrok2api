@@ -80,6 +80,7 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 			"oauth_status": state, "oauth_account_id": credential.ID,
 			"oauth_job_id": jobID, "oauth_message": message,
 			"cpa_sync": credential.CPASync, "cpa_managed": oauth.CPAManaged(credential),
+			"quality":          credential.Quality,
 			"oauth":            oauth.Public(credential),
 			"has_access_token": credential.AccessToken != "", "has_refresh_token": credential.RefreshToken != "",
 			"updated_at": item["updated_at"],

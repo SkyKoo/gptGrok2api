@@ -30,6 +30,19 @@ test('background progress and attention states remain searchable after reloading
 
 const { mergeGrokOAuthRows, cpaAction, cpaStatusText, oauthProgressText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
 
+test('quality risk survives a failed retry and prevents CPA delivery actions', () => {
+  const quality = { status: 'error', blocked: true, confirmed_at: 1, removal: { status: 'manual_required', file_name: 'xai-one.json' } }
+  const rows = mergeGrokOAuthRows([{ id: 'source', email: 'one@example.test', oauth_account_id: 'one', oauth_status: 'authorized' }], [
+    { id: 'one', email: 'one@example.test', has_access_token: true, has_refresh_token: true, quality, cpa_managed: true, cpa_sync: { status: 'synced' } },
+  ])
+  assert.equal(rows[0].quality, quality)
+  assert.equal(cpaAction(rows[0]), null)
+  assert.equal(cpaStatusText(rows[0]), '降智凭据待移除')
+  assert.equal(filterGrokOAuthCandidates(rows, '', 'quality_risk').length, 1)
+  assert.equal(filterGrokOAuthCandidates(rows, '', 'quality_error').length, 1)
+  assert.equal(cpaAction({ ...rows[0], quality: { status: 'normal', blocked: false }, cpa_sync: { status: 'quality_removed' } }), null, 'a passed recheck must not upload the old local copy')
+})
+
 test('one row combines SSO authorization and CPA state, preserving orphan credentials', () => {
   const candidates = [{ id: 'grok-one', email: 'One@Example.Test', login_status: 'active', oauth_status: 'requires_renewal', oauth_account_id: 'oauth-one' }]
   const accounts = [

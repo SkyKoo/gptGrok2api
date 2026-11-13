@@ -18,6 +18,7 @@ type xaiTestCPA struct {
 	mu           sync.Mutex
 	rows         map[string]map[string]any
 	uploads      int
+	deletes      int
 	postMode     string
 	postStarted  chan struct{}
 	postContinue chan struct{}
@@ -25,6 +26,7 @@ type xaiTestCPA struct {
 
 func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
 	t.Helper()
+	installQualityUpstream(t, s, nil)
 	state := &xaiTestCPA{rows: map[string]map[string]any{}}
 	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state.mu.Lock()
@@ -33,7 +35,7 @@ func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
 		case r.Method == "GET" && r.URL.Path == "/v0/management/auth-files":
 			files := []map[string]any{}
 			for name, row := range state.rows {
-				files = append(files, map[string]any{"name": name, "provider": row["type"], "email": row["email"]})
+				files = append(files, map[string]any{"name": name, "provider": row["type"], "email": row["email"], "auth_index": name})
 			}
 			json.NewEncoder(w).Encode(map[string]any{"files": files})
 		case r.Method == "GET" && r.URL.Path == "/v0/management/auth-files/download":
@@ -43,6 +45,16 @@ func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
 				return
 			}
 			json.NewEncoder(w).Encode(row)
+		case r.Method == "DELETE" && r.URL.Path == "/v0/management/auth-files":
+			name := r.URL.Query().Get("name")
+			if name == "" || r.URL.Query().Get("all") != "" {
+				t.Error("unsafe deletion")
+				w.WriteHeader(400)
+				return
+			}
+			state.deletes++
+			delete(state.rows, name)
+			w.Write([]byte(`{"status":"ok"}`))
 		case r.Method == "POST" && r.URL.Path == "/v0/management/auth-files":
 			state.uploads++
 			if state.postStarted != nil {

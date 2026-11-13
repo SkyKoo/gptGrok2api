@@ -84,6 +84,10 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/grok/oauth/")
 	switch {
+	case path == "quality/schedule":
+		s.grokQualityScheduleAPI(w, r)
+	case path == "quality":
+		s.grokQualityAPI(w, r)
 	case strings.HasPrefix(path, "protocol/"):
 		s.grokOAuthBackgroundAPI(w, r, strings.TrimPrefix(path, "protocol/"))
 	case path == "candidates" && r.Method == http.MethodGet:

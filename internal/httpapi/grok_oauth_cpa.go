@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/auucoder/gptgrok2api-go/internal/oauth"
+	"github.com/auucoder/gptgrok2api-go/internal/xaiquality"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -173,6 +174,9 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	if account.Status == "disabled" {
 		return account, errors.New("OAuth 账号已禁用")
 	}
+	if account.Quality != nil && account.Quality.Blocked && (checkOnly || oauth.CPAManaged(account)) {
+		return account, errors.New("该账号已标记降智风险，禁止恢复 CPA 交付；请先复测并处理风险")
+	}
 	receipt := account.CPASync
 	target := strings.TrimSpace(requestedPool)
 	if receipt != nil && receipt.PoolID != "" {
@@ -231,7 +235,7 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		}
 		return account, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
 	client := remoteClient(true)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -266,6 +270,9 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		return fail(errors.New("上次上传结果未确认，未重复上传；请核对 CPA 当前凭据"), "unknown")
 	}
 	if oauth.CPAManaged(account) || (exists && !result.ReplaceExisting) {
+		if account.Quality != nil && account.Quality.Blocked {
+			return fail(errors.New("该账号已标记降智风险，不能确认或恢复 CPA 交付；请先复测"), "quality_blocked")
+		}
 		if !exists {
 			return fail(errors.New("CPA 托管凭据未找到，未使用本地旧副本覆盖；请核对或重新授权"), "failed")
 		}
@@ -276,6 +283,31 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	}
 	if account.ExpiresAt > 0 && account.ExpiresAt <= time.Now().Unix() {
 		return fail(errors.New("待交付的 Access Token 已过期，请重新授权后同步"), "failed")
+	}
+	if !xaiquality.Passed(account.Quality, time.Now()) {
+		// Persist the exact destination before probing. A fresh reauthorization
+		// may expose risk for an older same-account credential already in CPA.
+		if err := save(); err != nil {
+			return account, err
+		}
+		if result.AuthorizationTaskID != "" {
+			if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
+				queue.SetStage(result.AuthorizationTaskID, "checking_quality")
+			}
+		}
+		checked, qualityErr := s.checkGrokQualityLocked(ctx, account)
+		if qualityErr != nil {
+			return fail(qualityErr, "quality_blocked")
+		}
+		account = checked
+		if !xaiquality.Passed(account.Quality, time.Now()) {
+			return fail(errors.New("grok-4.7 质量检测未通过，未上传 CPA；请查看检测依据并复测"), "quality_blocked")
+		}
+	}
+	if result.AuthorizationTaskID != "" {
+		if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
+			queue.SetStage(result.AuthorizationTaskID, "syncing_cpa")
+		}
 	}
 	result.Status = "uploading"
 	result.AttemptedAt = time.Now().Unix()

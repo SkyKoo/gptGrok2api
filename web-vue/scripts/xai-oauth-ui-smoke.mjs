@@ -34,6 +34,9 @@ accounts.set('oauth-retry', account('oauth-retry', 'retry@example.test', { statu
 accounts.set('oauth-managed', account('oauth-managed', 'managed@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true))
 accounts.set('oauth-legacy', account('oauth-legacy', 'legacy@example.test', { status: 'pending', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100, error: '凭据已刷新，请重新同步' }, true))
 accounts.set('oauth-orphan', account('oauth-orphan', 'orphan@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true))
+const riskQuality = { model: 'grok-4.7', version: 'grok47-v1', status: 'high_risk', blocked: true, confirmed_at: 1794564000, at: 1794564000, source: 'cpa', summary: '两组独立检测均至少2题失败（4/6），标记降智风险并阻止交付', removal: { status: 'manual_required', pool_id: 'cpa-a', pool_name: 'O-CPA', file_name: 'xai-risk@example.test.json', error: '此 CPA 不支持凭据删除接口，请人工删除', at: 1794564000 }, samples: [{ kind: 'inventory', prompt: '模拟题目', expected: 53, answer: '{"answer":54}', status: 'fail', reason: '答案与程序计算结果不一致', duration_ms: 1200 }] }
+accounts.set('oauth-risk', { ...account('oauth-risk', 'risk@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true), quality: riskQuality })
+let qualitySchedule = { enabled: true, interval_hours: 24, pending: 0, running: 0, next_due_at: 1794650400, last_checked_at: 1794564000 }
 let job, jobReads = 0
 await context.route('**/*', async route => {
   const req = route.request(), url = new URL(req.url()), pathname = url.pathname, method = req.method()
@@ -46,6 +49,19 @@ await context.route('**/*', async route => {
   else if (pathname === '/version') data = { version: 'fixture' }
   else if (pathname === '/api/cpa/pools') data = { pools: [{ id: 'cpa-a', name: 'O-CPA' }, { id: 'cpa-b', name: 'T-CPA' }] }
   else if (pathname === '/api/grok/oauth/accounts' && method === 'GET') data = { items: [...accounts.values()], total: accounts.size, available_models: [] }
+  else if (pathname === '/api/grok/oauth/quality/schedule') {
+    if (method === 'PUT') { const body = req.postDataJSON(); writes.push({ action: 'schedule', ...body }); qualitySchedule = { ...qualitySchedule, ...body } }
+    data = qualitySchedule
+  }
+  else if (pathname === '/api/grok/oauth/quality' && method === 'GET') data = { items: [] }
+  else if (pathname === '/api/grok/oauth/quality' && method === 'POST') {
+    const body = req.postDataJSON(); writes.push({ action: 'quality', ...body })
+    if (body.cleanup_only) {
+      const saved = accounts.get(body.ids[0])
+      accounts.set(saved.id, { ...saved, cpa_sync: { ...saved.cpa_sync, status: 'quality_removed' }, quality: { ...saved.quality, removal: { ...saved.quality.removal, status: 'removed', error: '' } } })
+    }
+    data = { job_ids: ['quality-fixture'] }
+  }
   else if (pathname === '/api/grok/oauth/accounts/status' && method === 'POST') {
     const body = req.postDataJSON(); writes.push({ action: 'status', ...body })
     for (const id of body.ids) accounts.set(id, { ...accounts.get(id), status: body.disabled ? 'disabled' : 'active' })
@@ -113,7 +129,7 @@ try {
   assert.deepEqual(writes.find(item => item.action === 'check'), { action: 'check', id: 'oauth-legacy', cpa_pool_id: 'cpa-a' })
   assert.equal(await row('grok-managed').getByRole('button', { name: '额度与测试' }).count(), 0)
   await page.getByRole('button', { name: '导入凭据', exact: true }).click()
-  await page.getByRole('dialog').getByText('导入后自动同步到 T-CPA', { exact: true }).waitFor()
+  await page.getByRole('dialog').getByText('检测通过后同步到 T-CPA', { exact: true }).waitFor()
   await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
   assert.equal(await page.locator('textarea:visible').count(), 0, 'no persistent authorization or import form below rows')
   await row('grok-retry').locator('summary').click()
@@ -123,6 +139,27 @@ try {
   assert.deepEqual(writes.find(item => item.action === 'device'), { action: 'device', account_id: 'grok-retry', cpa_pool_id: 'cpa-b' })
   await page.reload()
   await row('grok-new').getByText('已交付 CPA', { exact: true }).waitFor()
+  await row('oauth:oauth-risk').getByText('降智风险', { exact: true }).waitFor()
+  assert.equal(await row('oauth:oauth-risk').getByRole('button', { name: /^(同步 CPA|核对 CPA)$/ }).count(), 0, 'risk blocks all delivery actions')
+  await page.getByRole('button', { name: '降智风险', exact: true }).click()
+  assert.equal(await row('grok-managed').count(), 0, 'risk filter excludes healthy accounts')
+  await row('oauth:oauth-risk').getByRole('button', { name: '查看检测依据' }).click()
+  await page.getByRole('dialog').getByText('grok-4.7 降智检测依据', { exact: true }).waitFor()
+  await page.getByRole('dialog').getByText('此 CPA 不支持凭据删除接口，请人工删除', { exact: true }).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '全部', exact: true }).click()
+  await row('oauth:oauth-risk').getByRole('button', { name: '重试移除 CPA' }).click()
+  await row('oauth:oauth-risk').getByText('降智凭据已移除', { exact: true }).waitFor()
+  await page.getByRole('spinbutton', { name: '降智检测间隔小时' }).fill('12')
+  await page.getByRole('button', { name: '保存检测设置' }).click()
+  await page.waitForFunction(() => document.body.textContent.includes('定时检测设置已保存'))
+  await page.getByRole('checkbox', { name: '定时降智检测', exact: true }).uncheck()
+  await page.getByRole('button', { name: '保存检测设置' }).click()
+  await page.reload()
+  await row('grok-new').getByText('已交付 CPA', { exact: true }).waitFor()
+  assert.equal(await page.getByRole('checkbox', { name: '定时降智检测', exact: true }).isChecked(), false)
+  assert.equal(await page.getByRole('spinbutton', { name: '降智检测间隔小时' }).inputValue(), '12')
+  assert.deepEqual(writes.find(item => item.action === 'quality'), { action: 'quality', ids: ['oauth-risk'], cleanup_only: true })
   if (process.env.CFM_UI_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, { recursive: true })
     for (const theme of ['light', 'dark']) {

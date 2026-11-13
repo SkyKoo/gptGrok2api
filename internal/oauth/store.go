@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/auucoder/gptgrok2api-go/internal/xaiquality"
 )
 
 type CPASync struct {
@@ -31,24 +33,25 @@ type CPASync struct {
 }
 
 type Account struct {
-	ID            string         `json:"id"`
-	Email         string         `json:"email,omitempty"`
-	Subject       string         `json:"subject,omitempty"`
-	AccessToken   string         `json:"access_token,omitempty"`
-	RefreshToken  string         `json:"refresh_token,omitempty"`
-	IDToken       string         `json:"id_token,omitempty"`
-	TokenType     string         `json:"token_type,omitempty"`
-	TokenEndpoint string         `json:"token_endpoint,omitempty"`
-	Quota         map[string]any `json:"quota,omitempty"`
-	CPASync       *CPASync       `json:"cpa_sync,omitempty"`
-	ExpiresAt     int64          `json:"expires_at,omitempty"`
-	Status        string         `json:"status"`
-	SourceType    string         `json:"source_type"`
-	Models        []string       `json:"models,omitempty"`
-	CreatedAt     int64          `json:"created_at"`
-	UpdatedAt     int64          `json:"updated_at"`
-	LastError     string         `json:"last_error,omitempty"`
-	Probe         map[string]any `json:"probe,omitempty"`
+	ID            string             `json:"id"`
+	Email         string             `json:"email,omitempty"`
+	Subject       string             `json:"subject,omitempty"`
+	AccessToken   string             `json:"access_token,omitempty"`
+	RefreshToken  string             `json:"refresh_token,omitempty"`
+	IDToken       string             `json:"id_token,omitempty"`
+	TokenType     string             `json:"token_type,omitempty"`
+	TokenEndpoint string             `json:"token_endpoint,omitempty"`
+	Quota         map[string]any     `json:"quota,omitempty"`
+	CPASync       *CPASync           `json:"cpa_sync,omitempty"`
+	ExpiresAt     int64              `json:"expires_at,omitempty"`
+	Status        string             `json:"status"`
+	SourceType    string             `json:"source_type"`
+	Models        []string           `json:"models,omitempty"`
+	CreatedAt     int64              `json:"created_at"`
+	UpdatedAt     int64              `json:"updated_at"`
+	LastError     string             `json:"last_error,omitempty"`
+	Probe         map[string]any     `json:"probe,omitempty"`
+	Quality       *xaiquality.Report `json:"quality,omitempty"`
 }
 
 type Store struct {
@@ -115,6 +118,11 @@ func (s *Store) Import(item Account) (Account, error) {
 		if current.ID == item.ID || (item.Subject != "" && current.Subject == item.Subject) || (item.Email != "" && strings.EqualFold(current.Email, item.Email)) {
 			item.ID = current.ID
 			item.CreatedAt = current.CreatedAt
+			// Quality risk belongs to the account, not a particular token. A new
+			// grant must not erase a block; a fresh successful probe can clear it.
+			if current.Quality != nil && (current.Quality.Blocked || SameCredential(item, current)) {
+				item.Quality = current.Quality
+			}
 			if item.CPASync == nil && current.CPASync != nil {
 				cp := *current.CPASync
 				if !SameCredential(item, current) {
@@ -337,7 +345,7 @@ func public(item Account) map[string]any {
 	if quota == nil && item.Probe != nil {
 		quota, _ = item.Probe["quota"].(map[string]any)
 	}
-	return map[string]any{"id": item.ID, "provider": "xai_cli_oauth", "auth_kind": "oauth", "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "has_id_token": item.IDToken != "", "token_type": item.TokenType, "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "quota": cloneProbe(quota), "cpa_sync": item.CPASync, "cpa_managed": CPAManaged(item), "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
+	return map[string]any{"id": item.ID, "provider": "xai_cli_oauth", "auth_kind": "oauth", "email": item.Email, "subject": item.Subject, "has_access_token": item.AccessToken != "", "has_refresh_token": item.RefreshToken != "", "has_id_token": item.IDToken != "", "token_type": item.TokenType, "expires_at": item.ExpiresAt, "status": item.Status, "source_type": item.SourceType, "models": item.Models, "probe": cloneProbe(item.Probe), "quota": cloneProbe(quota), "cpa_sync": item.CPASync, "cpa_managed": CPAManaged(item), "quality": item.Quality, "created_at": item.CreatedAt, "updated_at": item.UpdatedAt, "last_error": item.LastError}
 }
 
 // CPAManaged includes historical delivery receipts and uncertain uploads. A

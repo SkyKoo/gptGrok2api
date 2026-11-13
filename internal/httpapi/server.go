@@ -261,6 +261,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.mediaProvider.SetProxyManager(proxyManager)
 	server.deviceOAuth = oauth.NewDeviceService(requestClient, cfg.OAuthDeviceURL, cfg.OAuthTokenURL, server.oauthStore)
 	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
+	server.taskQueue.Register("grok_oauth_quality", server.runGrokQualityTask)
 	server.PauseDeployment(!startWorkers)
 	if startWorkers {
 		server.StartWorkers()
@@ -2820,6 +2821,7 @@ func (s *Server) StartWorkers() {
 		s.taskQueue.Start(2)
 		go s.imageRetentionScheduler()
 		go s.grokProbeScheduler()
+		go s.grokQualityScheduler()
 		go s.openAISurvivalScheduler()
 		go s.capabilityScheduler()
 		go s.modelCapabilityScheduler()

@@ -1,5 +1,19 @@
 import apiClient from '@/api/client'
 
+export type GrokQualitySample = {
+  kind: string; prompt: string; expected: number; marker: string; answer?: string
+  status: 'pass' | 'fail' | 'error'; reason?: string; model?: string
+  http_status?: number; duration_ms: number; output_tokens?: number; reasoning_tokens?: number
+}
+export type GrokQualityReport = {
+  version: string; model: string; status: 'normal' | 'suspect' | 'high_risk' | 'error'
+  blocked: boolean; source: 'oauth' | 'cpa'; at: number; summary: string
+  samples?: GrokQualitySample[]; confirmed_at?: number; risk_samples?: GrokQualitySample[]
+  removal?: { status: 'pending' | 'removed' | 'manual_required'; pool_id: string; pool_name: string; file_name: string; auth_index?: string; at: number; error?: string }
+}
+export type GrokQualityJob = { id: string; account_id: string; status: string; error?: string; updated_at: number }
+export type GrokQualitySchedule = { enabled: boolean; interval_hours: number; last_checked_at: number; next_due_at: number; pending: number; running: number }
+
 export type GrokOAuthCPASync = {
   status: string
   pool_id?: string
@@ -24,6 +38,7 @@ export type GrokOAuthCandidate = {
   has_refresh_token: boolean
   cpa_sync?: GrokOAuthCPASync
   cpa_managed?: boolean
+  quality?: GrokQualityReport
   updated_at?: string
 }
 
@@ -110,6 +125,7 @@ export type GrokOAuthAccount = {
   cpa_sync?: GrokOAuthCPASync
   cpa_managed?: boolean
   recovery?: GrokOAuthRecovery
+  quality?: GrokQualityReport
   use_count: number
   fail_count: number
   last_used_at: string
@@ -189,6 +205,18 @@ export type GrokOAuthAccountTestResponse = {
 const BASE_PATH = '/api/grok/oauth'
 
 export const grokOAuthAccountsApi = {
+  qualitySchedule() {
+    return apiClient.get<never, GrokQualitySchedule>(`${BASE_PATH}/quality/schedule`)
+  },
+  saveQualitySchedule(enabled: boolean, intervalHours: number) {
+    return apiClient.put<{ enabled: boolean; interval_hours: number }, GrokQualitySchedule>(`${BASE_PATH}/quality/schedule`, { enabled, interval_hours: intervalHours })
+  },
+  qualityJobs() {
+    return apiClient.get<never, { items: GrokQualityJob[] }>(`${BASE_PATH}/quality`)
+  },
+  checkQuality(ids: string[], cleanupOnly = false) {
+    return apiClient.post<{ ids: string[]; cleanup_only: boolean }, { job_ids: string[] }>(`${BASE_PATH}/quality`, { ids, cleanup_only: cleanupOnly })
+  },
   candidates() {
     return apiClient.get<never, { items: GrokOAuthCandidate[]; total: number }>(`${BASE_PATH}/candidates`)
   },

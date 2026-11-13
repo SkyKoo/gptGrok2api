@@ -168,7 +168,7 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 				return nil, errors.New("oauth_account_changed")
 			}
 			value := map[string]any{"status": "authorized", "account": oauth.Public(credential)}
-			recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 45*time.Second)
+			recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 8*time.Minute)
 			defer recoveryCancel()
 			s.finishOAuthCPADelivery(recoveryCtx, value)
 			if _, err := finish("authorized", ""); err != nil {
@@ -316,6 +316,8 @@ func grokOAuthPublicJob(task tasks.Task) map[string]any {
 	case "running":
 		status, stage, message = "running", "authorize", "正在使用所选账号完成授权"
 		switch stringValue(task.Result["stage"]) {
+		case "checking_quality":
+			stage, message = "checking_quality", "OAuth 已授权，正在检测 grok-4.7"
 		case "syncing_cpa":
 			stage, message = "syncing_cpa", "OAuth 已授权，正在同步 CPA"
 		case "waiting_browser":

@@ -18,6 +18,10 @@ function panel(options = {}) {
   const scheduled = new Map(), notifications = [], calls = [], confirmations = []
   let timerId = 0, unmount
   const api = {
+    qualityJobs: async () => ({ items: [] }),
+    qualitySchedule: async () => ({ enabled: true, interval_hours: 24, pending: 0, running: 0, next_due_at: 0, last_checked_at: 0 }),
+    saveQualitySchedule: async (enabled, interval_hours) => { calls.push(['schedule', enabled, interval_hours]); return { enabled, interval_hours, pending: 0, running: 0 } },
+    checkQuality: async (...args) => { calls.push(['quality', ...args]); return { job_ids: ['quality-a'] } },
     list: async () => ({ items: [account] }),
     candidates: async () => ({ items: [candidate] }),
     getProtocolJob: async () => ({ job: job({ status: 'authorized', stage: 'completed', account: { ...account, cpa_sync: { status: 'synced', pool_id: 'cpa-a' } } }) }),
@@ -55,6 +59,20 @@ test('row authorization pins the selected CPA target in the start request', asyn
   await pending
   assert.deepEqual(calls, [['authorize', 'grok-a', 'cpa-a']])
   assert.equal(state.jobs.value['job-a'].source_account_id, 'grok-a')
+})
+
+test('quality actions use OAuth identity and scheduler validates persisted interval', async () => {
+  const { state, calls } = panel()
+  await state.checkQuality({ ...candidate, oauth_account_id: account.id })
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), ['quality', [account.id], false])
+  state.qualityIntervalHours.value = 0
+  await state.saveQualitySchedule()
+  assert.equal(calls.filter(call => call[0] === 'schedule').length, 0)
+  state.qualityIntervalHours.value = 12
+  state.qualityScheduleEnabled.value = false
+  await state.saveQualitySchedule()
+  assert.deepEqual(calls.at(-1), ['schedule', false, 12])
+  assert.equal(state.qualitySchedule.value.enabled, false)
 })
 
 test('saved OAuth with failed CPA delivery warns and never starts another authorization', async () => {
