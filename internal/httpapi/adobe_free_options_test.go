@@ -46,12 +46,17 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 	for _, tc := range []struct {
 		model, query, size, resolution, aspect string
 		duration                               int
+		audio                                  bool
 	}{
-		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4},
-		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8},
-		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6},
-		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8},
-		{"ray-3.14", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5},
+		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4, false},
+		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false},
+		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true},
+		{"veo-3.1-lite", "size=1080x1920&generate_audio=true", "1080x1920", "1080p", "9:16", 8, true},
+		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6, false},
+		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8, false},
+		{"ray-3.14", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, false},
+		{"gemini-omni-flash-1.1", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, true},
+		{"gemini-omni-flash-1.2", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 5, true},
 	} {
 		t.Run(tc.model+"/"+tc.query, func(t *testing.T) {
 			s := imageTaskTestServer(t)
@@ -73,7 +78,7 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := waitAdobeVideoIdle(t, s, created.ID)
-			if got.Model != tc.model || got.Size != tc.size || got.ResolutionName != tc.resolution || got.AspectRatio != tc.aspect || got.Seconds != fmt.Sprint(tc.duration) || got.GenerateAudio || got.ReferenceCount != 0 {
+			if got.Model != tc.model || got.Size != tc.size || got.ResolutionName != tc.resolution || got.AspectRatio != tc.aspect || got.Seconds != fmt.Sprint(tc.duration) || got.GenerateAudio != tc.audio || got.ReferenceCount != 0 {
 				t.Fatalf("request changed: %+v", got)
 			}
 			fixture.mu.Lock()
@@ -85,8 +90,8 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			if p["resolution"] != tc.resolution || p["duration"] != float64(tc.duration) || mapValue(p["generationSettings"])["aspectRatio"] != tc.aspect {
 				t.Fatalf("upstream parameters changed: %+v", p)
 			}
-			if tc.model != "ray-3.14" && p["generateAudio"] != false {
-				t.Fatal("silent request did not stay silent")
+			if tc.model != "ray-3.14" && p["generateAudio"] != tc.audio {
+				t.Fatal("upstream audio differs from the resolved request")
 			}
 			if _, exists := p["referenceBlobs"]; exists {
 				t.Fatal("text-only variant gained reference blobs")
@@ -101,17 +106,29 @@ func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
 		ref   bool
 	}{
 		{"model=veo-3.1-fast&generate_audio=true", false},
+		{"model=veo-3.1-fast&size=720x1280&generate_audio=true", false},
+		{"model=veo-3.1-fast&size=1080x1920&generate_audio=true", false},
 		{"model=veo-3.1-lite&seconds=4&generate_audio=true", false},
-		{"model=veo-3.1-lite&resolution=720p&generate_audio=true", false},
+		{"model=veo-3.1-lite&resolution=720p&aspect_ratio=16:9&generate_audio=true", false},
 		{"model=veo-3.1-lite&size=1080x1920&seconds=6", false},
+		{"model=veo-3.1-lite&size=720x1280&seconds=4&generate_audio=true", false},
+		{"model=veo-3.1-lite&size=1080x1920&seconds=6&generate_audio=true", false},
 		{"model=veo-3.1-fast&resolution=720p&seconds=4", false},
 		{"model=veo-3.1-lite&size=720x1280", true},
+		{"model=veo-3.1-lite&size=720x1280&generate_audio=true", true},
+		{"model=veo-3.1-lite&size=1080x1920&generate_audio=true", true},
 		{"model=veo-3.1-lite&seconds=4", true},
 		{"model=veo-3.1-fast&size=1080x1920", true},
 		{"model=ray-3.14&aspect_ratio=9:16", true},
 		{"model=veo-3.1-lite&size=1920x1080&resolution=720p", false},
 		{"model=firefly-video&resolution=720p", false},
-		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16", false},
+		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16&generate_audio=false", false},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&generate_audio=false", false},
+		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16", true},
+		{"model=gemini-omni-flash-1.2&size=720x1280", true},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&resolution=1080p", false},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=1:1", false},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&seconds=8", false},
 	} {
 		t.Run(fmt.Sprintf("%s/ref=%t", tc.query, tc.ref), func(t *testing.T) {
 			s := imageTaskTestServer(t)

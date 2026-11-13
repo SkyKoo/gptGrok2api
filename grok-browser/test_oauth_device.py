@@ -49,10 +49,13 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 page, button, _, _ = self.page(path, text)
                 outcome = await self.confirm(page)
                 self.assertEqual(outcome["code"], code)
+                self.assertIn(outcome["stage"], {"page_navigation", "page_observation", "consent_page"})
                 button.click.assert_not_awaited()
         page, button, _, _ = self.page()
         page.url = "https://accounts.x.ai.evil.invalid/oauth2/device/consent"
-        self.assertEqual((await self.confirm(page))["status"], "failed")
+        outcome = await self.confirm(page)
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(outcome["detail"], "untrusted_destination")
         button.click.assert_not_awaited()
 
     async def test_wrong_code_and_wrong_form_method_are_rejected(self):
@@ -67,7 +70,11 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
         page, button, _, _ = self.page()
         button.click.side_effect = TimeoutError("sensitive URL or cookie must not escape")
         outcome = await self.confirm(page)
-        self.assertEqual(outcome, {"status":"uncertain", "code":"oauth_worker_result_unknown"})
+        self.assertEqual(outcome["status"], "uncertain")
+        self.assertEqual(outcome["code"], "oauth_consent_click_timeout")
+        self.assertEqual(outcome["stage"], "consent_submit")
+        self.assertTrue(outcome["consent_submitted"])
+        self.assertNotIn("sensitive URL", str(outcome))
         button.click.assert_awaited_once()
 
     async def test_accept_once_wait_for_done_and_never_infer_success_from_click(self):
@@ -75,27 +82,66 @@ class ConfirmationTests(unittest.IsolatedAsyncioTestCase):
         async def finish(**kwargs): page.url = "https://accounts.x.ai/oauth2/device/done"
         button.click.side_effect = finish
         with patch.object(flow.asyncio, "sleep", AsyncMock()):
-            self.assertEqual((await self.confirm(page))["status"], "approved")
+            outcome = await self.confirm(page)
+            self.assertEqual(outcome["status"], "approved")
+            self.assertEqual(outcome["stage"], "consent_callback")
+            self.assertEqual(outcome["detail"], "callback_received")
+            self.assertEqual(outcome["page_path"], "/oauth2/device/done")
+            self.assertNotIn("selected@example.test", str(outcome))
         button.click.assert_awaited_once()
         page, button, _, _ = self.page()
         with patch.object(flow.asyncio, "sleep", AsyncMock()):
-            self.assertEqual((await self.confirm(page))["status"], "uncertain")
+            outcome = await self.confirm(page)
+            self.assertEqual(outcome["status"], "uncertain")
+            self.assertEqual(outcome["code"], "oauth_callback_timeout")
         button.click.assert_awaited_once()
 
     async def test_isolated_host_cookies_and_cleanup_on_failure(self):
-        page = SimpleNamespace(main_frame=object(), goto=AsyncMock(side_effect=RuntimeError("secret")))
+        page = SimpleNamespace(main_frame=object(), url="https://accounts.x.ai/oauth2/device", goto=AsyncMock(side_effect=RuntimeError("secret")))
         context = SimpleNamespace(add_cookies=AsyncMock(), new_page=AsyncMock(return_value=page), route=AsyncMock(), close=AsyncMock())
         browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
         module = SimpleNamespace(launch_async=AsyncMock(return_value=browser))
         with patch.dict(sys.modules, {"cloakbrowser": module}), patch.dict(os.environ, {"TURNSTILE_PROXY":"http://signup-only.example.test:8080"}):
             outcome = await flow.authorize_device(verification_uri_complete="https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH", user_code="ABCD-EFGH", sso="selected-secret", expected_email="selected@example.test")
-        self.assertEqual(outcome["code"], "oauth_worker_result_unknown")
+        self.assertEqual(outcome["code"], "oauth_page_navigation_failed")
+        self.assertEqual(outcome["stage"], "page_navigation")
+        self.assertEqual(outcome["detail"], "navigation_failed")
+        self.assertNotIn("selected-secret", str(outcome))
+        self.assertNotIn("selected@example.test", str(outcome))
         cookies = context.add_cookies.await_args.args[0]
         self.assertEqual({c["url"] for c in cookies}, {"https://accounts.x.ai", "https://auth.x.ai"})
         self.assertTrue(all("domain" not in c and c["secure"] and c["httpOnly"] for c in cookies))
         self.assertNotIn("proxy", module.launch_async.await_args.kwargs)
         # Closing the whole browser owns/cleans its contexts as well.
         context.close.assert_not_awaited()
+        browser.close.assert_awaited_once()
+
+    async def test_navigation_timeout_is_classified_without_page_content(self):
+        page = SimpleNamespace(
+            main_frame=object(),
+            url="https://accounts.x.ai/oauth2/device",
+            goto=AsyncMock(side_effect=asyncio.TimeoutError()),
+        )
+        context = SimpleNamespace(
+            add_cookies=AsyncMock(),
+            new_page=AsyncMock(return_value=page),
+            route=AsyncMock(),
+        )
+        browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+        outcome = await flow.authorize_device(
+            verification_uri_complete="https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH",
+            user_code="ABCD-EFGH",
+            sso="selected-secret",
+            expected_email="selected@example.test",
+            browser=browser,
+        )
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(outcome["code"], "oauth_page_navigation_timeout")
+        self.assertEqual(outcome["stage"], "page_navigation")
+        self.assertEqual(outcome["detail"], "navigation_timeout")
+        self.assertEqual(outcome["page_path"], "/oauth2/device")
+        self.assertNotIn("selected-secret", str(outcome))
+        self.assertNotIn("selected@example.test", str(outcome))
         browser.close.assert_awaited_once()
 
 

@@ -115,11 +115,12 @@
               </div>
             </template>
 
-            <div v-else-if="mode === 'video'" ref="settingsAnchorRef" class="chat-settings-anchor">
+            <div v-else-if="mode === 'video'" ref="settingsAnchorRef" class="chat-settings-anchor chat-video-settings-anchor">
               <StudioToolbarSelectButton
                 class="chat-summary-button justify-between gap-1.5"
                 :expanded="settingsOpen"
                 aria-label="视频设置"
+                :title="videoSummaryLabel"
                 @click.stop="toggleSettings"
               >
                 <Icon icon="lucide:sliders-horizontal" class="h-3.5 w-3.5" />
@@ -306,7 +307,7 @@ import {
   type ImageSizeResolution,
 } from '@/api/imageTasks'
 import { matchingMediaVariants, mediaCombinationError, type MediaCapability } from '@/lib/mediaCapabilities'
-import { normalizeStudioVideoOptions, studioVideoSelection, studioVideoSettingValues, studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
+import { normalizeStudioVideoOptions, studioVideoSelection, studioVideoSettingValues, studioVideoAspectLabel, studioVideoSizeLabel, studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -448,7 +449,7 @@ const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label
   const capability = videoCapabilities.value
   const values = capability ? studioVideoSettingValues(props.videoForm, capability, props.references.length) : undefined
   const groups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
-    { key: 'size', label: '尺寸', options: values?.sizes.map(value => ({ label: value, value })) || VIDEO_SIZE_OPTIONS },
+    { key: 'size', label: '比例', options: values?.sizes.map(value => ({ label: studioVideoSizeLabel(value, capability), value })) || VIDEO_SIZE_OPTIONS },
     { key: 'resolution', label: '分辨率', options: (values?.resolutions || ['480p', '720p']).map(value => ({ label: value, value })) },
     { key: 'seconds', label: '时长', options: values?.durations.map(value => ({ label: `${value} 秒`, value: String(value) })) || VIDEO_DURATION_OPTIONS },
   ]
@@ -456,7 +457,7 @@ const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label
   if (values?.hasAudio) groups.push({ key: 'audio', label: '音频', options: values.audio.map(value => ({ label: value ? '生成音频' : '无音频', value: String(value) })) })
   return groups.filter(group => group.options.length > 0)
 })
-const videoSummaryLabel = computed(() => `${props.chatModelLabels?.[videoModelValue.value] || videoModelValue.value} · ${props.videoForm.seconds} 秒 · ${props.videoForm.resolution}`)
+const videoSummaryLabel = computed(() => `${studioVideoAspectLabel(props.videoForm.size, videoCapabilities.value) || props.videoForm.size} · ${props.videoForm.resolution} · ${props.videoForm.seconds} 秒 · ${props.chatModelLabels?.[videoModelValue.value] || videoModelValue.value}`)
 function selectVideoSetting(key: keyof StudioVideoOptions, value: string) {
   const changed = { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : key === 'audio' ? value === 'true' : value }
   emit('update:videoForm', normalizeStudioVideoOptions(changed, videoCapabilities.value, key === 'preset' ? undefined : key, props.references.length))
@@ -1186,9 +1187,24 @@ onBeforeUnmount(() => {
     max-width: 12rem;
   }
 
+  .chat-select-wrap--mode {
+    min-width: 0;
+  }
+
+  .chat-video-settings-anchor {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
   .chat-summary-button,
   :deep(.chat-summary-button) {
     max-width: 11.5rem;
+  }
+
+  .chat-video-settings-anchor :deep(.chat-summary-button) {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
   }
 
   .studio-size-popover {

@@ -1,6 +1,7 @@
 """Exercise the real Worker HTTP routes using an in-memory browser only."""
 import asyncio
 import importlib.util
+import logging
 import sys
 import unittest
 from types import SimpleNamespace
@@ -126,6 +127,35 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
             await self.ready(key)
             self.assertNotIn('proxy',self.launch.call_args.kwargs)
             await self.client.delete('/v1/browser/reservations/'+key)
+
+    async def test_oauth_diagnostics_are_logged_without_sensitive_fields(self):
+        value = {
+            'status': 'uncertain',
+            'code': 'oauth_callback_timeout',
+            'stage': 'consent_callback',
+            'detail': 'callback_wait_timeout',
+            'elapsed_ms': 1200,
+            'consent_submitted': True,
+            'page_path': '/oauth2/device/consent',
+            'network_failures': 2,
+            'network_error_codes': 'ERR_TUNNEL_CONNECTION_FAILED,TIMED_OUT',
+        }
+        with patch.object(server, 'authorize_device', AsyncMock(return_value=value)):
+            with self.assertLogs(server.log, level=logging.INFO) as records:
+                response = await self.client.post('/v1/oauth/authorize-device', json={
+                    'verification_uri_complete': 'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH',
+                    'user_code': 'ABCD-EFGH',
+                    'sso': 'SSO-SECRET',
+                    'expected_email': 'selected@example.test',
+                })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('stage=consent_callback', records.output[0])
+        self.assertIn('code=oauth_callback_timeout', records.output[0])
+        self.assertIn('consent_submitted=True', records.output[0])
+        self.assertIn('network_failures=2', records.output[0])
+        self.assertIn('network_error_codes=ERR_TUNNEL_CONNECTION_FAILED,TIMED_OUT', records.output[0])
+        for secret in ('SSO-SECRET', 'selected@example.test', 'ABCD-EFGH'):
+            self.assertNotIn(secret, records.output[0])
 
 
 if __name__=='__main__':unittest.main()

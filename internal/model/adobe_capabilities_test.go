@@ -50,8 +50,11 @@ func TestAdobePublicVideoVariantsPreservePerTierLimits(t *testing.T) {
 				if v.MaxReferenceImages != 2 || v.Audio != (id == "veo-3.1-lite") {
 					t.Fatalf("%s baseline limits lost: %+v", id, v)
 				}
-			} else if v.MaxReferenceImages != 0 || v.Audio {
-				t.Fatalf("%s new text-only tier inherited input/audio support: %+v", id, v)
+			} else {
+				audioAllowed := id == "veo-3.1-lite" && v.AspectRatios[0] == "9:16"
+				if v.MaxReferenceImages != 0 || v.Audio != audioAllowed || v.AudioRequired || v.DefaultAudio {
+					t.Fatalf("%s text-only tier differs from verified audio/input limits: %+v", id, v)
+				}
 			}
 			if v.Sizes[0] != "1920x1080" && !slices.Equal(v.Durations, []int{8}) {
 				t.Fatalf("%s exposed shorter duration at unverified dimensions: %+v", id, v)
@@ -89,6 +92,32 @@ func TestAdobePublicImageVariantsPreserveOfficialSizeContracts(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("%s missing official size %s", tc.id, tc.size)
+		}
+	}
+}
+
+func TestOmniPublicPortraitVariantKeepsFixedAudioAndReferenceBoundary(t *testing.T) {
+	for _, id := range []string{"gemini-omni-flash-1.1", "gemini-omni-flash-1.2"} {
+		cap := MediaCapability(id)
+		if !cap.Audio || !cap.AudioRequired || !cap.DefaultAudio || len(cap.Variants) != 2 || !slices.Equal(cap.Resolutions, []string{"720p"}) || !slices.Equal(cap.Durations, []int{5}) {
+			t.Fatalf("%s fixed-audio contract changed: %+v", id, cap)
+		}
+		portrait := false
+		for _, v := range cap.Variants {
+			if !v.Audio || !v.AudioRequired || !v.DefaultAudio || !slices.Equal(v.Resolutions, []string{"720p"}) || !slices.Equal(v.Durations, []int{5}) {
+				t.Fatalf("%s variant widened audio or output tiers: %+v", id, v)
+			}
+			if slices.Equal(v.Sizes, []string{"720x1280"}) {
+				portrait = true
+				if !slices.Equal(v.AspectRatios, []string{"9:16"}) || v.MaxReferenceImages != 0 {
+					t.Fatalf("%s portrait reference boundary changed: %+v", id, v)
+				}
+			} else if !slices.Equal(v.Sizes, []string{"1280x720"}) || !slices.Equal(v.AspectRatios, []string{"16:9"}) || v.MaxReferenceImages != 2 {
+				t.Fatalf("%s original landscape contract changed: %+v", id, v)
+			}
+		}
+		if !portrait {
+			t.Fatalf("%s missing portrait capability", id)
 		}
 	}
 }

@@ -25,13 +25,15 @@ func TestVerifiedVeoFreeCombinationsDoNotFormCartesianProduct(t *testing.T) {
 				}
 				withAudio := r
 				withAudio.GenerateAudio = true
-				if _, _, err := ValidateVideoRequest(withAudio); err == nil {
-					t.Fatal("new text-only tier inherited audio from another tier")
+				audioAllowed := id == "veo-3.1-lite" && tier.aspect == "9:16"
+				if _, _, err := ValidateVideoRequest(withAudio); (err == nil) != audioAllowed {
+					t.Fatalf("audio allowance differs from the verified tier: allowed=%t error=%v", audioAllowed, err)
 				}
-				withReference := r
-				withReference.References = []ReferenceImage{ref}
-				if _, _, err := ValidateVideoRequest(withReference); err == nil {
-					t.Fatal("new text-only tier inherited reference support")
+				for _, candidate := range []VideoRequest{r, withAudio} {
+					candidate.References = []ReferenceImage{ref}
+					if _, _, err := ValidateVideoRequest(candidate); err == nil {
+						t.Fatal("new text-only tier inherited reference support")
+					}
 				}
 			})
 		}
@@ -76,6 +78,44 @@ func TestRayPortraitFreeTierKeepsReferenceBoundary(t *testing.T) {
 	}
 	if _, ok := m.MatchVideo(1080, 1920, 5, "1080p", "9:16", false, 0); ok {
 		t.Fatal("portrait aspect enabled an unverified resolution")
+	}
+}
+
+func TestOmniPortraitFreeTierRequiresAudioWithoutInheritingReferences(t *testing.T) {
+	ref := referenceFixture(t, 2, 2)
+	for _, id := range []string{"gemini-omni-flash-1.1", "gemini-omni-flash-1.2"} {
+		t.Run(id, func(t *testing.T) {
+			r := VideoRequest{Model: id, Prompt: "a landscape", Width: 720, Height: 1280, Duration: 5, Resolution: "720p", AspectRatio: "9:16", GenerateAudio: true}
+			m, tier, err := ValidateVideoRequest(r)
+			if err != nil || !tier.Audio || !tier.AudioRequired || !tier.DefaultAudio || tier.MaxReferenceImages != 0 {
+				t.Fatalf("portrait fixed-audio contract lost: %+v, %v", tier, err)
+			}
+			if m.Size != "1280x720" || m.AspectRatio != "16:9" || m.Duration != 5 || !m.DefaultAudio || !m.AudioRequired {
+				t.Fatalf("existing defaults changed: %+v", m)
+			}
+			if _, ok := m.MatchVideo(1280, 720, 5, "720p", "16:9", true, 2); !ok {
+				t.Fatal("original landscape reference tier lost")
+			}
+			for _, tc := range []struct {
+				name   string
+				mutate func(*VideoRequest)
+			}{
+				{"silent", func(r *VideoRequest) { r.GenerateAudio = false }},
+				{"reference", func(r *VideoRequest) { r.References = []ReferenceImage{ref} }},
+				{"1080p", func(r *VideoRequest) { r.Width, r.Height, r.Resolution = 1080, 1920, "1080p" }},
+				{"square", func(r *VideoRequest) { r.Width, r.Height, r.AspectRatio = 720, 720, "1:1" }},
+				{"mismatched-aspect", func(r *VideoRequest) { r.AspectRatio = "16:9" }},
+				{"duration", func(r *VideoRequest) { r.Duration = 8 }},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					invalid := r
+					tc.mutate(&invalid)
+					if _, _, err := ValidateVideoRequest(invalid); err == nil {
+						t.Fatalf("unverified combination accepted: %+v", invalid)
+					}
+				})
+			}
+		})
 	}
 }
 
