@@ -294,7 +294,7 @@ async function collectRefreshedSession(context,page,expected,identity,{waitIdent
   // were renewed. Let incomplete/cancelled runtime ARP fail without exporting
   // a partial replacement for the previously stored account.
   let media;
-  try {media=await ensureMedia(page,context,{signal});}
+  try {media=await ensureMedia(page,context,{signal,identity});}
   catch(error){
     if(error instanceof RegistrationError && error.code!=='media_session_cancelled'){
       try {error.diagnostics={...error.diagnostics,...await sessionDiagnostics(page,context)};} catch { /* Preserve the original failure. */ }

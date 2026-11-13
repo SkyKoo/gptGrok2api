@@ -516,8 +516,10 @@ class BrowserReservationRequest(BaseModel):
     profile_id: str = Field(default="", max_length=80, pattern=r"^[a-zA-Z0-9_-]*$")
     email: str = Field(default="", max_length=320)
     adobe_profile: dict[str, Any] = Field(default_factory=dict)
-    adobe_mode: str = Field(default="registration", pattern=r"^(registration|refresh|resume)$")
+    adobe_mode: str = Field(default="registration", pattern=r"^(registration|refresh|resume|media)$")
     adobe_require_new: bool = False
+    adobe_defer_media: bool = Field(default=False, strict=True)
+    adobe_legacy_media: bool = Field(default=False, strict=True)
     adobe_recovery_id: str = Field(default="", max_length=80, pattern=r"^[a-zA-Z0-9_-]*$")
     account_id: str = Field(default="", max_length=256)
     password: str = Field(default="", max_length=256)
@@ -542,8 +544,18 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
                 raise HTTPException(status_code=422, detail="adobe_recovery_id_required")
             if req.adobe_require_new and req.adobe_mode != "registration":
                 raise HTTPException(status_code=422, detail="adobe_profile_mode_invalid")
+            if req.adobe_defer_media and req.adobe_mode not in {"registration", "resume"}:
+                raise HTTPException(status_code=422, detail="adobe_media_mode_invalid")
+            if req.adobe_legacy_media and req.adobe_mode != "media":
+                raise HTTPException(status_code=422, detail="adobe_media_mode_invalid")
+            # This phase only reads the accepted signup's existing profile.
+            # It cannot submit a password or start another registration.
+            if req.adobe_mode == "media" and (req.password or not req.proxy):
+                raise HTTPException(status_code=422, detail="adobe_media_options_invalid")
             return queue.enqueue(req.id, {"profile_id":req.profile_id, "email":req.email,
                 "profile":req.adobe_profile, "proxy":proxy, "mode":req.adobe_mode, "require_new":req.adobe_require_new,
+                **({"defer_media":True} if req.adobe_defer_media else {}),
+                **({"legacy_media":True} if req.adobe_legacy_media else {}),
                 "recovery_id":req.adobe_recovery_id, "account_id":req.account_id, "password":req.password}, launch_adobe,
                 startup_progress=True)
         options = browser_kwargs("TURNSTILE", "direct" if req.daily_direct and not proxy else proxy or None,

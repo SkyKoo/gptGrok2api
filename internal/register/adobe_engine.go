@@ -24,6 +24,7 @@ type AdobeEngine struct {
 	path, secret               string
 	jobs                       []RegistrationJob
 	factory                    AdobeFactory
+	mediaFactory               func(AdobeConfig) AdobeRegistrationFlow
 	importer                   ImportAccount
 	verifier                   VerifyAccount
 	ProxyRouting               *ProxyRouting
@@ -123,6 +124,12 @@ func (e *AdobeEngine) getJob(id string) (RegistrationJob, error) {
 	return RegistrationJob{}, fail("task", "not_found")
 }
 func (e *AdobeEngine) SetProxyRouting(r *ProxyRouting) { e.ProxyRouting = r; r.restore(e.jobs) }
+
+// A separate internal factory lets verified identities finish media preparation
+// without acquiring another registration proxy or reopening an HME source.
+func (e *AdobeEngine) SetMediaFlowFactory(factory func(AdobeConfig) AdobeRegistrationFlow) {
+	e.mediaFactory = factory
+}
 func (e *AdobeEngine) Start(raw map[string]any) (string, error) {
 	cfg, err := ParseAdobeConfig(raw)
 	if err != nil {
@@ -236,6 +243,44 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	}
 	cfg.Profile = job.AdobeProfile.fields()
 	cfg.BrowserProfileID = adobeBrowserProfileID(job)
+	if e.mediaFactory != nil && adobeMediaPreparationPending(job) {
+		if err := e.change(id, markAdobeMediaPreparation); err != nil {
+			failTask(err)
+			return
+		}
+		job, err = e.getJob(id)
+		if err != nil {
+			failTask(err)
+			return
+		}
+		cfg.mediaOnly, cfg.legacyMedia = true, job.AdobeRegistration.LegacyMedia
+		cfg.RecoveryMode = "resume_session"
+		flow := e.mediaFactory(cfg)
+		if flow == nil {
+			failTask(fail("adobe", "media_flow_unavailable"))
+			return
+		}
+		defer flow.Close()
+		cfg.diagnosticProgress = e.adobeDiagnosticProgress(id)
+		account, err := flow.Register(ctx, id, job.Mailbox, cfg, nil, func(stage string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return e.change(id, func(j *RegistrationJob) {
+				if j.Stage != stage || j.Status != "running" {
+					appendRegistrationLog(j, stage, adobeRegistrationStageText(stage), "info")
+				}
+				j.Status, j.Stage = "running", stage
+			})
+		})
+		if err == nil {
+			err = e.completeRegisteredAccount(ctx, id, job, job.Mailbox, account, nil)
+		}
+		if err != nil {
+			failTask(err)
+		}
+		return
+	}
 	if job.ParentJobID != "" {
 		cfg.RecoveryMode = adobeRegistrationRecoveryMode(job)
 		if job.AdobeRegistration != nil && job.AdobeRegistration.ProxyRecorded {
@@ -315,13 +360,20 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		}
 		return e.recordRegistrationCountry(id, country)
 	}
-	cfg.diagnosticProgress = func(diagnostics adobeRegistrationDiagnostics) error {
-		detail := adobeFailureDiagnosticText(diagnostics)
-		if detail == "" {
-			return nil
+	cfg.diagnosticProgress = e.adobeDiagnosticProgress(id)
+	cfg.mediaProgress = func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		current, err := e.getJob(id)
+		if err != nil || adobeCreationOutcome(current) != "accepted" {
+			return fail("adobe", "media_identity_not_verified")
 		}
 		return e.change(id, func(j *RegistrationJob) {
-			appendRegistrationLog(j, "adobe_registration_diagnostics", detail, "info")
+			ensureAdobeRegistrationState(j)
+			j.AdobeRegistration.MediaPending, j.AdobeRegistration.LegacyMedia = true, false
+			j.Stage = "adobe_media_pending"
+			appendRegistrationLog(j, j.Stage, adobeRegistrationStageText(j.Stage), "info")
 		})
 	}
 	cfg.startupProgress = func(event browserqueue.StartupEvent) error {
@@ -372,29 +424,46 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		failTask(err)
 		return
 	}
+	if err = e.completeRegisteredAccount(ctx, id, job, box, account, mail); err != nil {
+		failTask(err)
+	}
+}
+
+func (e *AdobeEngine) adobeDiagnosticProgress(id string) func(adobeRegistrationDiagnostics) error {
+	return func(diagnostics adobeRegistrationDiagnostics) error {
+		detail := adobeFailureDiagnosticText(diagnostics)
+		if detail == "" {
+			return nil
+		}
+		return e.change(id, func(j *RegistrationJob) {
+			appendRegistrationLog(j, "adobe_registration_diagnostics", detail, "info")
+		})
+	}
+}
+
+func (e *AdobeEngine) completeRegisteredAccount(ctx context.Context, id string, job RegistrationJob, box Mailbox, account map[string]any, mail MailSource) error {
 	account["platform"], account["registration_job_id"], account["enabled"] = "adobe", mailboxClaimJobID(job), false
 	account["registration_mailbox"] = map[string]any{"provider": "icloud_hme", "platform": "adobe", "source_id": box.SourceID, "source_type": box.SourceType, "source_mailbox_id": box.SourceMailboxID, "id": box.ID, "account_id": box.AccountID, "email": box.Email}
-	if err = e.change(id, func(j *RegistrationJob) {
+	if err := e.change(id, func(j *RegistrationJob) {
 		UseDefaultAccountProxy(account)
 		j.Account = account
 		j.Status = "import_pending"
 		j.Stage = "import"
+		if j.AdobeRegistration != nil {
+			j.AdobeRegistration.MediaPending, j.AdobeRegistration.LegacyMedia = false, false
+		}
 	}); err != nil {
-		failTask(err)
-		return
+		return err
 	}
 	// Commit the upstream identity, not the registration task identifier.
 	if m, ok := mail.(interface {
 		Commit(context.Context, string, Mailbox) error
 	}); ok {
-		if err = m.Commit(ctx, "adobe:"+stringValue(account["account_id"]), box); err != nil {
-			failTask(err)
-			return
+		if err := m.Commit(ctx, "adobe:"+stringValue(account["account_id"]), box); err != nil {
+			return err
 		}
 	}
-	if err = e.importAndVerify(ctx, id); err != nil {
-		failTask(err)
-	}
+	return e.importAndVerify(ctx, id)
 }
 func (e *AdobeEngine) acquire(ctx context.Context, id string, mail MailSource) (Mailbox, error) {
 	e.mailboxMu.Lock()

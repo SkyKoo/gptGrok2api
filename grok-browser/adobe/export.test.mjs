@@ -220,3 +220,31 @@ test('worker registration refuses identity changes and invalid runtime values wi
   await assert.rejects(browser.exportSession(),codeIs(code));assert.equal((await store.load()).result?.account,undefined);
  }
 });
+
+test('deferred media export persists only a verified identity checkpoint and returns pending',async t=>{
+ const {browser,store,calls}=await workerExportFixture(t);browser.deferMedia=true;
+ browser.creationTracker={accepted:async()=>{
+  const state=await store.load();await store.save({creationEvidence:{version:1,marker:state.submission.startedAt,requests:1,finished:1,rejected:0,unknown:0,accepted:true,complete:true,sealed:false}});
+ }};
+ const result=await browser.exportSession();
+ assert.equal(result.stage,'media_pending');assert.equal(result.emailVerified,true);assert.deepEqual(calls,['identity']);
+ const state=await store.load();assert.equal(state.stage,'media_pending');assert.equal(state.result,undefined);
+ assert.equal(state.mediaCheckpoint.account_id,'synthetic-id');assert.equal(state.mediaCheckpoint.emailVerified,true);
+ assert.doesNotMatch(JSON.stringify(state.mediaCheckpoint),/synthetic-token|cookie|user_agent|password/);
+ browser.page=null;browser.context=null;
+ assert.equal((await browser.exportSession()).stage,'media_pending');assert.deepEqual(calls,['identity']);
+});
+
+test('deferred export requires explicit verified email and cannot save an unknown identity',async t=>{
+ for(const verified of [false,null,undefined]){
+  const {browser,store,calls}=await workerExportFixture(t);browser.deferMedia=true;
+  const evaluate=browser.page.evaluate;browser.page.evaluate=async(fn,args)=>{
+   const value=await evaluate(fn,args);if(fn.name==='identityInPage')return {...value,emailVerified:verified};return value;
+  };
+  browser.creationTracker={accepted:async()=>{
+   const state=await store.load();await store.save({creationEvidence:{version:1,marker:state.submission.startedAt,requests:0,finished:0,rejected:0,unknown:0,accepted:true,complete:true,sealed:false}});
+  }};
+  await assert.rejects(browser.exportSession(),error=>['email_verification_required','media_email_unverified'].includes(error.code));
+  const state=await store.load();assert.equal(state.mediaCheckpoint,undefined);assert.equal(state.result,undefined);assert.deepEqual(calls,['identity']);
+ }
+});

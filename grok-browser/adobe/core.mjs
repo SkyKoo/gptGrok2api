@@ -13,12 +13,12 @@ export const REGISTRATION_STAGES = Object.freeze([
   'form_ready', 'awaiting_profile', 'awaiting_email', 'awaiting_password', 'awaiting_approval',
   'awaiting_verification', 'needs_manual',
   'verification', 'ready_to_submit', 'submission_started', 'outcome_unknown',
-  'session', 'credentials_saved', 'completed', 'failed', 'cancelled',
+  'session', 'media_pending', 'credentials_saved', 'completed', 'failed', 'cancelled',
 ]);
 const STAGES = new Set(REGISTRATION_STAGES);
 const POST_SUBMISSION_STAGES = new Set([
   'submission_started', 'outcome_unknown', 'awaiting_verification', 'verification',
-  'needs_manual', 'session', 'credentials_saved', 'completed', 'failed', 'cancelled',
+  'needs_manual', 'session', 'media_pending', 'credentials_saved', 'completed', 'failed', 'cancelled',
 ]);
 const PROTECTED_FIELDS = new Set(['schemaVersion', 'runId', 'createdAt', 'updatedAt', 'submission']);
 
@@ -78,7 +78,7 @@ function validateState(state, runId) {
         !POST_SUBMISSION_STAGES.has(state.stage)) fail('invalid_state');
     if ((submission.outcome === 'confirmed') !== (state.stage === 'completed')) fail('invalid_state');
   } else if (submission.startedAt !== null || submission.outcome !== 'not_started' ||
-             ['submission_started', 'outcome_unknown', 'completed'].includes(state.stage)) fail('invalid_state');
+             ['submission_started', 'outcome_unknown', 'media_pending', 'completed'].includes(state.stage)) fail('invalid_state');
   if (Buffer.byteLength(JSON.stringify(state)) > MAX_STATE_BYTES) fail('state_too_large');
 }
 function privateMode(stat, directory) {
@@ -295,8 +295,10 @@ export class PrivateRunStore {
         if (initial.email && (typeof initial.email !== 'string' ||
             initial.email.trim().toLowerCase() !== state.email.trim().toLowerCase())) fail('run_email_mismatch');
         if (state.submission.started && state.submission.outcome !== 'confirmed') {
-          state.stage = 'outcome_unknown';
-          state.code = 'submission_result_unknown';
+          if (state.stage !== 'media_pending') {
+            state.stage = 'outcome_unknown';
+            state.code = 'submission_result_unknown';
+          }
           state.submission.outcome = 'unknown';
           state.updatedAt = new Date().toISOString();
           state = await this.#commit(state);

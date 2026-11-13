@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { observeAutomaticVerification, runAutomaticRegistration } from './auto-runner.mjs';
 import { RegistrationError } from './core.mjs';
+import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
 const profile = { firstName: 'Fixture', lastName: 'Person', birthMonth: 6, birthYear: '1980', country: 'US' };
 
@@ -82,6 +83,45 @@ function fixture({ phase = 'awaiting_email', submitted = false, patch = {}, huma
   };
   return { browser, store, state, calls, setPhase: value => { phase = value; } };
 }
+
+test('failed signup export preserves its media evidence through later status and persistence without replaying creation',async()=>{
+  const f=fixture({phase:'firefly',submitted:true});
+  const evidence={media_runtime:{state:'pending',readiness_reason:'vendors_pending',vendors_started:3,vendors_complete:2,token:'PRIVATE'},
+    media_page:{route:'editor',matching_host_count:1,authentication_count:1,arp_observer_count:1,scan_complete:true,url:'PRIVATE'},
+    media_timing:{first_source_ms:3,emissions:2,source_changes:0,raw:'PRIVATE'}};
+  const error=new RegistrationError('media_session_incomplete');error.diagnostics=evidence;
+  let failed=false;
+  const read=f.browser.status;
+  f.browser.status=async()=>{
+    if(failed) {
+      // A later observation must not overwrite or mutate the captured export failure.
+      evidence.media_runtime.readiness_reason='runtime_changed';
+      return {...await read(),diagnostics:{media_runtime:{state:'ready'},cookie:'PRIVATE'}};
+    }
+    return read();
+  };
+  f.browser.exportSession=async()=>{f.calls.push(['export']);failed=true;throw error;};
+  const result=await runAutomaticRegistration(f.browser,f.store);
+  assert.equal(result.code,'media_session_incomplete');assert.deepEqual(f.calls,[['export']]);
+  assert.equal(result.diagnostics.media_runtime.readiness_reason,'vendors_pending');
+  assert.doesNotMatch(JSON.stringify(result.diagnostics),/PRIVATE|token|cookie|url|raw/);
+  const saved=registrationDiagnostics(result,await f.store.load());
+  assert.equal(saved.submission_started,true);assert.equal(saved.media_runtime.readiness_reason,'vendors_pending');
+  assert.deepEqual(saved.media_timing,{first_source_ms:3,emissions:2,source_changes:0});
+});
+
+test('media export evidence survives unavailable browser and journal fallback without disclosing the raw error',async()=>{
+  const f=fixture({phase:'firefly',submitted:true});
+  const error=new RegistrationError('media_session_incomplete');
+  error.diagnostics={media_runtime:{state:'changed',readiness_reason:'identity_changed'},token:'PRIVATE'};
+  f.browser.exportSession=async()=>{
+    f.browser.status=async()=>{throw Error('PRIVATE')};f.store.load=async()=>{throw Error('PRIVATE')};throw error;
+  };
+  const result=await runAutomaticRegistration(f.browser,f.store);
+  assert.equal(result.stage,'needs_manual');assert.equal(result.code,'media_session_incomplete');
+  assert.deepEqual(registrationDiagnostics(result,null).media_runtime,{state:'changed',readiness_reason:'identity_changed'});
+  assert.doesNotMatch(JSON.stringify(result),/PRIVATE/);
+});
 
 test('automatic signup fills normal stages and pauses before the final agreement by default', async () => {
   const f = fixture();
@@ -442,4 +482,12 @@ test('cancellation after an action retains its actual submission snapshot', asyn
   assert.equal(result.submissionStarted, true);
   assert.deepEqual(result.failureDiagnostics, { form_error: 'invalid_field', invalid_fields: ['country'] });
   assert.deepEqual(result.automatic, { paused: true, steps: 1 });
+});
+
+test('runner returns media pending without marking registration fully completed or repeating form actions',async()=>{
+ const f=fixture({submitted:true,phase:'firefly'});f.browser.deferMedia=true;
+ f.browser.exportSession=async()=>{f.calls.push(['export']);return {stage:'media_pending'}};
+ const result=await runAutomaticRegistration(f.browser,f.store);
+ assert.equal(result.stage,'media_pending');assert.equal(result.code,undefined);assert.equal(result.automatic.completed,false);assert.equal(result.automatic.pending,true);
+ assert.deepEqual(f.calls,[['export']]);
 });

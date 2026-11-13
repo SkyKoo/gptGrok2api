@@ -22,9 +22,26 @@ type AdobeRegistrationState struct {
 	CreationOutcome    string `json:"creation_outcome,omitempty"`
 	CreationErrorCode  string `json:"creation_error_code,omitempty"`
 	CreationHTTPStatus int    `json:"creation_http_status,omitempty"`
+	// Media handoff follows accepted creation and verified identity. It never
+	// makes a partial credential snapshot eligible for account import.
+	MediaPending bool `json:"media_pending,omitempty"`
+	LegacyMedia  bool `json:"legacy_media,omitempty"`
 	// Written only by the explicit administrator action, then retained by
 	// accepted-session continuations using this same BrowserProfileID.
 	ManualReregistration bool `json:"manual_reregistration,omitempty"`
+}
+
+func adobeMediaPreparationPending(job RegistrationJob) bool {
+	return adobeCreationOutcome(job) == "accepted" && len(job.Account) == 0 && !job.Imported && !job.Verified &&
+		(job.AdobeRegistration != nil && job.AdobeRegistration.MediaPending || job.Error == "adobe: media_session_incomplete")
+}
+
+func markAdobeMediaPreparation(job *RegistrationJob) {
+	ensureAdobeRegistrationState(job)
+	if !job.AdobeRegistration.MediaPending {
+		job.AdobeRegistration.LegacyMedia = job.Error == "adobe: media_session_incomplete"
+	}
+	job.AdobeRegistration.MediaPending = true
 }
 
 func adobeStageMayHaveSubmitted(stage string) bool {
@@ -114,6 +131,10 @@ func adobeCompensationEnvironment(job RegistrationJob) bool {
 func adobeAutomaticFailure(job RegistrationJob) bool {
 	if len(job.Account) > 0 && job.Error != "task_cancelled" && job.Error != "import: account_writer_not_configured" && job.Error != "verify: account_verifier_not_configured" {
 		return true // The identity is already captured; import/verify is idempotent.
+	}
+	switch job.Error {
+	case "adobe: media_proxy_unavailable", "adobe: media_browser_unavailable", "adobe: media_result_unknown", "adobe: media_worker_result_unknown", "adobe: media_previous_browser_closing", "adobe: media_prepare_timeout", "adobe: media_prepare_failed":
+		return job.AdobeRegistration != nil && job.AdobeRegistration.MediaPending && adobeCreationOutcome(job) == "accepted"
 	}
 	if adobeRegistrationRecoveryMode(job) == "result_uncertain" {
 		return false
@@ -571,6 +592,11 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 			return fail("task", "random_failed")
 		}
 		job = cloneJob(parent)
+		// The child clears Error below. Preserve the exact accepted legacy-media
+		// evidence before doing so; never infer it from a public request setting.
+		if e.mediaFactory != nil && adobeMediaPreparationPending(parent) {
+			markAdobeMediaPreparation(&job)
+		}
 		job.ID, job.ParentJobID, job.RootJobID, job.RetryJobID = hex.EncodeToString(raw), parent.ID, mailboxClaimJobID(parent), ""
 		job.Status, job.Stage, job.Error = "running", "compensation", ""
 		job.CreatedAt, job.UpdatedAt = now.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)

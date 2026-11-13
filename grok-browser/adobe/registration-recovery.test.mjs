@@ -59,6 +59,32 @@ test('recovery reuses saved credentials without inspecting or reopening the brow
   assert.deepEqual(f.calls,['export']);
 });
 
+test('accepted account recovery preserves the failing media export before later observation and never creates again',async t=>{
+  const f=await fixture(t,{phase:'firefly'});
+  const error=new RegistrationError('media_session_incomplete');
+  error.diagnostics={media_runtime:{state:'unavailable',readiness_reason:'arp_observer_missing',token:'PRIVATE'},
+    media_page:{route:'editor',matching_host_count:2,authentication_count:1,arp_observer_count:0,scan_complete:true},
+    media_timing:{emissions:0,source_changes:0,raw:'PRIVATE'},cookie:'PRIVATE'};
+  const read=f.browser.status;
+  let failed=false;
+  f.browser.status=async()=>{
+    if(failed) {
+      error.diagnostics.media_runtime.readiness_reason='authentication_missing';
+      return {...await read(),diagnostics:{media_runtime:{state:'ready'},token:'PRIVATE'}};
+    }
+    return read();
+  };
+  f.browser.exportSession=async()=>{f.calls.push('export');failed=true;throw error;};
+  const result=await resumeRegistration(f.browser,f.store,{recoveryId:'media1'});
+  assert.equal(result.code,'media_session_incomplete');assert.deepEqual(f.calls,['export']);
+  assert.equal(result.diagnostics.media_runtime.readiness_reason,'arp_observer_missing');
+  assert.doesNotMatch(JSON.stringify(result.diagnostics),/PRIVATE|token|cookie|raw/);
+  const state=await f.store.load(),saved=registrationDiagnostics(result,state);
+  assert.equal(state.creationEvidence.requests,1);assert.equal(state.creationEvidence.accepted,true);
+  assert.equal(saved.failure_action,'export_session');assert.equal(saved.media_runtime.readiness_reason,'arp_observer_missing');
+  assert.deepEqual(saved.media_page,{route:'editor',matching_host_count:2,authentication_count:1,arp_observer_count:0,scan_complete:true});
+});
+
 test('resume requires a bounded recovery identity before changing any journal',async t=>{
   const f=await fixture(t,{submitted:false});
   assert.equal((await resumeRegistration(f.browser,f.store,{recoveryId:'../secret'})).code,'recovery_id_required');
@@ -364,4 +390,13 @@ test('resume-only browser startup never enters the account-creation link even wi
   browser.status=async()=>({stage:'outcome_unknown'});
   await browser.open({resumeOnly:true});
   assert.deepEqual(calls,['https://account.adobe.com/']);assert.equal((await f.store.load()).submission.started,true);
+});
+
+test('checkpoint recovery returns media pending offline without login, verification or signup',async t=>{
+ const f=await fixture(t);f.browser.deferMedia=true;
+ await f.store.save({stage:'media_pending',mediaCheckpoint:{version:1,email:'fixture@example.test',account_id:'fixture-id',emailVerified:true,createdAt:new Date().toISOString()}});
+ f.browser.status=()=>assert.fail('checkpoint resumes without opening registration');
+ f.browser.exportSession=async()=>{f.calls.push('export');return {stage:'media_pending'}};
+ assert.equal((await resumeRegistration(f.browser,f.store,{recoveryId:'media-checkpoint'})).stage,'media_pending');
+ assert.deepEqual(f.calls,['export']);assert.equal((await f.store.load()).recoveryAttempts,undefined);
 });

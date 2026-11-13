@@ -1,6 +1,7 @@
 import { RegistrationError } from './core.mjs';
 import { formBlockingCode } from './browser.mjs';
 import { verificationObservation } from './verification-observation.mjs';
+import { sanitizeMediaDiagnostics } from './media-diagnostics.mjs';
 
 const ADVANCE_STAGES = new Set(['awaiting_email', 'awaiting_password', 'awaiting_profile']);
 const APPROVAL_STAGES = new Set(['awaiting_password', 'awaiting_profile', 'awaiting_approval']);
@@ -73,7 +74,8 @@ export async function runAutomaticRegistration(browser, store, {
   let status = {};
   const observationDetails = () => browser.verificationWait ? { verificationWait: browser.verificationWait } : {};
   const paused = code => ({ ...status, ...observationDetails(), code, automatic: { paused: true, steps } });
-  const complete = result => ({ ...result, ...observationDetails(), automatic: { paused: false, completed: true, steps } });
+  const complete = result => ({ ...result, ...observationDetails(), automatic: { paused: false,
+    completed:result.stage==='completed',...(result.stage==='media_pending'?{pending:true}:{}),steps } });
   const perform = async (key, action) => {
     if (steps >= maxSteps) throw new RegistrationError('automatic_step_limit_reached');
     if (attempted.has(key)) throw new RegistrationError('automatic_progress_stalled');
@@ -95,6 +97,9 @@ export async function runAutomaticRegistration(browser, store, {
     for (let observation = 0; observation <= maxSteps; observation++) {
       if (shouldStop()) return paused('automatic_interrupted');
       const state = await store.load();
+      if (browser.deferMedia && (state.stage==='media_pending'||Object.hasOwn(state,'mediaCheckpoint')) && !state.result?.account) {
+        return complete(await perform('export',()=>browser.exportSession()));
+      }
       status = await browser.status();
       // Stage waits already settled a recorded manual challenge. Do not add
       // another waiting window or reopen a paused/unknown signup attempt.
@@ -178,6 +183,10 @@ export async function runAutomaticRegistration(browser, store, {
     }
     return paused('automatic_step_limit_reached');
   } catch (error) {
+    // Capture the failed export before status() observes a later page. Only
+    // this bounded projection may leave the original credential-bearing error.
+    const mediaDiagnostics = error instanceof RegistrationError && error.code === 'media_session_incomplete'
+      ? sanitizeMediaDiagnostics(error.diagnostics) : undefined;
     // 动作可能已落盘后才超时，不能把动作前的状态作为失败结果返回。
     try { status = await browser.status(); }
     catch {
@@ -195,6 +204,7 @@ export async function runAutomaticRegistration(browser, store, {
     if (error instanceof RegistrationError && error.failureDiagnostics) {
       status = { ...status, failureDiagnostics: error.failureDiagnostics };
     }
+    if (mediaDiagnostics) status = { ...status, diagnostics: mediaDiagnostics };
     return paused(shouldStop() ? 'automatic_interrupted' : errorCode(error));
   }
 }

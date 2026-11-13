@@ -50,7 +50,7 @@ func SanitizeMediaPreparationDiagnostic(value any) *MediaPreparationDiagnostic {
 	}
 	if reason, ok := fields["readiness_reason"].(string); ok {
 		switch reason {
-		case "performance_unavailable", "instance_missing", "instance_ambiguous", "vendor_unrecognized", "vendors_pending", "token_settling", "editor_not_ready", "observer_unavailable", "context_changed", "identity_pending", "identity_changed", "runtime_changed", "verification_timeout",
+		case "performance_unavailable", "instance_missing", "instance_ambiguous", "vendor_unrecognized", "vendors_pending", "token_pending", "token_settling", "editor_not_ready", "observer_unavailable", "context_changed", "identity_pending", "identity_changed", "runtime_changed", "verification_timeout",
 			"authentication_missing", "arp_observer_missing", "editor_route_changed", "page_hidden", "observation_cancelled", "evaluation_failed", "navigation_budget_exhausted":
 			diagnostic.ReadinessReason = reason
 		}

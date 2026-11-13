@@ -9,6 +9,7 @@ import (
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,13 +32,59 @@ func (s *Server) initAdobeRegistration() {
 		if err != nil {
 			return nil, nil, err
 		}
-		return mail, &registerruntime.AdobeBrowserFlow{Client: &http.Client{Timeout: cfg.RequestTimeout, Transport: &http.Transport{Proxy: nil}}}, nil
+		return mail, s.newAdobeMediaRegistrationFlow(cfg), nil
 	}
 	s.adobeRegister = registerruntime.NewAdobeEngine(filepath.Join(journalDir, "adobe_registration_tasks.enc.json"), firstNonEmpty(s.cfg.AdminKey, s.cfg.APIKey, "gptgrok2api"), factory, s.importRegisteredAdobeAccount, s.verifyRegisteredAdobeAccount)
 	s.adobeRegister.SetReregistrationAccountCheck(s.adobeReregistrationAccountExists)
 	s.adobeRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
+	s.adobeRegister.SetMediaFlowFactory(s.newAdobeMediaRegistrationFlow)
 	s.adobeRegistrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "adobe_registration_schedule.json"))
 	_ = s.adobeRegistrationSchedule.BindTarget("adobe")
+}
+
+func (s *Server) newAdobeMediaRegistrationFlow(cfg registerruntime.AdobeConfig) registerruntime.AdobeRegistrationFlow {
+	return &registerruntime.AdobeBrowserFlow{
+		Client:            &http.Client{Timeout: cfg.RequestTimeout, Transport: &http.Transport{Proxy: nil}},
+		ResolveMediaProxy: s.adobeRegistrationMediaProxy,
+	}
+}
+
+// A new identity follows today's configured daily route. An existing account's
+// override is used only when this exact mailbox and browser profile already own it.
+func (s *Server) adobeRegistrationMediaProxy(ctx context.Context, email, profileID string) (string, error) {
+	if s.adobeStore == nil || strings.TrimSpace(email) == "" || profileID == "" {
+		return "", errors.New("adobe_media_identity_missing")
+	}
+	items, err := s.adobeStore.List()
+	if err != nil {
+		return "", err
+	}
+	account := adobe.Account{Email: email, ProfileID: profileID, ProxyPolicy: "inherit"}
+	found := false
+	for _, candidate := range items {
+		if !strings.EqualFold(strings.TrimSpace(candidate.Email), strings.TrimSpace(email)) {
+			continue
+		}
+		if found || candidate.ProfileID != profileID {
+			return "", adobe.ErrIdentity
+		}
+		account, found = candidate, true
+	}
+	fixed, err := s.adobeAccountContext(ctx, account)
+	if err != nil {
+		return "", err
+	}
+	endpoint, selected := proxyruntime.URLSelectionFromContext(fixed)
+	if !selected {
+		return "", errors.New("adobe_media_egress_required")
+	}
+	if endpoint != "" {
+		u, parseErr := url.Parse(endpoint)
+		if parseErr != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h") {
+			return "", errors.New("adobe_media_proxy_unavailable")
+		}
+	}
+	return endpoint, nil
 }
 
 // Manually imported accounts may not yet have a mailbox asset association or

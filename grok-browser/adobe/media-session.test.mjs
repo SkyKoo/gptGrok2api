@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {isUsableSherlock, mediaCookieHeader, isCompleteMediaSession, runtimeARPInPage, ensureMediaSession, verifyMediaSession} from './media-session.mjs';
+import {isUsableSherlock, mediaCookieHeader, isCompleteMediaSession, runtimeARPInPage, ensureMediaSession, verifyMediaSession, bootstrapRecoveryAllowedInPage} from './media-session.mjs';
 
 function observable(initial) {
   let value=initial, subscriptions=0, unsubscriptions=0;
@@ -26,7 +26,7 @@ function pageHarness(source,{url='https://firefly.adobe.com/generate/image',shad
   let currentSource=source;
   const authentication={get arpSessionToken(){return currentSource?.observe}};
   const host={service:{serviceName,authentication}};
-  const editorRoot={querySelectorAll(selector){return selector==='*'?[host]:currentSource?[host]:[]}};
+  const editorRoot={querySelectorAll(selector){return selector==='*'?[host]:selector==='firefly-commerce-dialogs, firefly-commerce-paywall-dialog'&&currentSource?[host]:[]}};
   const globals={Event,setTimeout,clearTimeout,setInterval,clearInterval,queueMicrotask,performance,
     location:{origin:new URL(url).origin,pathname:new URL(url).pathname},
     document:{querySelectorAll(selector){
@@ -75,6 +75,27 @@ test('initial null and a non-emitting SPL source remain pending until the observ
   const result=await pending;
   assert.equal(result.state,'pending');assert.equal(result.source,'spl_runtime');assert.equal('token' in result,false);
   assert.equal(result.value_kind,kind);assert.equal(source.active,0);assert.equal(h.listeners,0);
+ }
+});
+test('missing runtime tokens still expose vendor initialization progress without exporting proof or accepting a session',async()=>{
+ for(const [value,kind] of [[null,'null'],[undefined,'unobserved'],['','empty_string']]){
+  for(const [performance,reason,started,complete] of [
+   [{getEntriesByType:()=>[]},'instance_missing',0,0],
+   [performanceFixture({vendors:['arkose','bfp']}),'vendors_pending',2,2],
+   [performanceFixture({complete:false}),'vendors_pending',3,0],
+   [performanceFixture(),'token_pending',3,3],
+  ]){
+   const source=observable(value),h=pageHarness(source,{performance});
+   const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:15,cancelEvent:'cancel-test'});
+   assert.equal(result.state,'pending');assert.equal(result.value_kind,kind);assert.equal(result.readiness_reason,reason);
+   assert.equal(result.vendors_started,started);assert.equal(result.vendors_complete,complete);
+   assert.equal(result.token,undefined);assert.equal(result.runtime_proof,undefined);assert.equal(result.proof,undefined);
+   assert.equal(result.media_timing.first_nonempty_ms,undefined);assert.equal(result.media_timing.last_candidate_ms,undefined);
+   assert.equal(JSON.stringify(result).includes('fixture-sdk'),false);assert.equal(source.active,0);assert.equal(h.listeners,0);
+   await assert.rejects(ensureMediaSession(h.page,{cookies:async()=>assert.fail('missing token must not export cookies')},{timeoutMs:15}),error=>{
+    assert.equal(error.code,'media_session_incomplete');assert.equal(error.diagnostics.media_runtime.readiness_reason,reason);return true;
+   });
+  }
  }
 });
 test('a missing source is not confused with the official null default and times out cleanly',async()=>{
@@ -215,14 +236,14 @@ test('normal editor initialization reads SPL rather than the unrelated homepage 
 test('initial official null cannot replace an existing cookie with an omitted session',async()=>{
  const h=pageHarness(observable(null));
  await assert.rejects(ensureMediaSession(h.page,{cookies:async()=>assert.fail('pending media must not export cookies')},{timeoutMs:15}),error=>{
-  assert.equal(error.code,'media_session_incomplete');assert.deepEqual(error.diagnostics.media_runtime,{state:'pending',value_kind:'null'});
+  assert.equal(error.code,'media_session_incomplete');assert.deepEqual(error.diagnostics.media_runtime,{state:'pending',value_kind:'null',readiness_reason:'token_pending',vendors_started:3,vendors_complete:3});
   assert.equal(error.diagnostics.media_timing.emissions,1);assert.equal(error.diagnostics.media_timing.value_changes,0);return true;
  });
 });
 test('pending and absent runtime sources produce different sanitized diagnostics',async()=>{
  const h=pageHarness(observable(undefined));
  await assert.rejects(ensureMediaSession(h.page,{cookies:async()=>assert.fail('pending source')},{timeoutMs:15}),error=>{
-  assert.deepEqual(error.diagnostics.media_runtime,{state:'pending',value_kind:'unobserved'});return true;
+  assert.deepEqual(error.diagnostics.media_runtime,{state:'pending',value_kind:'unobserved',readiness_reason:'token_pending',vendors_started:3,vendors_complete:3});return true;
  });
  const missing=pageHarness(null);
  await assert.rejects(ensureMediaSession(missing.page,{cookies:async()=>assert.fail('missing runtime')},{timeoutMs:15}),e=>{
@@ -468,4 +489,203 @@ test('page navigation cancels component discovery and pre-cancelled operations d
  h.globals.dispatchEvent(new Event('pagehide'));assert.equal((await pending).state,'unavailable');assert.equal(h.listeners,0);
  const abort=new AbortController();abort.abort();
  await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{signal:abort.signal}),e=>e.code==='media_session_cancelled');assert.deepEqual(h.navigations,[]);
+});
+
+const bootstrapIdentity={account_id:'fixture-account',email:'fixture@example.test',token:'fixture-access'};
+function allowBootstrapInspection(h) {
+ const identity=h.identity??bootstrapIdentity;
+ for(const [key,value] of Object.entries({userProfile:{userId:identity.account_id,email:identity.email,emailVerified:true},accessToken:identity.token,isSignedIn:true})){
+  if(typeof h.authentication[key]!=='function')h.authentication[key]=observable(value).observe;
+ }
+ const evaluate=h.page.evaluate;h.page.evaluate=(fn,args)=>evaluate(fn,fn===bootstrapRecoveryAllowedInPage?{identity,...args}:args);
+ h.globals.getComputedStyle=()=>({display:'block',visibility:'visible'});
+ h.globals.document.body={innerText:''};
+ return h;
+}
+function emptyPerformance() {return {getEntriesByType:()=>[]};}
+
+test('bootstrap recovery rechecks the live source and releases its subscription',async()=>{
+ for(const value of [null,'',undefined,'new-runtime-value',{private:'value'}]){
+  const source=observable(value),h=allowBootstrapInspection(pageHarness(source,{performance:emptyPerformance()}));
+  const allowed=await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'});
+  assert.equal(allowed,value===null||value==='');
+  assert.equal(source.active,0);assert.equal(source.subscribed,1);assert.equal(source.unsubscribed,1);assert.equal(h.listeners,0);
+ }
+ const missing=allowBootstrapInspection(pageHarness(null,{performance:emptyPerformance()}));
+ assert.equal(await missing.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+ assert.equal(await missing.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel',allowPending:true}),true);
+ const noObserver=allowBootstrapInspection(pageHarness({},{performance:emptyPerformance()}));
+ assert.equal(await noObserver.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+});
+
+test('initialized SDK, official navigation, lifecycle evidence and visible challenges prevent reload',async()=>{
+ for(const change of [
+  h=>{h.globals.SherlockSdk={}},h=>{h.globals.UniversalNav=()=>{}},
+  h=>{h.globals.performance=performanceFixture({complete:false})},
+  h=>{h.globals.document.body.innerText='Please verify you are human'},
+  h=>{h.globals.location.origin='https://auth.services.adobe.com'},
+  h=>{h.globals.performance=null},
+ ]){
+  const source=observable(null),h=allowBootstrapInspection(pageHarness(source,{performance:emptyPerformance()}));change(h);
+  assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+  assert.equal(source.active,0);assert.equal(source.subscribed,0);assert.equal(h.listeners,0);
+ }
+ for(const visible of [false,true]){
+  const source=observable(null),h=allowBootstrapInspection(pageHarness(source,{performance:emptyPerformance()}));
+  const original=h.globals.document.querySelectorAll;
+  h.globals.document.querySelectorAll=selector=>selector==='iframe'?[{src:'https://challenges.cloudflare.com/widget',getClientRects:()=>visible?[{width:100,height:100}]:[]}]:original(selector);
+  assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),!visible);
+  assert.equal(source.active,0);assert.equal(h.listeners,0);
+ }
+});
+
+test('bootstrap recovery rejects a changed source and cancels an unobserved source cleanly',async()=>{
+ const first=observable(undefined),next=observable(null),h=allowBootstrapInspection(pageHarness(first,{performance:emptyPerformance()}));
+ const pending=h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:50,cancelEvent:'bootstrap-cancel'});
+ h.setSource(next);first.emit(null);assert.equal(await pending,false);assert.equal(first.active,0);assert.equal(next.active,0);assert.equal(h.listeners,0);
+ const waiting=observable(undefined),other=allowBootstrapInspection(pageHarness(waiting,{performance:emptyPerformance()}));
+ const cancelled=other.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:1000,cancelEvent:'bootstrap-cancel'});
+ other.globals.dispatchEvent(new Event('bootstrap-cancel'));assert.equal(await cancelled,false);assert.equal(waiting.active,0);assert.equal(other.listeners,0);
+});
+
+function bootstrapSequence({observations=[],initialURL='https://firefly.adobe.com/generate/image',navigationExhausted=false,guard=true,reload}={}) {
+ let time=0,url=initialURL,index=0;
+ const calls=[];
+ const page={url:()=>url,
+  async goto(next,options){calls.push(['goto',options.timeout]);url=next;if(navigationExhausted){time+=options.timeout;throw Error('navigation timeout')}},
+  async reload(options){calls.push(['reload',options.timeout]);if(reload)return reload({options,setTime:value=>{time=value}});time+=1;},
+  async evaluate(fn,args){
+   if(fn===bootstrapRecoveryAllowedInPage){calls.push(['guard']);return typeof guard==='function'?guard():guard;}
+   assert.equal(fn,runtimeARPInPage);calls.push(['observe',args.timeoutMs]);
+   const observation=observations[index++]??{state:'unavailable',readiness_reason:'authentication_missing'};
+   if(observation.state!=='ready')time+=args.timeoutMs;
+   return observation;
+  }};
+ return {page,calls,identity:bootstrapIdentity,now:()=>time,pause:async ms=>{time+=ms},get time(){return time}};
+}
+const missingRuntime=()=>({state:'pending',source:'spl_runtime',value_kind:'null',readiness_reason:'instance_missing',vendors_started:0,vendors_complete:0,
+ media_timing:{emissions:1,source_changes:0,authentication_changes:0}});
+const readyRuntime=()=>({state:'ready',source:'spl_runtime',token:'fresh-runtime',runtime_proof:{instance:'fixture-new-document'}});
+
+test('a navigation timeout on the trusted editor gets one bounded observation and one ordinary reload',async()=>{
+ const h=bootstrapSequence({initialURL:'https://firefly.adobe.com/',navigationExhausted:true,observations:[missingRuntime(),readyRuntime()]});
+ const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity});
+ assert.equal(media.cookie,'sherlockToken=fresh-runtime');assert.deepEqual(media.runtime_proof,{instance:'fixture-new-document'});
+ assert.deepEqual(h.calls,[['goto',30],['guard'],['observe',10],['guard'],['reload',10],['observe',19]]);assert.ok(h.time<=60);
+});
+
+test('fast success and same-document recovery do not reload or issue an extra navigation',async()=>{
+ for(const observations of [[readyRuntime()],[missingRuntime(),readyRuntime()]]){
+  const h=bootstrapSequence({observations});
+  const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity});
+  assert.equal(media.cookie,'sherlockToken=fresh-runtime');assert.equal(h.calls.some(call=>['goto','reload'].includes(call[0])),false);
+  assert.equal(h.calls.filter(call=>call[0]==='observe').length,observations.length);
+ }
+});
+
+test('recovery never reloads twice and retains the final observation within its total budget',async()=>{
+ const h=bootstrapSequence({observations:[missingRuntime(),missingRuntime(),missingRuntime()]});
+ await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity}),error=>{
+  assert.equal(error.code,'media_session_incomplete');assert.equal(error.diagnostics.media_runtime.readiness_reason,'instance_missing');return true;
+ });
+ assert.equal(h.calls.filter(call=>call[0]==='reload').length,1);assert.equal(h.calls.filter(call=>call[0]==='observe').length,3);assert.equal(h.time,60);
+});
+
+test('existing tokens, changed identities, vendor progress and invalid contracts cannot trigger recovery',async()=>{
+ for(const observation of [
+  {...missingRuntime(),media_timing:{first_nonempty_ms:0}},
+  {...missingRuntime(),media_timing:{authentication_changes:1}},
+  {...missingRuntime(),media_timing:{source_changes:1}},
+  {state:'pending',readiness_reason:'vendors_pending',vendors_started:3,vendors_complete:2},
+  {state:'pending',readiness_reason:'token_pending',vendors_started:3,vendors_complete:3},
+  {state:'changed',readiness_reason:'identity_changed'},
+  {state:'unavailable',readiness_reason:'editor_route_changed'},
+  {state:'invalid'},{state:'invalid_contract'},
+ ]){
+  const h=bootstrapSequence({observations:[observation]});
+  await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity}),error=>error.code==='media_session_incomplete');
+  assert.deepEqual(h.calls,[['observe',30]]);
+ }
+ const changed=bootstrapSequence({observations:[missingRuntime()],guard:false});
+ await assert.rejects(ensureMediaSession(changed.page,fixtureContext([]),{timeoutMs:30,now:changed.now,pause:changed.pause,identity:changed.identity}),error=>error.code==='media_session_incomplete');
+ assert.deepEqual(changed.calls,[['observe',30],['guard']]);
+});
+
+test('a token observed during same-document recovery prevents a later reload even with no SDK',async()=>{
+ const h=bootstrapSequence({observations:[missingRuntime(),{...missingRuntime(),media_timing:{first_nonempty_ms:1}}]});
+ await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity}),error=>error.code==='media_session_incomplete');
+ assert.deepEqual(h.calls,[['observe',30],['guard'],['observe',10]]);
+});
+
+test('a stalled reload is cancelled at the overall budget without exporting cookies',async()=>{
+ const h=bootstrapSequence({observations:[missingRuntime(),missingRuntime()],reload:async()=>new Promise(()=>{})});
+ const started=Date.now();
+ await assert.rejects(ensureMediaSession(h.page,{cookies:async()=>assert.fail('no session')},{timeoutMs:20,now:h.now,pause:h.pause,identity:h.identity}),error=>error.code==='media_session_incomplete');
+ assert.ok(Date.now()-started<250);assert.equal(h.calls.filter(call=>call[0]==='reload').length,1);
+});
+
+test('external cancellation during the sole reload does not start another observation',async()=>{
+ const abort=new AbortController();
+ const h=bootstrapSequence({observations:[missingRuntime(),missingRuntime()],reload:async()=>{abort.abort();return new Promise(()=>{})}});
+ await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,signal:abort.signal,identity:h.identity}),error=>error.code==='media_session_cancelled');
+ assert.equal(h.calls.filter(call=>call[0]==='reload').length,1);assert.equal(h.calls.filter(call=>call[0]==='observe').length,2);
+});
+
+test('a transient nonempty guard emission forbids reload even if the last value is null',async()=>{
+ let releases=0;
+ const h=allowBootstrapInspection(pageHarness({observe:listener=>{listener('transient');listener(null);return()=>{releases++}}},{performance:emptyPerformance()}));
+ assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+ assert.equal(releases,1);assert.equal(h.listeners,0);
+});
+
+test('a recovered document still needs its own runtime proof and matching final identity',async()=>{
+ const h=allowBootstrapInspection(verifiedMediaHarness('fresh-runtime'));
+ h.source.emit(null);h.globals.performance=emptyPerformance();
+ let reloads=0;
+ h.page.reload=async()=>{reloads++;h.globals.performance=performanceFixture({instance:'reloaded-sdk'});h.source.emit('fresh-runtime')};
+ const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:750,identity:h.identity});
+ assert.equal(reloads,1);assert.equal(media.runtime_proof.instance,'sherlock:reloaded-sdk:init:start');
+ await verifyMediaSession(h.page,media,h.identity);
+ h.values.userProfile.emit({userId:'other-account',email:h.identity.email,emailVerified:true});
+ await assert.rejects(verifyMediaSession(h.page,media,h.identity),error=>error.diagnostics.media_runtime.readiness_reason==='identity_changed');
+ assertVerificationReleased(h,h.values);assert.equal(h.source.active,0);
+});
+
+test('the current authentication identity must still match before a reload is permitted',async()=>{
+ for(const allowPending of [false,true]){
+  for(const [key,value] of [['userProfile',{userId:'other-account',email:bootstrapIdentity.email}],['accessToken','changed-access'],['isSignedIn',false],['userProfile',{userId:bootstrapIdentity.account_id,email:'other@example.test'}]]){
+   const h=allowBootstrapInspection(pageHarness(observable(null),{performance:emptyPerformance()}));
+   const changed=observable(value);h.authentication[key]=changed.observe;
+   assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel',allowPending}),false);
+   assert.equal(changed.active,0);assert.equal(h.listeners,0);
+  }
+ }
+ const h=allowBootstrapInspection(pageHarness(observable(null),{performance:emptyPerformance()}));
+ let releases=0;
+ h.authentication.isSignedIn=listener=>{listener(true);listener(false);listener(true);return()=>{releases++}};
+ assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+ assert.equal(releases,1);assert.equal(h.listeners,0);
+});
+
+test('bootstrap guards release a disposer returned after synchronous pagehide or cancellation',async()=>{
+ for(const event of ['pagehide','bootstrap-cancel']){
+  let active=0;
+  const h=allowBootstrapInspection(pageHarness({observe:listener=>{active++;listener(null);h.globals.dispatchEvent(new Event(event));return()=>{active--}}},{performance:emptyPerformance()}));
+  assert.equal(await h.page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:10,cancelEvent:'bootstrap-cancel'}),false);
+  assert.equal(active,0);assert.equal(h.listeners,0);
+ }
+});
+
+test('an explicit previously verified identity is required to enable bootstrap recovery',async()=>{
+ const h=bootstrapSequence({observations:[missingRuntime()]});
+ await assert.rejects(ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause}),error=>error.code==='media_session_incomplete');
+ assert.deepEqual(h.calls,[['observe',30]]);
+});
+
+test('reload waits for commit and reserves observation time even when that navigation times out',async()=>{
+ const h=bootstrapSequence({observations:[missingRuntime(),missingRuntime(),readyRuntime()],reload:async({options,setTime})=>{
+  assert.equal(options.waitUntil,'commit');assert.equal(options.timeout,10);setTime(50);throw Error('commit timeout');
+ }});
+ const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:30,now:h.now,pause:h.pause,identity:h.identity});
+ assert.equal(media.cookie,'sherlockToken=fresh-runtime');assert.equal(h.calls.at(-1)[0],'observe');assert.equal(h.calls.at(-1)[1],10);
 });

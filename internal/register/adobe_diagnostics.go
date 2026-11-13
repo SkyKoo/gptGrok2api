@@ -1,9 +1,12 @@
 package register
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 )
 
@@ -30,6 +33,11 @@ type adobeRegistrationDiagnostics struct {
 	DurationMS                  *int64                    `json:"duration_ms"`
 	VerificationWaitElapsedMS   *int64                    `json:"verification_wait_elapsed_ms"`
 	VerificationWaitOutcome     string                    `json:"verification_wait_outcome"`
+	// Decode optional observations independently: malformed diagnostics must not
+	// discard an otherwise valid creation result or alter compensation policy.
+	MediaRuntime json.RawMessage `json:"media_runtime"`
+	MediaPage    json.RawMessage `json:"media_page"`
+	MediaTiming  json.RawMessage `json:"media_timing"`
 }
 
 type adobeInvalidFieldReason struct {
@@ -89,6 +97,10 @@ func adobeRegistrationStageText(stage string) string {
 		return label
 	}
 	switch stage {
+	case "adobe_media_pending":
+		return "账号已创建并验证邮箱，正在按账号日常出口准备媒体会话"
+	case "adobe_media_preparing":
+		return "正在使用原账号浏览器资料采集媒体会话，不重新注册"
 	case "waiting_browser":
 		return "等待浏览器会话释放"
 	case "adobe_verification_visible_challenge_frame":
@@ -151,7 +163,7 @@ func adobeStartupEventText(event browserqueue.StartupEvent) string {
 // Only fixed labels leave the private Worker response. Unknown values, page
 // text and unbounded lists cannot become log content or change retry policy.
 func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
-	parts := []string{}
+	parts := adobeMediaDiagnosticText(d)
 	if field := map[string]string{"country": "国家/地区", "birth_month": "出生月份", "birth_year": "出生年份", "birth_day": "出生日期（日）"}[d.ProfileField]; field != "" {
 		if reason := map[string]string{"missing": "找不到目标选项", "incomplete": "选项尚未完整加载", "ambiguous": "选项不唯一", "disabled": "目标选项不可用", "invalid": "目标值不符合要求"}[d.ProfileOptionReason]; reason != "" {
 			text := "下拉选项：" + field + "，" + reason
@@ -248,6 +260,107 @@ func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 		parts = append(parts, "异常类别："+label)
 	}
 	return strings.Join(parts, "；")
+}
+
+func adobeMediaDiagnosticText(d adobeRegistrationDiagnostics) []string {
+	runtime := adobe.SanitizeMediaPreparationDiagnostic(d.MediaRuntime)
+	if runtime == nil {
+		return nil
+	}
+	parts := []string{}
+	label := map[string]string{
+		"performance_unavailable": "无法读取初始化阶段记录", "instance_missing": "尚未观察到初始化实例记录",
+		"instance_ambiguous": "初始化实例记录不唯一", "vendor_unrecognized": "出现未识别的初始化组件",
+		"vendors_pending": "初始化组件尚未全部完成", "token_pending": "初始化组件已完成，尚未收到媒体凭据", "token_settling": "媒体凭据尚未稳定",
+		"editor_not_ready": "媒体编辑页尚未就绪", "observer_unavailable": "媒体观察接口不可用",
+		"context_changed": "媒体页面上下文已变化", "identity_pending": "最终身份同步尚未完成",
+		"identity_changed": "最终身份与采集记录不一致", "runtime_changed": "媒体运行状态在收尾校验时变化",
+		"verification_timeout": "最终媒体会话校验超时", "authentication_missing": "媒体认证组件尚未出现",
+		"arp_observer_missing": "媒体凭据观察接口尚未出现", "editor_route_changed": "页面已离开媒体编辑路径",
+		"page_hidden": "媒体观察期间页面已离开", "observation_cancelled": "媒体观察已取消",
+		"evaluation_failed": "无法读取媒体页面运行状态", "navigation_budget_exhausted": "媒体编辑页导航已耗尽等待时间",
+	}[runtime.ReadinessReason]
+	if label == "" {
+		label = map[string]string{
+			"unavailable": "暂不可用", "pending": "仍在等待就绪", "invalid": "媒体凭据格式无效",
+			"invalid_contract": "媒体观察接口不符合预期", "changed": "收尾状态已变化",
+			"observation_timeout": "媒体运行状态观察超时", "ready": "观测状态已就绪",
+			"editor_not_ready": "媒体编辑页尚未就绪", "observer_unavailable": "媒体观察接口不可用",
+			"context_changed": "媒体页面上下文已变化",
+		}[runtime.State]
+	}
+	if label != "" {
+		parts = append(parts, "媒体会话："+label)
+	}
+	if value := map[string]string{"unobserved": "尚未收到初值", "null": "当前观测为空", "undefined": "当前观测未定义", "empty_string": "当前观测为空字符串"}[runtime.ValueKind]; value != "" {
+		parts = append(parts, "媒体凭据观察："+value)
+	}
+	if runtime.VendorsStarted != nil {
+		parts = append(parts, fmt.Sprintf("初始化组件已启动 %d 个", *runtime.VendorsStarted))
+	}
+	if runtime.VendorsComplete != nil {
+		parts = append(parts, fmt.Sprintf("初始化组件已完成 %d 个", *runtime.VendorsComplete))
+	}
+	page := adobeMediaObservationFields(d.MediaPage)
+	if route, ok := page["route"].(string); ok {
+		if label := map[string]string{"editor": "图片编辑页", "other": "其他页面", "unavailable": "无法确认"}[route]; label != "" {
+			parts = append(parts, "媒体页面："+label)
+		}
+	}
+	counts := make(map[string]int)
+	for _, key := range []string{"matching_host_count", "authentication_count", "arp_observer_count"} {
+		if count, ok := adobeMediaObservationNumber(page[key], 32); ok {
+			counts[key] = count
+		}
+	}
+	hosts, hasHosts := counts["matching_host_count"]
+	authentications, hasAuthentications := counts["authentication_count"]
+	observers, hasObservers := counts["arp_observer_count"]
+	if (!hasHosts || !hasAuthentications || authentications <= hosts) && (!hasAuthentications || !hasObservers || observers <= authentications) {
+		for _, field := range [][2]string{{"matching_host_count", "媒体组件"}, {"authentication_count", "认证实例"}, {"arp_observer_count", "凭据观察器"}} {
+			if count, ok := counts[field[0]]; ok {
+				parts = append(parts, fmt.Sprintf("已观察到%s %d 个", field[1], count))
+			}
+		}
+	}
+	if complete, ok := page["scan_complete"].(bool); ok && !complete {
+		parts = append(parts, "媒体页面扫描未完成")
+	}
+	timing := adobeMediaObservationFields(d.MediaTiming)
+	for _, field := range [][2]string{
+		{"candidate_changes", "候选会话变化"}, {"source_changes", "观察接口变化"},
+		{"authentication_changes", "认证实例变化"}, {"emissions", "凭据观察回调"},
+		{"value_changes", "观察值变化"}, {"proof_changes", "初始化记录变化"},
+	} {
+		if count, ok := adobeMediaObservationNumber(timing[field[0]], 65535); ok {
+			parts = append(parts, fmt.Sprintf("%s %d 次", field[1], count))
+		}
+	}
+	for _, field := range [][2]string{
+		{"first_source_ms", "首次观察接口"}, {"first_nonempty_ms", "首次非空凭据"},
+		{"vendors_ready_ms", "组件首次就绪"}, {"last_candidate_ms", "最近候选会话"},
+	} {
+		if elapsed, ok := adobeMediaObservationNumber(timing[field[0]], 60000); ok {
+			parts = append(parts, fmt.Sprintf("%s在观察开始后 %.1f 秒", field[1], float64(elapsed)/1000))
+		}
+	}
+	return parts
+}
+
+func adobeMediaObservationFields(raw json.RawMessage) map[string]any {
+	var fields map[string]any
+	if len(raw) > 8192 || json.Unmarshal(raw, &fields) != nil {
+		return nil
+	}
+	return fields
+}
+
+func adobeMediaObservationNumber(value any, maximum int) (int, bool) {
+	number, ok := value.(float64)
+	if !ok || math.IsNaN(number) || math.IsInf(number, 0) || number < 0 || number > float64(maximum) || math.Trunc(number) != number {
+		return 0, false
+	}
+	return int(number), true
 }
 
 func adobeRegistrationReviewHint(failure string) string {

@@ -1,7 +1,7 @@
 // One Node subprocess belongs to exactly one Python queue reservation.
 import readline from 'node:readline';
 import path from 'node:path';
-import { mkdir, chmod } from 'node:fs/promises';
+import { mkdir, chmod, lstat } from 'node:fs/promises';
 import { PrivateRunStore, RegistrationError } from './core.mjs';
 import { BrowserRegistration } from './browser.mjs';
 import { launchPersistentBrowser } from './browser-runtime.mjs';
@@ -12,6 +12,7 @@ import { resumeRegistration } from './registration-recovery.mjs';
 import { creationOutcome } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
 import { prepareRegistrationCountry } from './exit-country.mjs';
+import { validateMediaState, prepareRegisteredMedia } from './registration-media.mjs';
 const output = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Browser libraries may log, but stdout is a credential-bearing RPC pipe only.
 console.log = console.info = console.warn = console.error = () => {};
@@ -46,26 +47,44 @@ async function command(request) {
   if (request.action === 'init') {
     if (init) throw new RegistrationError('session_already_initialized');
     init = request;
+    if (!['registration','resume','refresh','media'].includes(request.mode)) throw new RegistrationError('worker_mode_invalid');
+    if (request.mode==='media' && (request.require_new===true || request.defer_media===true || request.password)) throw new RegistrationError('media_mode_invalid');
     const startupProgress = new StartupProgress({ emit: progress => output({ id: request.id, event: 'startup_progress', progress }) });
     if (request.mode === 'resume' && !/^[a-zA-Z0-9_-]{1,128}$/.test(request.recovery_id || '')) throw new RegistrationError('recovery_id_required');
     process.env.ADOBE_BROWSER_BACKEND = 'cloakbrowser';
     process.env.ADOBE_BROWSER_PROXY = request.proxy || '';
     const root = process.env.CFM_ADOBE_PROFILE_ROOT || '/data/adobe';
-    await mkdir(root, {recursive:true, mode:0o700}); await chmod(root, 0o700);
+    if (request.mode!=='media') {await mkdir(root, {recursive:true, mode:0o700});await chmod(root, 0o700);}
     if (request.mode === 'refresh') {
       const dir = path.join(root, request.profile_id, 'browser');
       context = await startupProgress.run('starting_browser', () => launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1',restoreLastSession:false}));
     } else {
       store = new PrivateRunStore(root, request.profile_id);
-      const state = await store.init({email:request.email, config:{profile:request.profile}}, {
-        requireExisting:request.mode === 'resume', requireNew:request.require_new === true,
+      const state = await store.init({email:request.email,...(request.mode!=='media'?{config:{profile:request.profile}}:{})}, {
+        requireExisting:['resume','media'].includes(request.mode), requireNew:request.require_new === true,
       });
       init.profile = state.config.profile;
+      if (request.mode === 'media') {
+        validateMediaState(state,{email:request.email,legacyMedia:request.legacy_media===true});
+        if (!state.result?.account) {
+          const dir=path.join(store.runDir,'browser');
+          let profile;
+          try {profile=await lstat(dir);} catch(error) {throw new RegistrationError(error.code==='ENOENT'?'browser_profile_missing':'browser_profile_unavailable');}
+          if (!profile.isDirectory() || profile.isSymbolicLink() || typeof process.getuid==='function'&&profile.uid!==process.getuid()) throw new RegistrationError('browser_profile_unavailable');
+          await chmod(dir,0o700);
+          context=await startupProgress.run('starting_browser',()=>launchPersistentBrowser(dir,{headless:process.env.TURNSTILE_HEADLESS==='1',restoreLastSession:false}));
+        }
+        return {stage:'ready'};
+      }
       browser = new BrowserRegistration(store, {headless:process.env.TURNSTILE_HEADLESS === '1', startupProgress});
       browser.workerMode = true;
+      browser.deferMedia = request.defer_media === true;
       // A saved verified export is already sufficient for compensation. Do not
       // acquire fresh credentials or navigate a completed registration again.
-      if (!(request.mode === 'resume' && state.result?.account)) await browser.open({
+      const pendingMedia=request.mode==='resume'&&browser.deferMedia&&
+        (state.stage==='media_pending'||Object.hasOwn(state,'mediaCheckpoint'))&&!state.result?.account;
+      if(pendingMedia)validateMediaState(state,{email:request.email});
+      if (!(request.mode === 'resume' && state.result?.account) && !pendingMedia) await browser.open({
         resumeOnly:request.mode === 'resume' && state.submission.started,
         requireExistingProfile:request.mode === 'resume',
       });
@@ -76,8 +95,14 @@ async function command(request) {
   if (!init) throw new RegistrationError('session_not_initialized');
   if (browserClosed) throw new RegistrationError('registration_attempt_ended');
   if (request.action === 'refresh') return refresh(request);
+  if (request.action === 'media') {
+    if (init.mode!=='media'||!store) throw new RegistrationError('media_mode_required');
+    const result=await prepareRegisteredMedia(context,store,{email:init.email,legacyMedia:init.legacy_media===true});
+    const state=await store.load();
+    return {...result,submission_started:state.submission.started,...creationOutcome(state)};
+  }
   if (request.action === 'prepare') {
-    if (!store || !browser || init.mode === 'refresh') throw new RegistrationError('registration_mode_required');
+    if (!store || !browser || !['registration','resume'].includes(init.mode)) throw new RegistrationError('registration_mode_required');
     const country = await prepareRegistrationCountry(store, { mode:init.mode, requireNew:init.require_new === true, proxy:init.proxy });
     init.profile = (await store.load()).config.profile;
     return {stage:'prepared', registration_country:country};

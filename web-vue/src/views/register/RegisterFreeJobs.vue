@@ -89,6 +89,8 @@ const stages: Record<string, string> = {
   adobe_waiting_registration_form: '等待 Adobe 注册表单',
   adobe_checking_registration_form: '识别 Adobe 注册表单',
   adobe_restoring_registration_page: '恢复原注册页面',
+  adobe_media_pending: '账号已创建，准备媒体会话',
+  adobe_media_preparing: '通过日常出口采集媒体会话',
   adobe_flow_started: '执行 Adobe 注册', adobe_creation_submitted: '已发起创建，等待结果', awaiting_verification: '等待邮箱验证码', adobe_registration_needs_review: '本次流程已结束，检查创建结果', adobe_original_submission_recorded: '原注册提交记录已保留', adobe_registration_diagnostics: '注册失败诊断', compensation_stopped: '已停止自动补偿', adobe_recovery_started: '继续已创建账号的验证', needs_manual: '需要人工核对', submission_started: '已提交，等待结果', outcome_unknown: '提交结果待核对', twofa_reauth: '2FA 邮箱重认证', twofa_waiting_email_code: '2FA 等待邮箱验证码', twofa_verifying_email_code: '2FA 验证邮箱', twofa_enroll: '2FA 申请密钥', twofa_activate: '2FA 激活', twofa_completed: '2FA 已开启', queued: '等待执行', mailbox: '准备邮箱资源', compensation: '准备复用邮箱', authorize: '初始化会话', submit_email: '提交邮箱', send_code: '发送验证码', wait_code: '等待验证码', validate_code: '验证邮箱', create_profile: '创建账号资料', session: '获取会话凭据', bootstrap: '获取 Grok 注册配置', turnstile: '等待安全验证', signup: '填写资料并完成注册', sso: '获取 Grok SSO', import: '导入账号', verify: '校验账号', completed: '账号可用' }
 function jobStageText(job: NonNullable<LegacyRegisterConfig['jobs']>[number]): string {
   const label = stages[job.stage] || job.stage

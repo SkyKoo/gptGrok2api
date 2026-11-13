@@ -54,7 +54,7 @@ func TestMediaDiagnosticErrorSuffixPreservesLegacyMessages(t *testing.T) {
 			t.Fatal("absent diagnostic changed legacy error")
 		}
 	}
-	for _, reason := range []string{"editor_not_ready", "observer_unavailable", "vendors_pending", "instance_ambiguous", "context_changed", "identity_pending", "identity_changed", "runtime_changed", "verification_timeout",
+	for _, reason := range []string{"editor_not_ready", "observer_unavailable", "vendors_pending", "token_pending", "instance_ambiguous", "context_changed", "identity_pending", "identity_changed", "runtime_changed", "verification_timeout",
 		"authentication_missing", "arp_observer_missing", "editor_route_changed", "page_hidden", "observation_cancelled", "evaluation_failed", "navigation_budget_exhausted"} {
 		err := &Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: &MediaPreparationDiagnostic{State: "pending", ReadinessReason: reason}}
 		if SafeError(err) != "adobe_relogin_media_session_incomplete ["+reason+"]" {
@@ -68,6 +68,39 @@ func TestMediaDiagnosticErrorSuffixPreservesLegacyMessages(t *testing.T) {
 	err.Code = "result_unknown"
 	if SafeError(err) != "adobe_relogin_result_unknown (HTTP 502)" {
 		t.Fatal("unrelated error formatting changed")
+	}
+}
+
+func TestMediaTokenPendingDiagnosticSurvivesMaintenanceAndRestart(t *testing.T) {
+	s, a := idleMediaStore(t)
+	observed := SanitizeMediaPreparationDiagnostic(json.RawMessage(`{"state":"pending","readiness_reason":"token_pending","value_kind":"null","vendors_started":3,"vendors_complete":3,"token":"PRIVATE_TOKEN"}`))
+	if observed == nil || observed.ReadinessReason != "token_pending" {
+		t.Fatal("worker token-pending reason was dropped")
+	}
+	s.SetBrowserRefresher(func(context.Context, Account) (Account, error) {
+		return Account{}, &Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: observed}
+	})
+	_, err := s.WarmMediaSession(mediaTestContext(), a.ID, a.Revision)
+	if SafeError(err) != "adobe_relogin_media_session_incomplete [token_pending]" {
+		t.Fatalf("maintenance error lost token-pending reason: %v", err)
+	}
+	fromError := MediaDiagnosticFromError(err)
+	if fromError == nil || fromError.ReadinessReason != "token_pending" {
+		t.Fatal("typed maintenance error lost token-pending diagnostic")
+	}
+	restarted := NewStore(s.path, s.secret)
+	disk, err := restarted.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := disk.MediaFailures[a.ID]
+	diagnostic := failure.Diagnostic
+	if diagnostic == nil || diagnostic.State != "pending" || diagnostic.ReadinessReason != "token_pending" || diagnostic.ValueKind != "null" || diagnostic.VendorsStarted == nil || *diagnostic.VendorsStarted != 3 || diagnostic.VendorsComplete == nil || *diagnostic.VendorsComplete != 3 || failure.Revision != a.Revision || failure.RetryAfter <= failure.ObservedAt {
+		t.Fatal("token-pending diagnostic or retry boundary did not survive encrypted persistence")
+	}
+	raw, _ := json.Marshal(failure)
+	if strings.Contains(string(raw), "PRIVATE_TOKEN") || strings.Contains(string(raw), a.Token) || strings.Contains(string(raw), a.Email) || strings.Contains(string(raw), a.Cookie) {
+		t.Fatal("credentials reached persisted token-pending diagnostic")
 	}
 }
 

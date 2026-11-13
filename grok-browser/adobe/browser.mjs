@@ -957,6 +957,12 @@ export class BrowserRegistration {
   async exportSession() {
     const state = await this.store.load();
     if (!state.submission.started) throw new RegistrationError('registration_not_submitted');
+    if (this.workerMode && this.deferMedia && (state.stage==='media_pending'||Object.hasOwn(state,'mediaCheckpoint')) && !state.result?.account) {
+      const {validateMediaState} = await import('./registration-media.mjs');
+      validateMediaState(state,{email:state.email});
+      await this.store.setStage('media_pending');
+      return {stage:'media_pending',fireflySessionVerified:true,emailVerified:true,generationVerified:false};
+    }
     const nonempty = value => typeof value === 'string' && value.trim().length > 0;
     const matchingIdentity = account => account && nonempty(account.email) &&
       account.email.trim().toLowerCase() === state.email.trim().toLowerCase() &&
@@ -989,10 +995,15 @@ export class BrowserRegistration {
       if (!matchingIdentity(identity)) throw new RegistrationError('identity_not_verified');
       await this.creationTracker?.accepted();
       if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
+      if (this.workerMode && this.deferMedia) {
+        const {saveMediaCheckpoint} = await import('./registration-media.mjs');
+        await saveMediaCheckpoint(this.store,identity);
+        return {stage:'media_pending',fireflySessionVerified:true,emailVerified:true,generationVerified:false};
+      }
       let media, cookie;
       if (this.workerMode) {
         const expectedAccountID = identity.account_id;
-        media = await ensureMediaSession(this.page,this.context);
+        media = await ensureMediaSession(this.page,this.context,{identity});
         if (!isCompleteMediaSession(media)) throw new RegistrationError('media_session_incomplete');
         identity = await waitForIdentity(this.page,{timeoutMs:10000});
         if (!matchingIdentity(identity) || identity.account_id !== expectedAccountID) throw new RegistrationError('identity_not_verified');

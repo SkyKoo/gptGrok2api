@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -12,17 +12,23 @@ import { PrivateRunStore } from './core.mjs';
 // Run the actual line-oriented Worker protocol and real durable journal. Only
 // the browser dependency is replaced, so tests never launch Chromium or make
 // registration requests on the developer's host.
-async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false,countryProbe=false}={}) {
+async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false,countryProbe=false,mediaFailed=false,
+  checkpoint=false,mediaMode=false,missingBrowser=false,checkpointValue}={}) {
   const root=await mkdtemp(join(tmpdir(),'adobe-worker-rpc-'));
   const store=new PrivateRunStore(root,'original');
   if(!missing){
     await store.init({email:'fixture@example.test',config:{profile:{country:'US'},password:'fixture-password'}});
     if(submitted)await store.markSubmissionStarted();
+    if(submitted&&(mediaFailed||checkpoint))await store.save({creationEvidence:{version:1,marker:(await store.load()).submission.startedAt,
+      requests:1,finished:1,rejected:0,unknown:0,accepted:true,complete:true,sealed:true}});
+    if(checkpoint)await store.save({stage:'media_pending',mediaCheckpoint:checkpointValue===undefined?{version:1,email:'fixture@example.test',account_id:'fixture-id',emailVerified:true,createdAt:new Date().toISOString()}:checkpointValue});
+    if(mediaMode&&!missingBrowser)await mkdir(join(store.runDir,'browser'),{mode:0o700});
     if(saved)await store.save({stage:'credentials_saved',result:{account:{email:'fixture@example.test',account_id:'fixture-id',token:'fixture-token'}}});
     await store.close();
   }
   const mock=join(root,'mock-browser.mjs'),loader=join(root,'loader.mjs');
   await writeFile(mock,`
+    import {RegistrationError} from ${JSON.stringify(new URL('./core.mjs',import.meta.url).href)};
     export class BrowserRegistration {
       constructor(store,options={}){this.store=store;this.startupProgress=options.startupProgress;this.opened=false;this.phase='awaiting_password';}
       async open(options){
@@ -30,7 +36,8 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         this.opened=true;
         const state=await this.store.load();
         await this.store.save({testOpenMode:options.resumeOnly,testRequireExistingProfile:options.requireExistingProfile});
-        if(state.submission.started){this.phase='challenge';await this.store.setStage('needs_manual','human_verification_required');}
+        if(state.submission.started&&${mediaFailed}){this.phase='firefly';await this.store.setStage('outcome_unknown','submission_result_unknown');}
+        else if(state.submission.started){this.phase='challenge';await this.store.setStage('needs_manual','human_verification_required');}
         else if(${uiFailed}){this.phase='needs_manual';await this.store.setStage('needs_manual','login_ui_not_ready');}
         else if(${countryProbe}){this.phase='awaiting_profile';await this.store.setStage('awaiting_profile');}
         else await this.store.setStage('awaiting_approval');
@@ -53,6 +60,18 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
       }
       async verify(){await this.store.save({verificationSubmitted:true});this.phase='firefly';}
       async exportSession(){
+        if(this.deferMedia){
+          const {saveMediaCheckpoint}=await import(${JSON.stringify(new URL('./registration-media.mjs',import.meta.url).href)});
+          await saveMediaCheckpoint(this.store,{email:'fixture@example.test',account_id:'fixture-id',token:'fixture-token',emailVerified:true});
+          return {stage:'media_pending'};
+        }
+        if(${mediaFailed}){
+          const error=new RegistrationError('media_session_incomplete');
+          error.diagnostics={media_runtime:{state:'pending',readiness_reason:'vendors_pending',vendors_started:3,vendors_complete:2,token:'PRIVATE'},
+            media_page:{route:'editor',matching_host_count:1,authentication_count:1,arp_observer_count:1,scan_complete:true,url:'PRIVATE'},
+            media_timing:{emissions:3,first_source_ms:0,raw:'PRIVATE'},cookie:'PRIVATE'};
+          throw error;
+        }
         const state=await this.store.load();
         const result=state.result||{account:{email:state.email,account_id:'fixture-id',token:'fixture-token'}};
         await this.store.save({stage:'completed',result});return {stage:'completed'};
@@ -62,6 +81,24 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         const state=await this.store.load();
         if(state.creationEvidence)await this.store.save({creationEvidence:{...state.creationEvidence,sealed:true}});
       }
+    }
+  `,{mode:0o600});
+  const mediaMock=join(root,'mock-media-runtime.mjs');
+  if(mediaMode)await writeFile(mediaMock,`
+    import assert from 'node:assert/strict';
+    export {validateMediaState} from ${JSON.stringify(new URL('./registration-media.mjs',import.meta.url).href)};
+    export async function launchPersistentBrowser(dir,options){
+      assert.equal(dir,${JSON.stringify(join(root,'original','browser'))});
+      assert.equal(options.restoreLastSession,false);
+      return {close:async()=>{}};
+    }
+    export async function prepareRegisteredMedia(context,store,options){
+      const state=await store.load();assert.ok(context);assert.equal(options.email,state.email);
+      await store.save({testMediaCalls:(state.testMediaCalls||0)+1});
+      if(${mediaFailed})return {stage:'media_pending',code:'media_session_incomplete'};
+      const account={email:state.email,account_id:'fixture-id',token:'fresh-token',cookie:'sherlockToken=fresh-arp',media_session_arp_mode:'present',media_session_arp_source:'spl_runtime'};
+      await store.save({stage:'completed',result:{account,fireflySessionVerified:true,emailVerified:true,exportComplete:true,generationVerified:false}});
+      return {stage:'completed',account:{...account,profile_id:store.runId,password:state.config.password}};
     }
   `,{mode:0o600});
   const countryMock=join(root,'mock-country.mjs');
@@ -93,6 +130,10 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
     }
   `,{mode:0o600});
   await writeFile(loader,`export async function resolve(specifier,context,next){
+    if(${mediaMode}&&specifier==='./browser-runtime.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
+      return {url:${JSON.stringify(pathToFileURL(mediaMock).href)},shortCircuit:true};
+    if(${mediaMode}&&specifier==='./registration-media.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
+      return {url:${JSON.stringify(pathToFileURL(mediaMock).href)},shortCircuit:true};
     if(specifier==='./browser.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
       return {url:${JSON.stringify(pathToFileURL(mock).href)},shortCircuit:true};
     if(${countryProbe}&&specifier==='./exit-country.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
@@ -137,8 +178,31 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
     await current.init({}, {requireExisting:true});
     const state=await current.load();await current.close();return state;
   };
-  return {initialize,command,exited,journal,startupFrames};
+  return {initialize,command,exited,journal,startupFrames,root};
 }
+
+test('real RPC persists safe media export failures for both signup and accepted recovery',async t=>{
+  for(const mode of ['registration','resume'])await t.test(mode,async sub=>{
+    const f=await rpcFixture(sub,{submitted:mode==='resume',mediaFailed:true});
+    assert.equal((await f.initialize({mode})).result.stage,'ready');
+    let response;
+    if(mode==='registration'){
+      assert.equal((await f.command({action:'run'})).result.code,'verification_required');
+      response=await f.command({action:'verify',code:'123456'});
+    }else response=await f.command({action:'resume'});
+    assert.equal(response.ok,true);assert.equal(response.result.code,'media_session_incomplete');
+    assert.equal(response.result.creation_outcome,'accepted');assert.equal(response.result.account,undefined);
+    const diagnostics=response.result.diagnostics;
+    assert.deepEqual(diagnostics.media_runtime,{state:'pending',readiness_reason:'vendors_pending',vendors_started:3,vendors_complete:2});
+    assert.equal(diagnostics.media_page.route,'editor');assert.deepEqual(diagnostics.media_timing,{emissions:3,first_source_ms:0});
+    assert.doesNotMatch(JSON.stringify(diagnostics),/PRIVATE|token|cookie|url|raw/);
+    await f.command({action:'close'});await f.exited;
+    const state=await f.journal();
+    assert.deepEqual(state.lastObservation,diagnostics);assert.equal(state.creationEvidence.requests,1);
+    assert.equal(state.creationEvidence.accepted,true);assert.equal(state.result,undefined);
+    assert.equal(state.testCreates,mode==='registration'?1:undefined);
+  });
+});
 
 test('RPC prepares one country before creating, and passes the saved selection into form filling',async t=>{
   const f=await rpcFixture(t,{missing:true,countryProbe:true});
@@ -285,4 +349,68 @@ test('RPC refresh preserves the waiting context and forwards one OTP without wra
   const duplicate=await f.command({action:'refresh',code:'123456'});
   assert.equal(duplicate.ok,false);assert.equal(duplicate.code,'refresh_otp_already_submitted');
   await f.command({action:'close'});await f.exited;
+});
+
+test('RPC deferred registration returns accepted media pending without credentials',async t=>{
+ const f=await rpcFixture(t);
+ assert.equal((await f.initialize({mode:'registration',defer_media:true})).result.stage,'ready');
+ assert.equal((await f.command({action:'run'})).result.code,'verification_required');
+ const result=(await f.command({action:'verify',code:'123456'})).result;
+ assert.equal(result.stage,'media_pending');assert.equal(result.code,'');assert.equal(result.account,undefined);assert.equal(result.creation_outcome,'accepted');
+ await f.command({action:'close'});await f.exited;
+ const state=await f.journal();assert.equal(state.stage,'media_pending');assert.equal(state.result,undefined);assert.equal(state.testCreates,1);
+ assert.equal(state.mediaCheckpoint.account_id,'fixture-id');assert.doesNotMatch(JSON.stringify(state.mediaCheckpoint),/token|cookie|password/);
+});
+
+test('RPC resumes an existing media checkpoint without opening registration again',async t=>{
+ const f=await rpcFixture(t,{submitted:true,checkpoint:true});
+ assert.equal((await f.initialize({defer_media:true})).result.stage,'ready');
+ const result=(await f.command({action:'resume'})).result;
+ assert.equal(result.stage,'media_pending');assert.equal(result.code,'');assert.equal(result.account,undefined);assert.equal(result.creation_outcome,'accepted');
+ await f.command({action:'close'});await f.exited;
+ const state=await f.journal();assert.equal(state.testOpenMode,undefined);assert.equal(state.testCreates,undefined);assert.equal(state.result,undefined);
+});
+
+test('RPC media uses the existing profile without restored tabs and only exposes the media action',async t=>{
+ const f=await rpcFixture(t,{submitted:true,checkpoint:true,mediaMode:true});
+ assert.equal((await f.initialize({mode:'media',proxy:'direct'})).result.stage,'ready');
+ for(const action of ['prepare','run','verify','resume','refresh']){
+  const result=await f.command({action});assert.equal(result.ok,false);
+ }
+ const result=(await f.command({action:'media'})).result;
+ assert.equal(result.stage,'completed');assert.equal(result.creation_outcome,'accepted');assert.equal(result.account.profile_id,'original');assert.equal(result.account.password,'fixture-password');
+ await f.command({action:'close'});await f.exited;
+ const state=await f.journal();assert.equal(state.testOpenMode,undefined);assert.equal(state.testCreates,undefined);assert.equal(state.testMediaCalls,1);
+});
+
+test('RPC media refuses missing journals, unknown creation, mismatched email and missing browser profiles before launch',async t=>{
+ for(const [options,extra,expected] of [
+  [{missing:true},{},'state_missing'],
+  [{submitted:true},{legacy_media:true},'media_creation_not_accepted'],
+  [{submitted:true,checkpoint:true},{email:'other@example.test'},'run_email_mismatch'],
+  [{submitted:true,checkpoint:true,missingBrowser:true},{},'browser_profile_missing'],
+ ])await t.test(expected,async sub=>{
+  const f=await rpcFixture(sub,{...options,mediaMode:true});const result=await f.initialize({mode:'media',...extra});
+  assert.equal(result.ok,false);assert.equal(result.code,expected);assert.equal(f.startupFrames.length,0);
+  await f.command({action:'close'});await f.exited;
+ });
+});
+
+test('RPC media failure leaves checkpoint pending without creating or returning an account',async t=>{
+ const f=await rpcFixture(t,{submitted:true,checkpoint:true,mediaMode:true,mediaFailed:true});
+ assert.equal((await f.initialize({mode:'media'})).result.stage,'ready');
+ const result=(await f.command({action:'media'})).result;
+ assert.equal(result.stage,'media_pending');assert.equal(result.code,'media_session_incomplete');assert.equal(result.account,undefined);assert.equal(result.creation_outcome,'accepted');
+ await f.command({action:'close'});await f.exited;
+ const state=await f.journal();assert.equal(state.mediaCheckpoint.account_id,'fixture-id');assert.equal(state.result,undefined);assert.equal(state.testCreates,undefined);
+});
+
+test('RPC deferred resume rejects every malformed checkpoint before opening a browser or login',async t=>{
+ for(const checkpointValue of [null,false,'',{},[]])await t.test(JSON.stringify(checkpointValue),async sub=>{
+  const f=await rpcFixture(sub,{submitted:true,checkpoint:true,checkpointValue});
+  const response=await f.initialize({defer_media:true});
+  assert.equal(response.ok,false);assert.equal(response.code,'media_checkpoint_invalid');assert.equal(f.startupFrames.length,0);
+  await f.command({action:'close'});await f.exited;
+  const state=await f.journal();assert.equal(state.testOpenMode,undefined);assert.equal(state.testCreates,undefined);assert.equal(state.result,undefined);
+ });
 });

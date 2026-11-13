@@ -1,6 +1,7 @@
 import { formFailureDiagnostics } from './browser.mjs';
 import { STARTUP_STAGES, STARTUP_LIMIT_MS } from './startup-progress.mjs';
 import { VERIFICATION_WAIT_OUTCOMES, VERIFICATION_WAIT_LIMIT_MS } from './verification-observation.mjs';
+import { sanitizeMediaDiagnostics } from './media-diagnostics.mjs';
 
 const SOURCES = new Set(['visible_challenge_frame', 'visible_instruction', 'upstream_captcha_response']);
 const INSTRUCTIONS = new Set(['start_puzzle', 'complete_puzzle', 'prove_human', 'not_robot', 'identity_instruction']);
@@ -132,6 +133,8 @@ export function registrationDiagnostics(result, state, { now } = {}) {
     ...(FORM_STAGES.has(result?.detected) ? { detected_stage: result.detected } : {}),
     ...(validWait ? { verification_wait_elapsed_ms: wait.elapsed_ms, verification_wait_outcome: wait.outcome } : {}),
     ...failureDiagnostics(result),
+    ...(result?.code === 'media_session_incomplete' && result?.stage !== 'completed'
+      ? sanitizeMediaDiagnostics(result.diagnostics) : {}),
     ...networkTimeline(result, now),
   };
 }

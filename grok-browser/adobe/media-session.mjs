@@ -194,7 +194,14 @@ export function runtimeARPInPage({timeoutMs, cancelEvent}) {
         if (current !== authentication || currentSource !== source) { unsubscribe();return; }
         if (!emitted || value === null || value === undefined || value === '') {
           stableCandidate='';
-          observation = {state:'pending', source:'spl_runtime', value_kind:!emitted?'unobserved':value === null?'null':value === undefined?'undefined':'empty_string'};
+          // A missing value can hide an earlier initialization failure. Read
+          // the same bounded lifecycle evidence for diagnosis only; completed
+          // vendors without an official token still cannot export a session.
+          const readiness = inspectVendorReadiness();
+          observation = {state:'pending', source:'spl_runtime', value_kind:!emitted?'unobserved':value === null?'null':value === undefined?'undefined':'empty_string',
+            readiness_reason:readiness.state === 'ready' ? 'token_pending' : readiness.readiness_reason,
+            vendors_started:readiness.state === 'ready' ? 3 : readiness.vendors_started,
+            vendors_complete:readiness.state === 'ready' ? 3 : readiness.vendors_complete};
           return;
         }
         if (typeof value === 'string' && value.length <= 65536 && /^[\x21-\x7e]+$/.test(value) && !/[;,]/.test(value)) {
@@ -397,20 +404,207 @@ async function pauseAbortably(ms, pause, signal) {
   const cancelled = new Promise((_, reject) => {
     abort = () => reject(cancelledError());signal?.addEventListener('abort', abort, {once:true});
   });
-  try { await Promise.race([pause(ms), cancelled]); }
+  try { return await Promise.race([pause(ms), cancelled]); }
   finally { signal?.removeEventListener('abort', abort); }
 }
 
+// A reload may recover an unfinished official module import, but must never
+// restart an initialized ARP runtime or a visible verification challenge.
+// Re-observe the current source here: an earlier null is not current evidence.
+export function bootstrapRecoveryAllowedInPage({timeoutMs=250, cancelEvent, identity, allowPending=false}) {
+  return new Promise(resolve => {
+    let finished=false, timer, subscribed=false;
+    const releases=[];
+    const finish = allowed => {
+      if (finished) return;
+      finished=true;clearTimeout(timer);
+      globalThis.removeEventListener(cancelEvent,cancelled);
+      globalThis.removeEventListener('pagehide',cancelled);
+      for (const release of releases.splice(0)) { try { release(); } catch {} }
+      resolve(allowed === true);
+    };
+    const cancelled = () => finish(false);
+    const inspect = () => {
+      if (globalThis.location?.origin !== 'https://firefly.adobe.com' || globalThis.location?.pathname !== '/generate/image' ||
+          typeof globalThis.SherlockSdk !== 'undefined' || typeof globalThis.UniversalNav !== 'undefined') return null;
+      const marks=globalThis.performance?.getEntriesByType('mark');
+      if (!Array.isArray(marks) || marks.some(entry=>/^sherlock:.*:init:start$/.test(entry.name))) return null;
+      if (typeof globalThis.getComputedStyle !== 'function') return null;
+      const challenge=/verify you are human|prove you(?:'|’)re human|start puzzle|verify your identity|人机验证|验证您是人|证明您是|请验证身份/i;
+      const visible = element => {
+        const style=globalThis.getComputedStyle(element),rects=element.getClientRects();
+        return style.display!=='none' && style.visibility!=='hidden' && [...rects].some(rect=>rect.width>4&&rect.height>4);
+      };
+      const roots=[document],seen=new Set();let authentication=null,inspected=0;
+      for (const root of roots) {
+        if (seen.has(root)) continue;
+        if (seen.size>=128) return null;
+        seen.add(root);
+        const text=root===document?document.body?.innerText:root.host?.innerText;
+        if (typeof text==='string' && challenge.test(text)) return null;
+        for (const frame of root.querySelectorAll('iframe')) {
+          if (!visible(frame)) continue;
+          let url;try { url=new URL(frame.src,globalThis.location.href); } catch { return null; }
+          if (/(?:^|\.)(?:arkoselabs\.com|funcaptcha\.com|hcaptcha\.com|recaptcha\.net)$|^challenges\.cloudflare\.com$|^arks-client\.adobe\.com$/i.test(url.hostname) ||
+              /(?:^|\.)google\.com$/i.test(url.hostname)&&/^\/recaptcha\//.test(url.pathname)) return null;
+        }
+        for (const host of root.querySelectorAll('firefly-commerce-dialogs, firefly-commerce-paywall-dialog')) {
+          if (!authentication && host.service?.serviceName==='spl-commerce-dialog-service' && host.service.authentication) authentication=host.service.authentication;
+        }
+        for (const element of root.querySelectorAll('*')) {
+          if (++inspected>16384) return null;
+          if (element.shadowRoot) roots.push(element.shadowRoot);
+        }
+      }
+      return {authentication,source:authentication?.arpSessionToken};
+    };
+    globalThis.addEventListener(cancelEvent,cancelled,{once:true});
+    globalThis.addEventListener('pagehide',cancelled,{once:true});
+    timer=setTimeout(()=>finish(allowPending),timeoutMs);
+    try {
+      if (!identity || !['email','account_id','token'].every(key=>typeof identity[key]==='string'&&identity[key].length>0)) return finish(false);
+      const initial=inspect();
+      if (!initial) return finish(false);
+      if (!initial.authentication) return finish(allowPending);
+      const keys=['userProfile','accessToken','isSignedIn','arpSessionToken'],values={},sources={},emitted=new Set(),confirmed=new Set();
+      let nonempty=false,identityChanged=false;
+      const absent=value=>value===null||value===undefined||value==='';
+      const matchesIdentity = (key,value) => key==='userProfile' ? value?.userId===identity.account_id &&
+        typeof value?.email==='string' && value.email.toLowerCase()===identity.email.toLowerCase() && value.emailVerified!==false :
+        key==='accessToken'?value===identity.token:key==='isSignedIn'?value===true:false;
+      const mismatchedIdentity = (key,value) => {
+        if (absent(value)) return false;
+        if (key==='userProfile') return typeof value!=='object' || value.emailVerified===false ||
+          !absent(value.userId)&&value.userId!==identity.account_id ||
+          !absent(value.email)&&(typeof value.email!=='string'||value.email.toLowerCase()!==identity.email.toLowerCase());
+        return key==='accessToken'||key==='isSignedIn' ? !matchesIdentity(key,value) : false;
+      };
+      const confirm = () => {
+        if (finished || !subscribed) return;
+        try {
+          const current=inspect();
+          if (!current || current.authentication!==initial.authentication ||
+              keys.some(key=>current.authentication[key]!==sources[key]) || nonempty || identityChanged) return finish(false);
+          const profile=values.userProfile;
+          if (!absent(profile) && (typeof profile!=='object' || profile.emailVerified===false ||
+              !absent(profile.userId)&&profile.userId!==identity.account_id ||
+              !absent(profile.email)&&(typeof profile.email!=='string'||profile.email.toLowerCase()!==identity.email.toLowerCase()))) return finish(false);
+          const matches={userProfile:profile?.userId===identity.account_id && typeof profile?.email==='string' && profile.email.toLowerCase()===identity.email.toLowerCase(),
+            accessToken:values.accessToken===identity.token,isSignedIn:values.isSignedIn===true,arpSessionToken:emitted.has('arpSessionToken')&&absent(values.arpSessionToken)};
+          for (const key of keys) {
+            if (confirmed.has(key)&&!matches[key]) return finish(false);
+            if (matches[key]) confirmed.add(key);
+          }
+          if (emitted.has('accessToken')&&!absent(values.accessToken)&&!matches.accessToken ||
+              emitted.has('isSignedIn')&&!absent(values.isSignedIn)&&!matches.isSignedIn) return finish(false);
+          if (keys.every(key=>matches[key])) finish(true);
+        } catch { finish(false); }
+      };
+      for (const key of keys) sources[key]=initial.authentication[key];
+      for (const key of keys) {
+        if (typeof sources[key]!=='function') continue;
+        const release=sources[key](next=>{
+          emitted.add(key);values[key]=next;
+          if(key==='arpSessionToken'&&!absent(next))nonempty=true;
+          if (key!=='arpSessionToken') {
+            if (mismatchedIdentity(key,next) || confirmed.has(key)&&!matchesIdentity(key,next)) identityChanged=true;
+            if (matchesIdentity(key,next)) confirmed.add(key);
+          }
+          if (subscribed) confirm();
+        });
+        // A source may synchronously dispatch pagehide/cancel before returning
+        // its disposer. Release that late disposer instead of leaking it.
+        if (finished) {if(typeof release==='function')try{release();}catch{}return;}
+        if (typeof release!=='function') return finish(false);
+        releases.push(release);
+      }
+      subscribed=true;confirm();
+    } catch { finish(false); }
+  });
+}
+
+function trustedEditor(page) {
+  try { const url=new URL(page.url());return url.origin===new URL(FIREFLY_HOME).origin && url.pathname==='/generate/image'; }
+  catch { return false; }
+}
+
+function bootstrapFailure(error) {
+  const diagnostic=error?.diagnostics;
+  return error instanceof RegistrationError && error.code==='media_session_incomplete' &&
+    ['navigation_budget_exhausted','authentication_missing','instance_missing'].includes(diagnostic?.media_runtime?.readiness_reason) &&
+    diagnostic?.media_timing?.first_nonempty_ms===undefined &&
+    !(diagnostic?.media_timing?.authentication_changes>0) && !(diagnostic?.media_timing?.source_changes>0);
+}
+
+async function bootstrapRecoveryAllowed(page,deadline,now,signal,identity,allowPending=false) {
+  if (!trustedEditor(page) || now()>=deadline) return false;
+  const cancelEvent=`cfm-adobe-bootstrap-cancel-${randomUUID()}`;
+  const onAbort=()=>{void page.evaluate(name=>globalThis.dispatchEvent(new Event(name)),cancelEvent).catch(()=>{});};
+  signal?.addEventListener('abort',onAbort,{once:true});
+  try {
+    if (signal?.aborted) throw cancelledError();
+    return await pauseAbortably(0,()=>page.evaluate(bootstrapRecoveryAllowedInPage,{timeoutMs:Math.min(250,Math.max(1,deadline-now())),cancelEvent,identity,allowPending}),signal) === true;
+  } catch(error) {
+    if (signal?.aborted) throw cancelledError();
+    return false;
+  } finally { signal?.removeEventListener('abort',onAbort); }
+}
+
 export async function ensureMediaSession(page, context, {
-  timeoutMs = 30000, now = Date.now, pause = ms => new Promise(resolve => setTimeout(resolve, ms)), signal,
+  timeoutMs = 30000, now = Date.now, pause = ms => new Promise(resolve => setTimeout(resolve, ms)), signal, identity,
 } = {}) {
   if (signal?.aborted) throw cancelledError();
-  const deadline = now() + timeoutMs;
-  let atEditor = false;
-  try { const url = new URL(page.url());atEditor = url.origin === new URL(FIREFLY_HOME).origin && url.pathname === '/generate/image'; } catch {}
+  const initialBudget=Number.isFinite(timeoutMs)?Math.max(1,Math.min(timeoutMs,30000)):30000;
+  const started=now(),deadline=started+initialBudget*2,controller=new AbortController();
+  let timedOut=false,lastError,nonemptyObserved=false,activePhase='navigation';
+  const onAbort=()=>controller.abort();
+  const timer=setTimeout(()=>{timedOut=true;controller.abort();},initialBudget*2);
+  signal?.addEventListener('abort',onAbort,{once:true});
+  const attempt=async (until,navigate=true) => {
+    try {return await collectMediaSession(page,context,{deadline:until,now,pause,signal:controller.signal,navigate,
+      onNonempty:()=>{nonemptyObserved=true;},onPhase:phase=>{activePhase=phase;}});}
+    catch(error) {if(error?.code!=='media_session_cancelled')lastError=error;throw error;}
+  };
+  try {
+    try {return await attempt(started+initialBudget);}
+    catch(error) {
+      if (nonemptyObserved || !identity || !bootstrapFailure(error) || !await bootstrapRecoveryAllowed(page,deadline,now,controller.signal,identity,true)) throw error;
+    }
+    // Give the current document a short chance to finish loading before the
+    // sole reload. All three phases share one overall deadline (at most 60s).
+    try {return await attempt(Math.min(deadline,now()+Math.min(10000,initialBudget/3)),false);}
+    catch(error) {
+      if (nonemptyObserved || !identity || !bootstrapFailure(error) || !await bootstrapRecoveryAllowed(page,deadline,now,controller.signal,identity)) throw error;
+    }
+    if (now()>=deadline) throw lastError;
+    activePhase='navigation';
+    try {await pauseAbortably(0,()=>page.reload({waitUntil:'commit',timeout:Math.max(1,Math.min(10000,(deadline-now())/2))}),controller.signal);}
+    catch(error) {
+      if (controller.signal.aborted) throw cancelledError();
+      // A timeout can leave a usable editor document. Only observe that same
+      // document with the remaining budget; never issue another navigation.
+      if (!trustedEditor(page) || now()>=deadline) throw lastError;
+    }
+    return await attempt(deadline,false);
+  } catch(error) {
+    if (signal?.aborted) throw cancelledError();
+    if (timedOut) {
+      const incomplete=new RegistrationError('media_session_incomplete');
+      incomplete.diagnostics={media_runtime:activePhase==='observation'?{state:'observation_timeout'}:{state:'unavailable',readiness_reason:'navigation_budget_exhausted'}};
+      throw incomplete;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);signal?.removeEventListener('abort',onAbort);controller.abort();
+  }
+}
+
+async function collectMediaSession(page,context,{deadline,now,pause,signal,navigate,onNonempty,onPhase}) {
+  if (signal?.aborted) throw cancelledError();
   let runtimeState = {state:'unavailable',readiness_reason:'navigation_budget_exhausted'}, mediaPage, mediaTiming;
-  if (!atEditor) {
-    try { await page.goto(FIREFLY_IMAGE, {waitUntil:'domcontentloaded', timeout:Math.max(1, deadline-now())}); }
+  if (navigate && !trustedEditor(page)) {
+    onPhase('navigation');
+    try { await pauseAbortably(0,()=>page.goto(FIREFLY_IMAGE, {waitUntil:'domcontentloaded', timeout:Math.max(1, deadline-now())}),signal); }
     catch (error) {
       if (signal?.aborted) throw cancelledError();
       if (now() < deadline) throw error;
@@ -421,8 +615,10 @@ export async function ensureMediaSession(page, context, {
   }
   while (now() < deadline) {
     if (signal?.aborted) throw cancelledError();
+    onPhase('observation');
     const observation = await observeRuntimeARP(page, Math.max(1, deadline-now()), signal);
     if (signal?.aborted) throw cancelledError();
+    if (observation?.media_timing?.first_nonempty_ms!==undefined || typeof observation?.token==='string'&&observation.token.length>0) onNonempty();
     runtimeState = {state:observation?.state || 'unavailable', ...(observation?.value_kind?{value_kind:observation.value_kind}:{}),
       ...(observation?.readiness_reason?{readiness_reason:observation.readiness_reason}:{}),
       ...(Number.isInteger(observation?.vendors_started)?{vendors_started:observation.vendors_started}:{}),
@@ -431,7 +627,7 @@ export async function ensureMediaSession(page, context, {
     mediaTiming=observation?.media_timing;
     const present = observation?.state === 'ready' && isUsableSherlock(observation.token);
     if (observation?.source === 'spl_runtime' && present) {
-      const cookies = await context.cookies(FIREFLY_HOME);
+      const cookies = await pauseAbortably(0,()=>context.cookies(FIREFLY_HOME),signal);
       if (signal?.aborted) throw cancelledError();
       return {cookie:mediaCookieHeader(cookies, observation.token),
         media_session_arp_mode:'present', media_session_arp_source:'spl_runtime', runtime_state:runtimeState, runtime_proof:observation.runtime_proof};

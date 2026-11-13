@@ -21,13 +21,15 @@ type AdobeRegistrationFlow interface {
 }
 type AdobeFactory func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error)
 type AdobeBrowserFlow struct {
-	Client *http.Client
-	lease  *browserqueue.Lease
+	Client            *http.Client
+	ResolveMediaProxy func(context.Context, string, string) (string, error)
+	lease             *browserqueue.Lease
 }
 
 func (f *AdobeBrowserFlow) Close() {
 	if f.lease != nil {
 		f.lease.Release()
+		f.lease = nil
 	}
 }
 
@@ -67,6 +69,9 @@ func isAdobeSender(sender string) bool {
 		(parts[1] == "icloud.com" && adobeHMESender.MatchString(parts[0]))
 }
 func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox, cfg AdobeConfig, waitCode func(context.Context, time.Time) (string, error), progress Progress) (map[string]any, error) {
+	if cfg.mediaOnly {
+		return f.prepareMedia(ctx, box, cfg, progress)
+	}
 	action, mode, stage := "run", "registration", "adobe_flow_started"
 	switch cfg.RecoveryMode {
 	case "", "retry_registration":
@@ -92,7 +97,11 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 	var err error
 	// Every registration attempt owns new storage; only an accepted creation
 	// continues the original profile and verification session.
-	f.lease, err = browserqueue.AcquireWithStartupProgress(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id, "adobe_require_new": mode == "registration"}, progress, cfg.startupProgress)
+	options := map[string]any{"provider": "adobe", "profile_id": profileID, "email": box.Email, "proxy": cfg.Proxy, "adobe_profile": profile, "adobe_mode": mode, "adobe_recovery_id": id, "adobe_require_new": mode == "registration"}
+	if f.ResolveMediaProxy != nil {
+		options["adobe_defer_media"] = true
+	}
+	f.lease, err = browserqueue.AcquireWithStartupProgress(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, options, progress, cfg.startupProgress)
 	if err != nil {
 		var startup *browserqueue.StartupError
 		if errors.As(err, &startup) {
@@ -169,6 +178,21 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 			return nil, err
 		}
 	}
+	if result.Stage == "media_pending" {
+		if f.ResolveMediaProxy == nil || cfg.mediaProgress == nil || result.CreationOutcome != "accepted" || result.Code != "" || len(result.Account) != 0 {
+			return nil, fail("adobe", "media_handoff_invalid")
+		}
+		// Commit the checkpoint acknowledgement before releasing the original
+		// browser. Restart recovery must never depend on its registration proxy.
+		if err := cfg.mediaProgress(); err != nil {
+			return nil, err
+		}
+		if err := f.releaseForMedia(ctx, cfg); err != nil {
+			return nil, err
+		}
+		cfg.BrowserProfileID = profileID
+		return f.prepareMedia(ctx, box, cfg, progress)
+	}
 	if result.Stage != "completed" {
 		if cfg.diagnosticProgress != nil {
 			if err := cfg.diagnosticProgress(result.Diagnostics); err != nil {
@@ -184,6 +208,109 @@ func (f *AdobeBrowserFlow) Register(ctx context.Context, id string, box Mailbox,
 		return nil, fail("adobe", "identity_not_verified")
 	}
 	return result.Account, nil
+}
+
+func (f *AdobeBrowserFlow) prepareMedia(ctx context.Context, box Mailbox, cfg AdobeConfig, progress Progress) (map[string]any, error) {
+	if f.ResolveMediaProxy == nil || cfg.BrowserProfileID == "" || strings.TrimSpace(box.Email) == "" {
+		return nil, fail("adobe", "media_handoff_invalid")
+	}
+	proxy, err := f.ResolveMediaProxy(ctx, box.Email, cfg.BrowserProfileID)
+	if err != nil {
+		return nil, fail("adobe", "media_proxy_unavailable")
+	}
+	if proxy == "" {
+		proxy = "direct" // The resolver explicitly selected the configured direct route.
+	}
+	options := map[string]any{"provider": "adobe", "profile_id": cfg.BrowserProfileID, "email": box.Email,
+		"proxy": proxy, "adobe_mode": "media"}
+	if cfg.legacyMedia {
+		options["adobe_legacy_media"] = true
+	}
+	if progress != nil {
+		if err := progress("adobe_media_pending"); err != nil {
+			return nil, err
+		}
+	}
+	f.lease, err = browserqueue.AcquireWithStartupProgress(ctx, f.Client, cfg.WorkerURL, cfg.WorkerKey, options, progress, cfg.startupProgress)
+	if err != nil {
+		return nil, fail("adobe", "media_browser_unavailable")
+	}
+	if progress != nil {
+		if err := progress("adobe_media_preparing"); err != nil {
+			return nil, err
+		}
+	}
+	result, err := f.command(ctx, cfg, "media", "")
+	if err != nil {
+		return nil, err
+	}
+	if result.Stage != "completed" {
+		if cfg.diagnosticProgress != nil {
+			if err := cfg.diagnosticProgress(result.Diagnostics); err != nil {
+				return nil, err
+			}
+		}
+		return nil, fail("adobe", firstNonEmpty(result.Code, "media_session_incomplete"))
+	}
+	if result.CreationOutcome != "accepted" || stringValue(result.Account["token"]) == "" ||
+		!strings.EqualFold(strings.TrimSpace(stringValue(result.Account["email"])), strings.TrimSpace(box.Email)) ||
+		stringValue(result.Account["account_id"]) == "" || stringValue(result.Account["profile_id"]) != cfg.BrowserProfileID {
+		return nil, fail("adobe", "identity_not_verified")
+	}
+	return result.Account, nil
+}
+
+// A DELETE acknowledgement of "closing" still owns the profile and licence.
+// Only confirmed removal permits the second reservation, regardless of capacity.
+func (f *AdobeBrowserFlow) releaseForMedia(ctx context.Context, cfg AdobeConfig) error {
+	if f.lease == nil {
+		return fail("adobe", "media_previous_browser_closing")
+	}
+	closing, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	client := f.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	dedicated := *client
+	dedicated.Timeout = 12 * time.Second
+	dedicated.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	dedicated.Jar = nil
+	method := http.MethodDelete
+	for {
+		req, err := http.NewRequestWithContext(closing, method, cfg.WorkerURL+"/v1/browser/reservations/"+f.lease.ID, nil)
+		if err != nil {
+			return fail("adobe", "media_previous_browser_closing")
+		}
+		if cfg.WorkerKey != "" {
+			req.Header.Set("Authorization", "Bearer "+cfg.WorkerKey)
+		}
+		resp, err := dedicated.Do(req)
+		if err != nil {
+			return fail("adobe", "media_previous_browser_closing")
+		}
+		var result struct {
+			Status string `json:"status"`
+		}
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16384)).Decode(&result)
+		resp.Body.Close()
+		if method == http.MethodGet && resp.StatusCode == http.StatusNotFound ||
+			resp.StatusCode == http.StatusOK && decodeErr == nil && result.Status == "released" {
+			f.lease = nil
+			return nil
+		}
+		if resp.StatusCode != http.StatusOK || decodeErr != nil || result.Status != "closing" {
+			return fail("adobe", "media_previous_browser_closing")
+		}
+		method = http.MethodGet
+		timer := time.NewTimer(200 * time.Millisecond)
+		select {
+		case <-closing.Done():
+			timer.Stop()
+			return fail("adobe", "media_previous_browser_closing")
+		case <-timer.C:
+		}
+	}
 }
 
 type adobeBrowserResult struct {
@@ -214,18 +341,30 @@ func (f *AdobeBrowserFlow) command(ctx context.Context, cfg AdobeConfig, action,
 		client = &http.Client{Timeout: 160 * time.Second}
 	}
 	dedicated := *client
+	if action == "media" {
+		dedicated.Timeout = 150 * time.Second
+	}
 	dedicated.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	dedicated.Jar = nil
 	resp, err := dedicated.Do(req)
 	if err != nil {
+		if action == "media" {
+			return adobeBrowserResult{}, fail("adobe", "media_result_unknown")
+		}
 		return adobeBrowserResult{}, fail("adobe", "submission_result_unknown")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		if action == "media" {
+			return adobeBrowserResult{}, fail("adobe", "media_worker_result_unknown")
+		}
 		return adobeBrowserResult{}, fail("adobe", "worker_result_unknown")
 	}
 	var result adobeBrowserResult
 	if json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result) != nil {
+		if action == "media" {
+			return result, fail("adobe", "media_worker_result_unknown")
+		}
 		return result, fail("adobe", "worker_result_unknown")
 	}
 	return result, nil

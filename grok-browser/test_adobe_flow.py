@@ -369,3 +369,70 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(launcher.await_args.kwargs['mode'], 'registration')
                     await client.delete('/v1/browser/reservations/'+job_id)
         await q.shutdown()
+
+    async def test_media_handoff_waits_for_signup_browser_close_and_pins_daily_exit(self):
+        import httpx
+        import server
+        import adobe_flow
+        q = BrowserQueue(close_timeout=1)
+        closing, release_close = asyncio.Event(), asyncio.Event()
+        registration = AsyncMock(spec=AdobeProcess)
+        media = AsyncMock(spec=AdobeProcess)
+        async def close_registration():
+            closing.set()
+            await release_close.wait()
+        registration.close.side_effect = close_registration
+        launcher = AsyncMock(side_effect=[registration, media])
+        base = {"provider":"adobe", "profile_id":"original-profile", "email":"fixture@example.test"}
+        with patch.object(server, "queue", q), patch.object(adobe_flow, "queue", q), \
+             patch.object(server, "_auth_token", "secret"), patch.object(server, "launch_adobe", launcher):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://worker",
+                headers={"Authorization":"Bearer secret"}) as client:
+                response = await client.post("/v1/browser/reservations", json={**base, "id":"r"*32,
+                    "proxy":"http://registration.invalid:8080", "adobe_defer_media":True})
+                self.assertEqual(response.status_code, 200)
+                for _ in range(50):
+                    if q.status("r"*32)["status"] == "ready": break
+                    await asyncio.sleep(.01)
+                self.assertTrue(launcher.await_args.kwargs["defer_media"])
+                await client.delete("/v1/browser/reservations/" + "r"*32)
+                await asyncio.wait_for(closing.wait(), 1)
+                response = await client.post("/v1/browser/reservations", json={**base, "id":"m"*32,
+                    "adobe_mode":"media", "adobe_legacy_media":True, "proxy":"socks5://daily.invalid:1080"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(q.status("m"*32)["status"], "waiting_browser")
+                self.assertEqual(launcher.await_count, 1)
+                release_close.set()
+                for _ in range(50):
+                    if q.status("m"*32)["status"] == "ready": break
+                    await asyncio.sleep(.01)
+                self.assertEqual(q.status("m"*32)["status"], "ready")
+                options = launcher.await_args.kwargs
+                self.assertEqual(options["mode"], "media")
+                self.assertEqual(options["proxy"], "socks5://daily.invalid:1080")
+                self.assertEqual(options["profile_id"], base["profile_id"])
+                self.assertTrue(options["legacy_media"])
+                self.assertNotIn("defer_media", options)
+                media.command.return_value = {"stage":"completed", "account":{"fixture":True}}
+                response = await client.post("/v1/adobe/run", json={"browser_lease":"m"*32,"action":"media"})
+                self.assertEqual(response.status_code, 200)
+                media.command.assert_awaited_once_with({"action":"media", "code":""})
+                await client.delete("/v1/browser/reservations/" + "m"*32)
+        await q.shutdown()
+
+    async def test_media_options_reject_wrong_modes_before_queueing(self):
+        import httpx
+        import server
+        queue = AsyncMock()
+        base = {"id":"m"*32, "provider":"adobe", "profile_id":"original-profile",
+            "email":"fixture@example.test", "adobe_mode":"media", "proxy":"direct"}
+        with patch.object(server, "queue", queue), patch.object(server, "_auth_token", "secret"):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://worker",
+                headers={"Authorization":"Bearer secret"}) as client:
+                for changes in ({"adobe_require_new":True}, {"adobe_defer_media":True},
+                    {"password":"not-allowed"}, {"proxy":""}, {"adobe_mode":"registration", "adobe_legacy_media":True},
+                    {"adobe_mode":"refresh", "adobe_defer_media":True}, {"adobe_legacy_media":"true"}):
+                    with self.subTest(changes=changes):
+                        response = await client.post("/v1/browser/reservations", json={**base, **changes})
+                        self.assertEqual(response.status_code, 422)
+        queue.enqueue.assert_not_called()

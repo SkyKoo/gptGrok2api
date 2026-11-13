@@ -25,6 +25,8 @@ type AdobeConfig struct {
 	creationProgress               func(adobeCreationObservation, bool) error
 	startupProgress                func(browserqueue.StartupEvent) error
 	countryProgress                func(adobeCountrySelection) error
+	mediaProgress                  func() error
+	mediaOnly, legacyMedia         bool
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {

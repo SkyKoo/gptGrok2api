@@ -1,4 +1,5 @@
 import { RegistrationError, isTrustedAdobeURL } from './core.mjs';
+import { sanitizeMediaDiagnostics } from './media-diagnostics.mjs';
 import { formBlockingCode, formFailureDiagnostics } from './browser.mjs';
 import { runAutomaticRegistration, observeAutomaticVerification } from './auto-runner.mjs';
 import { creationOutcome } from './creation-outcome.mjs';
@@ -195,7 +196,8 @@ export async function resumeRegistration(browser, store, { recoveryId, code = ''
   try {
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(recoveryId || '')) throw new RegistrationError('recovery_id_required');
     let state = await store.load();
-    if (state.result?.account || state.stage === 'completed' || state.stage === 'credentials_saved') {
+    if (state.result?.account || state.stage === 'completed' || state.stage === 'credentials_saved' ||
+        browser.deferMedia&&(state.stage==='media_pending'||Object.hasOwn(state,'mediaCheckpoint'))) {
       action = 'export_session';
       return await browser.exportSession();
     }
@@ -291,7 +293,10 @@ export async function resumeRegistration(browser, store, { recoveryId, code = ''
     // read can show newer UI, but must not replace the cause with that page.
     const diagnostics = error instanceof RegistrationError && error.failureDiagnostics
       ? error.failureDiagnostics : failureDetails(error, action, phase, status.form);
+    const mediaDiagnostics = error instanceof RegistrationError && error.code === 'media_session_incomplete'
+      ? sanitizeMediaDiagnostics(error.diagnostics) : undefined;
     try { status = await browser.status(); } catch { /* Original fixed error and durable state remain authoritative. */ }
+    if (mediaDiagnostics) status = { ...status, diagnostics: mediaDiagnostics };
     return stopped(shouldStop() ? 'automatic_interrupted' : error instanceof RegistrationError ? error.code : 'recovery_step_failed', diagnostics);
   }
 }
