@@ -59,7 +59,7 @@ test('video option changes select one complete combination and constrain depende
  assert.deepEqual(next,{...old,size:'1920x1080',resolution:'1080p',seconds:8})
  assert.deepEqual(studioVideoSettingValues(next,capability),{sizes:['1280x720','1920x1080'],resolutions:['1080p'],durations:[8],audio:[false,true],hasAudio:true})
  const back = normalizeStudioVideoOptions({...next,size:'1280x720',audio:true},capability,'size')
- assert.equal(back.resolution,'720p');assert.equal(back.seconds,4);assert.equal(back.audio,false)
+ assert.equal(back.size,'1920x1080');assert.equal(back.resolution,'1080p');assert.equal(back.seconds,8);assert.equal(back.audio,true)
 })
 
 test('required video audio defaults to true and cannot be disabled or omitted in serialization', t => {

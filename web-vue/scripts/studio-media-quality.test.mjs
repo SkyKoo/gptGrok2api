@@ -15,7 +15,7 @@ test('video options preserve the requested resolution',()=>{
 
 async function imageSizes() {
  const source=await readFile(new URL('../src/api/imageTasks.ts',import.meta.url),'utf8')
- const js=ts.transpileModule(source.replace("import { mediaCapability } from '@/lib/mediaCapabilities'", 'const mediaCapability = () => undefined').replace("import apiClient from './client'",'const apiClient = {}'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText
+ const js=ts.transpileModule(source.replace(/import \{[^}]+\} from '@\/lib\/mediaCapabilities'/, 'const mediaCapability = () => undefined').replace("import apiClient from './client'",'const apiClient = {}'),{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText
  return import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`)
 }
 test('Grok generation keeps Pro 1K ratios and hides unverified 2K/4K choices',async()=>{

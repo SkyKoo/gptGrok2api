@@ -82,6 +82,47 @@ func TestGenerationPermissionsSharesPoolsAndPreservesUnknown(t *testing.T) {
 		t.Fatal("known free pools unavailable")
 	}
 }
+
+func TestGenerationPermissionsPreservesExplicitVeoAudioDefaults(t *testing.T) {
+	c := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		var body struct {
+			Features []struct {
+				FeatureID string         `json:"featureId"`
+				Params    map[string]any `json:"params"`
+			} `json:"features"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		wantAudio := map[string]bool{
+			"firefly_3p:external:veo_3_1_lite":          false,
+			"firefly_3p:external:veo_3_fast":            false,
+			"firefly_3p:external:gemini_omni_flash_1_1": true,
+			"firefly_3p:external:gemini_omni_flash_1_2": true,
+		}
+		for _, feature := range body.Features {
+			want, hasAudioContract := wantAudio[feature.FeatureID]
+			got, present := feature.Params["generateAudio"]
+			if hasAudioContract {
+				if !present || got != want {
+					t.Fatalf("%s default audio missing or changed: %v", feature.FeatureID, feature.Params)
+				}
+				delete(wantAudio, feature.FeatureID)
+			} else if present {
+				t.Fatalf("unexpected audio parameter for %s", feature.FeatureID)
+			}
+		}
+		if len(wantAudio) != 0 {
+			t.Fatalf("missing model features: %v", wantAudio)
+		}
+		raw, _ := json.Marshal(entitlementFixture())
+		return jsonResponse(200, string(raw)), nil
+	})})
+	if _, err := c.GenerationPermissions(context.Background(), fixtureAccount(t)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerationPermissionsRejectsIncompleteAndPaidProfiles(t *testing.T) {
 	for _, kind := range []string{"missing", "duplicate", "missing_auth", "missing_resource", "paid"} {
 		t.Run(kind, func(t *testing.T) {

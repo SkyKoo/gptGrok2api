@@ -139,7 +139,9 @@ func (c *Client) GenerationPermissions(ctx context.Context, a Account) (Generati
 				params["videoResolution"] = m.Resolution
 			}
 			for _, v := range m.Variants {
-				if v.Audio || m.DefaultAudio {
+				// Veo requires an explicit silent default even when its free
+				// variants do not permit audio generation.
+				if m.ModelID == "veo" || v.Audio || m.DefaultAudio {
 					params["generateAudio"] = m.DefaultAudio
 					break
 				}

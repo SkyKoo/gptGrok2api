@@ -21,12 +21,13 @@
     "test:account-progress-layout": "node --experimental-strip-types --test scripts/account-progress-layout.test.mjs",
     "test:cpa-binding": "node --experimental-strip-types --test scripts/cpa-binding.test.mjs",
     "test:registration-channel-isolation": "node --experimental-strip-types --test scripts/registration-channel-isolation.test.mjs",
-    "test:adobe-media": "node --experimental-strip-types --test scripts/adobe-media-capabilities.test.mjs scripts/adobe-account-quotas.test.mjs scripts/adobe-account-relogin.test.mjs scripts/adobe-account-auto-refresh.test.mjs scripts/adobe-relogin-tracker.test.mjs",
+    "test:adobe-media": "node --experimental-strip-types --test scripts/adobe-media-capabilities.test.mjs scripts/adobe-account-quotas.test.mjs scripts/adobe-account-relogin.test.mjs scripts/adobe-account-auto-refresh.test.mjs scripts/adobe-relogin-tracker.test.mjs scripts/adobe-free-parameters.test.mjs",
     "test:adobe-ui": "node scripts/adobe-ui-smoke.mjs",
     "test:adobe-relogin-ui": "node scripts/adobe-relogin-ui-smoke.mjs",
     "test:proxy-binding-ui": "node scripts/proxy-binding-ui-smoke.mjs",
     "test:adobe-recovery-ui": "node scripts/adobe-recovery-ui-smoke.mjs",
-    "test:adobe-registration-ui": "node scripts/adobe-registration-ui-smoke.mjs"
+    "test:adobe-registration-ui": "node scripts/adobe-registration-ui-smoke.mjs",
+    "test:adobe-free-parameters-ui": "node scripts/adobe-free-parameters-ui-smoke.mjs"
   },
   "devDependencies": {
     "@iconify/vue": "^5.0.0",

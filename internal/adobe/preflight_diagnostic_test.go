@@ -33,11 +33,11 @@ func TestExactPreflightRefusalDiagnosticsRemainFreeOnly(t *testing.T) {
 				if request["generateAudio"] != true || request["duration"] != float64(8) || request["resolution"] != "1080p" || len(refs) != 1 || request["referenceBlobs"] != nil {
 					t.Fatal("preflight did not preserve the exact audio/reference request")
 				}
-				body := permissionFixture("firefly_3p:external:veo_3_fast", tc.resource, tc.authorization, tc.consumed)
+				body := permissionFixture("firefly_3p:external:veo_3_1_lite", tc.resource, tc.authorization, tc.consumed)
 				body = strings.ReplaceAll(body, "quota_available", tc.reason)
 				return jsonResponse(200, body), nil
 			})})
-			permission, err := client.PreflightVideo(context.Background(), fixtureAccount(t), VideoRequest{Model: "veo-3.1-fast", Prompt: "PRIVATE_PROMPT", Width: 1920, Height: 1080, Duration: 8, Resolution: "1080p", AspectRatio: "16:9", GenerateAudio: true, References: []ReferenceImage{referenceFixture(t, 16, 9)}})
+			permission, err := client.PreflightVideo(context.Background(), fixtureAccount(t), VideoRequest{Model: "veo-3.1-lite", Prompt: "PRIVATE_PROMPT", Width: 1920, Height: 1080, Duration: 8, Resolution: "1080p", AspectRatio: "16:9", GenerateAudio: true, References: []ReferenceImage{referenceFixture(t, 16, 9)}})
 			d := PreflightDiagnosticFromError(err)
 			if err == nil || permission.Free || calls != 1 || d == nil || d.ErrorCode != tc.wantCode || d.ResourceType != tc.wantResource || d.Authorization != tc.wantAuthorization || d.ReasonCode != tc.wantReason || !d.FeatureMatch {
 				t.Fatalf("unexpected exact refusal: diagnostic=%+v error=%v", d, err)

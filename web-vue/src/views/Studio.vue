@@ -162,7 +162,7 @@
 
 <script setup lang="ts">
 import { mediaCapability } from '@/lib/mediaCapabilities'
-import { DEFAULT_VIDEO_OPTIONS, normalizeStudioVideoOptions, validateStudioReferenceCount } from '@/lib/studioMedia'
+import { DEFAULT_VIDEO_OPTIONS, normalizeStudioVideoOptions, studioVideoSelection, validateStudioReferenceCount } from '@/lib/studioMedia'
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
 import { computed, defineAsyncComponent, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -232,16 +232,21 @@ const referenceRuntime = useStudioReferenceRuntime({
     composerRuntime.composeMode.value === 'search' ? 'image' : composerRuntime.composeMode.value,
     composerRuntime.composeMode.value === 'video' ? videoForm.model || 'grok-imagine-video' : modelFormRuntime.imageForm.model,
     count,
+    composerRuntime.composeMode.value === 'video'
+      ? studioVideoSelection(videoForm)
+      : composerRuntime.composeMode.value === 'image'
+        ? { size: modelFormRuntime.imageForm.size, quality: modelFormRuntime.imageForm.quality, count: modelFormRuntime.imageForm.n }
+        : undefined,
   ),
 })
 const persistedConversationState = loadStudioConversationPersistenceState()
-const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0 })
-watch([modelFormRuntime.videoModelOptions, modelFormRuntime.catalog, () => videoForm.model], (values, previous) => {
+const modelFormRuntime = useStudioModelFormRuntime({ settingsStore, hasReferences: () => referenceRuntime.references.value.length > 0, referenceCount: () => referenceRuntime.references.value.length })
+watch([modelFormRuntime.videoModelOptions, modelFormRuntime.catalog, () => videoForm.model, () => referenceRuntime.references.value.length], (values, previous) => {
   const models = modelFormRuntime.videoModelOptions.value
   if (models.length && !models.includes(videoForm.model || '')) videoForm.model = models[0]
   const capability = mediaCapability(videoForm.model || '')
   if (!capability) return
-  Object.assign(videoForm, normalizeStudioVideoOptions(videoForm, capability, values[2] !== previous?.[2] ? 'model' : undefined))
+  Object.assign(videoForm, normalizeStudioVideoOptions(videoForm, capability, values[2] !== previous?.[2] ? 'model' : undefined, referenceRuntime.references.value.length))
 }, { immediate: true })
 
 const composeMode = composerRuntime.composeMode

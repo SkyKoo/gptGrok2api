@@ -1,4 +1,4 @@
-import { mediaCapability } from '@/lib/mediaCapabilities'
+import { matchingMediaVariants, mediaCapability } from '@/lib/mediaCapabilities'
 import { resolveStudioImageModel } from '@/lib/studioMedia'
 import { computed, reactive, ref, watch } from 'vue'
 import {
@@ -20,9 +20,11 @@ import type { useSettingsStore } from '@/stores/settings'
 export type StudioModelFormRuntimeInput = {
   settingsStore: ReturnType<typeof useSettingsStore>
   hasReferences: () => boolean
+  referenceCount?: () => number
 }
 
 export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
+  const referenceCount = () => input.referenceCount?.() ?? (input.hasReferences() ? 1 : 0)
   const { chatModels, chatModelLabels, modelLabels, modelAliases, imageModels, imageEditModels, videoModels, catalog, loadModelCatalog, loadError, isLoading } = useModelCatalog(() => input.settingsStore.settings)
   const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
   const chatReasoningEffort = ref(getStringPreference(preferenceKeys.studioChatReasoningEffort, ''))
@@ -46,14 +48,16 @@ export function useStudioModelFormRuntime(input: StudioModelFormRuntimeInput) {
         ? (mediaCapability(model)?.max_reference_images ?? 8) > 0 && (!model.startsWith('grok-') || model === 'grok-imagine-image-edit')
         : model !== 'grok-imagine-image-edit')
   })
-  watch([imageModelOptions, () => input.hasReferences(), () => imageForm.model], () => {
+  watch([imageModelOptions, referenceCount, () => imageForm.model], () => {
     imageForm.model = resolveStudioImageModel(imageForm.model, input.hasReferences(), imageModelOptions.value)
     const capability = mediaCapability(imageForm.model)
-    if (capability?.qualities?.length && !capability.qualities.includes(imageForm.quality)) imageForm.quality = capability.qualities[0]!
-    const maxCount = capability?.max_count ?? (Math.max(0, ...(capability?.variants || []).map(item => item.max_count || 0)) || (imageForm.model === 'grok-imagine-image-edit' ? 2 : 10))
+    const variants = capability ? matchingMediaVariants(capability, { references: referenceCount() }) : []
+    const qualities = [...new Set(variants.flatMap(variant => variant.qualities || []))]
+    if (qualities.length && !qualities.includes(imageForm.quality)) imageForm.quality = qualities[0]!
+    const maxCount = Math.max(0, ...variants.map(item => item.max_count || 0)) || capability?.max_count || (imageForm.model === 'grok-imagine-image-edit' ? 2 : 10)
     imageForm.n = Math.min(input.hasReferences() ? Math.min(maxCount, 2) : maxCount, imageForm.n)
-    const sizes = resolveImageSizePresets(imageForm.model)
-    if (!sizes.some(item => item.value === imageForm.size)) imageForm.size = sizes[0]?.value || DEFAULT_IMAGE_SIZE
+    const sizes = resolveImageSizePresets(imageForm.model, referenceCount())
+    if (sizes.length && !sizes.some(item => item.value === imageForm.size)) imageForm.size = sizes[0]!.value
   }, { immediate: true, flush: 'sync' })
 
   watch(modelAliases, (aliases) => {

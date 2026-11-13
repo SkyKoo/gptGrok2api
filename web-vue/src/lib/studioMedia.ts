@@ -1,24 +1,25 @@
-import { mediaCapability, mediaReferenceLimit, validateMediaCombination, type MediaCapability, type MediaVariant } from './mediaCapabilities.ts'
+import { matchingMediaVariants, mediaCapability, mediaReferenceLimit, validateMediaCombination, type MediaCapability, type MediaSelection, type MediaVariant } from './mediaCapabilities.ts'
 export const GROK_IMAGE_REFERENCE_LIMIT = 5
 export const GROK_VIDEO_REFERENCE_LIMIT = 7
 
-export function studioReferenceLimit(mode: string, imageModel: string) {
-  const confirmed = mediaReferenceLimit(imageModel)
+export function studioReferenceLimit(mode: string, imageModel: string, selection?: MediaSelection) {
+  const confirmed = mediaReferenceLimit(imageModel, selection)
   if ((mode === 'video' || mode === 'image') && confirmed !== undefined) return confirmed
   if (mode === 'video') return GROK_VIDEO_REFERENCE_LIMIT
   if (mode === 'image' && imageModel.startsWith('grok-')) return GROK_IMAGE_REFERENCE_LIMIT
   return 8
 }
 
-export function studioReferenceCountError(mode: string, imageModel: string, count: number) {
-  const limit = studioReferenceLimit(mode, imageModel)
+export function studioReferenceCountError(mode: string, imageModel: string, count: number, selection?: MediaSelection) {
+  const limit = studioReferenceLimit(mode, imageModel, selection)
   if (count <= limit) return ''
-  const label = mode === 'video' ? '当前视频模型' : mode === 'image' && imageModel.startsWith('grok-') ? 'Grok 生图' : '当前模式'
+  if (limit === 0 && selection) return '当前参数不支持参考图，请调整参数或移除参考图。'
+  const label = selection ? '当前参数' : mode === 'video' ? '当前视频模型' : mode === 'image' && imageModel.startsWith('grok-') ? 'Grok 生图' : '当前模式'
   return `${label}最多支持 ${limit} 张参考图，当前 ${count} 张，请减少参考图数量`
 }
 
-export function validateStudioReferenceCount(mode: string, imageModel: string, count: number) {
-  const error = studioReferenceCountError(mode, imageModel, count)
+export function validateStudioReferenceCount(mode: string, imageModel: string, count: number, selection?: MediaSelection) {
+  const error = studioReferenceCountError(mode, imageModel, count, selection)
   if (error) throw new Error(error)
 }
 
@@ -66,8 +67,8 @@ export const DEFAULT_VIDEO_OPTIONS: StudioVideoOptions = { model: 'grok-imagine-
 
 type VideoSelectionKey = 'size' | 'resolution' | 'seconds' | 'audio'
 
-function videoVariants(capability: MediaCapability): MediaVariant[] {
-  return capability.variants?.length ? capability.variants : [capability]
+export function studioVideoSelection(options: StudioVideoOptions): MediaSelection {
+  return { size: options.size, resolution: options.resolution, seconds: options.seconds, audio: options.audio }
 }
 function hasValue<T>(values: T[] | undefined, value: T) {
   return !values?.length || values.includes(value)
@@ -80,9 +81,14 @@ function videoVariantMatches(variant: MediaVariant, options: StudioVideoOptions,
 }
 
 // Preserve valid user selections while moving all dependent fields to one supported combination.
-export function normalizeStudioVideoOptions(options: StudioVideoOptions, capability?: MediaCapability, changed?: VideoSelectionKey | 'model'): StudioVideoOptions {
+export function normalizeStudioVideoOptions(options: StudioVideoOptions, capability?: MediaCapability, changed?: VideoSelectionKey | 'model', references = 0): StudioVideoOptions {
   if (!capability) return { ...options }
-  const variants = videoVariants(capability)
+  const referenceVariants = matchingMediaVariants(capability, { references })
+  const requestedAudio = options.audio ?? capability.default_audio ?? capability.audio_required ?? false
+  const audioVariants = referenceVariants.filter(variant => videoVariantMatches(variant, { ...options, audio: requestedAudio }, 'audio'))
+  // Preserve explicit audio and references. An unsupported model switch stays invalid
+  // until the user changes the input; it must not silently submit a silent video.
+  const variants = audioVariants.length ? audioVariants : referenceVariants
   const preferred = changed && changed !== 'model' ? variants.filter(variant => videoVariantMatches(variant, options, changed)) : variants
   const candidates = preferred.length ? preferred : variants
   const keys: VideoSelectionKey[] = ['size', 'resolution', 'seconds', 'audio']
@@ -90,29 +96,29 @@ export function normalizeStudioVideoOptions(options: StudioVideoOptions, capabil
   const selected = candidates.reduce<MediaVariant | undefined>((best, variant) => !best || score(variant) > score(best) ? variant : best, undefined)
   if (!selected) return { ...options }
   const choose = <T>(values: T[] | undefined, value: T) => hasValue(values, value) ? value : values![0]!
-  const requestedAudio = changed === 'model' || options.audio === undefined ? selected.default_audio ?? capability.default_audio ?? false : options.audio
   return {
     ...options,
     size: choose(selected.sizes, options.size),
     resolution: choose(selected.resolutions, options.resolution),
     seconds: choose(selected.durations, options.seconds),
-    audio: selected.audio_required ? true : selected.audio ? requestedAudio : false,
+    audio: selected.audio_required ? true : requestedAudio,
   }
 }
 
 // Size is the first choice; resolution, duration and audio follow that supported branch.
-export function studioVideoSettingValues(options: StudioVideoOptions, capability: MediaCapability) {
-  const variants = videoVariants(capability)
+export function studioVideoSettingValues(options: StudioVideoOptions, capability: MediaCapability, references = 0) {
+  const referenceVariants = matchingMediaVariants(capability, { references })
+  const variants = options.audio ? referenceVariants.filter(variant => variant.audio) : referenceVariants
   const bySize = variants.filter(variant => hasValue(variant.sizes, options.size))
   const byResolution = bySize.filter(variant => hasValue(variant.resolutions, options.resolution))
-  const byDuration = byResolution.filter(variant => hasValue(variant.durations, options.seconds))
+  const byDuration = referenceVariants.filter(variant => hasValue(variant.sizes, options.size) && hasValue(variant.resolutions, options.resolution) && hasValue(variant.durations, options.seconds))
   const unique = <T>(values: T[]) => [...new Set(values)]
   return {
     sizes: unique(variants.flatMap(variant => variant.sizes || [])),
     resolutions: unique(bySize.flatMap(variant => variant.resolutions || [])),
-    durations: unique(byResolution.flatMap(variant => variant.durations || [])),
-    audio: unique(byDuration.flatMap(variant => variant.audio_required ? [true] : variant.audio ? [false, true] : [false])),
-    hasAudio: byDuration.some(variant => variant.audio),
+    durations: unique(byResolution.flatMap(variant => variant.durations || [])).sort((a, b) => a - b),
+    audio: byDuration.length ? unique(byDuration.flatMap(variant => variant.audio_required ? [true] : variant.audio ? [false, true] : [false])) : options.audio ? [false] : [],
+    hasAudio: options.audio === true || byDuration.some(variant => variant.audio),
   }
 }
 

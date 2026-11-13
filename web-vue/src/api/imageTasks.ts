@@ -1,4 +1,4 @@
-import { mediaCapability } from '@/lib/mediaCapabilities'
+import { matchingMediaVariants, mediaCapability } from '@/lib/mediaCapabilities'
 import apiClient from './client'
 
 export type ImageTaskStatus = 'queued' | 'running' | 'success' | 'error'
@@ -205,14 +205,18 @@ export function supportsHighResolutionImageSizes(model: string) {
   return value.includes('codex-gpt-image-2') || value.includes('gpt-image-2-codex')
 }
 
-export function resolveImageSizePresets(model: string): ImageSizePreset[] {
+export function resolveImageSizePresets(model: string, references = 0): ImageSizePreset[] {
   const value = String(model || '').toLowerCase()
   const capability = mediaCapability(model)
-  const sizes = capability?.sizes?.length ? capability.sizes : [...new Set(capability?.variants?.flatMap(variant => variant.sizes || []) || [])]
+  const variants = capability ? matchingMediaVariants(capability, { references }) : []
+  if (capability && !variants.length) return []
+  const sizes = capability?.variants?.length
+    ? [...new Set(variants.flatMap(variant => variant.sizes || []))]
+    : capability?.sizes || []
   if (sizes.length) return sizes.map(size => {
     if (size === 'auto') return AUTO_IMAGE_SIZE_PRESET[0]!
     const [width = 1024, height = 1024] = size.split('x').map(Number)
-    const variant = capability?.variants?.find(item => item.sizes?.includes(size) && item.aspect_ratios?.length === 1)
+    const variant = variants.find(item => item.sizes?.includes(size) && item.aspect_ratios?.length === 1)
     const divisor = gcd(width, height)
     const ratio = variant?.aspect_ratios?.[0] || `${width / divisor}:${height / divisor}`
     const declaredResolution = variant?.resolutions?.length === 1 ? variant.resolutions[0] : undefined

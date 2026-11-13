@@ -12,7 +12,7 @@
     <form
       class="chat-input-panel"
       :class="{ 'is-dragging': isDragging }"
-      @submit.prevent="$emit('submit')"
+      @submit.prevent="submitMessage"
       @dragenter.prevent="handleDragEnter"
       @dragover.prevent="handleDragOver"
       @dragleave="handleDragLeave"
@@ -47,8 +47,8 @@
             </div>
           </div>
 
-          <p v-if="canAttachReferences" class="px-3 text-xs" :class="referenceError ? 'text-red-500' : 'text-muted-foreground'" :role="referenceError ? 'alert' : undefined">
-            {{ referenceError || `参考图 ${references.length}/${referenceLimit} 张` }}
+          <p v-if="canAttachReferences" class="px-3 text-xs" :class="composerError ? 'text-red-500' : 'text-muted-foreground'" :role="composerError ? 'alert' : undefined">
+            {{ composerError || (referenceLimit === 0 ? '当前参数仅支持文字生成' : `参考图 ${references.length}/${referenceLimit} 张`) }}
           </p>
 
           <textarea
@@ -59,7 +59,7 @@
             :placeholder="placeholderText"
             @input="resizeTextarea"
             @paste="handlePaste"
-            @keydown.enter.exact.prevent="$emit('submit')"
+            @keydown.enter.exact.prevent="submitMessage"
           ></textarea>
         </div>
 
@@ -132,6 +132,7 @@
                   <div class="studio-size-label">模型</div>
                   <GroupedSelectMenu v-model="videoModelValue" :options="videoModelSelectOptions" selected-indicator="none" block />
                 </div>
+                <p v-if="composerError" class="text-xs text-red-500" role="alert">{{ composerError }}</p>
                 <div v-for="group in videoSettingGroups" :key="group.key" class="studio-video-field">
                   <span class="studio-video-label">{{ group.label }}</span>
                   <div class="studio-video-choices">
@@ -146,7 +147,7 @@
                     >{{ option.label }}</Button>
                   </div>
                 </div>
-                <p class="studio-size-current">选项按模型可用能力显示；分辨率为请求档位，实际输出以上游结果为准。</p>
+                <p class="studio-size-current">选项随参考图和音频设置调整；实际输出以上游结果为准。</p>
               </div>
             </div>
             <template v-else-if="mode === 'image'">
@@ -268,8 +269,8 @@
               v-else
               type="submit"
               class="chat-input-send"
-              :class="text.trim() && !isSending && !referenceError ? 'chat-input-send-ready' : 'chat-input-send-idle'"
-              :disabled="isSending || !text.trim() || !!referenceError"
+              :class="text.trim() && !isSending && !composerError ? 'chat-input-send-ready' : 'chat-input-send-idle'"
+              :disabled="isSending || !text.trim() || !!composerError"
               :aria-label="mode === 'image' ? '提交图片任务' : mode === 'video' ? '提交视频任务' : '发送消息'"
               @click.stop
             >
@@ -304,8 +305,8 @@ import {
   resolveImageSizePresets,
   type ImageSizeResolution,
 } from '@/api/imageTasks'
-import { type MediaCapability } from '@/lib/mediaCapabilities'
-import { normalizeStudioVideoOptions, studioVideoSettingValues, studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
+import { matchingMediaVariants, mediaCombinationError, type MediaCapability } from '@/lib/mediaCapabilities'
+import { normalizeStudioVideoOptions, studioVideoSelection, studioVideoSettingValues, studioReferenceLimit, studioReferenceCountError, VIDEO_DURATION_OPTIONS, VIDEO_SIZE_OPTIONS, VIDEO_PRESET_OPTIONS, type StudioVideoOptions } from '@/lib/studioMedia'
 import type { StudioComposeMode, StudioImageForm, StudioReference } from './types'
 
 type ComposerMenuItem = ActionMenuItem & {
@@ -331,8 +332,16 @@ const props = defineProps<{
   isEditing: boolean
 }>()
 
-const referenceLimit = computed(() => studioReferenceLimit(props.mode, props.mode === 'video' ? props.videoForm.model || 'grok-imagine-video' : props.imageForm.model))
-const referenceError = computed(() => studioReferenceCountError(props.mode, props.mode === 'video' ? props.videoForm.model || 'grok-imagine-video' : props.imageForm.model, props.references.length))
+const selectedMediaModel = computed(() => props.mode === 'video' ? props.videoForm.model || 'grok-imagine-video' : props.imageForm.model)
+const mediaSelection = computed(() => props.mode === 'video' ? studioVideoSelection(props.videoForm)
+  : props.mode === 'image' ? { size: props.imageForm.size, quality: props.imageForm.quality, count: props.imageForm.n } : undefined)
+const referenceLimit = computed(() => { void props.mediaCapabilities; return studioReferenceLimit(props.mode, selectedMediaModel.value, mediaSelection.value) })
+const referenceError = computed(() => { void props.mediaCapabilities; return studioReferenceCountError(props.mode, selectedMediaModel.value, props.references.length, mediaSelection.value) })
+const composerError = computed(() => {
+  const parameterError = mediaSelection.value
+    ? mediaCombinationError(props.mediaCapabilities?.[selectedMediaModel.value], { ...mediaSelection.value, references: props.references.length }) : ''
+  return parameterError || referenceError.value
+})
 
 const emit = defineEmits<{
   'update:mode': [mode: StudioComposeMode]
@@ -353,6 +362,10 @@ const emit = defineEmits<{
   'preview-reference': [reference: StudioReference]
   'open-prompts': []
 }>()
+
+function submitMessage() {
+  if (!props.isSending && !props.isStreaming && props.text.trim() && !composerError.value) emit('submit')
+}
 
 const composerShellRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
@@ -429,11 +442,11 @@ const videoModelValue = computed({
 const videoModelSelectOptions = computed(() => (props.videoModelOptions || []).map(model => ({ label: props.chatModelLabels?.[model] || model, value: model })))
 const videoCapabilities = computed(() => props.mediaCapabilities?.[videoModelValue.value])
 const imageCapabilities = computed(() => props.mediaCapabilities?.[props.imageForm.model])
-const imageQualityOptions = computed(() => IMAGE_QUALITY_OPTIONS.filter(option => !imageCapabilities.value?.qualities?.length || imageCapabilities.value.qualities.includes(option.value)))
-const imageCountOptions = computed(() => IMAGE_COUNT_OPTIONS.filter(option => option.value <= Math.min(props.references.length ? 2 : 10, imageCapabilities.value?.max_count ?? (Math.max(0, ...(imageCapabilities.value?.variants || []).map(item => item.max_count || 0)) || 10))))
+const imageQualityOptions = computed(() => IMAGE_QUALITY_OPTIONS.filter(option => !imageCapabilities.value || matchingMediaVariants(imageCapabilities.value, { quality: option.value, references: props.references.length }).length))
+const imageCountOptions = computed(() => IMAGE_COUNT_OPTIONS.filter(option => option.value <= (props.references.length ? 2 : 10) && (!imageCapabilities.value || matchingMediaVariants(imageCapabilities.value, { count: option.value, references: props.references.length }).length)))
 const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }>>(() => {
   const capability = videoCapabilities.value
-  const values = capability ? studioVideoSettingValues(props.videoForm, capability) : undefined
+  const values = capability ? studioVideoSettingValues(props.videoForm, capability, props.references.length) : undefined
   const groups: Array<{ key: keyof StudioVideoOptions; label: string; options: Array<{ label: string; value: string }> }> = [
     { key: 'size', label: '尺寸', options: values?.sizes.map(value => ({ label: value, value })) || VIDEO_SIZE_OPTIONS },
     { key: 'resolution', label: '分辨率', options: (values?.resolutions || ['480p', '720p']).map(value => ({ label: value, value })) },
@@ -441,15 +454,15 @@ const videoSettingGroups = computed<Array<{ key: keyof StudioVideoOptions; label
   ]
   if (videoModelValue.value.startsWith('grok-')) groups.push({ key: 'preset', label: '风格', options: VIDEO_PRESET_OPTIONS })
   if (values?.hasAudio) groups.push({ key: 'audio', label: '音频', options: values.audio.map(value => ({ label: value ? '生成音频' : '无音频', value: String(value) })) })
-  return groups
+  return groups.filter(group => group.options.length > 0)
 })
 const videoSummaryLabel = computed(() => `${props.chatModelLabels?.[videoModelValue.value] || videoModelValue.value} · ${props.videoForm.seconds} 秒 · ${props.videoForm.resolution}`)
 function selectVideoSetting(key: keyof StudioVideoOptions, value: string) {
   const changed = { ...props.videoForm, [key]: key === 'seconds' ? Number(value) : key === 'audio' ? value === 'true' : value }
-  emit('update:videoForm', normalizeStudioVideoOptions(changed, videoCapabilities.value, key === 'preset' ? undefined : key))
+  emit('update:videoForm', normalizeStudioVideoOptions(changed, videoCapabilities.value, key === 'preset' ? undefined : key, props.references.length))
 }
 
-const sizePresets = computed(() => { void props.mediaCapabilities; return resolveImageSizePresets(props.imageForm.model) })
+const sizePresets = computed(() => { void props.mediaCapabilities; return resolveImageSizePresets(props.imageForm.model, props.references.length) })
 const selectedPreset = computed(() => sizePresets.value.find((preset) => preset.value === props.imageForm.size))
 const selectedRatio = computed(() => selectedPreset.value?.ratio || 'auto')
 const selectedResolution = computed(() => selectedPreset.value?.resolution || 'auto')

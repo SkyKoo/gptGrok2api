@@ -213,7 +213,7 @@ func TestAdobeUnsupportedCombinationNeverSelectsAccount(t *testing.T) {
 }
 func TestAdobeVideoFreeParameters(t *testing.T) {
 	good := "model=veo-3.1-lite&seconds=8&resolution_name=1080p&size=1920x1080&generate_audio=false"
-	for _, q := range []string{good, strings.Replace(good, "seconds=8", "seconds=4", 1), strings.Replace(good, "1080p", "720p", 1), strings.Replace(good, "false", "invalid", 1), good + "&preset=normal", good + "&provider=adobe"} {
+	for _, q := range []string{good, strings.Replace(good, "seconds=8", "seconds=5", 1), strings.Replace(good, "1080p", "720p", 1), strings.Replace(good, "false", "invalid", 1), good + "&preset=normal", good + "&provider=adobe"} {
 		r := httptest.NewRequest("POST", "/v1/videos", nil)
 		r.Form, _ = url.ParseQuery(q)
 		_, err := parseVideoOptions(r)
