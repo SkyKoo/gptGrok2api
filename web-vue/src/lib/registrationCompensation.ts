@@ -25,14 +25,13 @@ export function registrationHasSuccessor(job: RegistrationRecoveryActions): bool
   return Boolean(job.retry_job_id || job.auto_retry?.state === 'superseded')
 }
 
-// Explicit server permission permits a new manual flow even when the old
-// submission is unknown. It never grants automatic retry or replaces a result.
+// The server checks saved accounts, active work and the shared mailbox budget.
+// Explicit permission opens a new environment without replaying the old flow.
 export function adobeManualReregistration(job: RegistrationRecoveryActions, target?: string): boolean {
   return target === 'adobe' && job.can_reregister === true
     && ['registration_pending', 'failed', 'interrupted', 'cancelled'].includes(job.status || '')
     && !registrationHasSuccessor(job) && !job.imported && !job.can_retry
-    && job.creation_outcome !== 'accepted'
-    && job.recovery_mode !== 'saved_result' && job.recovery_mode !== 'resume_session'
+    && job.recovery_mode !== 'saved_result'
 }
 
 export function adobeReregistrationCooldown(job: RegistrationRecoveryActions, now: number): { blocked: boolean; text: string } {
@@ -56,7 +55,7 @@ export function registrationRecoveryAction(job: RegistrationRecoveryActions, tar
 }
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 可重试的注册失败最多自动补偿 3 次，复用原邮箱，在独立浏览器环境中重新注册；同一邮箱共用次数和冷却。失败后可点击“手动重新注册”，用原邮箱启动新的注册流程，旧失败记录保留；创建结果未知时停止自动重试。已明确创建账号的任务继续验证，已保存凭据只补入库或校验。安全验证仍须通过 Adobe 校验。'
+  if (target === 'adobe') return 'Adobe 注册失败或未完成且未保存账号时，系统释放邮箱预占用；再次执行前重新预占。同一邮箱共用自动补偿次数和冷却，最多自动补偿 3 次，创建结果未知时停止自动重试。可点击“手动重新注册”，用原邮箱和当前注册出口，在全新浏览器环境中开始；旧任务和历史次数保留。已保存账号只补入库或校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'
@@ -122,7 +121,7 @@ export function registrationJobStatusText(status: string, state?: RegistrationCo
   if (target === 'adobe') {
     if (retryJobId || state?.state === 'superseded') return '已发起后续重试'
     if (['registration_pending', 'failed', 'interrupted'].includes(status)) {
-      if (recoveryMode === 'resume_session') return '账号待验证'
+      if (recoveryMode === 'resume_session') return '注册未完成'
       if (recoveryMode === 'saved_result') return '账号已创建，等待入库 / 校验'
       return '注册失败'
     }

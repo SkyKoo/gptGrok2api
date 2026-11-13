@@ -18,8 +18,8 @@ func TestSubmissionDiagnosticRetainsSafeFailureEvidence(t *testing.T) {
 	}{
 		{"timeout", `{"error_code":"timeout_error","message":"PRIVATE_BODY"}`, "PRIVATE_HEADER", "timeout_error", "top_error_code", "unknown", "adobe_submit_timeout_error (HTTP 408)", 408, 2, 0, true},
 		{"taste", `{"code":"access_error","message":"PRIVATE_BODY"}`, "taste_exhausted", "access_error", "top_code", "taste_exhausted", "adobe_submit_access_error (HTTP 403)", 403, 1, 1, false},
-		{"nested", `{"error":{"error_code":"timeout_error","message":"PRIVATE_BODY"}}`, "", "timeout_error", "nested_error_code", "", "adobe_submit_http_error (HTTP 408)", 408, 2, 0, true},
-		{"nested_code", `{"error":{"code":"access_error","message":"PRIVATE_BODY"}}`, "", "access_error", "nested_code", "", "adobe_submit_access_denied (HTTP 403)", 403, 2, 0, false},
+		{"nested", `{"error":{"error_code":"timeout_error","message":"PRIVATE_BODY"}}`, "", "timeout_error", "nested_error_code", "", "adobe_submit_timeout_error (HTTP 408)", 408, 2, 0, true},
+		{"nested_code", `{"error":{"code":"access_error","message":"PRIVATE_BODY"}}`, "", "access_error", "nested_code", "", "adobe_submit_access_error (HTTP 403)", 403, 2, 0, false},
 		{"untrusted", `{"error_code":"PRIVATE_CODE","code":"PRIVATE_CODE","error":{"code":"PRIVATE_CODE"}}`, "taste_exhausted PRIVATE_HEADER", "http_error", "http_status", "unknown", "adobe_submit_http_error (HTTP 408)", 408, 2, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

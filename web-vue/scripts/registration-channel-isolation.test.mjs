@@ -240,3 +240,22 @@ test('Adobe save sends only its own config, task settings and mail source', asyn
  assert.deepEqual(payload.mail, { source_id: 'adobe-mail' })
  assert.deepEqual(Object.keys(payload.adobe).sort(), ['api_base', 'api_key', 'api_key_set', 'request_timeout'])
 })
+
+
+test('Adobe mailbox cleanup errors refresh and stay isolated across channel changes', t => {
+ const h = harness(t), s = h.state, incoming = h.incoming('adobe')
+ incoming.target_runtime.adobe.mailbox_cleanup_error = 'mailbox: reservation_release_failed'
+ s.applyRuntimeConfig(incoming)
+ s.setTarget('adobe')
+ assert.equal(s.config.value.mailbox_cleanup_error, 'mailbox: reservation_release_failed')
+ for (const target of ['openai', 'grok']) {
+  s.setTarget(target)
+  assert.equal(s.config.value.mailbox_cleanup_error || '', '')
+ }
+ s.setTarget('adobe')
+ assert.equal(s.config.value.mailbox_cleanup_error, 'mailbox: reservation_release_failed')
+ incoming.target_runtime.adobe.mailbox_cleanup_error = ''
+ s.applyRuntimeConfig(incoming)
+ assert.equal(s.config.value.mailbox_cleanup_error, '')
+ assert.equal(h.calls.length, 0)
+})

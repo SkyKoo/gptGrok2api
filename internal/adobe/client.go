@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -134,7 +135,7 @@ func (c *Client) request(ctx context.Context, stage, method, endpoint string, a 
 
 func knownResponseCode(code string) bool {
 	switch code {
-	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request", "timeout_error":
+	case "access_error", "rate_limit_exceeded", "insufficient_credits", "content_policy_violation", "authentication_error", "invalid_request", "timeout_error", "video_unsafe":
 		return true
 	}
 	return false
@@ -159,6 +160,13 @@ func requestDiagnostic(resp *http.Response, started time.Time, code, source stri
 			d.AccessError = access
 		}
 	}
+	if candidate, source := responseErrorCode(data); candidate != "" {
+		d.ErrorCode, d.ErrorSource = candidate, source
+	}
+	return d
+}
+
+func responseErrorCode(data map[string]any) (string, string) {
 	for _, candidate := range []struct{ code, source string }{
 		{str(data["error_code"]), "top_error_code"},
 		{str(data["code"]), "top_code"},
@@ -166,19 +174,14 @@ func requestDiagnostic(resp *http.Response, started time.Time, code, source stri
 		{str(object(data["error"])["code"]), "nested_code"},
 	} {
 		if knownResponseCode(candidate.code) {
-			d.ErrorCode, d.ErrorSource = candidate.code, candidate.source
-			break
+			return candidate.code, candidate.source
 		}
 	}
-	return d
+	return "", ""
 }
 
 func responseCode(status int, data map[string]any) string {
-	code, _ := data["error_code"].(string)
-	if code == "" {
-		code, _ = data["code"].(string)
-	}
-	if knownResponseCode(code) {
+	if code, _ := responseErrorCode(data); code != "" {
 		return code
 	}
 	switch status {
@@ -410,6 +413,13 @@ func (c *Client) Poll(ctx context.Context, a Account, j Job) (Job, error) {
 	}
 	d, h, err := c.request(ctx, "poll", http.MethodGet, j.PollURL, a, nil, nil)
 	if err != nil {
+		var upstream *Error
+		// This exact terminal response was observed on an existing Adobe job.
+		// A bare 451, transport error or another code does not prove completion.
+		if j.Kind == "video" && errors.As(err, &upstream) && upstream.Status == http.StatusUnavailableForLegalReasons && upstream.Code == "video_unsafe" {
+			j.Status, j.OutputURLs, j.PollDiagnostic = "FAILED", nil, upstream.Diagnostic
+			return j, nil
+		}
 		return j, err
 	}
 	status := strings.ToUpper(str(d["status"]))

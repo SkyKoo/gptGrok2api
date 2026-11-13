@@ -124,7 +124,7 @@ func (f adobeStageFailureFlow) Register(_ context.Context, _ string, _ Mailbox, 
 	return nil, fail("adobe", "fixture_failure")
 }
 
-func TestAdobeCreationOutcomeControlsMailboxReservation(t *testing.T) {
+func TestAdobeFailureReleasesReservationRegardlessOfCreationOutcome(t *testing.T) {
 	for _, outcome := range []string{"not_submitted", "rejected", "accepted", "unknown"} {
 		t.Run(outcome, func(t *testing.T) {
 			mail := &adobeReleaseMailbox{box: Mailbox{ID: "asset", Email: "fixture@example.test"}}
@@ -136,10 +136,7 @@ func TestAdobeCreationOutcomeControlsMailboxReservation(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitAdobe(t, engine)
-			want := 0
-			if outcome == "not_submitted" || outcome == "rejected" {
-				want = 1
-			}
+			want := 1
 			if mail.releases != want || calls.Load() != 1 {
 				t.Fatalf("release=%d want=%d", mail.releases, want)
 			}
@@ -148,7 +145,7 @@ func TestAdobeCreationOutcomeControlsMailboxReservation(t *testing.T) {
 }
 func (adobeStageFailureFlow) Close() {}
 
-func TestAdobeFailureReleaseStopsAtBrowserSubmissionBoundary(t *testing.T) {
+func TestAdobeFailureReleasesReservationAfterEveryBrowserStage(t *testing.T) {
 	for _, stage := range []string{"waiting_browser", "starting_browser", "adobe_flow_started", "awaiting_verification"} {
 		t.Run(stage, func(t *testing.T) {
 			mail := &adobeReleaseMailbox{box: Mailbox{ID: "asset", Email: "fixture@example.test"}}
@@ -160,10 +157,7 @@ func TestAdobeFailureReleaseStopsAtBrowserSubmissionBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			waitAdobe(t, engine)
-			want := 0
-			if stage == "waiting_browser" || stage == "starting_browser" {
-				want = 1
-			}
+			want := 1
 			if mail.releases != want || calls.Load() != 1 {
 				t.Fatalf("releases=%d calls=%d", mail.releases, calls.Load())
 			}

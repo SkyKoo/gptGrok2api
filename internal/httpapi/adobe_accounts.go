@@ -337,24 +337,23 @@ func (s *Server) importRegisteredAdobeAccount(ctx context.Context, jobID string,
 		return err
 	}
 	a.Enabled = false
+	a.AccountID = strings.TrimSpace(a.AccountID)
 	a.RegistrationJobID = jobID
+	var commit func() error
 	if s.mailboxStore != nil && len(a.RegistrationMailbox) > 0 {
 		var box registerruntime.Mailbox
 		raw, _ := json.Marshal(a.RegistrationMailbox)
 		if err = json.Unmarshal(raw, &box); err != nil {
 			return err
 		}
-		if err = s.mailboxStore.Commit(ctx, "adobe", jobID, "adobe:"+a.AccountID, mailboxFromRegister(box)); err != nil {
-			return err
+		commit = func() error {
+			if err := s.mailboxStore.PrepareRegistrationClaim(ctx, "adobe", jobID, "adobe:"+a.AccountID, mailboxFromRegister(box)); err != nil {
+				return err
+			}
+			return s.mailboxStore.CommitRegistration(ctx, "adobe", jobID, "adobe:"+a.AccountID, mailboxFromRegister(box))
 		}
 	}
-	// Recovery of an already imported registration must not replace a refreshed
-	// credential or re-disable an account whose verification already completed.
-	if existing, e := s.adobeStore.Get("adobe:" + a.AccountID); e == nil && existing.RegistrationJobID == jobID {
-		return nil
-	}
-	_, err = s.adobeStore.Import([]adobe.Account{a})
-	return err
+	return s.adobeStore.ImportRegistration(ctx, a, commit)
 }
 func (s *Server) verifyRegisteredAdobeAccount(ctx context.Context, jobID string, fields map[string]any) error {
 	a, err := s.adobeStore.Get("adobe:" + stringValue(fields["account_id"]))

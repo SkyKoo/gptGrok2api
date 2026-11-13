@@ -83,14 +83,19 @@ func (c *Client) preflight(ctx context.Context, a Account, m Model, payload map[
 	if err != nil {
 		return GenerationPermission{}, err
 	}
+	diagnostic := preflightDiagnostic(data, m.FeatureID)
+	failure := func(code string) error {
+		diagnostic.ErrorCode = code
+		return &Error{Stage: "preflight", Code: code, PreflightDiagnostic: diagnostic}
+	}
 	permission := GenerationPermission{FeatureID: str(data["featureId"])}
 	if permission.FeatureID == "" || permission.FeatureID != m.FeatureID {
-		return permission, &Error{Stage: "preflight", Code: "invalid_response"}
+		return permission, failure("invalid_response")
 	}
 	auth := object(data["authorizationResult"])
 	result := str(auth["result"])
 	if result == "" {
-		return permission, &Error{Stage: "preflight", Code: "invalid_response"}
+		return permission, failure("invalid_response")
 	}
 	if reason := str(auth["reasonCode"]); regexp.MustCompile(`^[a-z][a-z0-9_]{0,79}$`).MatchString(reason) {
 		permission.ReasonCode = reason
@@ -104,6 +109,11 @@ func (c *Client) preflight(ctx context.Context, a Account, m Model, payload map[
 		permission.Free = permission.Authorized
 	}
 	permission.Cost = finiteNumber(selected["computedCost"])
+	// Reject a paid or unavailable selection before inspecting a quota whose
+	// resource type was intentionally not admitted into the free permission.
+	if !permission.Free {
+		return permission, failure("free_entitlement_unavailable")
+	}
 	ref := str(selected["effectiveQuotaReferenceId"])
 	quotas, _ := data["effectiveQuotas"].([]any)
 	for _, raw := range quotas {
@@ -112,7 +122,7 @@ func (c *Client) preflight(ctx context.Context, a Account, m Model, payload map[
 			continue
 		}
 		if str(q["resourceType"]) != permission.ResourceType {
-			return permission, &Error{Stage: "preflight", Code: "invalid_quota"}
+			return permission, failure("invalid_quota")
 		}
 		permission.Quota = &GenerationQuota{ReferenceID: ref, ResourceType: permission.ResourceType, Provisioned: finiteNumber(q["provisionedQuota"]), Consumed: finiteNumber(q["consumedQuota"])}
 		period := str(q["refreshPeriod"])
@@ -121,12 +131,9 @@ func (c *Client) preflight(ctx context.Context, a Account, m Model, payload map[
 		}
 		break
 	}
-	if !permission.Free {
-		return permission, &Error{Stage: "preflight", Code: "free_entitlement_unavailable"}
-	}
 	if q := permission.Quota; q != nil && q.Provisioned != nil && q.Consumed != nil && permission.Cost != nil && *q.Provisioned-*q.Consumed < *permission.Cost {
 		permission.Free = false
-		return permission, &Error{Stage: "preflight", Code: "free_quota_exhausted"}
+		return permission, failure("free_quota_exhausted")
 	}
 	return permission, nil
 }

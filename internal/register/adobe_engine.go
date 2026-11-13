@@ -36,6 +36,10 @@ type AdobeEngine struct {
 	loadError                  error
 	compensationError          string
 	reregistrationAccountCheck func(string) (bool, error)
+	activeJobs                 map[string]bool
+	mailboxCleanupError        string
+	prepareMailboxReservation  func(context.Context, RegistrationJob) error
+	releaseMailboxReservation  func(context.Context, RegistrationJob) error
 }
 
 func NewAdobeEngine(path, secret string, factory AdobeFactory, importer ImportAccount, verifier VerifyAccount) *AdobeEngine {
@@ -186,6 +190,7 @@ func (e *AdobeEngine) batch(ctx context.Context, cfg AdobeConfig, ids []string) 
 			for id := range jobs {
 				if ctx.Err() != nil {
 					e.failJob(id, ctx.Err())
+					e.releaseFailedAdobeMailboxReservation(id, nil)
 					continue
 				}
 				e.runTask(ctx, cfg, id)
@@ -215,14 +220,21 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	defer cancel()
 	e.mu.Lock()
 	e.active++
+	if e.activeJobs == nil {
+		e.activeJobs = map[string]bool{}
+	}
+	e.activeJobs[id] = true
 	e.mu.Unlock()
+	var activeMail MailSource
 	defer func() {
-		e.mu.Lock()
-		e.active--
-		e.mu.Unlock()
 		if recover() != nil {
 			e.failJob(id, fail("task", "internal_error"))
 		}
+		e.releaseFailedAdobeMailboxReservation(id, activeMail)
+		e.mu.Lock()
+		delete(e.activeJobs, id)
+		e.active--
+		e.mu.Unlock()
 	}()
 	failTask := func(err error) {
 		if ctx.Err() != nil {
@@ -232,6 +244,10 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	}
 	job, err := e.getJob(id)
 	if err == nil && len(job.Account) > 0 {
+		if err := e.prepareAdobeMailboxReservation(ctx, id); err != nil {
+			failTask(err)
+			return
+		}
 		if err := e.importAndVerify(ctx, id); err != nil {
 			failTask(err)
 		}
@@ -243,6 +259,12 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 	}
 	cfg.Profile = job.AdobeProfile.fields()
 	cfg.BrowserProfileID = adobeBrowserProfileID(job)
+	if job.ParentJobID != "" || (e.mediaFactory != nil && adobeMediaPreparationPending(job)) {
+		if err := e.prepareAdobeMailboxReservation(ctx, id); err != nil {
+			failTask(err)
+			return
+		}
+	}
 	if e.mediaFactory != nil && adobeMediaPreparationPending(job) {
 		if err := e.change(id, markAdobeMediaPreparation); err != nil {
 			failTask(err)
@@ -316,6 +338,7 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		failTask(err)
 		return
 	}
+	activeMail = mail
 	defer mail.Close()
 	defer flow.Close()
 	box := job.Mailbox
@@ -328,27 +351,6 @@ func (e *AdobeEngine) runTask(parent context.Context, cfg AdobeConfig, id string
 		failTask(err)
 		return
 	}
-	defer func() {
-		job, _ := e.getJob(id)
-		// Release only a proven unsubmitted or rejected attempt. Ancestor
-		// uncertainty and accepted creation continue holding the root claim.
-		if len(job.Account) > 0 || job.Imported || adobeRegistrationRecoveryMode(job) != "retry_registration" {
-			return
-		}
-		e.mu.Lock()
-		blocked := e.adobeMailboxCreationBlocked(job)
-		e.mu.Unlock()
-		if blocked {
-			return
-		}
-		if releaser, ok := mail.(interface {
-			Release(context.Context, Mailbox, string) error
-		}); ok {
-			releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			_ = releaser.Release(releaseCtx, box, "registration_not_submitted")
-		}
-	}()
 	cfg.creationProgress = func(observed adobeCreationObservation, registrationResponse bool) error {
 		return e.change(id, func(j *RegistrationJob) {
 			recordAdobeCreationOutcome(j, observed, registrationResponse)
@@ -455,12 +457,15 @@ func (e *AdobeEngine) completeRegisteredAccount(ctx context.Context, id string, 
 	}); err != nil {
 		return err
 	}
-	// Commit the upstream identity, not the registration task identifier.
-	if m, ok := mail.(interface {
-		Commit(context.Context, string, Mailbox) error
-	}); ok {
-		if err := m.Commit(ctx, "adobe:"+stringValue(account["account_id"]), box); err != nil {
-			return err
+	// Production import validates the saved account before atomically committing
+	// its exact local claim. Legacy embedders keep their MailSource contract.
+	if e.prepareMailboxReservation == nil {
+		if m, ok := mail.(interface {
+			Commit(context.Context, string, Mailbox) error
+		}); ok {
+			if err := m.Commit(ctx, "adobe:"+stringValue(account["account_id"]), box); err != nil {
+				return err
+			}
 		}
 	}
 	return e.importAndVerify(ctx, id)
@@ -502,6 +507,8 @@ func (e *AdobeEngine) acquire(ctx context.Context, id string, mail MailSource) (
 	})
 	if err != nil {
 		err = e.releaseUnstartedMailbox(mail, box, err)
+	} else {
+		err = e.prepareAdobeMailboxReservation(ctx, id)
 	}
 	return box, err
 }
@@ -735,7 +742,7 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 	if len(logs) > 200 {
 		logs = logs[len(logs)-200:]
 	}
-	result := map[string]any{"running": e.cancel != nil, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "compensation_error": e.compensationError, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": e.active, "threads": e.active}}
+	result := map[string]any{"running": e.cancel != nil, "jobs": jobs, "jobs_total": total, "jobs_page": page, "jobs_page_size": RegistrationHistoryPageSize, "logs": logs, "compensation_error": e.compensationError, "mailbox_cleanup_error": e.mailboxCleanupError, "stats": map[string]any{"success": success, "fail": failed, "done": success + failed, "running": e.active, "threads": e.active}}
 	if e.loadError != nil {
 		result["error"] = safeFailure(e.loadError)
 	}

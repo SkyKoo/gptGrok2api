@@ -8,6 +8,7 @@ import (
 	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,8 +39,51 @@ func (s *Server) initAdobeRegistration() {
 	s.adobeRegister.SetReregistrationAccountCheck(s.adobeReregistrationAccountExists)
 	s.adobeRegister.SetProxyRouting(&registerruntime.ProxyRouting{Manager: s.proxyManager})
 	s.adobeRegister.SetMediaFlowFactory(s.newAdobeMediaRegistrationFlow)
+	s.configureAdobeMailboxReservations()
 	s.adobeRegistrationSchedule = registerruntime.NewSchedule(filepath.Join(journalDir, "adobe_registration_schedule.json"))
 	_ = s.adobeRegistrationSchedule.BindTarget("adobe")
+}
+
+// Release and reacquisition are local resource operations. Holding the Adobe
+// account-store lock makes an imported account authoritative even when it has
+// not yet been manually associated with its mailbox asset.
+func (s *Server) configureAdobeMailboxReservations() {
+	if s.adobeRegister == nil || s.mailboxStore == nil || s.adobeStore == nil {
+		return
+	}
+	s.adobeRegister.SetMailboxReservationHandlers(
+		func(ctx context.Context, job registerruntime.RegistrationJob) error {
+			root := firstNonEmpty(job.RootJobID, job.ID)
+			accountID := ""
+			if len(job.Account) > 0 {
+				accountID = "adobe:" + stringValue(job.Account["account_id"])
+			}
+			prepare := func() error {
+				return s.mailboxStore.PrepareRegistrationClaim(ctx, "adobe", root, accountID, mailboxFromRegister(job.Mailbox))
+			}
+			if accountID != "" {
+				return s.adobeStore.WithRegistrationMailboxOwner(ctx, job.Mailbox.Email, root, accountID, prepare)
+			}
+			executed, err := s.adobeStore.WithoutEmailAccount(ctx, job.Mailbox.Email, prepare)
+			if err != nil {
+				return err
+			}
+			if !executed {
+				return adobe.ErrIdentity
+			}
+			return nil
+		},
+		func(ctx context.Context, job registerruntime.RegistrationJob) error {
+			_, err := s.adobeStore.WithoutEmailAccount(ctx, job.Mailbox.Email, func() error {
+				return s.mailboxStore.Release(ctx, "adobe", firstNonEmpty(job.RootJobID, job.ID), mailboxFromRegister(job.Mailbox), "registration_failed_without_account")
+			})
+			return err
+		})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.adobeRegister.ReconcileMailboxReservations(ctx); err != nil {
+		log.Printf("adobe failed mailbox reservation cleanup unavailable")
+	}
 }
 
 func (s *Server) newAdobeMediaRegistrationFlow(cfg registerruntime.AdobeConfig) registerruntime.AdobeRegistrationFlow {

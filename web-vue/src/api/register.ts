@@ -228,10 +228,11 @@ export type RegistrationTaskSettings = {
 export type LegacyRegisterConfig = {
   runtime_error?: string
   mail_source_id?: string
-  target_runtime?: Partial<Record<RegisterTarget, Pick<LegacyRegisterConfig, "enabled" | "stats" | "logs" | "jobs" | "jobs_total" | "jobs_page" | "jobs_page_size" | "runtime_error" | "compensation_error" | "registration_schedule">>>
+  target_runtime?: Partial<Record<RegisterTarget, Pick<LegacyRegisterConfig, "enabled" | "stats" | "logs" | "jobs" | "jobs_total" | "jobs_page" | "jobs_page_size" | "runtime_error" | "compensation_error" | "mailbox_cleanup_error" | "registration_schedule">>>
   target_settings?: Partial<Record<RegisterTarget, RegistrationTaskSettings>>
   registration_schedule?: RegistrationSchedule
   compensation_error?: string
+  mailbox_cleanup_error?: string
   openai_free: { timeout_seconds: number; auto_twofa?: boolean }
   jobs?: Array<{ id: string; parent_job_id?: string; root_job_id?: string; retry_job_id?: string; status: string; stage: string; error?: string; review_hint?: string; email: string; imported: boolean; verified: boolean; can_retry: boolean; can_retry_registration?: boolean; can_resume_registration?: boolean; can_reregister?: boolean; reregister_not_before?: string; recovery_mode?: RegistrationRecoveryMode; creation_outcome?: 'not_submitted' | 'rejected' | 'accepted' | 'unknown'; can_codex_oauth?: boolean; codex_oauth?: CodexOAuthTask | null; twofa?: { status: string; stage: string; message: string; error?: string; pending: boolean } | null; auto_retry?: RegistrationCompensation | null }>
   jobs_total?: number

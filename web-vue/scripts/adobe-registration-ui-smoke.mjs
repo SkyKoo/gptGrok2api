@@ -34,7 +34,7 @@ const jobs = [
   { ...base, id: 'waiting', can_reregister: true, error: 'adobe: verification_request_timeout', recovery_mode: 'retry_registration', auto_retry: waiting, review_hint: 'STALE_REVIEW_HINT' },
   { ...base, id: 'running', recovery_mode: 'resume_session', auto_retry: { ...waiting, state: 'running', attempts: 2 } },
   { ...base, id: 'exhausted', can_reregister: true, error: 'adobe: verification_dns_failed', auto_retry: { ...waiting, state: 'exhausted', attempts: 3 }, review_hint: 'STALE_EXHAUSTED_HINT' },
-  { ...base, id: 'resume', stage: 'adobe_restoring_registration_page', error: 'adobe: recovery_page_observation_timeout', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' },
+  { ...base, id: 'resume', can_reregister: true, stage: 'adobe_restoring_registration_page', error: 'adobe: recovery_page_observation_timeout', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' },
   { ...base, id: 'retry', can_reregister: true, can_retry_registration: true, recovery_mode: 'retry_registration' },
   { ...base, id: 'unknown', can_reregister: true, creation_outcome: 'unknown', error: 'adobe: human_verification_required', recovery_mode: 'result_uncertain', auto_retry: { ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, review_hint: 'STALE_UNKNOWN_HINT' },
   { ...base, id: 'unknown-synthetic', error: 'task: registration_result_uncertain', recovery_mode: 'result_uncertain', auto_retry: { ...waiting, state: 'manual', reason: 'registration_result_uncertain' } },
@@ -51,6 +51,7 @@ let releaseManualRequest
 const manualRequestGate = new Promise(resolve => { releaseManualRequest = resolve })
 const schedule = { enabled: false, interval_minutes: 60 }
 const register = { target: 'adobe', total: 1, threads: 1, mode: 'total', enabled: false, mail: { source_id: 'mail', providers: [{ id: 'mail', type: 'icloud_hme', enable: true, label: 'fixture' }] }, target_settings: Object.fromEntries(['openai', 'grok', 'adobe'].map(target => [target, { total: 1, threads: 1, mode: 'total', mail_source_id: 'mail', proxy: 'direct' }])), target_runtime: Object.fromEntries(['openai', 'grok', 'adobe'].map(target => [target, { enabled: false, stats: {}, logs: [], jobs: target === 'adobe' ? jobs : [], jobs_total: target === 'adobe' ? jobs.length : 0, registration_schedule: schedule }])) }
+register.target_runtime.adobe.mailbox_cleanup_error = 'mailbox: reservation_release_failed'
 register.target_runtime.adobe.logs = [
   { action: 'manual_reregistration', detail: '原邮箱启动新流程', time: new Date().toISOString(), level: 'info' },
   { action: 'adobe_restoring_registration_page', detail: '继续原账号验证', time: new Date().toISOString(), level: 'info' },
@@ -86,12 +87,13 @@ try {
   await page.getByText('地区按本次注册出口自动选择，定位失败时使用美国；生日按 25–50 岁随机生成。验证码由所选邮箱来源自动接收，注册成功后自动加入 Adobe 账号池。', { exact: true }).waitFor()
   await page.getByText('手动重新注册 · 原邮箱启动新流程', { exact: true }).waitFor()
   await page.getByText('恢复原注册页面 · 继续原账号验证', { exact: true }).waitFor()
+  await page.getByText(/部分失败任务的邮箱预占用尚未释放.*核对现有邮箱/).waitFor()
   await job('waiting').getByText('fixture@example.test · 注册失败', { exact: true }).waitFor()
   await job('waiting').getByText(/等待自动重新注册.*1\/3.*分钟后执行/).waitFor()
   await job('waiting').getByText('人机验证组件加载失败：请求超时。', { exact: true }).waitFor()
   for (const hint of ['STALE_REVIEW_HINT', 'STALE_EXHAUSTED_HINT', 'STALE_UNKNOWN_HINT', 'STALE_PARENT_HINT']) assert.equal(await page.getByText(hint, { exact: true }).count(), 0)
   await job('running').getByText(/正在自动继续账号验证.*2\/3/).waitFor()
-  await job('running').getByText('fixture@example.test · 账号待验证', { exact: true }).waitFor()
+  await job('running').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
   await job('exhausted').getByText('fixture@example.test · 注册失败', { exact: true }).waitFor()
   await job('exhausted').getByText('自动重试次数已用完（3/3），已停止自动重试。', { exact: true }).waitFor()
   await job('exhausted').getByText('人机验证组件加载失败：域名解析失败。', { exact: true }).waitFor()
@@ -117,7 +119,7 @@ try {
   }
   await job('unknown').getByText('Adobe 人机验证未完成。', { exact: true }).waitFor()
   assert.equal(await job('unknown-synthetic').getByText('task: registration_result_uncertain', { exact: true }).count(), 0)
-  await job('challenge').getByText('fixture@example.test · 账号待验证', { exact: true }).waitFor()
+  await job('challenge').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
   await job('challenge').getByText('Adobe 人机验证未完成。', { exact: true }).waitFor()
   await job('challenge').getByText('当前错误不支持自动重试。', { exact: true }).waitFor()
   await job('cancelled').getByText('fixture@example.test · 已取消', { exact: true }).waitFor()
@@ -129,10 +131,11 @@ try {
   await job('parent').getByText('fixture@example.test · 已发起后续重试', { exact: true }).waitFor()
   assert.equal(await job('parent').getByRole('status').count(), 0)
   await job('saved').getByText('fixture@example.test · 等待入库', { exact: true }).waitFor()
-  await job('resume').getByText('fixture@example.test · 账号待验证', { exact: true }).waitFor()
+  await job('resume').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
   await job('resume').getByText('结束于：恢复原注册页面 · 入库未完成 · 校验未通过', { exact: true }).waitFor()
   await job('resume').getByText('恢复原浏览器页面超时，未能继续账号验证。', { exact: true }).waitFor()
-  assert.equal(await job('resume').getByText(/注册失败|创建失败|重新注册/).count(), 0)
+  assert.equal(await job('resume').getByText(/注册失败|创建失败/).count(), 0)
+  assert.equal(await job('resume').getByRole('button', { name: '手动重新注册', exact: true }).isEnabled(), true)
   await screenshot('adobe-registration-failure-desktop')
   assert.deepEqual(writes, [])
   await page.clock.runFor(61000)
@@ -148,14 +151,14 @@ try {
   await job('unknown').getByText('后续补偿任务 unknown-new', { exact: true }).waitFor()
   assert.equal(await job('unknown').getByRole('button').count(), 0)
   await job('unknown-new').getByText('补偿任务 unknown-new · 来源任务 unknown', { exact: true }).waitFor()
-  for (const [id, label, endpoint] of [['resume', '继续验证', 'retry-registration'], ['retry', '手动重新注册', 'reregister'], ['saved', '重试入库 / 校验', 'retry-result']]) {
+  for (const [id, label, endpoint] of [['resume', '手动重新注册', 'reregister'], ['retry', '手动重新注册', 'reregister'], ['saved', '重试入库 / 校验', 'retry-result']]) {
     const response = page.waitForResponse(result => result.url().endsWith('/api/register/adobe/' + endpoint) && result.request().method() === 'POST')
     await job(id).getByRole('button', { name: label, exact: true }).click()
     await response
   }
   assert.deepEqual(writes, [
     { path: '/api/register/adobe/reregister', body: { id: 'unknown' } },
-    { path: '/api/register/adobe/retry-registration', body: { id: 'resume' } },
+    { path: '/api/register/adobe/reregister', body: { id: 'resume' } },
     { path: '/api/register/adobe/reregister', body: { id: 'retry' } },
     { path: '/api/register/adobe/retry-result', body: { id: 'saved' } },
   ])

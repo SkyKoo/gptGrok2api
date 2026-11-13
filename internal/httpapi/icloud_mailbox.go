@@ -498,6 +498,11 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 			result["errors"] = append(result["errors"].([]string), "失败注册预留清理未完成")
 		}
 	}
+	if s.adobeRegister != nil {
+		if err := s.adobeRegister.ReconcileMailboxReservations(ctx); err != nil {
+			result["errors"] = append(result["errors"].([]string), "Adobe 失败注册预留清理未完成")
+		}
+	}
 	result["success"] = len(result["errors"].([]string)) == 0
 	writeJSON(w, http.StatusOK, result)
 }

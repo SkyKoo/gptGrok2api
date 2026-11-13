@@ -82,17 +82,20 @@ test('shared mailbox cooldown and merged retries have actionable errors', async 
   assert.match(registrationProxyFailureText('storage: account_lookup_failed'), /无法核对.*没有启动/)
 })
 
-test('Adobe failed attempts restart registration while accepted creations continue verification', async () => {
+test('Adobe failed attempts release reservations and manual restart uses a new environment', async () => {
   const { registrationCompensationHelp, registrationJobStatusText } = await import('../src/lib/registrationCompensation.ts')
-  assert.match(registrationCompensationHelp('adobe'), /最多自动补偿 3 次.*原邮箱.*独立浏览器环境.*共用次数和冷却.*手动重新注册.*新的注册流程.*旧失败记录保留.*未知时停止自动重试.*安全验证/)
+  const help = registrationCompensationHelp('adobe')
+  assert.match(help, /未保存账号.*释放邮箱预占用.*再次执行前重新预占/)
+  assert.match(help, /共用自动补偿次数和冷却.*最多自动补偿 3 次.*未知时停止自动重试/)
+  assert.match(help, /手动重新注册.*原邮箱.*当前注册出口.*全新浏览器环境.*旧任务和历史次数保留.*已保存账号只补入库/)
   const text = registrationCompensationText(waiting, false, now, 'adobe', 'resume_session')
   assert.match(text, /等待自动继续账号验证.*1\/3.*5 分钟后/)
   assert.match(registrationCompensationText({ ...waiting, state: 'running', attempts: 2 }, true, now, 'adobe', 'resume_session'), /正在自动继续账号验证.*2\/3/)
   assert.match(registrationCompensationText(waiting, false, now, 'adobe', 'retry_registration'), /等待自动重新注册.*1\/3/)
   assert.match(registrationCompensationText(waiting, true, now + 300000, 'adobe', 'resume_session'), /等待当前注册任务结束/)
-  assert.equal(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'resume_session'), '账号待验证')
+  assert.equal(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'resume_session'), '注册未完成')
   assert.equal(registrationJobStatusText('registration_pending', waiting, undefined, 'adobe', 'retry_registration'), '注册失败')
-  assert.match(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), /账号待验证/)
+  assert.match(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), /注册未完成/)
   assert.doesNotMatch(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe'), /人工处理/)
 })
 
@@ -143,18 +146,21 @@ test('Adobe manual restart is explicit and takes priority over the old registrat
   for (const target of ['grok', 'openai', undefined]) assert.equal(adobeManualReregistration(job, target), false)
 })
 
-test('Adobe manual restart cannot replace accepted, saved, active or superseded work', async () => {
+test('Adobe manual restart cannot replace saved, active or superseded work', async () => {
   const { adobeManualReregistration, registrationRecoveryAction } = await import('../src/lib/registrationCompensation.ts')
   const job = { status: 'failed', can_reregister: true, can_retry_registration: true, recovery_mode: 'retry_registration', creation_outcome: 'rejected' }
   for (const change of [
-    { creation_outcome: 'accepted' }, { imported: true }, { can_retry: true },
-    { recovery_mode: 'saved_result' }, { recovery_mode: 'resume_session' },
+    { imported: true }, { can_retry: true },
+    { recovery_mode: 'saved_result' },
     { status: 'running' }, { status: 'queued' }, { status: 'completed' },
     { retry_job_id: 'child' }, { auto_retry: { ...waiting, state: 'superseded' } },
   ]) assert.equal(adobeManualReregistration({ ...job, ...change }, 'adobe'), false, JSON.stringify(change))
   assert.equal(registrationRecoveryAction({ ...job, retry_job_id: 'child' }, 'adobe'), '')
   assert.equal(registrationRecoveryAction({ ...job, auto_retry: { ...waiting, state: 'superseded' } }, 'adobe'), '')
-  assert.equal(registrationRecoveryAction({ ...job, creation_outcome: 'accepted', recovery_mode: 'resume_session', can_resume_registration: true }, 'adobe'), '继续验证')
+  const accepted = { ...job, creation_outcome: 'accepted', recovery_mode: 'resume_session', can_resume_registration: true }
+  assert.equal(adobeManualReregistration(accepted, 'adobe'), true)
+  assert.equal(registrationRecoveryAction(accepted, 'adobe'), '手动重新注册')
+  assert.equal(registrationRecoveryAction({ ...accepted, can_reregister: false }, 'adobe'), '继续验证')
 })
 
 test('Adobe mailbox cooldown exposes local deadline without calling ordinary waiting an upstream limit', async () => {
@@ -188,7 +194,7 @@ test('Adobe final failure labels preserve accepted accounts and expose the actua
   const { registrationJobStatusText, registrationFailureText } = await import('../src/lib/registrationCompensation.ts')
   for (const status of ['registration_pending', 'failed', 'interrupted']) {
     assert.equal(registrationJobStatusText(status, undefined, undefined, 'adobe', 'retry_registration'), '注册失败')
-    assert.equal(registrationJobStatusText(status, undefined, undefined, 'adobe', 'resume_session'), '账号待验证')
+    assert.equal(registrationJobStatusText(status, undefined, undefined, 'adobe', 'resume_session'), '注册未完成')
   }
   assert.equal(registrationJobStatusText('cancelled', undefined, undefined, 'adobe', 'result_uncertain'), '已取消')
   assert.equal(registrationJobStatusText('cancelled', undefined, undefined, 'adobe', 'resume_session'), '已取消')
@@ -215,7 +221,7 @@ test('Adobe recovery-page failures describe page restoration without claiming ac
     assert.match(text, /恢复原浏览器页面/)
     assert.doesNotMatch(text, /创建失败|注册失败|重新注册|adobe:/)
   }
-  assert.equal(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), '账号待验证')
+  assert.equal(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), '注册未完成')
   assert.equal(registrationRecoveryAction({ status: 'registration_pending', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' }, 'adobe'), '继续验证')
   assert.equal(registrationFailureText('mail: timeout', 'adobe'), '未在规定时间内收到 Adobe 邮件验证码。')
 })

@@ -175,7 +175,7 @@ func (s *Server) updateRegisterConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "请先停止本渠道注册，再修改该渠道配置", "registration_running")
 		return
 	}
-	for _, key := range []string{"target_runtime", "enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
+	for _, key := range []string{"target_runtime", "enabled", "stats", "logs", "jobs", "runtime_error", "compensation_error", "mailbox_cleanup_error", "registration_schedule", "jobs_total", "jobs_page", "jobs_page_size"} {
 		delete(updates, key)
 	}
 	s.mergeAdobeWorkerKey(updates)

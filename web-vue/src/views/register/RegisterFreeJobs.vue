@@ -2,6 +2,7 @@
   <section class="register-free-jobs">
     <p class="text-xs text-muted-foreground mb-3">{{ registrationCompensationHelp(target) }}</p>
     <p v-if="compensationError" class="text-xs text-amber-600 mb-3">自动补偿暂缓：请检查已保存的批次和邮箱来源配置。</p>
+    <p v-if="target === 'adobe' && mailboxCleanupError" class="text-xs text-amber-600 mb-3" role="status">部分失败任务的邮箱预占用尚未释放，请在邮箱管理中执行“核对现有邮箱”重试；若仍失败，请检查邮箱资产服务。</p>
     <EmptyState v-if="!visibleJobs.length" plain title="暂无注册任务" description="启动注册后会在这里显示任务记录。" />
     <div v-for="job in visibleJobs" :key="job.id" class="border-b py-3 space-y-1 text-sm break-words" role="group" :aria-label="`注册任务 ${job.id}`">
       <p>{{ job.email || '等待分配邮箱' }} · {{ registrationJobStatusText(job.status, job.auto_retry, job.retry_job_id, target, job.recovery_mode) }}</p>
@@ -41,7 +42,7 @@ import { Button, EmptyState } from 'nanocat-ui'
 import { registerApi, type LegacyRegisterConfig } from '@/api/register'
 import { registrationProxyFailureText } from '@/lib/registrationProxy'
 import { registrationCompensationHelp, registrationCompensationText, registrationJobStatusText, registrationRecoveryAction, registrationFailureText, adobeManualReregistration, adobeReregistrationCooldown, registrationHasSuccessor } from '@/lib/registrationCompensation'
-const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; target?: 'openai' | 'grok' | 'adobe' }>()
+const props = defineProps<{ jobs: LegacyRegisterConfig['jobs']; total?: number; pageSize?: number; running: boolean; compensationError?: string; mailboxCleanupError?: string; target?: 'openai' | 'grok' | 'adobe' }>()
 const emit = defineEmits<{ (e: 'changed'): void }>()
 const now = ref(Date.now())
 const clock = setInterval(() => { now.value = Date.now() }, 1000)

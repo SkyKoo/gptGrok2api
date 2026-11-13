@@ -532,7 +532,7 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 	if mode != "saved_result" && !adobeSavedSourceMatches(parent, cfg) {
 		return fail("config", "saved_mailbox_source_unavailable")
 	}
-	if !adobeCompensationEnvironment(parent) {
+	if !manualReregister && !adobeCompensationEnvironment(parent) {
 		return fail("task", "saved_environment_missing")
 	}
 	if !manualReregister && parent.AutoRetry != nil && parent.AutoRetry.Reason == "duplicate_mailbox_retry" {
@@ -549,7 +549,7 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 		if i != index && (other.Status == "running" || other.Status == "queued") {
 			return fail("task", "already_running")
 		}
-		if mode == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
+		if !manualReregister && mode == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
 			return fail("task", "registration_result_uncertain")
 		}
 		if i != index && (other.Verified || other.Imported || len(other.Account) > 0) {
@@ -574,7 +574,9 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 	if parent.AutoRetry != nil && parent.AutoRetry.Attempts < 0 {
 		return fail("task", "invalid_retry_state")
 	}
-	ensureAdobeRegistrationState(&parent)
+	if !manualReregister {
+		ensureAdobeRegistrationState(&parent)
+	}
 	var job RegistrationJob
 	if mode == "retry_registration" {
 		var err error
@@ -583,7 +585,14 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 			return err
 		}
 		job.AdobeRegistration = &AdobeRegistrationState{BrowserProfileID: job.ID, CreationOutcome: "not_submitted", ManualReregistration: manualReregister}
-		if job.AdobeProfile != nil {
+		if manualReregister {
+			// A fresh administrator request needs no usable old browser/profile.
+			// Keep the old identity unchanged on the parent, including legacy nil.
+			job.AdobeProfile, err = newAdobeRegistrationProfile(now, rand.Reader)
+			if err != nil {
+				return err
+			}
+		} else if job.AdobeProfile != nil {
 			job.AdobeProfile.Country, job.AdobeProfile.CountrySource = "US", ""
 		}
 	} else {

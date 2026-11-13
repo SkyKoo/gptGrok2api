@@ -92,13 +92,11 @@ func TestAdobeManualReregistrationStartsFreshOnceAndPreservesUnknownHistory(t *t
 }
 
 func TestAdobeManualReregistrationRejectsProtectedMailboxStates(t *testing.T) {
-	for _, scenario := range []string{"accepted", "saved", "imported", "verified", "completed", "child_exists", "newer_leaf", "another_accepted", "another_saved", "invalid_cooldown", "negative_budget", "missing_source", "running"} {
+	for _, scenario := range []string{"saved", "imported", "verified", "completed", "child_exists", "newer_leaf", "another_saved", "another_completed", "invalid_cooldown", "negative_budget", "missing_source", "running"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := adobeReregisterFixture(t)
 			jobs := []RegistrationJob{job}
 			switch scenario {
-			case "accepted":
-				jobs[0].AdobeRegistration.CreationOutcome = "accepted"
 			case "saved":
 				jobs[0].Account = map[string]any{"account_id": "saved"}
 			case "imported":
@@ -120,8 +118,8 @@ func TestAdobeManualReregistrationRejectsProtectedMailboxStates(t *testing.T) {
 			default:
 				other := cloneJob(job)
 				other.ID, other.Mailbox.Email = "another-root", " EXISTING@EXAMPLE.TEST "
-				if scenario == "another_accepted" {
-					other.AdobeRegistration.CreationOutcome = "accepted"
+				if scenario == "another_completed" {
+					other.Status = "completed"
 				}
 				if scenario == "another_saved" {
 					other.Account = map[string]any{"account_id": "saved"}
@@ -141,6 +139,64 @@ func TestAdobeManualReregistrationRejectsProtectedMailboxStates(t *testing.T) {
 			after, _ := os.ReadFile(e.path)
 			if calls.Load() != 0 || string(before) != string(after) {
 				t.Fatal("rejected manual action changed the journal or reached Worker")
+			}
+		})
+	}
+}
+
+func TestAdobeManualReregistrationAcceptsFailedCreationWithoutOldEnvironment(t *testing.T) {
+	for _, outcome := range []string{"accepted", "unknown", "rejected", "legacy"} {
+		t.Run(outcome, func(t *testing.T) {
+			parent := adobeReregisterFixture(t)
+			parent.AdobeProfile = nil
+			parent.AdobeRegistration.ProxyRecorded = false
+			parent.AdobeRegistration.Proxy = "http://old.invalid:8080"
+			parent.ProxyBinding = &proxyruntime.Binding{Reference: "node:removed/old", Platform: "adobe", Purpose: "registration"}
+			parent.AdobeRegistration.CreationOutcome = outcome
+			if outcome == "rejected" {
+				parent.AdobeRegistration.CreationErrorCode, parent.AdobeRegistration.CreationHTTPStatus = "captcha_required", 400
+			}
+			if outcome == "legacy" {
+				parent.AdobeRegistration = nil
+			}
+			mail := &adobeCompensationMail{}
+			var observed AdobeConfig
+			var calls atomic.Int32
+			e := NewAdobeEngine(filepath.Join(t.TempDir(), "journal"), "fixture", func(cfg AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
+				observed = cfg
+				return mail, adobeCompensationFlow{run: func(context.Context, AdobeConfig, Progress) (map[string]any, error) {
+					calls.Add(1)
+					return nil, fail("adobe", "worker_result_unknown")
+				}}, nil
+			}, nil, nil)
+			seedAdobeCompensation(t, e, parent)
+			if e.Snapshot()["jobs"].([]any)[0].(map[string]any)["can_reregister"] != true {
+				t.Fatal("missing old browser environment hid explicit fresh registration")
+			}
+			cfg := adobeTestConfig()
+			cfg["proxy"] = "http://current.invalid:8080"
+			if err := e.Reregister(cfg, parent.ID); err != nil {
+				t.Fatal(err)
+			}
+			waitAdobe(t, e)
+			child := latestAdobe(t, e, parent.ID)
+			original, _ := e.getJob(parent.ID)
+			if calls.Load() != 1 || observed.Proxy != "http://current.invalid:8080" || observed.BrowserProfileID != child.ID || observed.RecoveryMode != "retry_registration" {
+				t.Fatal("manual request did not use exactly one fresh profile with the current route")
+			}
+			if child.AdobeProfile == nil || child.AdobeProfile.Country != "US" || child.AdobeProfile.CountrySource != "" || child.ProxyBinding != nil {
+				t.Fatal("fresh attempt depended on the old identity or proxy binding")
+			}
+			first, last := adobeBirthdayBounds(time.Now())
+			birth := time.Date(child.AdobeProfile.BirthYear, time.Month(child.AdobeProfile.BirthMonth), child.AdobeProfile.BirthDay, 0, 0, 0, 0, time.UTC)
+			if birth.Before(first) || birth.After(last) {
+				t.Fatal("new profile is outside the configured adult age range")
+			}
+			if original.AdobeProfile != nil || !reflect.DeepEqual(original.AdobeRegistration, parent.AdobeRegistration) || !reflect.DeepEqual(original.ProxyBinding, parent.ProxyBinding) || original.Error != parent.Error || original.Logs[0] != parent.Logs[0] {
+				t.Fatal("fresh attempt modified the old creation evidence")
+			}
+			if child.Mailbox != parent.Mailbox || child.RootJobID != parent.ID || mail.claim.Load() != parent.ID || child.AutoRetry.Attempts != 3 {
+				t.Fatal("fresh attempt changed mailbox ownership or automatic budget")
 			}
 		})
 	}

@@ -128,7 +128,7 @@ func (s *Server) registrationSnapshotForTarget(target string) map[string]any {
 	states := map[string]any{}
 	for name, state := range map[string]map[string]any{"openai": s.freeRegister.Snapshot(), "grok": s.grokRegister.Snapshot(), "adobe": s.adobeRegistrationSnapshot()} {
 		runtime := map[string]any{"enabled": state["running"], "runtime_error": state["error"], "registration_schedule": s.registrationScheduleSnapshot(name)}
-		for _, key := range []string{"stats", "logs", "jobs", "compensation_error", "jobs_total", "jobs_page", "jobs_page_size"} {
+		for _, key := range []string{"stats", "logs", "jobs", "compensation_error", "mailbox_cleanup_error", "jobs_total", "jobs_page", "jobs_page_size"} {
 			runtime[key] = state[key]
 		}
 		states[name] = runtime

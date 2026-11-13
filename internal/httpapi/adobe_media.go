@@ -113,6 +113,9 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 	}
 	selected.Adobe = fresh
 	if _, err := s.adobeClient.PreflightImage(ctx, selected.Adobe, request); err != nil {
+		if diagnostic := adobe.PreflightDiagnosticFromError(err); diagnostic != nil {
+			s.enrichRequestMonitor(r, map[string]any{"metrics": map[string]any{"adobe_preflight_diagnostic": diagnostic}})
+		}
 		s.invalidateRejectedAdobeMediaSession(selected.Adobe, err)
 		s.adobeStore.Release(selected.Key)
 		return nil, adobeAPIError(err)
@@ -195,7 +198,7 @@ func adobeTerminal(status string) bool {
 }
 func (s *Server) pollAdobeJob(ctx context.Context, a adobe.Account, key string, job adobe.Job, progress func(int)) (adobe.Job, error) {
 	refreshed := false
-	if a.ExpiresAt <= time.Now().Add(time.Minute).Unix() {
+	if !adobeTerminal(job.Status) && a.ExpiresAt <= time.Now().Add(time.Minute).Unix() {
 		var err error
 		a, err = s.adobeStore.RefreshTask(ctx, s.adobeClient, key, a.ID)
 		if err != nil {
@@ -207,8 +210,10 @@ func (s *Server) pollAdobeJob(ctx context.Context, a adobe.Account, key string, 
 	for {
 		if adobeTerminal(job.Status) {
 			if job.Status != "COMPLETED" {
-				s.adobeStore.Release(key)
-				return job, &adobe.Error{Stage: "poll", Code: "generation_failed", Status: 422}
+				if err := s.adobeStore.Release(key); err != nil {
+					return job, fmt.Errorf("could not release terminal Adobe task reservation")
+				}
+				return job, adobeAPIError(adobe.TerminalPollError(job))
 			}
 			return job, nil
 		}
@@ -437,6 +442,9 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	}
 	a = fresh
 	if _, err := s.adobeClient.PreflightVideo(ctx, a, request); err != nil {
+		if diagnostic := adobe.PreflightDiagnosticFromError(err); diagnostic != nil {
+			s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"adobe_preflight_diagnostic": diagnostic}})
+		}
 		s.invalidateRejectedAdobeMediaSession(a, err)
 		s.adobeStore.Release(key)
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "free_generation_unavailable", "message": adobe.SafeError(err)})
@@ -479,17 +487,26 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	s.finishAdobeVideo(ctx, job, a, handle)
 }
 func (s *Server) finishAdobeVideo(ctx context.Context, job *videoJob, a adobe.Account, handle adobe.Job) {
-	var egressErr error
-	ctx, egressErr = s.adobeAccountContext(ctx, a)
-	if egressErr != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_proxy_unavailable", "message": adobe.SafeError(egressErr)})
-		return
+	// A persisted rejection only needs local settlement. Completed jobs still
+	// require the selected egress for downloading, as do all nonterminal polls.
+	if !adobeTerminal(handle.Status) || handle.Status == "COMPLETED" {
+		var egressErr error
+		ctx, egressErr = s.adobeAccountContext(ctx, a)
+		if egressErr != nil {
+			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_proxy_unavailable", "message": adobe.SafeError(egressErr)})
+			return
+		}
 	}
 
 	key := job.Route.JobKey
 	handle, err := s.pollAdobeJob(ctx, a, key, handle, func(progress int) { s.setVideoStatus(job, "in_progress", progress, nil) })
 	if err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_poll_failed", "message": err.Error()})
+		code := "upstream_poll_failed"
+		if handle.Status == "FAILED" && adobe.TerminalPollError(handle).Code == "video_unsafe" {
+			code = "video_unsafe"
+			s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"adobe_poll_diagnostic": handle.PollDiagnostic}})
+		}
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": code, "message": err.Error()})
 		return
 	}
 	if len(handle.OutputURLs) != 1 {

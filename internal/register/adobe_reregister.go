@@ -11,8 +11,9 @@ func (e *AdobeEngine) SetReregistrationAccountCheck(check func(string) (bool, er
 }
 
 // Reregister is an explicit administrator action for a failed attempt. Unlike
-// recovery, it starts a new signup without treating an unknown prior result as
-// proof of failure. The original result and automatic no-replay rules remain.
+// recovery, it starts a new signup even when a prior attempt was accepted or its
+// result is unknown. This explicit choice does not change the old creation
+// evidence, authorize automatic replay, or allow replacing a saved account.
 func (e *AdobeEngine) Reregister(raw map[string]any, id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -55,14 +56,11 @@ func (e *AdobeEngine) adobeReregistrationEligibleLocked(index int) error {
 	if !adobeCompensationPending(parent) {
 		return fail("task", "no_saved_mailbox")
 	}
-	if !adobeCompensationEnvironment(parent) {
-		return fail("task", "saved_environment_missing")
-	}
 	for i, other := range e.jobs {
 		if grokMailboxKey(other.Mailbox.Email) != grokMailboxKey(parent.Mailbox.Email) {
 			continue
 		}
-		if len(other.Account) > 0 || other.Imported || other.Verified || adobeCreationOutcome(other) == "accepted" {
+		if len(other.Account) > 0 || other.Imported || other.Verified || other.Status == "completed" {
 			return fail("task", "mailbox_already_has_saved_account")
 		}
 		if other.Status == "running" || other.Status == "queued" {

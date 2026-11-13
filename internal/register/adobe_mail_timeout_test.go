@@ -79,8 +79,8 @@ func TestAdobeMailWaitDeadlineRetainsAcceptedAccountAndRecovery(t *testing.T) {
 			if got.Error != tc.wantError || got.Status != "registration_pending" || got.Stage != "awaiting_verification" {
 				t.Fatalf("failure classification: error=%q status=%q stage=%q", got.Error, got.Status, got.Stage)
 			}
-			if adobeCreationOutcome(got) != "accepted" || adobeRegistrationRecoveryMode(got) != "resume_session" || len(got.Account) != 0 || mail.releases != 0 {
-				t.Fatal("mail wait failure changed creation evidence, released its claim, or saved an unverified account")
+			if adobeCreationOutcome(got) != "accepted" || adobeRegistrationRecoveryMode(got) != "resume_session" || len(got.Account) != 0 || mail.releases != 1 {
+				t.Fatal("mail wait failure changed creation evidence, failed to release its reservation, or saved an unverified account")
 			}
 			if got.AutoRetry == nil || got.AutoRetry.State != tc.wantState || got.AutoRetry.Attempts != 0 {
 				t.Fatalf("changed recovery policy: %+v", got.AutoRetry)

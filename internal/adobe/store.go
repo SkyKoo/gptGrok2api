@@ -207,6 +207,10 @@ func (s *Store) BindProxy(id string, binding proxyruntime.Binding, reason string
 func (s *Store) Import(items []Account) ([]Account, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.importLocked(items)
+}
+
+func (s *Store) importLocked(items []Account) ([]Account, error) {
 	d, err := s.load()
 	if err != nil {
 		return nil, err

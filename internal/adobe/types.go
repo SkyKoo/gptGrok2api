@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -143,22 +144,35 @@ type Job struct {
 	Progress             float64               `json:"progress"`
 	OutputURLs           []string              `json:"output_urls,omitempty"`
 	SubmissionDiagnostic *SubmissionDiagnostic `json:"submission_diagnostic,omitempty"`
+	PollDiagnostic       *SubmissionDiagnostic `json:"poll_diagnostic,omitempty"`
 }
 
 // Error never includes response bodies, URLs, headers, prompts or credentials.
 type Error struct {
-	Stage             string
-	Code              string
-	Status            int
-	SubmissionUnknown bool
-	Diagnostic        *SubmissionDiagnostic
-	MediaDiagnostic   *MediaPreparationDiagnostic
+	Stage               string
+	Code                string
+	Status              int
+	SubmissionUnknown   bool
+	Diagnostic          *SubmissionDiagnostic
+	MediaDiagnostic     *MediaPreparationDiagnostic
+	PreflightDiagnostic *PreflightDiagnostic
 }
 
 func (e *Error) Error() string {
 	message := "adobe_" + e.Stage + "_" + e.Code
 	if e.Status > 0 {
 		message += fmt.Sprintf(" (HTTP %d)", e.Status)
+	}
+	if e.Stage == "poll" && e.Code == "video_unsafe" {
+		message += "：Adobe 视频安全检查未通过，原任务已终止，不会自动重试；额度是否返还需以重新查询为准。"
+	}
+	if e.Stage == "preflight" {
+		switch e.Code {
+		case "free_entitlement_unavailable":
+			message += "：Adobe 未授权本次参数组合使用免费额度，未提交生成。"
+		case "free_quota_exhausted":
+			message += "：Adobe 本次请求对应的免费额度不足，未提交生成。"
+		}
 	}
 	if e.Code == "media_session_incomplete" {
 		if diagnostic := SanitizeMediaPreparationDiagnostic(e.MediaDiagnostic); diagnostic != nil {
@@ -172,6 +186,15 @@ func (e *Error) Error() string {
 		}
 	}
 	return message
+}
+
+// TerminalPollError preserves a known rejection across task persistence and
+// background polling without inferring a cause from an HTTP status alone.
+func TerminalPollError(j Job) *Error {
+	if d := j.PollDiagnostic; j.Status == "FAILED" && d != nil && d.HTTPStatus == http.StatusUnavailableForLegalReasons && d.ErrorCode == "video_unsafe" {
+		return &Error{Stage: "poll", Code: "video_unsafe", Status: d.HTTPStatus, Diagnostic: d}
+	}
+	return &Error{Stage: "poll", Code: "generation_failed", Status: http.StatusUnprocessableEntity}
 }
 func SafeError(err error) string {
 	var e *Error

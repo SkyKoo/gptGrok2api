@@ -20,7 +20,7 @@ import (
 const adobeReregisterFixtureKey = "reregister-fixture-key"
 const adobeReregisterFixtureID = "unknown-adobe-registration"
 
-func adobeReregisterServer(t *testing.T) (*Server, string, *atomic.Int32, <-chan registerruntime.AdobeConfig) {
+func adobeReregisterServer(t *testing.T, changes ...func(*registerruntime.RegistrationJob)) (*Server, string, *atomic.Int32, <-chan registerruntime.AdobeConfig) {
 	t.Helper()
 	s := scheduleServer(t)
 	_, err := s.registerStore.Update(map[string]any{"mail": map[string]any{"providers": []any{
@@ -39,6 +39,9 @@ func adobeReregisterServer(t *testing.T) (*Server, string, *atomic.Int32, <-chan
 	}
 	job.CreatedAt = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)
 	job.UpdatedAt = job.CreatedAt
+	for _, change := range changes {
+		change(&job)
+	}
 	plain, err := json.Marshal([]registerruntime.RegistrationJob{job})
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +68,45 @@ func adobeReregisterServer(t *testing.T) (*Server, string, *atomic.Int32, <-chan
 	}, nil, nil)
 	s.adobeRegister.SetReregistrationAccountCheck(s.adobeReregistrationAccountExists)
 	return s, path, calls, observed
+}
+
+func TestAdobeReregisterAPIAcceptsCreatedButUnsavedAccountWithoutOldEnvironment(t *testing.T) {
+	s, path, calls, observed := adobeReregisterServer(t, func(job *registerruntime.RegistrationJob) {
+		job.AdobeProfile = nil
+		job.AdobeRegistration.CreationOutcome = "accepted"
+		job.AdobeRegistration.BrowserProfileID = ""
+		job.AdobeRegistration.ProxyRecorded = false
+		job.Error = "adobe: media_session_incomplete"
+	})
+	before := readAdobeReregisterJobs(t, path)[0]
+	response := adminRequest(s.Handler(), http.MethodGet, "/api/register/adobe/jobs", nil)
+	var snapshot struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &snapshot) != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0]["can_reregister"] != true {
+		t.Fatal("unsaved accepted attempt did not expose explicit fresh registration")
+	}
+	response = adminRequest(s.Handler(), http.MethodPost, "/api/register/adobe/reregister", strings.NewReader(`{"id":"`+adobeReregisterFixtureID+`"}`))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("fresh registration rejected due to missing prior environment: HTTP %d", response.Code)
+	}
+	waitAdobeReregisterIdle(t, s)
+	jobs := readAdobeReregisterJobs(t, path)
+	if len(jobs) != 2 || calls.Load() != 1 || !reflect.DeepEqual(jobs[0].AdobeRegistration, before.AdobeRegistration) || jobs[0].AdobeProfile != nil || jobs[0].Error != before.Error {
+		t.Fatal("explicit action lost old evidence or created multiple attempts")
+	}
+	child := jobs[1]
+	if child.AdobeProfile == nil || child.AdobeRegistration.BrowserProfileID != child.ID || !child.AdobeRegistration.ManualReregistration || child.AutoRetry.Attempts != before.AutoRetry.Attempts || child.Mailbox != before.Mailbox || child.RootJobID != before.ID {
+		t.Fatal("fresh child did not preserve root ownership and budget with a new profile")
+	}
+	select {
+	case cfg := <-observed:
+		if cfg.RecoveryMode != "retry_registration" || cfg.BrowserProfileID != child.ID {
+			t.Fatal("explicit API request resumed the previous environment")
+		}
+	default:
+		t.Fatal("fresh attempt did not reach the offline factory")
+	}
 }
 
 func readAdobeReregisterJobs(t *testing.T, path string) []registerruntime.RegistrationJob {

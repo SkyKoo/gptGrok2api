@@ -21,10 +21,10 @@ export type RegisterConfigRuntimeInput = {
   startLiveUpdates?: () => void
 }
 const TARGETS: RegisterTarget[] = ['openai', 'grok', 'adobe']
-const RUNTIME_KEYS = ['enabled', 'stats', 'logs', 'jobs', 'jobs_total', 'jobs_page', 'jobs_page_size', 'runtime_error', 'compensation_error', 'registration_schedule'] as const
+const RUNTIME_KEYS = ['enabled', 'stats', 'logs', 'jobs', 'jobs_total', 'jobs_page', 'jobs_page_size', 'runtime_error', 'compensation_error', 'mailbox_cleanup_error', 'registration_schedule'] as const
 const PROVIDER_RUNTIME_KEYS = ['mailboxes_count', 'mailboxes_base_count', 'mailboxes_alias_count', 'mailboxes_preview', 'mailboxes_stats', 'mailboxes_parse_stats', 'mailboxes_failed'] as const
 const label = (target: RegisterTarget) => target === 'adobe' ? 'Adobe' : target === 'grok' ? 'Grok' : 'OpenAI'
-const emptyRuntime = () => ({ enabled: false, stats: {}, logs: [], jobs: [], jobs_total: 0, jobs_page: 1, jobs_page_size: 50, runtime_error: '', compensation_error: '' })
+const emptyRuntime = () => ({ enabled: false, stats: {}, logs: [], jobs: [], jobs_total: 0, jobs_page: 1, jobs_page_size: 50, runtime_error: '', compensation_error: '', mailbox_cleanup_error: '' })
 const newControls = () => ({
   saving: false, actionBusy: false,
   autosaveStatus: 'idle' as 'idle' | 'pending' | 'saving' | 'saved' | 'error',
