@@ -138,13 +138,26 @@ async def oauth_authorize_device(req: OAuthDeviceRequest, authorization: str | N
         raise HTTPException(status_code=400, detail="oauth_verification_url_invalid")
     # Bound queue waiting as well as execution. No request body or browser
     # exception is logged, because both may include session credentials.
+    started = asyncio.get_running_loop().time()
     try:
         async with asyncio.timeout(150):
             browser = queue.claim(req.browser_lease) if req.browser_lease else None
-            return await authorize_device(**req.model_dump(exclude={"proxy", "browser_lease"}), proxy=_normalize_proxy(req.proxy), browser=browser)
+            value = await authorize_device(**req.model_dump(exclude={"proxy", "browser_lease"}), proxy=_normalize_proxy(req.proxy), browser=browser)
+            # Only fixed stage/detail fields are emitted. The request contains
+            # SSO, email and device code values and must never enter logs.
+            log.info(
+                "oauth device result status=%s code=%s stage=%s detail=%s elapsed_ms=%s consent_submitted=%s page_path=%s network_failures=%s network_error_codes=%s",
+                value.get("status", ""), value.get("code", ""), value.get("stage", ""),
+                value.get("detail", ""), value.get("elapsed_ms", int((asyncio.get_running_loop().time() - started) * 1000)),
+                value.get("consent_submitted", False), value.get("page_path", ""),
+                value.get("network_failures", 0), value.get("network_error_codes", ""),
+            )
+            return value
     except BrowserQueueError:
+        log.warning("oauth device result status=failed code=oauth_browser_unavailable stage=browser_claim detail=queue_claim_failed elapsed_ms=%d", int((asyncio.get_running_loop().time() - started) * 1000))
         return {"status":"failed", "code":"oauth_browser_unavailable"}
     except TimeoutError:
+        log.warning("oauth device result status=uncertain code=oauth_authorization_timeout stage=worker_timeout detail=worker_deadline elapsed_ms=%d", int((asyncio.get_running_loop().time() - started) * 1000))
         return {"status":"uncertain", "code":"oauth_worker_result_unknown"}
 
 
@@ -562,7 +575,7 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
             timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
         if req.daily_direct and not proxy:
             options.pop("proxy", None)
-        return queue.enqueue(req.id, options, cloakbrowser.launch_async)
+        return queue.enqueue(req.id, options, cloakbrowser.launch_async, startup_progress=True)
     except InvalidBrowserProxy:
         raise HTTPException(status_code=422, detail={"stage": "browser_start", "error": "proxy_configuration_invalid"}) from None
     except BrowserQueueError as exc:

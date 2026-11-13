@@ -27,8 +27,18 @@ type BrowserDeviceRequest struct {
 }
 
 type BrowserDeviceResult struct {
-	Status string `json:"status"`
-	Code   string `json:"code"`
+	Status            string `json:"status"`
+	Code              string `json:"code"`
+	Stage             string `json:"stage,omitempty"`
+	Detail            string `json:"detail,omitempty"`
+	ElapsedMS         int64  `json:"elapsed_ms,omitempty"`
+	ConsentSubmitted  bool   `json:"consent_submitted,omitempty"`
+	PagePath          string `json:"page_path,omitempty"`
+	CodeFormSeen      bool   `json:"code_form_seen,omitempty"`
+	ConsentPageSeen   bool   `json:"consent_page_seen,omitempty"`
+	ConsentButtonSeen bool   `json:"consent_button_seen,omitempty"`
+	NetworkFailures   int    `json:"network_failures,omitempty"`
+	NetworkErrorCodes string `json:"network_error_codes,omitempty"`
 }
 
 func ConfirmDeviceInBrowser(ctx context.Context, client *http.Client, base, key string, payload BrowserDeviceRequest) (BrowserDeviceResult, error) {
