@@ -486,9 +486,9 @@
       <div class="register-form-grid">
         <FormField label="浏览器服务地址"><Input v-model.trim="config.adobe.api_base" block placeholder="http://cfm-browser-worker:8899" :disabled="config.enabled" /></FormField>
         <FormField label="浏览器服务密钥"><Input v-model.trim="config.adobe.api_key" :placeholder="config.adobe.api_key_set ? '已配置，留空保留' : '服务密钥'" type="password" block autocomplete="new-password" :disabled="config.enabled" /></FormField>
-        <FormField label="请求超时（秒）"><Input v-model.number="config.adobe.request_timeout" type="number" min="30" max="180" block :disabled="config.enabled" /></FormField>
+        <FormField label="浏览器步骤调用超时（秒）"><Input v-model.number="config.adobe.request_timeout" type="number" min="30" max="600" block :disabled="config.enabled" /></FormField>
       </div>
-      <p class="text-xs text-muted-foreground">地区按本次注册出口自动选择，定位失败时使用美国；生日按 25–50 岁随机生成。验证码由所选邮箱来源自动接收，注册成功后自动加入 Adobe 账号池。</p>
+      <p class="text-xs text-muted-foreground">超时控制整个浏览器步骤调用；注册、恢复和验证码提交的调用预算至少为 320 秒，已有较小配置仍保留。地区按本次注册出口自动选择，定位失败时使用美国；生日按 25–50 岁随机生成。验证码由所选邮箱来源自动接收，注册成功后自动加入 Adobe 账号池。</p>
     </FormSection>
 
     <FormSection v-if="config.target === 'grok'" title="Grok 注册协议" density="roomy">

@@ -32,6 +32,23 @@ test('stage waits observe delayed forms through transient blank pages without tr
   assert.equal(timing.elapsed(), 300);
 });
 
+test('normal stage progress may take longer than thirty seconds but still has a sixty-second bound', async () => {
+  for (const resolves of [true, false]) {
+    let elapsed = 0;
+    const pending = waitForFormStage(async () => resolves && elapsed >= 40_000 ? verificationForm() : profileForm(), {
+      fromStage: 'awaiting_profile', pollIntervalMs: 1000,
+      now: () => elapsed, pause: async ms => { elapsed += ms; },
+    });
+    if (resolves) {
+      assert.equal((await pending).stage, 'awaiting_verification');
+      assert.equal(elapsed, 40_000);
+    } else {
+      await assert.rejects(pending, { code: 'stage_transition_timeout' });
+      assert.equal(elapsed, 60_000);
+    }
+  }
+});
+
 test('visible challenges and submitted field errors stop promptly, while verification instructions are allowed', async () => {
   for (const [current, code] of [
     [form({ humanVerification: { required: true } }), 'human_verification_required'],
@@ -160,6 +177,132 @@ test('creation accepts the account landing page without claiming identity confir
   assert.equal(state.result, undefined);
   await assert.rejects(browser.approveCreate(), error => error.code === 'submission_already_started');
   assert.equal(clicks, 1);
+});
+
+test('a Create navigation interruption observes its result without losing the submission fence or clicking again', async t => {
+  for (const destination of ['account', 'verification', 'stalled']) await t.test(destination, async subtest => {
+    const { store, browser } = await fixture(subtest);
+    await store.setStage('awaiting_approval');
+    let clicks = 0, reads = 0;
+    browser.page = { url: () => 'https://auth.services.adobe.com/' };
+    browser.authFrame = async () => ({ getByRole: () => ({
+      count: async () => 1, isEnabled: async () => true,
+      click: async () => {
+        clicks++;
+        assert.equal((await store.load()).submission.started, true);
+        throw new Error('PRIVATE Frame was detached');
+      },
+    }) });
+    browser.form = async () => {
+      if (!clicks || destination === 'stalled') return profileForm();
+      if (++reads === 1) throw new Error('PRIVATE Execution context was destroyed');
+      return destination === 'verification' ? verificationForm() : form({ host: 'account.adobe.com' });
+    };
+    if (destination === 'stalled') await assert.rejects(browser.approveCreate(), { code: 'submission_result_unknown' });
+    else {
+      const result = await browser.approveCreate();
+      assert.equal(result.code, destination === 'account' ? 'firefly_identity_required' : 'creation_needs_verification');
+      assert.equal(reads, 2);
+    }
+    const state = await store.load();
+    assert.equal(state.submission.started, true);
+    assert.equal(state.result, undefined);
+    assert.equal(state.submission.outcome, destination === 'stalled' ? 'unknown' : 'pending');
+    await assert.rejects(browser.approveCreate(), { code: 'submission_already_started' });
+    assert.equal(clicks, 1);
+    assert.doesNotMatch(JSON.stringify(state), /PRIVATE/);
+  });
+});
+
+test('unknown, closed and external-page Create errors stop without observing a speculative result', async t => {
+  for (const kind of ['unknown', 'closed', 'external']) await t.test(kind, async subtest => {
+    const { store, browser } = await fixture(subtest);
+    await store.setStage('awaiting_approval');
+    let clicks = 0;
+    browser.page = { url: () => kind === 'external' ? 'https://external.example.invalid/' : 'https://auth.services.adobe.com/' };
+    browser.authFrame = async () => ({ getByRole: () => ({
+      count: async () => 1, isEnabled: async () => true,
+      click: async () => {
+        clicks++;
+        throw new Error(kind === 'closed' ? 'Target page, context or browser has been closed' :
+          kind === 'external' ? 'Execution context was destroyed' : 'PRIVATE unexpected error');
+      },
+    }) });
+    browser.form = async () => profileForm();
+    browser.waitForStage = () => assert.fail('Only recognized Adobe navigation interruptions may be re-observed');
+    await assert.rejects(browser.approveCreate(), { code: 'submission_result_unknown' });
+    assert.equal((await store.load()).submission.outcome, 'unknown');
+    assert.equal(clicks, 1);
+  });
+});
+
+test('status re-reads a navigating snapshot and retains the original submission state', async t => {
+  const { store, browser } = await fixture(t);
+  await store.markSubmissionStarted();
+  browser.status = BrowserRegistration.prototype.status.bind(browser);
+  browser.workerMode = true;
+  browser.statusWaitOptions = clock();
+  let reads = 0, url = 'https://auth.services.adobe.com/';
+  browser.page = { url: () => url };
+  browser.context = { pages: () => [browser.page] };
+  browser.networkStatus = async () => ({ code: null });
+  browser.form = async () => {
+    if (++reads === 1) throw new Error('Execution context was destroyed');
+    if (reads === 2) { url = 'about:blank'; throw new Error('Frame was detached'); }
+    url = 'https://account.adobe.com/';
+    return form({ host: 'account.adobe.com' });
+  };
+  const status = await browser.status();
+  assert.equal(reads, 3);
+  assert.equal(status.form.host, 'account.adobe.com');
+  assert.equal(status.submissionStarted, true);
+  assert.equal((await store.load()).result, undefined);
+  assert.equal(browser.statusWaitOptions.elapsed(), 200);
+});
+
+test('status navigation observation is bounded and never hides closed, unknown or external-page errors', async t => {
+  for (const kind of ['stalled', 'never_resolves', 'closed', 'unknown', 'external']) await t.test(kind, async subtest => {
+    const { browser } = await fixture(subtest);
+    browser.status = BrowserRegistration.prototype.status.bind(browser);
+    browser.statusWaitOptions = { ...clock(), ...(kind === 'never_resolves' ? { timeoutMs: 20, pollIntervalMs: 1 } : {}) };
+    browser.page = { url: () => kind === 'external' ? 'https://external.example.invalid/' : 'https://auth.services.adobe.com/' };
+    let reads = 0;
+    const error = new Error(kind === 'closed' ? 'Target page, context or browser has been closed' :
+      kind === 'unknown' ? 'PRIVATE unexpected error' : 'Execution context was destroyed');
+    browser.readStatus = async () => { reads++; if (kind === 'never_resolves' && reads > 1) return new Promise(() => {}); throw error; };
+    await assert.rejects(browser.status(), failure => ['stalled', 'never_resolves'].includes(kind)
+      ? failure.code === 'stage_transition_timeout' : failure === error);
+    assert.equal(reads, kind === 'stalled' ? 10 : kind === 'never_resolves' ? 2 : 1);
+  });
+});
+
+test('normal status reads and CLI screenshots retain their original timeouts outside navigation observation', async t => {
+  for (const navigation of [false, true]) await t.test(String(navigation), async subtest => {
+    const { browser } = await fixture(subtest);
+    browser.status = BrowserRegistration.prototype.status.bind(browser);
+    browser.statusWaitOptions = { timeoutMs: 20, pollIntervalMs: 1 };
+    let reads = 0, screenshots = 0;
+    browser.page = { url: () => 'https://account.adobe.com/', screenshot: async options => {
+      assert.equal(options.timeout, 10000);
+      screenshots++;
+      await new Promise(resolve => setTimeout(resolve, 40));
+      throw new Error('Optional screenshot failed');
+    } };
+    browser.context = { pages: () => [browser.page] };
+    browser.networkStatus = async () => ({ code: null });
+    browser.form = async () => {
+      if (++reads === 1) {
+        if (navigation) throw new Error('Execution context was destroyed');
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+      return form({ host: 'account.adobe.com' });
+    };
+    const status = await browser.status();
+    assert.equal(status.form.host, 'account.adobe.com');
+    assert.equal(reads, navigation ? 2 : 1);
+    assert.equal(screenshots, 1);
+    assert.match(status.screenshot, /current\.png$/);
+  });
 });
 
 test('opening Firefly waits through its initial page until IMS is ready or the email verification form appears', async t => {

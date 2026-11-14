@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -95,6 +96,43 @@ func TestAdobeConfigurationIgnoresRemovedIdentityAndMailTiming(t *testing.T) {
 	encoded, err := os.ReadFile(configPath)
 	if err != nil || bytes.Contains(encoded, []byte("birth_year")) {
 		t.Fatal("legacy identity settings remained on disk")
+	}
+}
+
+func TestAdobeRequestTimeoutDefaultsAndBounds(t *testing.T) {
+	cfg, err := ParseAdobeConfig(adobeTestConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RequestTimeout != 320*time.Second {
+		t.Fatalf("default Adobe browser-call timeout = %s, want 320s", cfg.RequestTimeout)
+	}
+	for _, tc := range []struct {
+		name    string
+		seconds int
+		want    time.Duration
+	}{
+		{"minimum", 30, 30 * time.Second},
+		{"maximum", 600, 600 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := adobeTestConfig()
+			raw["adobe"] = map[string]any{"request_timeout": tc.seconds}
+			got, err := ParseAdobeConfig(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RequestTimeout != tc.want {
+				t.Fatalf("request timeout = %s, want %s", got.RequestTimeout, tc.want)
+			}
+		})
+	}
+	for _, seconds := range []int{29, 601} {
+		raw := adobeTestConfig()
+		raw["adobe"] = map[string]any{"request_timeout": seconds}
+		if _, err := ParseAdobeConfig(raw); err == nil || !strings.Contains(err.Error(), "adobe_timeout_must_be_30_to_600_seconds") {
+			t.Fatalf("request_timeout=%d was not rejected with the bounded error: %v", seconds, err)
+		}
 	}
 }
 

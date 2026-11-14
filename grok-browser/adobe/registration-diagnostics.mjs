@@ -36,7 +36,10 @@ const FAILURE_ACTIONS = new Set(['inspect_form', 'open_login', 'click_login_entr
   'fill_password', 'submit_email', 'submit_password', 'wait_login_result', 'request_code',
   'verify_code', 'export_session', 'open_firefly', ...STARTUP_STAGES]);
 const FAILURE_PHASES = new Set(['before_submission', 'submission_started']);
-const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_closed', 'unknown']);
+// Keep network failures as fixed categories so a proxy/Adobe navigation issue
+// remains distinguishable after the raw browser error is discarded.
+const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_closed', 'unknown',
+  'proxy_tunnel', 'proxy_connection', 'proxy_auth', 'dns', 'network_timeout', 'tls', 'network_connection']);
 const PROFILE_FIELDS = new Set(['country', 'birth_month', 'birth_year', 'birth_day']);
 const OPTION_REASONS = new Set(['missing', 'incomplete', 'ambiguous', 'disabled', 'invalid']);
 

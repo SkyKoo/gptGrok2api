@@ -40,7 +40,7 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
             {"event":"startup_progress", "progress":startup_event(1)},
             {"event":"startup_progress", "progress":startup_event(2, stage="PRIVATE")},
             {"event":"startup_progress", "progress":startup_event(2, duration_ms=True)},
-            {"event":"startup_progress", "progress":startup_event(2, elapsed_ms=150001)},
+            {"event":"startup_progress", "progress":startup_event(2, elapsed_ms=300001)},
             {"event":"startup_progress", "progress":startup_event(2, status="completed", elapsed_ms=12, duration_ms=12)},
             {"event":"startup_progress", "progress":startup_event(3, stage="adobe_loading_account_page")},
             {"event":"startup_progress", "progress":startup_event(4, stage="adobe_loading_account_page", status="failed", exception_type="timeout")},
@@ -88,13 +88,38 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
         with patch("adobe_flow.asyncio.timeout", side_effect=lambda _: real_timeout(.08)) as timeout:
             with self.assertRaises(TimeoutError):
                 await handle.command({"action":"init"}, startup_progress=events.append)
-        timeout.assert_called_once_with(150)
+        timeout.assert_called_once_with(300)
         self.assertGreater(len(events), 0)
         self.assertLess(len(events), len(frames))
         self.assertTrue(handle.tainted)
         with self.assertRaises(RuntimeError):
             await handle.command({"action":"init"})
         self.assertEqual(process.writes, 1)
+
+    async def test_action_deadlines_bound_one_command_without_replay(self):
+        real_timeout = asyncio.timeout
+        for action, seconds in (("init", 300), ("run", 300), ("resume", 300), ("verify", 300),
+                                ("prepare", 150), ("refresh", 150), ("media", 150)):
+            with self.subTest(action=action):
+                process = RPCProcess([{"ok":True, "result":{"stage":"ready"}}], delay=.04)
+                handle = AdobeProcess(process)
+                with patch("adobe_flow.asyncio.timeout", side_effect=lambda _: real_timeout(.01)) as timeout:
+                    with self.assertRaises(TimeoutError):
+                        await handle.command({"action":action})
+                timeout.assert_called_once_with(seconds)
+                self.assertTrue(handle.tainted)
+                with self.assertRaises(RuntimeError):
+                    await handle.command({"action":action})
+                self.assertEqual(process.writes, 1)
+
+    async def test_init_progress_remains_visible_at_extended_deadline(self):
+        process = RPCProcess([
+            {"event":"startup_progress", "progress":startup_event(1, status="completed", elapsed_ms=300000, duration_ms=300000)},
+            {"ok":True, "result":{"stage":"ready"}},
+        ])
+        events = []
+        await AdobeProcess(process).command({"action":"init"}, startup_progress=events.append)
+        self.assertEqual(events, [startup_event(1, status="completed", elapsed_ms=300000, duration_ms=300000)])
 
     async def test_launcher_keeps_callback_out_of_rpc_payload(self):
         handle = AsyncMock()

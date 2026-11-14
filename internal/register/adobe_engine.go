@@ -712,7 +712,11 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		state := adobeCompensationSummary(j, e.adobeMailboxAttemptsLocked(j.Mailbox.Email))
 		hint := adobeRegistrationReviewHint(j.Error)
 		if blocked {
-			hint = "本次注册失败；缺少 Adobe 创建结果，已停止自动重试。"
+			if e.adobeMailboxHasAcceptedCreationLocked(j.Mailbox.Email) {
+				hint = "该邮箱的账号创建已被 Adobe 受理，不能再次注册；需沿原会话继续验证和凭据采集。"
+			} else {
+				hint = "本次注册失败；缺少 Adobe 创建结果，已停止自动重试。"
+			}
 		} else if state != nil && (state.State == "waiting" || state.State == "running") {
 			switch mode {
 			case "retry_registration":

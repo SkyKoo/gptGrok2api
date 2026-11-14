@@ -100,7 +100,7 @@ test('container Chromium retains the requested disk profile and native context l
   assert.equal(options.channel, 'chromium');
   assert.equal(options.viewport, null);
   assert.equal(options.headless, false);
-  assert.equal(options.timeout, 30_000);
+  assert.equal(options.timeout, 60_000);
   assert.ok(options.args.includes('--restore-last-session'));
   for (const key of ['userAgent', 'locale', 'timezoneId', 'deviceScaleFactor']) {
     assert.equal(Object.hasOwn(options, key), false);
@@ -132,7 +132,7 @@ test('CloakBrowser uses its persistent API without passing a Chrome channel or p
         assert.equal(options.viewport, null);
         assert.equal(options.headless, false);
         assert.equal(options.humanize, true);
-        assert.deepEqual(options.launchOptions, { timeout: 30_000 });
+        assert.deepEqual(options.launchOptions, { timeout: 60_000 });
         assert.deepEqual(options.args, ['--restore-last-session', '--window-size=1440,900']);
         for (const key of ['channel', 'contextOptions', 'userAgent', 'locale', 'timezone', 'deviceScaleFactor']) {
           assert.equal(Object.hasOwn(options, key), false);

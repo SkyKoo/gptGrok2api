@@ -30,7 +30,7 @@ type AdobeConfig struct {
 }
 
 func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
-	c := AdobeConfig{Timeout: 15 * time.Minute, RequestTimeout: 160 * time.Second}
+	c := AdobeConfig{Timeout: 15 * time.Minute, RequestTimeout: 320 * time.Second}
 	if registrationTarget(raw["target"]) != "adobe" {
 		return c, fail("config", "adobe_target_required")
 	}
@@ -49,8 +49,8 @@ func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
 	c.HME, c.MailboxSourceID, c.MailTimeout, c.PollInterval = common.HME, common.MailboxSourceID, common.MailTimeout, common.PollInterval
 	a := object(raw["adobe"])
 	if seconds := intValue(a["request_timeout"]); seconds != 0 {
-		if seconds < 30 || seconds > 180 {
-			return c, fail("config", "adobe_timeout_must_be_30_to_180_seconds")
+		if seconds < 30 || seconds > 600 {
+			return c, fail("config", "adobe_timeout_must_be_30_to_600_seconds")
 		}
 		c.RequestTimeout = time.Duration(seconds) * time.Second
 	}

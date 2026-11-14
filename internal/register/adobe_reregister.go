@@ -11,9 +11,9 @@ func (e *AdobeEngine) SetReregistrationAccountCheck(check func(string) (bool, er
 }
 
 // Reregister is an explicit administrator action for a failed attempt. Unlike
-// recovery, it starts a new signup even when a prior attempt was accepted or its
-// result is unknown. This explicit choice does not change the old creation
-// evidence, authorize automatic replay, or allow replacing a saved account.
+// recovery, it starts a new signup when a prior result is unknown. Accepted
+// creation must continue the original session even if credentials are not yet
+// saved. This choice never changes old evidence or authorizes automatic replay.
 func (e *AdobeEngine) Reregister(raw map[string]any, id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -63,6 +63,12 @@ func (e *AdobeEngine) adobeReregistrationEligibleLocked(index int) error {
 		if len(other.Account) > 0 || other.Imported || other.Verified || other.Status == "completed" {
 			return fail("task", "mailbox_already_has_saved_account")
 		}
+		// An older accepted attempt owns this identity even when a later manual
+		// attempt failed with account_already_exists. Missing credentials or a
+		// missing browser environment cannot authorize creating that email again.
+		if adobeCreationOutcome(other) == "accepted" {
+			return fail("task", "registration_already_accepted")
+		}
 		if other.Status == "running" || other.Status == "queued" {
 			return fail("task", "already_running")
 		}
@@ -99,6 +105,15 @@ func (e *AdobeEngine) adobeReregistrationNotBeforeLocked(email string) time.Time
 		}
 	}
 	return latest
+}
+
+func (e *AdobeEngine) adobeMailboxHasAcceptedCreationLocked(email string) bool {
+	for _, job := range e.jobs {
+		if grokMailboxKey(job.Mailbox.Email) == grokMailboxKey(email) && adobeCreationOutcome(job) == "accepted" {
+			return true
+		}
+	}
+	return false
 }
 
 // Once an explicitly requested fresh attempt is accepted, its own session may

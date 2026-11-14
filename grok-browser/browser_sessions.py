@@ -22,7 +22,10 @@ STARTUP_PROGRESS_STAGES = frozenset({
     "adobe_waiting_registration_form", "adobe_checking_registration_form",
     "adobe_restoring_registration_page",
 })
-STARTUP_EXCEPTION_TYPES = frozenset({"registration", "timeout", "navigation", "page_closed", "unknown"})
+STARTUP_EXCEPTION_TYPES = frozenset({
+    "registration", "timeout", "navigation", "page_closed", "unknown",
+    "proxy_tunnel", "proxy_connection", "proxy_auth", "dns", "network_timeout", "tls", "network_connection",
+})
 
 
 def startup_progress_event(value):
@@ -35,7 +38,7 @@ def startup_progress_event(value):
         return None
     if type(value.get("sequence")) is not int or not 1 <= value["sequence"] <= STARTUP_PROGRESS_LIMIT:
         return None
-    if any(type(value.get(key)) is not int or not 0 <= value[key] <= 150000 for key in ("elapsed_ms", "duration_ms")):
+    if any(type(value.get(key)) is not int or not 0 <= value[key] <= 300000 for key in ("elapsed_ms", "duration_ms")):
         return None
     result = {key: value[key] for key in ("sequence", "stage", "status", "elapsed_ms", "duration_ms")}
     exception = value.get("exception_type")

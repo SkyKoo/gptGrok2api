@@ -151,15 +151,15 @@ test('Adobe manual restart cannot replace saved, active or superseded work', asy
   const job = { status: 'failed', can_reregister: true, can_retry_registration: true, recovery_mode: 'retry_registration', creation_outcome: 'rejected' }
   for (const change of [
     { imported: true }, { can_retry: true },
-    { recovery_mode: 'saved_result' },
+    { recovery_mode: 'saved_result' }, { recovery_mode: 'resume_session' }, { creation_outcome: 'accepted' },
     { status: 'running' }, { status: 'queued' }, { status: 'completed' },
     { retry_job_id: 'child' }, { auto_retry: { ...waiting, state: 'superseded' } },
   ]) assert.equal(adobeManualReregistration({ ...job, ...change }, 'adobe'), false, JSON.stringify(change))
   assert.equal(registrationRecoveryAction({ ...job, retry_job_id: 'child' }, 'adobe'), '')
   assert.equal(registrationRecoveryAction({ ...job, auto_retry: { ...waiting, state: 'superseded' } }, 'adobe'), '')
   const accepted = { ...job, creation_outcome: 'accepted', recovery_mode: 'resume_session', can_resume_registration: true }
-  assert.equal(adobeManualReregistration(accepted, 'adobe'), true)
-  assert.equal(registrationRecoveryAction(accepted, 'adobe'), '手动重新注册')
+  assert.equal(adobeManualReregistration(accepted, 'adobe'), false)
+  assert.equal(registrationRecoveryAction(accepted, 'adobe'), '继续验证')
   assert.equal(registrationRecoveryAction({ ...accepted, can_reregister: false }, 'adobe'), '继续验证')
 })
 

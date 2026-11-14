@@ -108,9 +108,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         valid = {"sequence":1, "stage":"starting_browser", "status":"started", "elapsed_ms":0, "duration_ms":0}
         for value in (None, [], {**valid, 'sequence':True}, {**valid, 'sequence':33},
             {**valid, 'stage':[]}, {**valid, 'status':{}}, {**valid, 'duration_ms':-1},
-            {**valid, 'elapsed_ms':150001}, {**valid, 'elapsed_ms':1.0}):
+            {**valid, 'elapsed_ms':300001}, {**valid, 'elapsed_ms':1.0}):
             self.assertIsNone(startup_progress_event(value))
         self.assertEqual(startup_progress_event({**valid, 'private':'PRIVATE', 'exception_type':'PRIVATE'}), valid)
+        self.assertEqual(startup_progress_event({**valid, 'exception_type':'proxy_tunnel'})['exception_type'], 'proxy_tunnel')
 
     async def test_registration_owns_slot_until_close_then_oauth_runs_fifo(self):
         first, second, third = self.browser(), self.browser(), self.browser()

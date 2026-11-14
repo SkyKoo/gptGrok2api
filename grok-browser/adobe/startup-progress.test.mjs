@@ -45,7 +45,7 @@ test('elapsed values outside the init deadline are omitted rather than clipped',
   let clock = 0;
   const frames = [], progress = new StartupProgress({ emit: frame => frames.push(frame), now: () => clock });
   const error = new Error('late');
-  await assert.rejects(progress.run('starting_browser', async () => { clock = 150_001; throw error; }));
+  await assert.rejects(progress.run('starting_browser', async () => { clock = 300_001; throw error; }));
   assert.equal(frames.length, 1);
   assert.deepEqual(progress.failureDetails(error), { failure_action: 'starting_browser', failure_phase: 'before_submission', exception_type: 'unknown' });
 });
@@ -59,4 +59,25 @@ test('exception categories are fixed even when browser errors contain private co
     [{ code: 'browser_launch_license_denied', message: 'PRIVATE' }, 'registration'],
     [{ code: 'PRIVATE URL', message: 'PRIVATE' }, 'unknown'],
   ]) assert.equal(startupExceptionType(error), expected);
+});
+
+test('startup network failures expose only fixed proxy, DNS, timeout, TLS and connection categories', () => {
+  for (const [message, expected] of [
+    ['net::ERR_TUNNEL_CONNECTION_FAILED proxy=https://PRIVATE', 'proxy_tunnel'],
+    ['net::ERR_PROXY_CONNECTION_FAILED proxy=https://PRIVATE', 'proxy_connection'],
+    ['net::ERR_PROXY_AUTH_UNSUPPORTED user=PRIVATE', 'proxy_auth'],
+    ['net::ERR_NAME_NOT_RESOLVED https://PRIVATE', 'dns'],
+    ['net::ERR_DNS_TIMED_OUT host=PRIVATE', 'dns'],
+    ['net::ERR_CONNECTION_TIMED_OUT https://PRIVATE', 'network_timeout'],
+    ['net::ERR_CERT_AUTHORITY_INVALID https://PRIVATE', 'tls'],
+    ['net::ERR_SSL_PROTOCOL_ERROR https://PRIVATE', 'tls'],
+    ['net::ERR_CONNECTION_RESET https://PRIVATE', 'network_connection'],
+    ['net::ERR_CONNECTION_REFUSED https://PRIVATE', 'network_connection'],
+  ]) {
+    assert.equal(startupExceptionType(new Error(message)), expected);
+    assert.doesNotMatch(startupExceptionType(new Error(message)), /PRIVATE|https/);
+  }
+  assert.equal(startupExceptionType(new Error('net::ERR_TUNNEL_CONNECTION_FAILED but navigation was aborted')), 'navigation');
+  assert.equal(startupExceptionType(new Error('net::ERR_PROXY_CONNECTION_FAILED but Timeout 30000ms exceeded')), 'timeout');
+  assert.equal(startupExceptionType(new Error('net::ERR_TUNNEL_CONNECTION_FAILED with unrelated context')), 'proxy_tunnel');
 });

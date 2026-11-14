@@ -315,6 +315,7 @@ test('opening normal login preserves the failing navigation action and a fixed e
   for (const [message,expected] of [
     ['Execution context was destroyed SECRET','navigation'],
     ['Target page, context or browser has been closed SECRET','page_closed'],
+    ['net::ERR_TUNNEL_CONNECTION_FAILED proxy=SECRET','proxy_tunnel'],
     ['arbitrary private failure SECRET','unknown'],
   ]) {
     const f=await fixture(t,{phase:'needs_manual'});

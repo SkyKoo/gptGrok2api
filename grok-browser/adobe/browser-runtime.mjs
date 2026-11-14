@@ -1,6 +1,7 @@
 import { RegistrationError } from './core.mjs';
+import { REGISTRATION_TIMEOUTS } from './registration-timeouts.mjs';
 
-const LAUNCH_TIMEOUT_MS = 30_000;
+const LAUNCH_TIMEOUT_MS = REGISTRATION_TIMEOUTS.launch;
 
 // Playwright errors can contain the full launch command, proxy credentials and
 // profile paths. Convert them to fixed categories before crossing the RPC pipe.

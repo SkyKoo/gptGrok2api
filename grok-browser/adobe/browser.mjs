@@ -9,12 +9,23 @@ import { NetworkDiagnostics, verificationDiagnosis, hasCaptchaRequirement } from
 import { CreationTracker } from './creation-outcome.mjs';
 import { StartupProgress, startupExceptionType } from './startup-progress.mjs';
 import { verificationObservation } from './verification-observation.mjs';
+import { REGISTRATION_TIMEOUTS as TIMEOUT } from './registration-timeouts.mjs';
 import { KOREA_REQUIRED_GROUP, KOREA_REQUIRED_CONSENTS, regionalConsentPlan, regionalConsentPreflight } from './regional-consent.mjs';
 import { waitForProfileOption } from './profile-options.mjs';
 import { registrationButtonAction, registrationLinkAction, isRegistrationButton,
   locateRegistrationButton, locateCreateAccountLink, isSignupPasswordForm } from './form-actions.mjs';
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+function canObserveNavigation(error, page) {
+  if (page?.isClosed?.()) return false;
+  let url;
+  try { url = page?.url?.(); } catch { return false; }
+  // 仅允许 Adobe 页面与短暂空白文档；导航错误不能掩盖真实的外域跳转。
+  if (url !== 'about:blank' && !isTrustedAdobeURL(url)) return false;
+  return startupExceptionType(error) === 'navigation' ||
+    error?.code === 'untrusted_page' && url === 'about:blank';
+}
 
 /** Adobe 用按钮覆盖原生 select；操作关联的可见列表，再回读实际表单值。 */
 export async function selectProfileOption(frame, field, option) {
@@ -33,11 +44,11 @@ export async function selectProfileOption(frame, field, option) {
     if (!buttonId) throw new RegistrationError('profile_dropdown_unrecognized');
     const button = frame.locator(`[id=${JSON.stringify(buttonId)}]`);
     if (await button.count() !== 1) throw new RegistrationError('profile_dropdown_unrecognized');
-    if (await button.getAttribute('aria-expanded') !== 'true') await button.click();
+    if (await button.getAttribute('aria-expanded') !== 'true') await button.click({ timeout: TIMEOUT.actionable });
     const listId = await button.getAttribute('aria-controls');
     if (!listId) throw new RegistrationError('profile_dropdown_unrecognized');
     const list = frame.getByRole('listbox').and(frame.locator(`[id=${JSON.stringify(listId)}]`));
-    await list.waitFor({ state: 'visible', timeout: 5000 });
+    await list.waitFor({ state: 'visible', timeout: TIMEOUT.actionable });
     const choice = list.getByRole('option', { name: option.label, exact: true });
     if (await choice.count() === 0) {
       // 国家列表按可视区域渲染；只滚动关联列表，不改写 select 或触发提交。
@@ -52,7 +63,7 @@ export async function selectProfileOption(frame, field, option) {
         catch (error) { if (error.name !== 'TimeoutError') throw error; }
       }
     }
-    await choice.click({ timeout: 5000 });
+    await choice.click({ timeout: TIMEOUT.actionable });
   }
   const deadline = Date.now() + 3000;
   while (await field.inputValue() !== option.value) {
@@ -63,7 +74,7 @@ export async function selectProfileOption(frame, field, option) {
 
 /** 国家切换可能重建资料控件；稳定窗只等待结构，不代替提交前的必填检查。 */
 async function waitForProfileControls(readForm, {
-  timeoutMs = 5000, pollIntervalMs = 100, now = Date.now, pause = wait,
+  timeoutMs = TIMEOUT.form, pollIntervalMs = 100, now = Date.now, pause = wait,
 } = {}) {
   const deadline = now() + timeoutMs;
   const coreFields = [/country|region|国家|地区/i, /first.?name|名字|名$/i,
@@ -190,7 +201,7 @@ export function formFailureDiagnostics(form) {
 export async function waitForFormStage(readForm, {
   fromStage,
   accept = stage => stage !== 'needs_manual' && stage !== fromStage,
-  timeoutMs = 30_000,
+  timeoutMs = TIMEOUT.stage,
   pollIntervalMs = 250,
   verificationGraceMs = 15_000,
   now = Date.now,
@@ -287,7 +298,7 @@ export class BrowserRegistration {
       }
     }
     try {
-      await this.startupProgress.run('adobe_loading_account_page', () => this.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }));
+      await this.startupProgress.run('adobe_loading_account_page', () => this.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT.navigation }));
     } catch (error) {
       try { await this.store.save({ startupFailure: this.startupProgress.failureDetails(error) }); }
       catch { /* Preserve the navigation failure if diagnostic persistence fails. */ }
@@ -296,7 +307,7 @@ export class BrowserRegistration {
     if (resumeOnly || state.submission.started) return this.observeRestoredPage(state);
     const createLink = locateCreateAccountLink(this.page);
     try {
-      try { await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000})); }
+      try { await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:TIMEOUT.form})); }
       catch (error) {
         const blockedFont = new URL(this.page.url()).hostname === 'auth.services.adobe.com' && await this.page.evaluate(() =>
           document.readyState === 'loading' && !!document.querySelector('link[rel="stylesheet"][href="https://use.typekit.net/znu8cfp.css"]') &&
@@ -304,15 +315,15 @@ export class BrowserRegistration {
         );
         if (!blockedFont) throw error;
         await this.page.route('https://use.typekit.net/znu8cfp.css', route=>route.abort('failed'));
-        await this.startupProgress.run('adobe_reloading_account_page', () => this.page.reload({waitUntil:'domcontentloaded',timeout:30000}));
-        await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:20000}));
+        await this.startupProgress.run('adobe_reloading_account_page', () => this.page.reload({waitUntil:'domcontentloaded',timeout:TIMEOUT.reload}));
+        await this.startupProgress.run('adobe_waiting_create_entry', () => createLink.waitFor({state:'visible',timeout:TIMEOUT.form}));
         this.onEvent({code:'optional_font_load_skipped'});
       }
       await this.startupProgress.run('adobe_opening_registration', async () => {
         if (await createLink.count() !== 1) throw new RegistrationError('create_entry_not_ready');
-        await createLink.click();
+        await createLink.click({timeout:TIMEOUT.click});
       });
-      await this.startupProgress.run('adobe_waiting_registration_form', () => this.page.locator('input[autocomplete="new-password"]').waitFor({state:'visible',timeout:20000}));
+      await this.startupProgress.run('adobe_waiting_registration_form', () => this.page.locator('input[autocomplete="new-password"]').waitFor({state:'visible',timeout:TIMEOUT.form}));
       const outcome = await this.startupProgress.run('adobe_checking_registration_form', () => this.waitForStage());
       await this.store.setStage(outcome.code ? 'needs_manual' : 'form_ready', outcome.code);
     } catch (error) {
@@ -324,7 +335,7 @@ export class BrowserRegistration {
 
   /** 恢复标签仍可能导航；只重新读取，不刷新页面或重放任何注册动作。 */
   async observeRestoredPage(state) {
-    const { timeoutMs = 15000, pollIntervalMs = 250, now = Date.now, pause = wait } = this.restorationWaitOptions || {};
+    const { timeoutMs = TIMEOUT.restoration, pollIntervalMs = 250, now = Date.now, pause = wait } = this.restorationWaitOptions || {};
     try {
       return await this.startupProgress.run('adobe_restoring_registration_page', async () => {
         const deadline = now() + timeoutMs;
@@ -334,7 +345,7 @@ export class BrowserRegistration {
           let timer;
           try {
             const result = await Promise.race([
-              this.status(),
+              this.status({ observeNavigation: false }),
               new Promise((_, reject) => { timer = setTimeout(() => reject(new RegistrationError('recovery_page_observation_timeout')), remaining); }),
             ]);
             // 状态读取完成时也核对当前目的页，不能把跳出 Adobe 当作恢复成功。
@@ -344,7 +355,7 @@ export class BrowserRegistration {
             const url = this.page.url();
             const pendingDocument = error?.code === 'untrusted_page' &&
               (url === 'about:blank' || isTrustedAdobeURL(url));
-            if (startupExceptionType(error) !== 'navigation' && !pendingDocument) throw error;
+            if (!canObserveNavigation(error, this.page) && !pendingDocument) throw error;
           } finally { clearTimeout(timer); }
           const remainingAfterRead = deadline - now();
           if (remainingAfterRead <= 0) throw new RegistrationError('recovery_page_observation_timeout');
@@ -531,14 +542,55 @@ export class BrowserRegistration {
     return verificationDiagnosis(this.activeNetwork);
   }
 
-  async status() {
+  async status({ observeNavigation = true } = {}) {
+    if (!observeNavigation) return this.readStatus();
+    const { timeoutMs = TIMEOUT.navigationObservation, pollIntervalMs = 100, now = Date.now, pause = wait } = this.statusWaitOptions || {};
+    let deadline;
+    while (true) {
+      let timer, result, ready = false;
+      try {
+        // 正常首次读取沿用原超时；只有已知导航中断才启动额外观察窗口。
+        if (deadline === undefined) result = await this.readStatus({ captureScreenshot: false });
+        else {
+          const readBudget = deadline - now();
+          if (readBudget <= 0) throw new RegistrationError('stage_transition_timeout');
+          result = await Promise.race([
+            this.readStatus({ captureScreenshot: false }),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new RegistrationError('stage_transition_timeout')), readBudget); }),
+          ]);
+        }
+        if (!isTrustedAdobeURL(this.page?.url?.())) throw new RegistrationError('untrusted_page');
+        ready = true;
+      } catch (error) {
+        if (!canObserveNavigation(error, this.page)) throw error;
+        deadline ??= now() + timeoutMs;
+      } finally { clearTimeout(timer); }
+      if (ready) {
+        // CLI 诊断截图保持原十秒上限，不占用导航观察预算。
+        await this.captureScreenshot(result.screenshot);
+        return result;
+      }
+      const remaining = deadline - now();
+      if (remaining <= 0) throw new RegistrationError('stage_transition_timeout');
+      await pause(Math.min(pollIntervalMs, remaining));
+    }
+  }
+
+  async captureScreenshot(screenshot) {
+    if (!screenshot || this.workerMode || !this.page?.screenshot) return;
+    await this.page.screenshot({ path: screenshot, timeout: 10000 })
+      .then(() => chmod(screenshot, 0o600)).catch(() => {});
+  }
+
+  /** 单次快照不执行动作；status 仅在已知导航中断时有界重读整个快照。 */
+  async readStatus({ captureScreenshot = true } = {}) {
     const state = await this.store.load();
     const form = await this.form();
     const networkDiagnosis = await this.networkStatus();
     const humanVerificationRequired = form.humanVerification?.required === true;
     const detected = humanVerificationRequired ? 'needs_manual' : classifyForm(form);
     const screenshot = this.workerMode ? undefined : path.join(this.store.runDir, 'current.png');
-    if (!this.workerMode) await this.page.screenshot({ path: screenshot, timeout: 10000 }).then(() => chmod(screenshot, 0o600)).catch(() => {});
+    if (captureScreenshot) await this.captureScreenshot(screenshot);
     const pages = this.context.pages().map(page => {const u = new URL(page.url() || 'about:blank'); return {host:u.hostname,path:u.pathname};});
     const visibleChallenge = ['visible_challenge_frame', 'visible_instruction'].includes(form.humanVerification?.source);
     return { stage: humanVerificationRequired || networkDiagnosis.code ? 'needs_manual' : state.stage,
@@ -603,13 +655,13 @@ export class BrowserRegistration {
 
   async clickContinue(frame, beforeClick, fromStage, form) {
     const button = await locateRegistrationButton(frame, 'continue', form);
-    await button.waitFor({state:'visible',timeout:10000});
+    await button.waitFor({state:'visible',timeout:TIMEOUT.actionable});
     if (await button.count() !== 1) throw new RegistrationError('continue_not_ready');
     // Playwright 的 trial 只等待可交互，不产生表单点击。
-    await button.click({ trial: true, timeout: 10000 });
+    await button.click({ trial: true, timeout: TIMEOUT.actionable });
     await beforeClick?.();
     try {
-      await button.click({ timeout: 15000 });
+      await button.click({ timeout: TIMEOUT.click });
       return await this.waitForStage({ fromStage });
     } catch {
       await this.store.setStage('needs_manual', 'continuation_result_unknown');
@@ -651,7 +703,7 @@ export class BrowserRegistration {
         const button = frame.getByRole('button', {name:input.button,exact:true});
         if (await button.count() !== 1 || !await button.isVisible() || !await button.isEnabled()) throw new RegistrationError('challenge_control_not_ready');
         if (!await visibleChallengeFrame(frame)) throw new RegistrationError('challenge_frame_unrecognized');
-        await button.click({timeout:10000});
+        await button.click({timeout:TIMEOUT.actionable});
         await wait(input.button === 'Submit' ? 2000 : 700);
       }
       const controls = [];
@@ -665,7 +717,7 @@ export class BrowserRegistration {
     if (input.action === 'open_firefly') {
       this.page = await this.context.newPage();
       this.focusPageOnly = true;
-      await this.page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:45000});
+      await this.page.goto('https://firefly.adobe.com/',{waitUntil:'domcontentloaded',timeout:TIMEOUT.navigation});
       const outcome = await this.waitForStage({ accept: async (stage, form) => {
         if (['awaiting_email', 'awaiting_password', 'awaiting_verification'].includes(stage)) return true;
         if (form.host !== 'firefly.adobe.com') return false;
@@ -685,8 +737,8 @@ export class BrowserRegistration {
       if (new URL(this.page.url()).hostname !== 'auth.services.adobe.com') throw new RegistrationError('diagnostic_page_mismatch');
       // 仅跳过已观察到阻塞解析的可选字体 CSS；不拦截身份、验证码或验证脚本。
       await this.page.route('https://use.typekit.net/znu8cfp.css', route => route.abort('failed'));
-      await this.page.reload({waitUntil:'domcontentloaded',timeout:45000});
-      await this.page.locator('input:visible').first().waitFor({timeout:20000}).catch(() => {});
+      await this.page.reload({waitUntil:'domcontentloaded',timeout:TIMEOUT.navigation});
+      await this.page.locator('input:visible').first().waitFor({timeout:TIMEOUT.form}).catch(() => {});
       return this.status();
     }
     if (input.action === 'diagnose') {
@@ -710,10 +762,10 @@ export class BrowserRegistration {
     }
     if (input.action === 'open_account') {
       this.page = await this.context.newPage();
-      await this.page.goto('https://account.adobe.com/', {waitUntil:'domcontentloaded',timeout:45000});
+      await this.page.goto('https://account.adobe.com/', {waitUntil:'domcontentloaded',timeout:TIMEOUT.navigation});
       const entry = locateCreateAccountLink(this.page);
-      await entry.waitFor({state:'visible',timeout:45000}).catch(() => {});
-      if (await entry.count() === 1 && await entry.isVisible()) await entry.click();
+      await entry.waitFor({state:'visible',timeout:TIMEOUT.navigation}).catch(() => {});
+      if (await entry.count() === 1 && await entry.isVisible()) await entry.click({timeout:TIMEOUT.click});
       return this.status();
     }
     const frame = await this.authFrame();
@@ -726,7 +778,7 @@ export class BrowserRegistration {
     }
     const createLink = locateCreateAccountLink(frame, form);
     if (kind === 'awaiting_email' && (form.links?.some(link => link.action === 'create_account') || /^(Sign in|登录)$/i.test(form.headings.join(' ').trim())) && await createLink.count() === 1) {
-      await createLink.click();
+      await createLink.click({timeout:TIMEOUT.click});
       const outcome = await this.waitForStage({ fromStage: 'awaiting_email' });
       await this.store.setStage(outcome.code ? 'needs_manual' : 'form_ready', outcome.code);
       return this.status();
@@ -853,7 +905,7 @@ export class BrowserRegistration {
         if (blocking) break;
         const control = await this.regionalConsentControl(key);
         if (!await control.isChecked()) {
-          try { await control.check({timeout:5000}); }
+          try { await control.check({timeout:TIMEOUT.actionable}); }
           catch { throw new RegistrationError('regional_consent_not_applied'); }
         }
       }
@@ -878,14 +930,18 @@ export class BrowserRegistration {
     this.creationTracker ??= new CreationTracker(this.store, this.context);
     await this.creationTracker.begin(this.page);
     try {
-      await button.click({ timeout: 15000 });
+      try { await button.click({ timeout: TIMEOUT.click }); }
+      catch (error) {
+        // Create 可能已成功而页面跳转令点击抛错；只观察后置页面，绝不再次点击。
+        if (!canObserveNavigation(error, this.page)) throw error;
+      }
       const outcome = await this.waitForStage({ accept: (stage, form) => stage === 'awaiting_verification' ||
         form.host === 'firefly.adobe.com' || form.host === 'account.adobe.com' });
       // 账户欢迎页证明页面已跳转，不证明 Firefly 身份或会话可用；成功仍由 exportSession 核对。
       const code = outcome.form.host === 'account.adobe.com' ? 'firefly_identity_required' : 'creation_needs_verification';
       await this.store.setStage(outcome.stage === 'awaiting_verification' ? outcome.stage : 'needs_manual', outcome.code || code);
       if (outcome.code === 'form_rejected') return this.rejectedFormStatus(outcome.form);
-      return this.status();
+      return await this.status();
     } catch {
       await this.store.markOutcomeUnknown();
       throw new RegistrationError('submission_result_unknown');
@@ -908,7 +964,7 @@ export class BrowserRegistration {
         if (alreadySubmitted) throw new RegistrationError('verification_already_submitted');
         await markSubmitted();
         actionStarted = true;
-        applyVerification = () => this.page.goto(input.verificationURL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        applyVerification = () => this.page.goto(input.verificationURL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT.navigation });
       } else {
         if (!/^\d{6}$/.test(String(input.code || ''))) throw new RegistrationError('verification_required');
         const frame = await this.authFrame();
@@ -980,7 +1036,7 @@ export class BrowserRegistration {
       if (!isTrustedAdobeURL(pageURL) || new URL(pageURL).hostname !== 'firefly.adobe.com') {
         throw new RegistrationError('firefly_session_not_ready');
       }
-      let identity = this.workerMode ? await waitForIdentity(this.page,{timeoutMs:10000}) : await this.page.evaluate(async () => {
+      let identity = this.workerMode ? await waitForIdentity(this.page,{timeoutMs:TIMEOUT.identity}) : await this.page.evaluate(async () => {
         const ims = window.adobeIMS;
         if (!ims || typeof ims.isSignedInUser !== 'function' || !await ims.isSignedInUser() ||
             typeof ims.getProfile !== 'function' || typeof ims.getAccessToken !== 'function') return null;
@@ -1005,7 +1061,7 @@ export class BrowserRegistration {
         const expectedAccountID = identity.account_id;
         media = await ensureMediaSession(this.page,this.context,{identity});
         if (!isCompleteMediaSession(media)) throw new RegistrationError('media_session_incomplete');
-        identity = await waitForIdentity(this.page,{timeoutMs:10000});
+        identity = await waitForIdentity(this.page,{timeoutMs:TIMEOUT.identity});
         if (!matchingIdentity(identity) || identity.account_id !== expectedAccountID) throw new RegistrationError('identity_not_verified');
         if (identity.emailVerified === false) throw new RegistrationError('email_verification_required');
         await verifyMediaSession(this.page,media,identity);

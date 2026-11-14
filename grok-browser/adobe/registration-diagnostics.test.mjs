@@ -147,13 +147,13 @@ test('startup diagnostics retain exact fixed actions and bounded zero-inclusive 
     'adobe_reloading_account_page', 'adobe_opening_registration', 'adobe_waiting_registration_form', 'adobe_checking_registration_form', 'adobe_restoring_registration_page']) {
     const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
       failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout',
-      elapsed_ms: 150_000, duration_ms: 0, message: 'PRIVATE', url: 'PRIVATE',
+      elapsed_ms: 300_000, duration_ms: 0, message: 'PRIVATE', url: 'PRIVATE',
     } }, { submission: { started: false } });
     assert.deepEqual(result, { submission_started: false, human_verification_required: false,
-      failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout', elapsed_ms: 150_000, duration_ms: 0 });
+      failure_action: action, failure_phase: 'before_submission', exception_type: 'timeout', elapsed_ms: 300_000, duration_ms: 0 });
     assert.doesNotMatch(JSON.stringify(result), /PRIVATE|message|url/);
   }
-  for (const value of [-1, 150_001, NaN, Infinity, '100', 1.5]) {
+  for (const value of [-1, 300_001, NaN, Infinity, '100', 1.5]) {
     const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
       failure_action: 'adobe_waiting_create_entry', elapsed_ms: value, duration_ms: value,
     } }, null);
@@ -163,6 +163,20 @@ test('startup diagnostics retain exact fixed actions and bounded zero-inclusive 
     failure_action: 'submit_email', elapsed_ms: 100, duration_ms: 100,
   } }, null);
   assert.equal(other.elapsed_ms, undefined); assert.equal(other.duration_ms, undefined);
+});
+
+test('startup network exception categories survive the diagnostics boundary', () => {
+  for (const exception_type of ['proxy_tunnel', 'proxy_connection', 'proxy_auth', 'dns',
+    'network_timeout', 'tls', 'network_connection']) {
+    const result = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
+      failure_action: 'adobe_loading_account_page', failure_phase: 'before_submission', exception_type,
+    } }, null);
+    assert.equal(result.exception_type, exception_type);
+  }
+  const unknown = registrationDiagnostics({ code: 'login_ui_not_ready', failureDiagnostics: {
+    failure_action: 'adobe_loading_account_page', exception_type: 'PRIVATE',
+  } }, null);
+  assert.equal(unknown.exception_type, undefined);
 });
 
 const start = Date.parse('2026-11-12T05:27:00Z');

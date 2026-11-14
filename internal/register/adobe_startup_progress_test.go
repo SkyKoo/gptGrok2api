@@ -104,4 +104,12 @@ func TestAdobeStartupFailureTimingProjection(t *testing.T) {
 	if strings.Contains(adobeFailureDiagnosticText(d), "秒") {
 		t.Fatal("negative timings escaped")
 	}
+	elapsed = 300000
+	if text := adobeFailureDiagnosticText(d); !strings.Contains(text, "累计 300.0 秒") {
+		t.Fatalf("extended startup timing lost: %s", text)
+	}
+	elapsed++
+	if strings.Contains(adobeFailureDiagnosticText(d), "秒") {
+		t.Fatal("unbounded startup timings escaped")
+	}
 }

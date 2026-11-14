@@ -135,7 +135,8 @@ try {
   await job('resume').getByText('结束于：恢复原注册页面 · 入库未完成 · 校验未通过', { exact: true }).waitFor()
   await job('resume').getByText('恢复原浏览器页面超时，未能继续账号验证。', { exact: true }).waitFor()
   assert.equal(await job('resume').getByText(/注册失败|创建失败/).count(), 0)
-  assert.equal(await job('resume').getByRole('button', { name: '手动重新注册', exact: true }).isEnabled(), true)
+  assert.equal(await job('resume').getByRole('button', { name: '手动重新注册', exact: true }).count(), 0)
+  assert.equal(await job('resume').getByRole('button', { name: '继续验证', exact: true }).isEnabled(), true)
   await screenshot('adobe-registration-failure-desktop')
   assert.deepEqual(writes, [])
   await page.clock.runFor(61000)
@@ -151,14 +152,14 @@ try {
   await job('unknown').getByText('后续补偿任务 unknown-new', { exact: true }).waitFor()
   assert.equal(await job('unknown').getByRole('button').count(), 0)
   await job('unknown-new').getByText('补偿任务 unknown-new · 来源任务 unknown', { exact: true }).waitFor()
-  for (const [id, label, endpoint] of [['resume', '手动重新注册', 'reregister'], ['retry', '手动重新注册', 'reregister'], ['saved', '重试入库 / 校验', 'retry-result']]) {
+  for (const [id, label, endpoint] of [['resume', '继续验证', 'retry-registration'], ['retry', '手动重新注册', 'reregister'], ['saved', '重试入库 / 校验', 'retry-result']]) {
     const response = page.waitForResponse(result => result.url().endsWith('/api/register/adobe/' + endpoint) && result.request().method() === 'POST')
     await job(id).getByRole('button', { name: label, exact: true }).click()
     await response
   }
   assert.deepEqual(writes, [
     { path: '/api/register/adobe/reregister', body: { id: 'unknown' } },
-    { path: '/api/register/adobe/reregister', body: { id: 'resume' } },
+    { path: '/api/register/adobe/retry-registration', body: { id: 'resume' } },
     { path: '/api/register/adobe/reregister', body: { id: 'retry' } },
     { path: '/api/register/adobe/retry-result', body: { id: 'saved' } },
   ])

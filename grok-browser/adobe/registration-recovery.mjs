@@ -3,6 +3,8 @@ import { sanitizeMediaDiagnostics } from './media-diagnostics.mjs';
 import { formBlockingCode, formFailureDiagnostics } from './browser.mjs';
 import { runAutomaticRegistration, observeAutomaticVerification } from './auto-runner.mjs';
 import { creationOutcome } from './creation-outcome.mjs';
+import { REGISTRATION_TIMEOUTS as TIMEOUT } from './registration-timeouts.mjs';
+import { startupExceptionType } from './startup-progress.mjs';
 
 const LOGIN = /^(Continue|Next|Sign in|Log in|继续|下一步|登录)$/i;
 const SIGN_IN = /^(Sign in|Log in|登录)$/i;
@@ -16,7 +18,7 @@ function failureDetails(error, action, phase, form) {
     : error?.name === 'TimeoutError' || /Timeout \d+ms exceeded/i.test(message) ? 'timeout'
     : /Target page, context or browser has been closed|page has been closed|Browser closed/i.test(message) ? 'page_closed'
     : /Execution context was destroyed|Frame was detached|Cannot find context with specified id|navigation.*(?:aborted|interrupted)/i.test(message) ? 'navigation'
-    : 'unknown';
+    : startupExceptionType(error);
   return { failure_action: action, failure_phase: phase, exception_type: type,
     ...(error?.code === 'form_rejected' ? formFailureDiagnostics(form) : {}) };
 }
@@ -41,11 +43,11 @@ async function patchAttempt(store, id, patch, { allowUnsubmitted = false } = {})
 }
 
 /** 正常登录入口只接受 Sign in；恢复不会进入注册入口或清除原提交标记。 */
-export async function openRecoveryLogin(browser, { timeoutMs = 20000, now = Date.now, wait = pause, observe = async status => status, shouldStop = () => false } = {}) {
+export async function openRecoveryLogin(browser, { timeoutMs = TIMEOUT.recovery, now = Date.now, wait = pause, observe = async status => status, shouldStop = () => false } = {}) {
   let action = 'open_login', current;
   try {
     if (shouldStop()) throw new RegistrationError('automatic_interrupted');
-    await browser.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await browser.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT.navigation });
     const deadline = now() + timeoutMs;
     let clicked = false;
     while (now() < deadline) {
@@ -64,7 +66,7 @@ export async function openRecoveryLogin(browser, { timeoutMs = 20000, now = Date
         if (shouldStop()) throw new RegistrationError('automatic_interrupted');
         clicked = true;
         action = 'click_login_entry';
-        await (await buttons.count() ? buttons : links).click({ timeout: 15000 });
+        await (await buttons.count() ? buttons : links).click({ timeout: TIMEOUT.click });
       }
       await wait(Math.min(250, Math.max(1, deadline - now())));
     }
@@ -104,12 +106,12 @@ export async function submitRecoveryLogin(browser, store, recoveryId, status) {
     action = password ? 'fill_password' : 'fill_email';
     await (await browser.field(frame, descriptor)).fill(value);
     action = password ? 'submit_password' : 'submit_email';
-    await button.click({ trial: true, timeout: 10000 });
+    await button.click({ trial: true, timeout: TIMEOUT.actionable });
     await patchAttempt(store, recoveryId, { [step]: new Date().toISOString() });
     phase = 'submission_started';
     // A successful form navigation may itself abort Playwright's click wait.
     // Observe the resulting form once; never click a second time.
-    try { await button.click({ timeout: 15000 }); } catch { /* The durable marker fences this action. */ }
+    try { await button.click({ timeout: TIMEOUT.click }); } catch { /* The durable marker fences this action. */ }
     let outcome;
     action = 'wait_login_result';
     try {
@@ -160,12 +162,12 @@ export async function requestRecoveryCode(browser, store, recoveryId) {
     const buttonCount = await buttons.count(), linkCount = await links.count();
     if (buttonCount + linkCount !== 1) throw new RegistrationError('recovery_verification_unavailable');
     const control = buttonCount ? buttons : links;
-    try { await control.click({ trial: true, timeout: 10000 }); }
+    try { await control.click({ trial: true, timeout: TIMEOUT.actionable }); }
     catch (error) { throw actionFailure(error, 'request_code', phase, current.form, 'recovery_verification_unavailable'); }
     const requestedAt = new Date().toISOString();
     await patchAttempt(store, recoveryId, { resendStartedAt: requestedAt });
     phase = 'submission_started';
-    try { await control.click({ timeout: 15000 }); }
+    try { await control.click({ timeout: TIMEOUT.click }); }
     catch (error) { throw actionFailure(error, 'request_code', phase, current.form, 'recovery_verification_result_unknown'); }
     await patchAttempt(store, recoveryId, { verificationRequestedAt: requestedAt });
     return requestedAt;
@@ -280,7 +282,7 @@ export async function resumeRegistration(browser, store, { recoveryId, code = ''
       if (status.form.host === 'account.adobe.com' && !fireflyOpened) {
         fireflyOpened = true;
         action = 'open_firefly';
-        await browser.page.goto('https://firefly.adobe.com/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await browser.page.goto('https://firefly.adobe.com/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT.navigation });
         continue;
       }
       if (loginOpened) return stopped('recovery_login_result_unknown');

@@ -341,8 +341,26 @@ func (f *AdobeBrowserFlow) command(ctx context.Context, cfg AdobeConfig, action,
 		client = &http.Client{Timeout: 160 * time.Second}
 	}
 	dedicated := *client
-	if action == "media" {
-		dedicated.Timeout = 150 * time.Second
+	requestTimeout := time.Duration(0)
+	// A registration command has one 300-second Worker budget. Preserve older
+	// saved settings, but leave time for the Worker to return its final result.
+	if action == "run" || action == "resume" || action == "verify" {
+		requestTimeout = cfg.RequestTimeout
+		if requestTimeout < 320*time.Second {
+			requestTimeout = 320 * time.Second
+		}
+	}
+	if action == "prepare" || action == "refresh" || action == "media" {
+		requestTimeout = 150 * time.Second
+	}
+	if requestTimeout > 0 {
+		// Set both the client timer and request context deadline. The latter is
+		// observable by transports and ensures a short saved client timeout cannot
+		// silently win over the registration command budget.
+		dedicated.Timeout = requestTimeout
+		requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+		defer cancel()
+		req = req.WithContext(requestCtx)
 	}
 	dedicated.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	dedicated.Jar = nil

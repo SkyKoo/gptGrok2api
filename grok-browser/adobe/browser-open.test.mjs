@@ -116,6 +116,43 @@ test('restored page navigation is re-observed without reopening registration or 
   assert.doesNotMatch(JSON.stringify(f.frames), /PRIVATE|fixture@/);
 });
 
+test('restoration calls the real status reader using one outer navigation window without replaying signup', async t => {
+  const f = await restoredFixture(t, () => assert.fail('Use the real status reader'));
+  f.browser.status = BrowserRegistration.prototype.status.bind(f.browser);
+  f.browser.workerMode = true;
+  f.browser.statusWaitOptions = { timeoutMs: 1, now: () => 0,
+    pause: () => assert.fail('Restoration must own its single observation window') };
+  let reads = 0;
+  f.browser.form = async () => {
+    if (++reads <= 2) throw new Error('Execution context was destroyed');
+    return { host: 'auth.services.adobe.com', fields: [{ autocomplete: 'one-time-code' }],
+      headings: [], notices: [], buttons: [], agreements: [], humanVerification: { required: false } };
+  };
+  const before = await f.store.load();
+  const status = await f.browser.open({ resumeOnly: true });
+  assert.equal(status.detected, 'awaiting_verification');
+  assert.equal(status.submissionStarted, true);
+  assert.equal(reads, 3);
+  assert.deepEqual(await f.store.load(), before);
+  assert.deepEqual(creationOutcome(await f.store.load()), { creation_outcome: 'accepted' });
+  assert.deepEqual(f.frames.filter(frame => frame.stage === 'adobe_restoring_registration_page')
+    .map(frame => [frame.status, frame.duration_ms]), [['started', 0], ['completed', 500]]);
+});
+
+test('restored navigation can settle after fifteen seconds while retaining the original accepted session', async t => {
+  let elapsed = 0;
+  const f = await restoredFixture(t, () => {
+    if (elapsed < 20_000) throw new Error('Execution context was destroyed');
+    return { stage: 'awaiting_verification' };
+  });
+  f.browser.restorationWaitOptions = { pollIntervalMs: 1000, now: () => elapsed,
+    pause: async ms => { elapsed += ms; } };
+  const before = await f.store.load();
+  assert.equal((await f.browser.open({ resumeOnly: true })).stage, 'awaiting_verification');
+  assert.equal(elapsed, 20_000);
+  assert.deepEqual(await f.store.load(), before);
+});
+
 test('continuous restored navigation and a stalled status read both have one bounded observation window', async t => {
   for (const stalled of [false, true]) await t.test(String(stalled), async sub => {
     const f = await restoredFixture(sub, () => {
@@ -208,10 +245,10 @@ test('initialization distinguishes browser launch, page load, entry and registra
   assert.deepEqual(f.frames.filter(frame => frame.status === 'started').map(frame => frame.stage), stages);
   assert.deepEqual(f.frames.filter(frame => frame.status === 'completed').map(frame => frame.stage), stages);
   assert.deepEqual(f.calls.map(call => call.stage), stages);
-  assert.equal(f.calls.find(call => call.stage === 'adobe_loading_account_page').options.timeout, 45000);
-  assert.equal(f.calls.find(call => call.stage === 'adobe_waiting_create_entry').options.timeout, 20000);
-  assert.equal(f.calls.find(call => call.stage === 'adobe_opening_registration').options, undefined);
-  assert.equal(f.calls.find(call => call.stage === 'adobe_waiting_registration_form').options.timeout, 20000);
+  assert.equal(f.calls.find(call => call.stage === 'adobe_loading_account_page').options.timeout, 90000);
+  assert.equal(f.calls.find(call => call.stage === 'adobe_waiting_create_entry').options.timeout, 40000);
+  assert.equal(f.calls.find(call => call.stage === 'adobe_opening_registration').options.timeout, 30000);
+  assert.equal(f.calls.find(call => call.stage === 'adobe_waiting_registration_form').options.timeout, 40000);
   assert.equal((await f.store.load()).submission.started, false);
 });
 
@@ -251,6 +288,6 @@ test('existing optional font reload has separate progress and does not duplicate
   assert.equal(f.frames.filter(frame => frame.stage === 'adobe_waiting_create_entry' && frame.status === 'failed').length, 1);
   assert.equal(f.frames.filter(frame => frame.stage === 'adobe_reloading_account_page' && frame.status === 'completed').length, 1);
   assert.equal(f.calls.filter(call => call.stage === 'adobe_opening_registration').length, 1);
-  assert.equal(f.calls.find(call => call.stage === 'adobe_reloading_account_page').options.timeout, 30000);
+  assert.equal(f.calls.find(call => call.stage === 'adobe_reloading_account_page').options.timeout, 60000);
   assert.equal((await f.store.load()).startupFailure, undefined);
 });

@@ -144,8 +144,90 @@ func TestAdobeManualReregistrationRejectsProtectedMailboxStates(t *testing.T) {
 	}
 }
 
-func TestAdobeManualReregistrationAcceptsFailedCreationWithoutOldEnvironment(t *testing.T) {
-	for _, outcome := range []string{"accepted", "unknown", "rejected", "legacy"} {
+func TestAdobeManualReregistrationRejectsAcceptedIdentityAcrossMailboxHistory(t *testing.T) {
+	for _, scenario := range []string{"current", "missing_environment", "accepted_ancestor", "accepted_other_root", "unrelated_email"} {
+		t.Run(scenario, func(t *testing.T) {
+			accepted := adobeReregisterFixture(t)
+			accepted.AdobeRegistration.CreationOutcome = "accepted"
+			accepted.AutoRetry.Attempts = 0
+			accepted.AutoRetry.State = "waiting"
+			accepted.AutoRetry.Reason = ""
+			accepted.Error = "mail: timeout"
+			jobs, target := []RegistrationJob{accepted}, accepted.ID
+			switch scenario {
+			case "missing_environment":
+				jobs[0].AdobeProfile = nil
+				jobs[0].AdobeRegistration.BrowserProfileID = ""
+				jobs[0].AdobeRegistration.ProxyRecorded = false
+			case "accepted_ancestor", "accepted_other_root", "unrelated_email":
+				leaf := adobeReregisterFixture(t)
+				leaf.ID, leaf.Error = "latest-failed-attempt", "adobe: account_already_exists"
+				leaf.Mailbox.Email = " EXISTING@EXAMPLE.TEST "
+				if scenario == "accepted_ancestor" {
+					leaf.ParentJobID, leaf.RootJobID = accepted.ID, accepted.ID
+					jobs[0].RetryJobID = leaf.ID
+					jobs[0].AutoRetry.State = "superseded"
+				}
+				if scenario == "unrelated_email" {
+					jobs[0].Mailbox.Email = "other@example.test"
+				}
+				jobs, target = append(jobs, leaf), leaf.ID
+			}
+			var calls atomic.Int32
+			e := NewAdobeEngine(filepath.Join(t.TempDir(), "journal"), "fixture", func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
+				calls.Add(1)
+				return nil, nil, fail("test", "offline_fixture")
+			}, nil, nil)
+			seedAdobeCompensation(t, e, jobs...)
+			before, err := os.ReadFile(e.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := e.Snapshot()["jobs"].([]any)
+			leaf := rows[len(rows)-1].(map[string]any)
+			if scenario == "unrelated_email" {
+				if leaf["can_reregister"] != true {
+					t.Fatal("another email's accepted creation blocked this mailbox")
+				}
+				if err := e.Reregister(adobeTestConfig(), target); err != nil {
+					t.Fatal(err)
+				}
+				waitAdobe(t, e)
+				if calls.Load() != 1 {
+					t.Fatal("unrelated accepted identity prevented an explicit attempt")
+				}
+				return
+			}
+			if leaf["can_reregister"] != false {
+				t.Fatal("accepted identity exposed fresh registration")
+			}
+			if scenario == "current" && (leaf["can_resume_registration"] != true || leaf["recovery_mode"] != "resume_session") {
+				t.Fatal("accepted identity lost its original-session recovery action")
+			}
+			if scenario == "accepted_ancestor" || scenario == "accepted_other_root" {
+				hint, _ := leaf["review_hint"].(string)
+				if !strings.Contains(hint, "账号创建已被 Adobe 受理") || strings.Contains(hint, "缺少 Adobe 创建结果") {
+					t.Fatal("accepted identity was described as an unknown creation result")
+				}
+			}
+			var failure *Failure
+			if err := e.Reregister(adobeTestConfig(), target); !errors.As(err, &failure) || failure.Code != "registration_already_accepted" {
+				t.Fatalf("accepted identity was not rejected explicitly: %v", err)
+			}
+			after, err := os.ReadFile(e.path)
+			if err != nil || string(before) != string(after) || calls.Load() != 0 {
+				t.Fatal("rejected creation changed the journal or reached Worker", err)
+			}
+			reloaded := NewAdobeEngine(e.path, "fixture", e.factory, nil, nil)
+			if err := reloaded.Reregister(adobeTestConfig(), target); !errors.As(err, &failure) || failure.Code != "registration_already_accepted" {
+				t.Fatalf("restart lost accepted-identity protection: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdobeManualReregistrationAcceptsUnconfirmedCreationWithoutOldEnvironment(t *testing.T) {
+	for _, outcome := range []string{"unknown", "rejected", "legacy"} {
 		t.Run(outcome, func(t *testing.T) {
 			parent := adobeReregisterFixture(t)
 			parent.AdobeProfile = nil

@@ -88,12 +88,24 @@ func TestStartupEventsAreAllowlistedAndBounded(t *testing.T) {
 	if !base.Valid() {
 		t.Fatal("valid event rejected")
 	}
+	boundary := base
+	boundary.ElapsedMS, boundary.DurationMS = 300000, 300000
+	if !boundary.Valid() {
+		t.Fatal("progress at the extended command deadline rejected")
+	}
+	for _, exception := range []string{"proxy_tunnel", "proxy_connection", "proxy_auth", "dns", "network_timeout", "tls", "network_connection"} {
+		candidate := base
+		candidate.ExceptionType = exception
+		if !candidate.Valid() {
+			t.Fatalf("network exception category rejected: %s", exception)
+		}
+	}
 	for _, modify := range []func(*StartupEvent){
 		func(e *StartupEvent) { e.Stage = "PRIVATE_URL" },
 		func(e *StartupEvent) { e.ExceptionType = "SECRET" },
 		func(e *StartupEvent) { e.Status = "SECRET" },
 		func(e *StartupEvent) { e.Sequence = 0 },
-		func(e *StartupEvent) { e.ElapsedMS = 150001 },
+		func(e *StartupEvent) { e.ElapsedMS = 300001 },
 		func(e *StartupEvent) { e.DurationMS = -1 },
 		func(e *StartupEvent) { e.DurationMS = 1 },
 	} {

@@ -25,13 +25,14 @@ export function registrationHasSuccessor(job: RegistrationRecoveryActions): bool
   return Boolean(job.retry_job_id || job.auto_retry?.state === 'superseded')
 }
 
-// The server checks saved accounts, active work and the shared mailbox budget.
-// Explicit permission opens a new environment without replaying the old flow.
+// Accepted creation must continue its original session, including snapshots
+// from older servers that still advertised the fresh-registration capability.
 export function adobeManualReregistration(job: RegistrationRecoveryActions, target?: string): boolean {
   return target === 'adobe' && job.can_reregister === true
     && ['registration_pending', 'failed', 'interrupted', 'cancelled'].includes(job.status || '')
     && !registrationHasSuccessor(job) && !job.imported && !job.can_retry
-    && job.recovery_mode !== 'saved_result'
+    && job.recovery_mode !== 'saved_result' && job.recovery_mode !== 'resume_session'
+    && job.creation_outcome !== 'accepted'
 }
 
 export function adobeReregistrationCooldown(job: RegistrationRecoveryActions, now: number): { blocked: boolean; text: string } {
@@ -55,7 +56,7 @@ export function registrationRecoveryAction(job: RegistrationRecoveryActions, tar
 }
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 注册失败或未完成且未保存账号时，系统释放邮箱预占用；再次执行前重新预占。同一邮箱共用自动补偿次数和冷却，最多自动补偿 3 次，创建结果未知时停止自动重试。可点击“手动重新注册”，用原邮箱和当前注册出口，在全新浏览器环境中开始；旧任务和历史次数保留。已保存账号只补入库或校验。'
+  if (target === 'adobe') return 'Adobe 注册失败或未完成且未保存账号时，系统释放邮箱预占用；再次执行前重新预占。同一邮箱共用自动补偿次数和冷却，最多自动补偿 3 次，创建结果未知时停止自动重试。创建已受理的账号只能沿原会话继续验证和采集凭据。其余符合条件的失败任务可点击“手动重新注册”，用原邮箱和当前注册出口，在全新浏览器环境中开始；旧任务和历史次数保留。已保存账号只补入库或校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'

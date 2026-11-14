@@ -40,7 +40,7 @@ type StartupEvent struct {
 }
 
 func (e StartupEvent) Valid() bool {
-	if e.Sequence < 1 || e.Sequence > 1024 || e.ElapsedMS < 0 || e.ElapsedMS > 150000 || e.DurationMS < 0 || e.DurationMS > e.ElapsedMS {
+	if e.Sequence < 1 || e.Sequence > 1024 || e.ElapsedMS < 0 || e.ElapsedMS > 300000 || e.DurationMS < 0 || e.DurationMS > e.ElapsedMS {
 		return false
 	}
 	switch e.Stage {
@@ -52,7 +52,8 @@ func (e StartupEvent) Valid() bool {
 		return false
 	}
 	switch e.ExceptionType {
-	case "", "registration", "timeout", "navigation", "page_closed", "unknown":
+	case "", "registration", "timeout", "navigation", "page_closed", "unknown",
+		"proxy_tunnel", "proxy_connection", "proxy_auth", "dns", "network_timeout", "tls", "network_connection":
 		return true
 	default:
 		return false

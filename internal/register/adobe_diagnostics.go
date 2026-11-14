@@ -250,13 +250,17 @@ func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 		parts = append(parts, "出错步骤："+label)
 	}
 	if adobeStartupStageText(d.FailureAction) != "" && d.ElapsedMS != nil && d.DurationMS != nil &&
-		*d.DurationMS >= 0 && *d.DurationMS <= *d.ElapsedMS && *d.ElapsedMS <= 150000 {
+		*d.DurationMS >= 0 && *d.DurationMS <= *d.ElapsedMS && *d.ElapsedMS <= 300000 {
 		parts = append(parts, fmt.Sprintf("本步 %.1f 秒，准备累计 %.1f 秒", float64(*d.DurationMS)/1000, float64(*d.ElapsedMS)/1000))
 	}
 	if label := map[string]string{"before_submission": "动作提交前", "submission_started": "动作已开始提交，结果仍需核对"}[d.FailurePhase]; label != "" {
 		parts = append(parts, "步骤进度："+label)
 	}
-	if label := map[string]string{"registration": "流程校验", "timeout": "等待超时", "navigation": "页面跳转", "page_closed": "页面已关闭", "unknown": "未分类异常"}[d.ExceptionType]; label != "" {
+	if label := map[string]string{
+		"registration": "流程校验", "timeout": "等待超时", "navigation": "页面跳转", "page_closed": "页面已关闭", "unknown": "未分类异常",
+		"proxy_tunnel": "代理隧道失败", "proxy_connection": "代理连接失败", "proxy_auth": "代理认证失败",
+		"dns": "域名解析失败", "network_timeout": "网络连接超时", "tls": "TLS 握手失败", "network_connection": "网络连接失败",
+	}[d.ExceptionType]; label != "" {
 		parts = append(parts, "异常类别："+label)
 	}
 	return strings.Join(parts, "；")

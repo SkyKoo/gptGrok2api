@@ -210,7 +210,7 @@ func (s *Server) refreshAdobeBrowserAccount(ctx context.Context, account adobe.A
 	raw := mapValue(s.registerStore.ConfigForTarget("adobe")["adobe"])
 	base := strings.TrimRight(firstNonEmpty(stringValue(raw["api_base"]), os.Getenv("CFM_BROWSER_WORKER_URL"), os.Getenv("CFM_GROK_BROWSER_URL"), "http://cfm-browser-worker:8899"), "/")
 	key := firstNonEmpty(stringValue(raw["api_key"]), os.Getenv("CFM_BROWSER_WORKER_TOKEN"), os.Getenv("GROK_BROWSER_TOKEN"))
-	client := &http.Client{Timeout: 160 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Timeout: 150 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	ctx, err := s.adobeAccountContext(ctx, account)
 	if err != nil {

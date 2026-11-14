@@ -190,7 +190,7 @@ export const defaultRegisterConfig: LegacyRegisterConfig = {
   openai_free: { timeout_seconds: 600, auto_twofa: false },
   target: 'openai',
   grok: { ...defaultGrokRegisterConfig },
-  adobe: { api_base: 'http://cfm-browser-worker:8899', api_key: '', request_timeout: 120 },
+  adobe: { api_base: 'http://cfm-browser-worker:8899', api_key: '', request_timeout: 320 },
   checkout: {
     enabled: false,
     channel: 'upi',
@@ -730,7 +730,7 @@ function normalizeAdobeRegisterConfig(raw?: Partial<AdobeRegisterConfig>): Adobe
     api_base: String(raw?.api_base ?? defaultRegisterConfig.adobe.api_base).trim(),
     api_key: String(raw?.api_key || '').trim(),
     api_key_set: Boolean(raw?.api_key_set),
-    request_timeout: Math.max(30, Math.min(180, Math.round(Number(raw?.request_timeout) || defaultRegisterConfig.adobe.request_timeout))),
+    request_timeout: Math.max(30, Math.min(600, Math.round(Number(raw?.request_timeout) || defaultRegisterConfig.adobe.request_timeout))),
   }
 }
 

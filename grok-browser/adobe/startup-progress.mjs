@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { REGISTRATION_TIMEOUTS } from './registration-timeouts.mjs';
 
 export const STARTUP_STAGES = new Set([
   'starting_browser', 'adobe_loading_account_page', 'adobe_waiting_create_entry',
@@ -6,7 +7,17 @@ export const STARTUP_STAGES = new Set([
   'adobe_waiting_registration_form', 'adobe_checking_registration_form',
   'adobe_restoring_registration_page',
 ]);
-export const STARTUP_LIMIT_MS = 150_000;
+export const STARTUP_LIMIT_MS = REGISTRATION_TIMEOUTS.command;
+
+const NETWORK_FAILURE_TYPES = Object.freeze([
+  ['proxy_tunnel', /\bERR_TUNNEL_CONNECTION_FAILED\b/i],
+  ['proxy_connection', /\bERR_PROXY_CONNECTION_FAILED\b/i],
+  ['proxy_auth', /\bERR_PROXY_(?:AUTH_UNSUPPORTED|AUTH_FAILED|AUTH_REQUESTED)\b/i],
+  ['dns', /\b(?:ERR_NAME_NOT_RESOLVED|ERR_DNS_TIMED_OUT)\b/i],
+  ['network_timeout', /\b(?:ERR_TIMED_OUT|ERR_CONNECTION_TIMED_OUT)\b/i],
+  ['tls', /\b(?:ERR_CERT_[A-Z0-9_]+|ERR_SSL_[A-Z0-9_]+|ERR_TLS_[A-Z0-9_]+)\b/i],
+  ['network_connection', /\b(?:ERR_CONNECTION_(?:REFUSED|CLOSED|RESET|FAILED)|ERR_INTERNET_DISCONNECTED)\b/i],
+]);
 
 // Inspect errors only to classify them. Neither messages, URLs nor browser
 // launch arguments are retained in progress frames or the private journal.
@@ -15,6 +26,7 @@ export function startupExceptionType(error) {
   if (error?.name === 'TimeoutError' || ['browser_launch_timeout', 'stage_transition_timeout', 'recovery_page_observation_timeout'].includes(error?.code) || /Timeout \d+ms exceeded/i.test(message)) return 'timeout';
   if (/Target page, context or browser has been closed|page has been closed|Browser closed/i.test(message)) return 'page_closed';
   if (/Execution context was destroyed|Frame was detached|Cannot find context with specified id|navigation.*(?:aborted|interrupted)/i.test(message)) return 'navigation';
+  for (const [type, pattern] of NETWORK_FAILURE_TYPES) if (pattern.test(message)) return type;
   return typeof error?.code === 'string' && /^[a-z][a-z0-9_]{0,79}$/.test(error.code) ? 'registration' : 'unknown';
 }
 

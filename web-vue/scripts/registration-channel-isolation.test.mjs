@@ -73,8 +73,23 @@ function harness(t) {
  }))
  state.applyConfig(incoming())
  t.after(() => scope.stop())
- return { state, api, incoming, calls, notices, scheduled, evaluate, overrides, setConfirm(fn) { confirm = fn } }
+ return { state, api, incoming, calls, notices, scheduled, evaluate, overrides, view, setConfirm(fn) { confirm = fn } }
 }
+
+test('Adobe browser-call timeout defaults to 320 seconds and stays within 30-600', t => {
+ const h = harness(t)
+ const normalize = value => h.view.normalizeRegisterConfig({ ...h.view.defaultRegisterConfig, adobe: value }).adobe
+ assert.equal(h.view.defaultRegisterConfig.adobe.request_timeout, 320)
+ assert.equal(normalize({ request_timeout: 30 }).request_timeout, 30)
+ assert.equal(normalize({ request_timeout: 120 }).request_timeout, 120)
+ assert.equal(normalize({ request_timeout: 600 }).request_timeout, 600)
+ assert.equal(normalize({ request_timeout: 12 }).request_timeout, 30)
+ assert.equal(normalize({ request_timeout: 900 }).request_timeout, 600)
+ const raw = { ...h.view.defaultRegisterConfig, adobe: { request_timeout: 120 } }
+ const payload = h.view.legacyRegisterPayload(h.view.normalizeRegisterConfig(raw))
+ assert.equal(payload.adobe.request_timeout, 120)
+ assert.equal(raw.adobe.request_timeout, 120)
+})
 
 test('running channel can be left; config, logs, source, proxy and controls restore independently', async t => {
  const h = harness(t), s = h.state

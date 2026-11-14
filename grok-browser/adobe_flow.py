@@ -39,7 +39,8 @@ class AdobeProcess:
                 # One deadline covers all progress frames and the final reply.
                 # Progress is observation only; it must not extend an init or
                 # cause the business command to be sent again.
-                async with asyncio.timeout(150):
+                timeout = 300 if payload.get("action") in {"init", "run", "resume", "verify"} else 150
+                async with asyncio.timeout(timeout):
                     self.process.stdin.write((json.dumps({**payload,"id":identifier})+"\n").encode())
                     await self.process.stdin.drain()
                     previous_sequence = 0

@@ -41,11 +41,19 @@ func TestAdobeAcceptedManualReregistrationContinuesItsSessionAfterRestart(t *tes
 						}}, nil
 					}
 					engine := NewAdobeEngine(path, "fixture", factory, nil, nil)
-					seedAdobeCompensation(t, engine, parent)
-					if err := engine.Reregister(adobeTestConfig(), parent.ID); err != nil {
-						t.Fatal(err)
+					wantSignup := int32(1)
+					if priorOutcome == "accepted" {
+						// Old versions admitted this child. Preserve its durable
+						// continuation without allowing a new Create under this version.
+						legacy := seedAdobeLegacyManualAttempt(t, engine, parent, "accepted")
+						profileID, wantSignup = legacy.ID, 0
+					} else {
+						seedAdobeCompensation(t, engine, parent)
+						if err := engine.Reregister(adobeTestConfig(), parent.ID); err != nil {
+							t.Fatal(err)
+						}
+						waitAdobe(t, engine)
 					}
-					waitAdobe(t, engine)
 					engine = NewAdobeEngine(path, "fixture", factory, nil, nil)
 					accepted := latestAdobe(t, engine, parent.ID)
 					if !accepted.AdobeRegistration.ManualReregistration || accepted.AdobeRegistration.BrowserProfileID != accepted.ID || adobeCreationOutcome(accepted) != "accepted" {
@@ -53,8 +61,8 @@ func TestAdobeAcceptedManualReregistrationContinuesItsSessionAfterRestart(t *tes
 					}
 					rows := engine.Snapshot()["jobs"].([]any)
 					leaf := rows[len(rows)-1].(map[string]any)
-					if leaf["can_resume_registration"] != true || leaf["can_reregister"] != true || leaf["can_retry_registration"] != false {
-						t.Fatal("accepted manual attempt lost recovery or the separate explicit fresh-registration action")
+					if leaf["can_resume_registration"] != true || leaf["can_reregister"] != false || leaf["can_retry_registration"] != false {
+						t.Fatal("accepted manual attempt lost recovery or exposed fresh registration")
 					}
 					for attempt := 0; attempt < 2; attempt++ {
 						current := latestAdobe(t, engine, parent.ID)
@@ -86,7 +94,7 @@ func TestAdobeAcceptedManualReregistrationContinuesItsSessionAfterRestart(t *tes
 					if automatic {
 						wantBudget = 2
 					}
-					if signup.Load() != 1 || resume.Load() != 2 || last.AutoRetry.Attempts != wantBudget || last.AdobeRegistration.BrowserProfileID != profileID {
+					if signup.Load() != wantSignup || resume.Load() != 2 || last.AutoRetry.Attempts != wantBudget || last.AdobeRegistration.BrowserProfileID != profileID {
 						t.Fatalf("wrong lifecycle: signup=%d resume=%d budget=%d", signup.Load(), resume.Load(), last.AutoRetry.Attempts)
 					}
 				})
@@ -180,23 +188,50 @@ func TestAdobeUnacceptedManualAttemptDoesNotAutomaticallyReplayPriorCreation(t *
 				}
 				path := filepath.Join(t.TempDir(), "journal")
 				engine := NewAdobeEngine(path, "fixture", factory, nil, nil)
-				seedAdobeCompensation(t, engine, parent)
-				if err := engine.Reregister(adobeTestConfig(), parent.ID); err != nil {
-					t.Fatal(err)
+				wantCalls := int32(1)
+				if priorOutcome == "accepted" {
+					seedAdobeLegacyManualAttempt(t, engine, parent, outcome)
+					wantCalls = 0
+				} else {
+					seedAdobeCompensation(t, engine, parent)
+					if err := engine.Reregister(adobeTestConfig(), parent.ID); err != nil {
+						t.Fatal(err)
+					}
+					waitAdobe(t, engine)
 				}
-				waitAdobe(t, engine)
 				engine = NewAdobeEngine(path, "fixture", factory, nil, nil)
 				child := latestAdobe(t, engine, parent.ID)
 				if adobeCreationOutcome(child) != outcome || child.AutoRetry.Attempts != 0 {
 					t.Fatal("manual result or retry budget was rewritten")
 				}
-				if ran, err := engine.RunCompensation(adobeTestConfig(), time.Now().Add(48*time.Hour)); ran || err != nil || calls.Load() != 1 {
+				if ran, err := engine.RunCompensation(adobeTestConfig(), time.Now().Add(48*time.Hour)); ran || err != nil || calls.Load() != wantCalls {
 					t.Fatalf("new uncertain/refused attempt caused blind automatic replay: ran=%v error=%v calls=%d", ran, err, calls.Load())
 				}
-				if engine.Snapshot()["jobs"].([]any)[1].(map[string]any)["can_reregister"] != true {
-					t.Fatal("stopping automatic replay removed the explicit manual choice")
+				if engine.Snapshot()["jobs"].([]any)[1].(map[string]any)["can_reregister"] != (priorOutcome != "accepted") {
+					t.Fatal("manual creation capability ignored the accepted ancestor")
 				}
 			})
 		}
 	}
+}
+
+// Model the legacy persisted child directly: a regression test must not use a
+// now-forbidden API call to manufacture history from an earlier release.
+func seedAdobeLegacyManualAttempt(t *testing.T, engine *AdobeEngine, parent RegistrationJob, outcome string) RegistrationJob {
+	t.Helper()
+	child := cloneJob(parent)
+	child.ID, child.ParentJobID, child.RootJobID, child.RetryJobID = "legacy-manual-origin", parent.ID, mailboxClaimJobID(parent), ""
+	child.AdobeRegistration.BrowserProfileID = child.ID
+	child.AdobeRegistration.ManualReregistration = true
+	child.AdobeRegistration.CreationOutcome = outcome
+	child.AdobeRegistration.CreationErrorCode, child.AdobeRegistration.CreationHTTPStatus = "", 0
+	if outcome == "rejected" {
+		child.AdobeRegistration.CreationErrorCode, child.AdobeRegistration.CreationHTTPStatus = "captcha_required", 400
+	}
+	child.Stage, child.Error = "awaiting_verification", "mail: timeout"
+	child.AutoRetry = &RegistrationCompensation{State: "waiting", NextAttemptAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339Nano)}
+	parent.RetryJobID = child.ID
+	parent.AutoRetry.State = "superseded"
+	seedAdobeCompensation(t, engine, parent, child)
+	return child
 }
