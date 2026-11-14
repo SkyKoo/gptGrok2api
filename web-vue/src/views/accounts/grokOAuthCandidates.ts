@@ -82,7 +82,11 @@ export function mergeGrokOAuthRows(candidates: GrokOAuthCandidate[], accounts: G
 export function cpaStatusText(item: GrokOAuthRow) {
   if (item.cpa_sync?.status === 'quality_removed' || item.quality?.removal?.status === 'removed') return '降智凭据已移除'
   if (item.quality?.removal) return '降智凭据待移除'
-  if (item.cpa_sync?.status === 'quality_blocked') return '检测未通过，未同步'
+  if (item.quality?.status === 'error' && !item.quality.blocked) {
+    if (item.cpa_sync?.status === 'synced') return '已交付，检测失败待复测'
+    return isCPAManaged(item) ? 'CPA 凭据保留，待复测' : '检测失败，暂缓同步'
+  }
+  if (item.quality?.blocked || item.cpa_sync?.status === 'quality_blocked') return isCPAManaged(item) ? 'CPA 凭据保留，检测未通过' : '检测未通过，未同步'
   if (item.job?.stage === 'syncing_cpa' && item.job.status === 'running') return '正在同步'
   if (isCPAManaged(item)) return item.cpa_sync?.status === 'synced' ? '已交付 CPA' : '待核对 CPA'
   return ({ synced: '已交付 CPA', pending: '待同步', failed: '同步失败', unknown: '待核对 CPA', uploading: '正在同步' } as Record<string, string>)[item.cpa_sync?.status || ''] || '未同步'
@@ -90,7 +94,7 @@ export function cpaStatusText(item: GrokOAuthRow) {
 
 export function cpaAction(item: GrokOAuthRow): 'check' | 'sync' | null {
   if (!item.oauth_account_id) return null
-  if (item.quality?.blocked || item.quality_running || item.cpa_sync?.status === 'quality_removed') return null
+  if (item.quality?.blocked || item.quality?.status === 'error' || item.quality_running || item.cpa_sync?.status === 'quality_removed') return null
   if (isCPAManaged(item) || ['unknown', 'uploading'].includes(item.cpa_sync?.status || '')) return 'check'
   return item.has_access_token && item.has_refresh_token ? 'sync' : null
 }
@@ -122,11 +126,16 @@ export function grokOAuthImportPayload(value: unknown, poolId: string, now = Dat
 export function filterGrokOAuthCandidates<T extends GrokOAuthCandidate>(items: T[], keyword: string, status: string): T[] {
   const query = keyword.trim().toLowerCase()
   return items.filter(item => (!status || (status === 'cpa_attention'
-    ? Boolean(item.cpa_sync && item.cpa_sync.status !== 'synced')
+    ? Boolean(item.quality?.blocked || item.quality?.status === 'error' || item.cpa_sync && item.cpa_sync.status !== 'synced')
     : status === 'quality_risk' ? Boolean(item.quality?.blocked)
     : status === 'quality_error' ? item.quality?.status === 'error'
     : item.oauth_status === status))
     && (!query || [item.email, item.id, item.login_status, xaiOAuthStatusLabels[item.oauth_status], item.cpa_sync?.pool_name, item.cpa_sync?.error].some(value => value?.toLowerCase().includes(query))))
+}
+
+export function qualityFailureReason(item: Pick<GrokOAuthRow, 'quality'>) {
+  if (item.quality?.status !== 'error') return ''
+  return item.quality.samples?.find(sample => sample.status === 'error')?.reason || item.quality.summary
 }
 
 export function qualityStatusText(item: Pick<GrokOAuthRow, 'quality' | 'quality_running'>) {

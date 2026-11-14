@@ -36,6 +36,9 @@ accounts.set('oauth-legacy', account('oauth-legacy', 'legacy@example.test', { st
 accounts.set('oauth-orphan', account('oauth-orphan', 'orphan@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true))
 const riskQuality = { model: 'grok-4.7', version: 'grok47-v1', status: 'high_risk', blocked: true, confirmed_at: 1794564000, at: 1794564000, source: 'cpa', summary: '两组独立检测均至少2题失败（4/6），标记降智风险并阻止交付', removal: { status: 'manual_required', pool_id: 'cpa-a', pool_name: 'O-CPA', file_name: 'xai-risk@example.test.json', error: '此 CPA 不支持凭据删除接口，请人工删除', at: 1794564000 }, samples: [{ kind: 'inventory', prompt: '模拟题目', expected: 53, answer: '{"answer":54}', status: 'fail', reason: '答案与程序计算结果不一致', duration_ms: 1200 }] }
 accounts.set('oauth-risk', { ...account('oauth-risk', 'risk@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true), quality: riskQuality })
+const failedQuality = { model: 'grok-4.7', version: 'grok47-v1', status: 'error', blocked: false, at: 1794564000, source: 'cpa', summary: '检测未完成，不能判定质量', samples: [{ status: 'error', reason: '上游 HTTP 402，未计为降智', http_status: 402, duration_ms: 100 }] }
+accounts.set('oauth-error', { ...account('oauth-error', 'error@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true), quality: failedQuality })
+accounts.set('oauth-error-new', { ...account('oauth-error-new', 'error-new@example.test', { status: 'quality_blocked', pool_id: 'cpa-a', pool_name: 'O-CPA' }), quality: { ...failedQuality, source: 'oauth' } })
 let qualitySchedule = { enabled: true, interval_hours: 24, pending: 0, running: 0, next_due_at: 1794650400, last_checked_at: 1794564000 }
 let job, jobReads = 0
 await context.route('**/*', async route => {
@@ -120,6 +123,16 @@ try {
   await row('grok-new').getByText('正在同步 CPA', { exact: true }).first().waitFor()
   assert.equal(await row('grok-new').getByText('O-CPA', { exact: true }).count(), 1, 'target pinned while selection changes')
   await row('grok-new').getByText('已交付 CPA', { exact: true }).waitFor()
+  await row('oauth:oauth-error').getByText('已交付，检测失败待复测', { exact: true }).waitFor()
+  await row('oauth:oauth-error-new').getByText('检测失败，暂缓同步', { exact: true }).waitFor()
+  await row('oauth:oauth-error').getByText('上游 HTTP 402，未计为降智', { exact: true }).waitFor()
+  for (const id of ['oauth:oauth-error', 'oauth:oauth-error-new']) {
+    assert.equal(await row(id).getByRole('button', { name: /^(同步 CPA|核对 CPA|重试同步)$/ }).count(), 0)
+    assert.equal(await row(id).getByRole('button', { name: '复测 grok-4.7', exact: true }).isEnabled(), true)
+  }
+  await page.getByRole('button', { name: 'CPA 待处理', exact: true }).click()
+  assert.equal(await row('oauth:oauth-error').count(), 1, 'historical delivery with a failed check needs attention')
+  await page.getByRole('button', { name: '全部', exact: true }).click()
   await row('grok-retry').getByRole('button', { name: '重试同步' }).click()
   await row('grok-retry').getByText('已交付 CPA', { exact: true }).waitFor()
   await row('grok-legacy').getByRole('button', { name: '核对 CPA' }).click()
@@ -143,6 +156,7 @@ try {
   assert.equal(await row('oauth:oauth-risk').getByRole('button', { name: /^(同步 CPA|核对 CPA)$/ }).count(), 0, 'risk blocks all delivery actions')
   await page.getByRole('button', { name: '降智风险', exact: true }).click()
   assert.equal(await row('grok-managed').count(), 0, 'risk filter excludes healthy accounts')
+  assert.equal(await row('oauth:oauth-error').count(), 0, 'request failure alone is not degradation')
   await row('oauth:oauth-risk').getByRole('button', { name: '查看检测依据' }).click()
   await page.getByRole('dialog').getByText('grok-4.7 降智检测依据', { exact: true }).waitFor()
   await page.getByRole('dialog').getByText('此 CPA 不支持凭据删除接口，请人工删除', { exact: true }).waitFor()
