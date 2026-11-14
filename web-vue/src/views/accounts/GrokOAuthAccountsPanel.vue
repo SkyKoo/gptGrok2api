@@ -16,7 +16,7 @@
         </div>
       </div>
       <SurfaceBox tone="muted" density="compact" wrap>
-        授权后先检测 grok-4.7，通过后同步到所选 CPA，由 CPA 负责续期。降智风险账号会拦截同步；已交付的风险凭据会自动尝试移除。检测使用账号额度，每轮 3 题，出现异常或复测风险账号时追加 3 题。
+        授权后先检测 grok-4.7，通过后同步到所选 CPA，由 CPA 负责续期。检测失败或疑似降智都会暂缓同步；已交付账号检测失败时保留 CPA 凭据，重复确认降智风险后才尝试移除。检测使用账号额度，每轮 3 题，出现异常或复测风险账号时追加 3 题。
       </SurfaceBox>
       <div class="space-y-2 rounded-lg border border-border p-3 text-sm" aria-label="定时降智检测">
         <div class="flex flex-wrap items-center gap-3">

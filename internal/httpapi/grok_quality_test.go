@@ -151,6 +151,75 @@ func TestQualityGatesEveryNewCPADelivery(t *testing.T) {
 	}
 }
 
+func TestQualityGatesExistingCPAConfirmation(t *testing.T) {
+	for _, route := range []string{"existing", "check", "managed", "unknown_sync", "unknown_check", "local_pass", "unchecked"} {
+		for _, mode := range []string{"normal", "error", "unsupported", "suspect", "high_risk"} {
+			t.Run(route+"/"+mode, func(t *testing.T) {
+				s := New(adminTestConfig(t.TempDir()))
+				remote := installXAITestCPA(t, s)
+				remote.qualityMode = mode
+				localCalls := installQualityUpstream(t, s, func(w http.ResponseWriter, r *http.Request) {
+					t.Error("existing CPA credential must not use the local token")
+					w.WriteHeader(500)
+				})
+				name := "xai-test@example.test.json"
+				remote.rows[name] = map[string]any{"type": "xai", "email": "test@example.test", "access_token": "remote-access", "refresh_token": "remote-refresh"}
+				cp := &oauth.CPASync{Status: "pending", PoolID: "test-cpa"}
+				access, refresh := "local-old", "local-refresh"
+				if route == "managed" {
+					cp.Status, cp.Managed, cp.FileName, cp.At, cp.VerifiedAt = "synced", true, name, 10, 10
+				}
+				if strings.HasPrefix(route, "unknown") {
+					cp.Status, cp.AttemptedAt = "unknown", 10
+					access, refresh = "remote-access", "remote-refresh"
+				}
+				q := &xaiquality.Report{Version: xaiquality.Version, Model: xaiquality.Model, Status: "error", Source: "cpa", At: time.Now().Unix()}
+				if route == "local_pass" {
+					q.Status, q.Source = "normal", "oauth"
+				}
+				if route == "unchecked" {
+					q = nil
+				}
+				item, err := s.oauthStore.Import(oauth.Account{Email: "test@example.test", AccessToken: access, RefreshToken: refresh, ExpiresAt: 1, CPASync: cp, Quality: q})
+				if err != nil {
+					t.Fatal(err)
+				}
+				updated, err := s.syncGrokOAuthCPA(context.Background(), item.ID, "test-cpa", strings.HasSuffix(route, "check"))
+				if remote.uploads != 0 || localCalls.Load() != 0 || updated.AccessToken != access || updated.RefreshToken != refresh {
+					t.Fatal("confirmation uploaded or used the retained local credential")
+				}
+				if mode == "normal" {
+					if err != nil || updated.CPASync.Status != "synced" || remote.qualityCalls != 3 || updated.Quality.Status != "normal" {
+						t.Fatalf("normal CPA confirmation failed: %v, calls=%d", err, remote.qualityCalls)
+					}
+				} else {
+					if err == nil || updated.CPASync.Status == "synced" || updated.CPASync.VerifiedAt != cp.VerifiedAt || updated.CPASync.At != cp.At {
+						t.Fatalf("quality failure confirmed delivery: err=%v receipt=%+v", err, updated.CPASync)
+					}
+					if mode == "high_risk" {
+						if remote.deletes != 1 || updated.CPASync.Status != "quality_removed" || updated.Quality.Removal == nil || updated.Quality.Removal.Status != "removed" {
+							t.Fatal("confirmed risk lost its remote removal receipt")
+						}
+					} else if remote.deletes != 0 || remote.rows[name] == nil || updated.CPASync.Status != "quality_blocked" {
+						t.Fatal("inconclusive quality removed a remote credential or failed to block confirmation")
+					}
+					if (mode == "error" || mode == "unsupported") && (updated.Quality.Status != "error" || updated.Quality.Blocked) {
+						t.Fatal("failed detection was counted as degraded quality")
+					}
+				}
+				if !oauth.CPAManaged(updated) || updated.Quality.Source != "cpa" {
+					t.Fatal("CPA renewal ownership not preserved after confirmation")
+				}
+				if mode == "normal" {
+					if _, err := s.syncGrokOAuthCPA(context.Background(), item.ID, "test-cpa", true); err != nil || remote.qualityCalls != 3 || remote.uploads != 0 {
+						t.Fatal("fresh CPA pass was not reused for a later confirmation")
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestQualityManagedCPAProbeAndRemoval(t *testing.T) {
 	for _, mode := range []string{"removed", "unsupported", "denied", "retained", "identity_mismatch", "changed_after_probe", "api_unsupported", "normal", "limited", "lost_delete_response", "target_changed"} {
 		t.Run(mode, func(t *testing.T) {

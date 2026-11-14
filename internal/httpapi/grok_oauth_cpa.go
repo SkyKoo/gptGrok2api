@@ -223,7 +223,53 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		}
 		return account, e
 	}
-	succeed := func() (oauth.Account, error) {
+	requireQuality := func(viaCPA bool) error {
+		if viaCPA {
+			// An existing remote identity owns renewal even if its quality probe
+			// fails. Persist that ownership before probing to avoid local tokens.
+			result.Managed = true
+		}
+		if xaiquality.Passed(account.Quality, time.Now()) && (!viaCPA || account.Quality.Source == "cpa") {
+			return nil
+		}
+		if err := save(); err != nil {
+			return err
+		}
+		if result.AuthorizationTaskID != "" {
+			if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
+				queue.SetStage(result.AuthorizationTaskID, "checking_quality")
+			}
+		}
+		checked, err := s.checkGrokQualityLocked(ctx, account)
+		account = checked
+		if account.CPASync != nil {
+			// The probe may have removed a confirmed risky CPA credential.
+			// Do not overwrite that receipt with the pre-probe snapshot.
+			result = *account.CPASync
+		}
+		if err != nil {
+			return err
+		}
+		if !xaiquality.Passed(account.Quality, time.Now()) {
+			if account.Quality != nil && account.Quality.Status == "error" {
+				return errors.New("grok-4.7 检测失败，暂不能判定质量；未新增上传或确认 CPA 交付，请查看检测依据并复测")
+			}
+			return errors.New("grok-4.7 质量检测未通过，未新增上传或确认 CPA 交付；请查看检测依据并复测")
+		}
+		return nil
+	}
+	rejectQuality := func(err error) (oauth.Account, error) {
+		if result.Status == "quality_removed" {
+			return account, err
+		}
+		return fail(err, "quality_blocked")
+	}
+	succeed := func(viaCPA bool) (oauth.Account, error) {
+		// Every confirmation path shares this gate, including legacy adoption
+		// and recovery after a lost upload response.
+		if err := requireQuality(viaCPA); err != nil {
+			return rejectQuality(err)
+		}
 		result.Status = "synced"
 		result.Error = ""
 		result.Managed = true
@@ -247,7 +293,7 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		if exists {
 			equal, readErr := readXAICredential(ctx, client, pool, name, account)
 			if readErr == nil && equal {
-				return succeed()
+				return succeed(true)
 			}
 		}
 		return fail(errors.New("CPA 当前凭据尚不能证明本次授权已交付，保留待核对状态，未覆盖远端"), "unknown")
@@ -258,13 +304,13 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		}
 		// The explicit check adopts the existing CPA identity, even if CPA has
 		// already rotated its tokens. It never overwrites the remote copy.
-		return succeed()
+		return succeed(true)
 	}
 	if result.AttemptedAt > 0 && result.VerifiedAt == 0 {
 		if exists {
 			equal, readErr := readXAICredential(ctx, client, pool, name, account)
 			if readErr == nil && equal {
-				return succeed()
+				return succeed(true)
 			}
 		}
 		return fail(errors.New("上次上传结果未确认，未重复上传；请核对 CPA 当前凭据"), "unknown")
@@ -276,7 +322,7 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 		if !exists {
 			return fail(errors.New("CPA 托管凭据未找到，未使用本地旧副本覆盖；请核对或重新授权"), "failed")
 		}
-		return succeed()
+		return succeed(true)
 	}
 	if account.AccessToken == "" || account.RefreshToken == "" || account.Status == "invalid" {
 		return fail(errors.New("OAuth 凭据不完整或失效，无法同步"), "failed")
@@ -284,25 +330,8 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	if account.ExpiresAt > 0 && account.ExpiresAt <= time.Now().Unix() {
 		return fail(errors.New("待交付的 Access Token 已过期，请重新授权后同步"), "failed")
 	}
-	if !xaiquality.Passed(account.Quality, time.Now()) {
-		// Persist the exact destination before probing. A fresh reauthorization
-		// may expose risk for an older same-account credential already in CPA.
-		if err := save(); err != nil {
-			return account, err
-		}
-		if result.AuthorizationTaskID != "" {
-			if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
-				queue.SetStage(result.AuthorizationTaskID, "checking_quality")
-			}
-		}
-		checked, qualityErr := s.checkGrokQualityLocked(ctx, account)
-		if qualityErr != nil {
-			return fail(qualityErr, "quality_blocked")
-		}
-		account = checked
-		if !xaiquality.Passed(account.Quality, time.Now()) {
-			return fail(errors.New("grok-4.7 质量检测未通过，未上传 CPA；请查看检测依据并复测"), "quality_blocked")
-		}
+	if err := requireQuality(false); err != nil {
+		return rejectQuality(err)
 	}
 	if result.AuthorizationTaskID != "" {
 		if queue, ok := s.taskQueue.(interface{ SetStage(string, string) }); ok {
@@ -323,7 +352,7 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	if readErr == nil && exists {
 		equal, verifyErr := readXAICredential(ctx, client, pool, name, account)
 		if verifyErr == nil && equal {
-			return succeed()
+			return succeed(false)
 		}
 		if verifyErr != nil {
 			readErr = verifyErr

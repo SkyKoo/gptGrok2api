@@ -22,6 +22,8 @@ type xaiTestCPA struct {
 	postMode     string
 	postStarted  chan struct{}
 	postContinue chan struct{}
+	qualityMode  string
+	qualityCalls int
 }
 
 func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
@@ -32,6 +34,28 @@ func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		switch {
+		case r.Method == "POST" && r.URL.Path == "/v0/management/api-call":
+			state.qualityCalls++
+			var req struct {
+				Index  string            `json:"auth_index"`
+				Header map[string]string `json:"header"`
+				Data   string            `json:"data"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || state.rows[req.Index] == nil || req.Header["Authorization"] != "Bearer $TOKEN$" {
+				t.Error("quality probe did not select the CPA credential")
+				w.WriteHeader(400)
+				return
+			}
+			if state.qualityMode == "unsupported" {
+				w.WriteHeader(404)
+				return
+			}
+			status := 200
+			if state.qualityMode == "error" {
+				status = 402
+			}
+			wrong := state.qualityMode == "high_risk" || state.qualityMode == "suspect" && state.qualityCalls == 1
+			json.NewEncoder(w).Encode(map[string]any{"status_code": status, "body": string(qualityFixtureBody(t, []byte(req.Data), wrong))})
 		case r.Method == "GET" && r.URL.Path == "/v0/management/auth-files":
 			files := []map[string]any{}
 			for name, row := range state.rows {

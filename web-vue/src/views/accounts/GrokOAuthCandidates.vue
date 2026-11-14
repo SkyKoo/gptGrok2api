@@ -22,22 +22,24 @@
               <p v-if="item.poll_error || item.oauth_message" class="mt-2 break-words text-xs text-amber-600">{{ item.poll_error || item.oauth_message }}</p>
               <p v-if="isCPAManaged(item) && item.cpa_sync?.status === 'synced'" class="mt-2 text-xs text-muted-foreground">由 CPA 负责续期</p>
               <p v-else-if="item.quality?.blocked" class="mt-2 text-xs text-rose-600">已拦截 CPA 交付</p>
+              <p v-else-if="item.quality?.status === 'error'" class="mt-2 text-xs text-amber-600">检测失败，复测通过后再处理交付</p>
               <p v-else-if="item.has_refresh_token && !running(item)" class="mt-2 text-xs text-muted-foreground">授权已保存，可单独同步</p>
               <p v-if="item.account?.status === 'disabled'" class="mt-2 text-xs text-muted-foreground">CFM OAuth 已禁用</p>
             </td>
             <td class="py-4 pr-5">
               <StateBadge :tone="item.quality?.blocked ? 'danger' : item.quality?.status === 'normal' ? 'success' : item.quality ? 'warning' : 'muted'" shape="rounded" size="sm">{{ qualityStatusText(item) }}</StateBadge>
               <p v-if="item.quality_running" class="mt-2 text-xs text-muted-foreground">正在检测，请稍候</p>
+              <p v-if="qualityFailureReason(item)" class="mt-2 break-words text-xs text-amber-600">{{ qualityFailureReason(item) }}</p>
               <p v-if="item.quality?.at" class="mt-2 text-xs text-muted-foreground">{{ formatGrokAccountDate(item.quality.at) }}</p>
               <button v-if="item.quality" class="mt-2 text-xs text-primary underline" @click="$emit('qualityDetails', item)">查看检测依据</button>
             </td>
             <td class="py-4 pr-5">
-              <StateBadge :tone="item.quality?.blocked ? 'danger' : item.cpa_sync?.status === 'synced' ? 'success' : item.cpa_sync ? 'warning' : 'muted'" shape="rounded" size="sm">{{ cpaStatusText(item) }}</StateBadge>
+              <StateBadge :tone="item.quality?.blocked ? 'danger' : item.quality?.status === 'error' ? 'warning' : item.cpa_sync?.status === 'synced' ? 'success' : item.cpa_sync ? 'warning' : 'muted'" shape="rounded" size="sm">{{ cpaStatusText(item) }}</StateBadge>
               <p v-if="item.cpa_sync?.pool_name || item.job?.cpa_pool_name" class="mt-2 break-words text-xs text-muted-foreground">{{ item.job?.status === 'running' ? item.job.cpa_pool_name || item.cpa_sync?.pool_name : item.cpa_sync?.pool_name }}</p>
               <p v-if="item.quality?.removal?.error" class="mt-2 break-words text-xs text-rose-600">{{ item.quality.removal.error }}</p>
               <p v-if="item.cpa_sync?.status === 'quality_removed' && isCPAManaged(item)" class="mt-2 text-xs text-muted-foreground">重新授权后再复测</p>
               <p v-if="item.quality?.removal && item.quality.removal.status !== 'removed'" class="mt-2 break-all text-xs text-muted-foreground">{{ item.quality.removal.file_name }}</p>
-              <p v-if="item.cpa_sync?.error && !isCPAManaged(item)" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.error }}</p>
+              <p v-if="item.cpa_sync?.error && (!isCPAManaged(item) || item.cpa_sync.status === 'quality_blocked')" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.error }}</p>
               <p v-else-if="isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
             </td>
             <td class="py-4 pr-5 text-xs text-muted-foreground">{{ formatGrokAccountDate(item.job?.updated_at || item.account?.updated_at || item.updated_at) }}</td>
@@ -77,7 +79,7 @@ import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { formatGrokAccountDate } from './grokAccountView'
-import { cpaAction, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
+import { cpaAction, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
 
 const props = defineProps<{ items: GrokOAuthRow[]; loading: boolean; busyRows: Record<string, string>; targetSelected: boolean; error: string }>()
 defineEmits<{ authorize: [account: GrokOAuthRow]; cpa: [account: GrokOAuthRow]; device: [account: GrokOAuthRow]; details: [account: GrokOAuthRow]; toggle: [account: GrokOAuthRow]; remove: [account: GrokOAuthRow]; quality: [account: GrokOAuthRow]; qualityDetails: [account: GrokOAuthRow]; cleanup: [account: GrokOAuthRow] }>()
@@ -89,7 +91,7 @@ const pageItems = computed(() => filtered.value.slice((page.value - 1) * 20, pag
 const metrics = computed(() => [
   { label: '账号', value: props.items.length },
   { label: '待授权', value: props.items.filter(i => i.oauth_status === 'pending').length },
-  { label: '已交付 CPA', value: props.items.filter(i => i.cpa_sync?.status === 'synced').length },
+  { label: '有 CPA 交付记录', value: props.items.filter(i => i.cpa_sync?.status === 'synced').length },
   { label: '需处理', value: props.items.filter(i => i.quality?.blocked || i.quality?.status === 'error' || ['failed', 'requires_renewal', 'manual_action_required'].includes(i.oauth_status) || (i.cpa_sync && i.cpa_sync.status !== 'synced')).length },
 ])
 watch([keyword, filter], () => { page.value = 1 })

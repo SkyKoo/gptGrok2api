@@ -30,6 +30,25 @@ test('background progress and attention states remain searchable after reloading
 
 const { mergeGrokOAuthRows, cpaAction, cpaStatusText, oauthProgressText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
 
+test('failed detection blocks delivery actions without labelling historical CPA delivery as degradation', async () => {
+  const { qualityStatusText, qualityFailureReason } = await import('../src/views/accounts/grokOAuthCandidates.ts')
+  const quality = { status: 'error', blocked: false, summary: '检测未完成', samples: [{ status: 'error', reason: '上游 HTTP 402，未计为降智' }] }
+  const retained = { id: 'retained', oauth_account_id: 'one', cpa_managed: true, cpa_sync: { status: 'synced' }, quality }
+  const pending = { id: 'pending', oauth_account_id: 'two', has_access_token: true, has_refresh_token: true, quality }
+  assert.equal(cpaStatusText(retained), '已交付，检测失败待复测')
+  assert.equal(cpaStatusText(pending), '检测失败，暂缓同步')
+  assert.equal(cpaStatusText({ ...retained, cpa_sync: { status: 'quality_blocked' } }), 'CPA 凭据保留，待复测')
+  assert.equal(cpaAction(retained), null)
+  assert.equal(cpaAction(pending), null)
+  assert.equal(qualityStatusText(retained), '检测失败')
+  assert.equal(qualityFailureReason(retained), '上游 HTTP 402，未计为降智')
+  assert.equal(qualityFailureReason({ quality: { ...quality, samples: [] } }), '检测未完成')
+  assert.equal(filterGrokOAuthCandidates([retained, pending], '', 'quality_risk').length, 0)
+  assert.equal(filterGrokOAuthCandidates([retained, pending], '', 'cpa_attention').length, 2)
+  assert.equal(cpaAction({ ...retained, quality: { status: 'normal', blocked: false } }), 'check')
+  assert.equal(cpaAction({ ...pending, quality: { status: 'normal', blocked: false } }), 'sync')
+})
+
 test('quality risk survives a failed retry and prevents CPA delivery actions', () => {
   const quality = { status: 'error', blocked: true, confirmed_at: 1, removal: { status: 'manual_required', file_name: 'xai-one.json' } }
   const rows = mergeGrokOAuthRows([{ id: 'source', email: 'one@example.test', oauth_account_id: 'one', oauth_status: 'authorized' }], [
