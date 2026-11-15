@@ -106,18 +106,28 @@ func TestAdobeCompensationSchedulerAndAPIGuards(t *testing.T) {
 	for time.Now().Before(deadline) && s.adobeRegister.Snapshot()["running"] == true {
 		time.Sleep(time.Millisecond)
 	}
-	if calls.Load() != 1 || s.adobeRegister.Snapshot()["running"] == true {
-		t.Fatalf("disabled timer or another selected tab blocked Adobe compensation: calls=%d snapshot=%+v", calls.Load(), s.adobeRegister.Snapshot())
+	if calls.Load() != 0 || s.adobeRegister.Snapshot()["running"] == true {
+		t.Fatalf("accepted incomplete registration was automatically resumed: calls=%d snapshot=%+v", calls.Load(), s.adobeRegister.Snapshot())
 	}
 	res = adminRequest(h, http.MethodGet, "/api/register/adobe/jobs", nil)
 	body := res.Body.String()
-	if res.Code != 200 || !strings.Contains(body, `"attempts":1`) || !strings.Contains(body, `"parent_job_id":"adobe-original"`) {
-		t.Fatal("missing compensation child or durable attempt count")
+	if res.Code != 200 || !strings.Contains(body, `"recovery_mode":"manual_reregistration"`) || !strings.Contains(body, `"can_reregister":true`) || !strings.Contains(body, `"can_resume_registration":false`) {
+		t.Fatal("accepted incomplete registration exposed the wrong recovery capability")
 	}
 	for _, secret := range []string{"PRIVATE-ADOBE-MAIL", "browser_profile_id", "proxy_recorded"} {
 		if strings.Contains(body, secret) {
 			t.Fatal("private recovery state leaked")
 		}
+	}
+	if w := adminRequest(h, http.MethodPost, "/api/register/adobe/reregister", strings.NewReader(`{"id":"adobe-original"}`)); w.Code >= 400 {
+		t.Fatalf("manual fresh registration was rejected: %d %s", w.Code, w.Body.String())
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && s.adobeRegister.Snapshot()["running"] == true {
+		time.Sleep(time.Millisecond)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("manual fresh registration did not reach the worker")
 	}
 	if err := s.ShutdownRegistration(context.Background()); err != nil {
 		t.Fatal(err)

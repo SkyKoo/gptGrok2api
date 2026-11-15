@@ -72,6 +72,50 @@ func seedAdobeCompensation(t *testing.T, e *AdobeEngine, jobs ...RegistrationJob
 	}
 }
 
+func TestAdobeAcceptedIncompleteRegistrationRequiresManualFreshSession(t *testing.T) {
+	now := time.Now().UTC()
+	job := adobeCompensationFixture(t, now)
+	job.Error = "adobe: recovery_step_failed"
+	var calls atomic.Int32
+	var observed AdobeConfig
+	e := NewAdobeEngine(filepath.Join(t.TempDir(), "adobe.enc.json"), "key", func(cfg AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
+		calls.Add(1)
+		observed = cfg
+		return &adobeCompensationMail{}, adobeCompensationFlow{run: func(context.Context, AdobeConfig, Progress) (map[string]any, error) {
+			return nil, fail("adobe", "recovery_step_failed")
+		}}, nil
+	}, nil, nil)
+	seedAdobeCompensation(t, e, job)
+
+	if started, err := e.RunCompensation(adobeTestConfig(), now); started || err != nil {
+		t.Fatalf("accepted incomplete registration was automatically resumed: started=%v err=%v", started, err)
+	}
+	current, err := e.getJob(job.ID)
+	if err != nil || current.AutoRetry == nil || current.AutoRetry.State != "manual" || current.AutoRetry.Reason != "manual_reregistration_required" {
+		t.Fatalf("wrong manual decision: job=%+v err=%v", current, err)
+	}
+	row := e.Snapshot()["jobs"].([]any)[0].(map[string]any)
+	if row["can_resume_registration"] != false || row["can_retry_registration"] != false || row["can_reregister"] != true {
+		t.Fatalf("wrong public recovery actions: %#v", row)
+	}
+	if err := e.RetryRegistration(adobeTestConfig(), job.ID); safeFailure(err) != "task: manual_reregistration_required" {
+		t.Fatalf("legacy resume endpoint was not fenced: %v", err)
+	}
+
+	if err := e.Reregister(adobeTestConfig(), job.ID); err != nil {
+		t.Fatalf("manual fresh registration was rejected: %v", err)
+	}
+	waitAdobe(t, e)
+	child := latestAdobe(t, e, job.ID)
+	if calls.Load() != 1 || observed.RecoveryMode != "retry_registration" || observed.BrowserProfileID != child.ID || child.ID == job.ID {
+		t.Fatalf("manual registration did not create a fresh session: calls=%d cfg=%+v child=%+v", calls.Load(), observed, child)
+	}
+	original, _ := e.getJob(job.ID)
+	if original.AdobeRegistration.CreationOutcome != "accepted" || original.AdobeRegistration.BrowserProfileID != job.ID || original.Error != job.Error {
+		t.Fatal("manual fresh registration rewrote the original accepted evidence")
+	}
+}
+
 func latestAdobe(t *testing.T, e *AdobeEngine, root string) RegistrationJob {
 	t.Helper()
 	job, err := latestAttempt(e.getJob, root)
@@ -97,6 +141,7 @@ func TestAdobeCompensationPlansBoundedResumeAndSavedResultRecovery(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := adobeCompensationFixture(t, now)
+			job.AdobeRegistration.MediaPending = true
 			job.AutoRetry, job.Error = nil, safeFailure(test.cause)
 			planAdobeRegistrationCompensation(&job, test.cause, now)
 			if job.AutoRetry.State != test.state || job.AutoRetry.Reason != test.reason || adobeRegistrationRecoveryMode(job) != "resume_session" {
@@ -109,6 +154,7 @@ func TestAdobeCompensationPlansBoundedResumeAndSavedResultRecovery(t *testing.T)
 	}
 	for attempt, delay := range compensationDelays {
 		job := adobeCompensationFixture(t, now)
+		job.AdobeRegistration.MediaPending = true
 		job.AutoRetry.Attempts = attempt
 		planAdobeRegistrationCompensation(&job, nil, now)
 		if job.AutoRetry.NextAttemptAt != now.Add(delay).Format(time.RFC3339Nano) {
@@ -116,6 +162,7 @@ func TestAdobeCompensationPlansBoundedResumeAndSavedResultRecovery(t *testing.T)
 		}
 	}
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	job.Error = (&Failure{Stage: "adobe", Code: "network_error", HTTPStatus: 429, RetryAfter: "14400"}).Error()
 	planAdobeRegistrationCompensation(&job, nil, now)
 	if job.AutoRetry.NextAttemptAt != now.Add(4*time.Hour).Format(time.RFC3339Nano) {
@@ -126,6 +173,7 @@ func TestAdobeCompensationPlansBoundedResumeAndSavedResultRecovery(t *testing.T)
 func TestAdobeAutomaticRecoveryKeepsOriginalProfileEgressAndClaim(t *testing.T) {
 	now := time.Now()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	routing := routingFixture()
 	lease, err := routing.Manager.AcquireTask(context.Background(), "group:shared", "adobe", "registration", nil, job.ID)
 	if err != nil {
@@ -197,6 +245,7 @@ func TestAdobeAutomaticRecoveryKeepsOriginalProfileEgressAndClaim(t *testing.T) 
 func TestAdobeSavedResultAutomaticCompensationNeverCreatesMailboxOrBrowser(t *testing.T) {
 	now := time.Now()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	job.Status, job.Stage, job.Error = "verification_pending", "verify", "verify: account_unverified"
 	job.Account = map[string]any{"email": job.Mailbox.Email, "account_id": "saved", "token": "PRIVATE"}
 	job.Imported = true
@@ -327,6 +376,7 @@ func TestAdobeCompensationSourceMismatchAndFailedJournalDoNotStart(t *testing.T)
 func TestAdobeCompensationBudgetSharedByMailboxAcrossRestart(t *testing.T) {
 	now := time.Now()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	other := cloneJob(job)
 	other.ID, other.AdobeRegistration.BrowserProfileID = "another-root", "another-root"
 	other.AutoRetry.State, other.AutoRetry.Attempts = "exhausted", 2
@@ -357,6 +407,7 @@ func TestAdobeStopCancelsWaitingAndActiveRecovery(t *testing.T) {
 		t.Run(map[bool]string{false: "waiting", true: "active"}[active], func(t *testing.T) {
 			now := time.Now()
 			job := adobeCompensationFixture(t, now)
+			job.AdobeRegistration.MediaPending = true
 			entered := make(chan struct{})
 			e := NewAdobeEngine(filepath.Join(t.TempDir(), "adobe.enc.json"), "key", func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {
 				return &adobeCompensationMail{}, adobeCompensationFlow{run: func(ctx context.Context, _ AdobeConfig, progress Progress) (map[string]any, error) {
@@ -395,6 +446,7 @@ func TestAdobeStopCancelsWaitingAndActiveRecovery(t *testing.T) {
 func TestAdobeRestartRetainsReservedDeadlineAndSubmissionFence(t *testing.T) {
 	now := time.Now()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	job.Status, job.AutoRetry.State, job.AutoRetry.Attempts = "running", "running", 1
 	job.AutoRetry.NextAttemptAt = now.Add(3 * time.Hour).UTC().Format(time.RFC3339Nano)
 	path := filepath.Join(t.TempDir(), "adobe.enc.json")
@@ -452,6 +504,7 @@ func TestAdobeGracefulShutdownDefersInitialAndManualWorkButStopStaysStopped(t *t
 		t.Run(mode, func(t *testing.T) {
 			now := time.Now()
 			job := adobeCompensationFixture(t, now)
+			job.AdobeRegistration.MediaPending = true
 			entered := make(chan struct{})
 			path := filepath.Join(t.TempDir(), "adobe.enc.json")
 			e := NewAdobeEngine(path, "key", func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {

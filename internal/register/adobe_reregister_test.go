@@ -198,6 +198,19 @@ func TestAdobeManualReregistrationRejectsAcceptedIdentityAcrossMailboxHistory(t 
 				}
 				return
 			}
+			if scenario == "current" || scenario == "missing_environment" {
+				if leaf["can_reregister"] != true || leaf["can_resume_registration"] != false {
+					t.Fatalf("incomplete accepted registration did not expose a fresh manual action: %#v", leaf)
+				}
+				if err := e.Reregister(adobeTestConfig(), target); err != nil {
+					t.Fatalf("fresh manual registration was rejected: %v", err)
+				}
+				waitAdobe(t, e)
+				if calls.Load() != 1 {
+					t.Fatal("fresh manual registration did not reach the Worker")
+				}
+				return
+			}
 			if leaf["can_reregister"] != false {
 				t.Fatal("accepted identity exposed fresh registration")
 			}
@@ -206,7 +219,7 @@ func TestAdobeManualReregistrationRejectsAcceptedIdentityAcrossMailboxHistory(t 
 			}
 			if scenario == "accepted_ancestor" || scenario == "accepted_other_root" {
 				hint, _ := leaf["review_hint"].(string)
-				if !strings.Contains(hint, "账号创建已被 Adobe 受理") || strings.Contains(hint, "缺少 Adobe 创建结果") {
+				if !strings.Contains(hint, "创建受理") || strings.Contains(hint, "缺少 Adobe 创建结果") {
 					t.Fatal("accepted identity was described as an unknown creation result")
 				}
 			}

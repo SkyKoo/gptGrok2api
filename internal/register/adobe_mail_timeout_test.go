@@ -40,8 +40,8 @@ func TestAdobeMailWaitDeadlineRetainsAcceptedAccountAndRecovery(t *testing.T) {
 		mailTimeout, taskTimeout   time.Duration
 		cancelParent               bool
 	}{
-		{"mail_wait", "mail: timeout", "waiting", 5 * time.Millisecond, time.Second, false},
-		{"task_deadline", "task_timeout", "waiting", time.Second, 200 * time.Millisecond, false},
+		{"mail_wait", "mail: timeout", "manual", 5 * time.Millisecond, time.Second, false},
+		{"task_deadline", "task_timeout", "manual", time.Second, 200 * time.Millisecond, false},
 		{"parent_cancel", "task_cancelled", "manual", time.Second, time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -79,11 +79,14 @@ func TestAdobeMailWaitDeadlineRetainsAcceptedAccountAndRecovery(t *testing.T) {
 			if got.Error != tc.wantError || got.Status != "registration_pending" || got.Stage != "awaiting_verification" {
 				t.Fatalf("failure classification: error=%q status=%q stage=%q", got.Error, got.Status, got.Stage)
 			}
-			if adobeCreationOutcome(got) != "accepted" || adobeRegistrationRecoveryMode(got) != "resume_session" || len(got.Account) != 0 || mail.releases != 1 {
+			if adobeCreationOutcome(got) != "accepted" || adobeRegistrationRecoveryMode(got) != "manual_reregistration" || len(got.Account) != 0 || mail.releases != 1 {
 				t.Fatal("mail wait failure changed creation evidence, failed to release its reservation, or saved an unverified account")
 			}
 			if got.AutoRetry == nil || got.AutoRetry.State != tc.wantState || got.AutoRetry.Attempts != 0 {
 				t.Fatalf("changed recovery policy: %+v", got.AutoRetry)
+			}
+			if tc.wantState == "manual" && !tc.cancelParent && got.AutoRetry.Reason != "manual_reregistration_required" {
+				t.Fatalf("accepted incomplete registration did not require manual restart: %+v", got.AutoRetry)
 			}
 			if tc.wantState == "waiting" {
 				due, err := time.Parse(time.RFC3339Nano, got.AutoRetry.NextAttemptAt)
@@ -165,10 +168,11 @@ func TestAdobeRecoveryFailureCodesKeepCreationAndRetryGuards(t *testing.T) {
 				job.Error, job.AutoRetry, job.AdobeRegistration.CreationOutcome = code, nil, outcome
 				planAdobeRegistrationCompensation(&job, nil, now)
 				want := "manual"
-				if outcome == "accepted" && code != "adobe: recovery_page_untrusted" {
-					want = "waiting"
+				wantReason := "registration_result_uncertain"
+				if outcome == "accepted" {
+					wantReason = "manual_reregistration_required"
 				}
-				if job.AutoRetry.State != want || adobeCreationOutcome(job) != outcome {
+				if job.AutoRetry.State != want || job.AutoRetry.Reason != wantReason || adobeCreationOutcome(job) != outcome {
 					t.Fatalf("state=%+v creation=%s", job.AutoRetry, adobeCreationOutcome(job))
 				}
 			})

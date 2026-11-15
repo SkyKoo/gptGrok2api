@@ -18,6 +18,9 @@ import (
 func TestAdobeAcceptedSessionIntakeSurvivesImportFailureAndRestart(t *testing.T) {
 	now := time.Now()
 	parent := adobeCompensationFixture(t, now)
+	// This fixture represents the post-creation media/session handoff, which
+	// remains resumable after the registration identity has been accepted.
+	parent.AdobeRegistration.MediaPending = true
 	path := filepath.Join(t.TempDir(), "adobe.enc.json")
 	var browserCalls, imports, verifies atomic.Int32
 	factory := func(AdobeConfig) (MailSource, AdobeRegistrationFlow, error) {

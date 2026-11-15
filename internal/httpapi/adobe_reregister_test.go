@@ -96,6 +96,37 @@ func TestAdobeReregisterAPIRejectsCreatedButUnsavedAccountWithoutOldEnvironment(
 	}
 }
 
+func TestAdobeReregisterAPIAcceptsIncompleteAcceptedWithFreshSession(t *testing.T) {
+	s, path, calls, observed := adobeReregisterServer(t, func(job *registerruntime.RegistrationJob) {
+		job.AdobeRegistration.CreationOutcome = "accepted"
+		job.Error = "adobe: recovery_step_failed"
+	})
+	response := adminRequest(s.Handler(), http.MethodGet, "/api/register/adobe/jobs", nil)
+	var snapshot struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &snapshot) != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0]["can_reregister"] != true || snapshot.Jobs[0]["can_resume_registration"] != false || snapshot.Jobs[0]["recovery_mode"] != "manual_reregistration" {
+		t.Fatalf("accepted incomplete task exposed wrong recovery capability: %s", response.Body.String())
+	}
+	response = adminRequest(s.Handler(), http.MethodPost, "/api/register/adobe/reregister", strings.NewReader(`{"id":"`+adobeReregisterFixtureID+`"}`))
+	if response.Code >= 400 {
+		t.Fatalf("manual fresh registration was rejected: %d %s", response.Code, response.Body.String())
+	}
+	waitAdobeReregisterIdle(t, s)
+	jobs := readAdobeReregisterJobs(t, path)
+	if len(jobs) != 2 || calls.Load() != 1 || jobs[1].ID == jobs[0].ID || jobs[1].ParentJobID != jobs[0].ID {
+		t.Fatalf("fresh child was not created: jobs=%d calls=%d", len(jobs), calls.Load())
+	}
+	select {
+	case cfg := <-observed:
+		if cfg.RecoveryMode != "retry_registration" || cfg.BrowserProfileID != jobs[1].ID {
+			t.Fatalf("worker did not receive a fresh registration config: %+v", cfg)
+		}
+	default:
+		t.Fatal("worker config was not observed")
+	}
+}
+
 func TestAdobeReregisterAPIRejectsAcceptedAncestorBehindDuplicateAccountFailure(t *testing.T) {
 	s, path, calls, _ := adobeReregisterServer(t, func(job *registerruntime.RegistrationJob) {
 		job.AdobeRegistration.CreationOutcome = "accepted"

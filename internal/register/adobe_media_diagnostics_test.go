@@ -136,6 +136,7 @@ func TestAdobeMediaFailureLogsPersistAndKeepAcceptedRecoveryPolicy(t *testing.T)
 			var root string
 			if recovery {
 				job := adobeCompensationFixture(t, now)
+				job.AdobeRegistration.MediaPending = true
 				job.AdobeProfile.Country = "JP"
 				root = job.ID
 				seedAdobeCompensation(t, engine, job)

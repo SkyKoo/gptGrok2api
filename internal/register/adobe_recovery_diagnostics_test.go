@@ -97,6 +97,7 @@ func TestAdobeRecoveryPageDiagnosticPersistsWithoutChangingAcceptedAccount(t *te
 	}, nil, nil)
 	now := time.Now().UTC()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	seedAdobeCompensation(t, engine, job)
 	started, err := engine.RunCompensation(config, now)
 	if err != nil || !started {

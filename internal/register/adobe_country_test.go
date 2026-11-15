@@ -272,6 +272,7 @@ func TestAdobeCountryMalformedDiagnosticCannotChangeAcceptedRecovery(t *testing.
 			}, nil, nil)
 			now := time.Now().UTC()
 			job := adobeCompensationFixture(t, now)
+			job.AdobeRegistration.MediaPending = true
 			job.AdobeProfile.CountrySource = "default_us"
 			seedAdobeCompensation(t, engine, job)
 			if started, err := engine.RunCompensation(config, now); err != nil || !started {
@@ -294,6 +295,7 @@ func TestAdobeCountryMalformedDiagnosticCannotChangeAcceptedRecovery(t *testing.
 func TestAdobeCountryAcceptedCompensationPreservesOriginalLookupEvidence(t *testing.T) {
 	now := time.Now()
 	parent := adobeCompensationFixture(t, now)
+	parent.AdobeRegistration.MediaPending = true
 	parent.AdobeProfile.CountrySource = "default_us"
 	parent.AdobeProfile.CountryDiagnostics = &adobeCountryDiagnostics{FailureKind: "timeout", ElapsedMS: 4500}
 	mail := &adobeCompensationMail{}

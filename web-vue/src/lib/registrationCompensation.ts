@@ -6,7 +6,7 @@ export type RegistrationCompensation = {
   last_attempt_at?: string
   reason?: string
 }
-export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'saved_result' | 'result_uncertain'
+export type RegistrationRecoveryMode = 'resume_session' | 'retry_registration' | 'manual_reregistration' | 'saved_result' | 'result_uncertain'
 type RegistrationRecoveryActions = {
   status?: string
   imported?: boolean
@@ -25,14 +25,17 @@ export function registrationHasSuccessor(job: RegistrationRecoveryActions): bool
   return Boolean(job.retry_job_id || job.auto_retry?.state === 'superseded')
 }
 
-// Accepted creation must continue its original session, including snapshots
-// from older servers that still advertised the fresh-registration capability.
+// The server checks saved accounts, active work and the shared mailbox budget.
+// Explicit permission opens a new environment without replaying the old flow.
 export function adobeManualReregistration(job: RegistrationRecoveryActions, target?: string): boolean {
+  // An accepted creation without a saved account is still unfinished.  The
+  // server exposes this as manual_reregistration (older responses may still
+  // report resume_session), but either way the only safe action is a fresh
+  // browser session when can_reregister is granted.
   return target === 'adobe' && job.can_reregister === true
     && ['registration_pending', 'failed', 'interrupted', 'cancelled'].includes(job.status || '')
     && !registrationHasSuccessor(job) && !job.imported && !job.can_retry
-    && job.recovery_mode !== 'saved_result' && job.recovery_mode !== 'resume_session'
-    && job.creation_outcome !== 'accepted'
+    && job.recovery_mode !== 'saved_result'
 }
 
 export function adobeReregistrationCooldown(job: RegistrationRecoveryActions, now: number): { blocked: boolean; text: string } {
@@ -51,12 +54,16 @@ export function registrationRecoveryAction(job: RegistrationRecoveryActions, tar
   if (registrationHasSuccessor(job)) return ''
   if (adobeManualReregistration(job, target)) return '手动重新注册'
   if (job.can_retry || job.recovery_mode === 'saved_result') return ''
+  // Do not offer the old-session continuation for an accepted registration
+  // that was never saved.  The server may be upgraded independently from the
+  // UI, so guard the legacy response here as well.
+  if (job.recovery_mode === 'manual_reregistration') return ''
   if (job.recovery_mode === 'resume_session' && job.can_resume_registration) return '继续验证'
   return job.recovery_mode === 'retry_registration' && job.can_retry_registration ? '重新注册' : ''
 }
 
 export function registrationCompensationHelp(target?: string): string {
-  if (target === 'adobe') return 'Adobe 注册失败或未完成且未保存账号时，系统释放邮箱预占用；再次执行前重新预占。同一邮箱共用自动补偿次数和冷却，最多自动补偿 3 次，创建结果未知时停止自动重试。创建已受理的账号只能沿原会话继续验证和采集凭据。其余符合条件的失败任务可点击“手动重新注册”，用原邮箱和当前注册出口，在全新浏览器环境中开始；旧任务和历史次数保留。已保存账号只补入库或校验。'
+  if (target === 'adobe') return 'Adobe 注册失败或未完成且未保存账号时，不恢复原注册会话，也不继续原页面验证；系统释放邮箱预占用，再次执行前重新预占。同一邮箱共用自动补偿次数和冷却，最多自动补偿 3 次，创建结果未知时停止自动重试。可点击“手动重新注册”，用原邮箱和当前注册出口，在全新浏览器环境中开始；旧任务和历史次数保留。已保存账号只补入库或校验。'
   return target === 'grok'
     ? 'Grok 临时失败最多自动补偿 3 次，同一邮箱共用次数和冷却；失败后释放预留，新任务会跳过已有注册记录的邮箱。明确拒绝、需人工核查或次数耗尽时，不自动重试。'
     : '只有可重试的超时或临时网络错误才会自动补偿，最多 3 次。上游明确拒绝、邮箱无效或安全验证失败需人工处理；原邮箱会保留。'
@@ -65,6 +72,7 @@ export function registrationCompensationHelp(target?: string): string {
 export function registrationCompensationText(state: RegistrationCompensation | null | undefined, running: boolean, now: number, target?: string, recoveryMode?: RegistrationRecoveryMode, jobStatus?: string): string {
   if (target === 'adobe') {
     if (['running', 'queued', 'completed', 'import_pending', 'verification_pending'].includes(jobStatus || '') || ['superseded', 'completed', 'saved_result'].includes(state?.state || '') || recoveryMode === 'saved_result') return ''
+    if (recoveryMode === 'manual_reregistration') return '注册未完成，已停止自动重试，请手动重新注册。'
     if (recoveryMode === 'result_uncertain' || state?.reason === 'registration_result_uncertain') return '未收到 Adobe 创建结果，已停止自动重试。'
     if (!state) return ''
     const attempts = `${state.attempts}/${state.max_attempts}`
@@ -122,6 +130,7 @@ export function registrationJobStatusText(status: string, state?: RegistrationCo
   if (target === 'adobe') {
     if (retryJobId || state?.state === 'superseded') return '已发起后续重试'
     if (['registration_pending', 'failed', 'interrupted'].includes(status)) {
+      if (recoveryMode === 'manual_reregistration') return '注册未完成，需手动重新开始'
       if (recoveryMode === 'resume_session') return '注册未完成'
       if (recoveryMode === 'saved_result') return '账号已创建，等待入库 / 校验'
       return '注册失败'

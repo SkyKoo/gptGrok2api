@@ -713,7 +713,7 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 		hint := adobeRegistrationReviewHint(j.Error)
 		if blocked {
 			if e.adobeMailboxHasAcceptedCreationLocked(j.Mailbox.Email) {
-				hint = "该邮箱的账号创建已被 Adobe 受理，不能再次注册；需沿原会话继续验证和凭据采集。"
+				hint = "该邮箱已有其他创建受理记录，当前任务不能再次注册；请先核对已有任务。"
 			} else {
 				hint = "本次注册失败；缺少 Adobe 创建结果，已停止自动重试。"
 			}
@@ -723,9 +723,13 @@ func (e *AdobeEngine) SnapshotPage(page int) map[string]any {
 				hint = "系统将复用原邮箱并创建新的浏览器会话，重新执行注册；原失败记录、次数与冷却时间保留。"
 			case "resume_session":
 				hint = "创建账户已被接受，系统将沿用原会话继续邮箱验证和凭据采集。"
+			case "manual_reregistration":
+				hint = "注册尚未完成且账号未入库，已停止继续验证；请手动重新注册以创建新的浏览器会话。"
 			case "saved_result":
 				hint = "账号结果已保存，系统仅继续入库和验证，不重新注册。"
 			}
+		} else if e.adobeMailboxHasAcceptedCreationLocked(j.Mailbox.Email) && mode != "manual_reregistration" && mode != "resume_session" {
+			hint = "该邮箱已有其他创建受理记录，当前任务不能再次注册；请先核对已有任务。"
 		}
 		if j.Status == "running" || j.Status == "queued" || j.Status == "completed" || j.RetryJobID != "" {
 			hint = ""

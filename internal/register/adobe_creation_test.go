@@ -17,7 +17,7 @@ import (
 func TestAdobeCreationOutcomeSeparatesRetryFromAcceptedAndUnknown(t *testing.T) {
 	for _, tc := range []struct{ outcome, want string }{
 		{"not_submitted", "retry_registration"}, {"rejected", "retry_registration"},
-		{"accepted", "resume_session"}, {"unknown", "result_uncertain"}, {"", "result_uncertain"}, {"PRIVATE", "result_uncertain"},
+		{"accepted", "manual_reregistration"}, {"unknown", "result_uncertain"}, {"", "result_uncertain"}, {"PRIVATE", "result_uncertain"},
 	} {
 		t.Run(tc.outcome, func(t *testing.T) {
 			job := adobeCompensationFixture(t, time.Now())

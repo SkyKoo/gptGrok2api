@@ -139,6 +139,7 @@ func TestAdobeRecoveryFailureLogsKeepOriginalSubmissionFence(t *testing.T) {
 	}, nil, nil)
 	now := time.Now().UTC()
 	job := adobeCompensationFixture(t, now)
+	job.AdobeRegistration.MediaPending = true
 	// Go knew the flow had started but had not received the Worker's Create
 	// marker. Observing the original marker during recovery must persist it.
 	job.Stage = "adobe_recovery_started"

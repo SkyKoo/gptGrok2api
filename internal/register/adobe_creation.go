@@ -72,7 +72,8 @@ func (e *AdobeEngine) adobeMailboxCreationBlocked(job RegistrationJob) bool {
 			continue
 		}
 		otherMode := adobeRegistrationRecoveryMode(other)
-		if otherMode == "result_uncertain" && !priorUnknownAncestors[other.ID] || mode == "retry_registration" && otherMode == "resume_session" {
+		if otherMode == "result_uncertain" && !priorUnknownAncestors[other.ID] ||
+			mode == "retry_registration" && other.ID != job.ID && adobeCreationOutcome(other) == "accepted" {
 			return true
 		}
 		if other.ID != job.ID && (other.Status == "running" || other.Status == "queued") {

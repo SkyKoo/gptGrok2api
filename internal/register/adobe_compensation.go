@@ -103,12 +103,26 @@ func adobeRegistrationRecoveryMode(job RegistrationJob) string {
 	}
 	switch adobeCreationOutcome(job) {
 	case "accepted":
+		if adobeRegistrationNeedsManualReregistration(job) {
+			return "manual_reregistration"
+		}
 		return "resume_session"
 	case "not_submitted", "rejected":
 		return "retry_registration"
 	default:
 		return "result_uncertain"
 	}
+}
+
+// adobeRegistrationNeedsManualReregistration marks a creation that Adobe
+// accepted but whose registration never reached a saved account result. The
+// original browser session is no longer a valid continuation point for this
+// state: only an explicit administrator action may start a fresh profile.
+// Media preparation is a post-creation handoff and still uses the accepted
+// session, so it is deliberately excluded here.
+func adobeRegistrationNeedsManualReregistration(job RegistrationJob) bool {
+	return adobeCreationOutcome(job) == "accepted" && len(job.Account) == 0 && !job.Imported && !job.Verified &&
+		!adobeMediaPreparationPending(job)
 }
 
 func adobeCompensationPending(job RegistrationJob) bool {
@@ -136,7 +150,7 @@ func adobeAutomaticFailure(job RegistrationJob) bool {
 	case "adobe: media_proxy_unavailable", "adobe: media_browser_unavailable", "adobe: media_result_unknown", "adobe: media_worker_result_unknown", "adobe: media_previous_browser_closing", "adobe: media_prepare_timeout", "adobe: media_prepare_failed":
 		return job.AdobeRegistration != nil && job.AdobeRegistration.MediaPending && adobeCreationOutcome(job) == "accepted"
 	}
-	if adobeRegistrationRecoveryMode(job) == "result_uncertain" {
+	if adobeRegistrationRecoveryMode(job) == "result_uncertain" || adobeRegistrationRecoveryMode(job) == "manual_reregistration" {
 		return false
 	}
 	if adobeCreationOutcome(job) == "rejected" {
@@ -184,6 +198,10 @@ func planAdobeRegistrationCompensation(job *RegistrationJob, cause error, now ti
 		state.State, state.Reason = "exhausted", "retry_limit_reached"
 		return
 	}
+	if adobeRegistrationRecoveryMode(*job) == "manual_reregistration" {
+		state.Reason = "manual_reregistration_required"
+		return
+	}
 	if adobeRegistrationRecoveryMode(*job) == "result_uncertain" {
 		state.Reason = "registration_result_uncertain"
 		return
@@ -210,6 +228,12 @@ func planAdobeRegistrationCompensation(job *RegistrationJob, cause error, now ti
 }
 
 func recoverAdobeRegistrationCompensation(job *RegistrationJob, now time.Time) {
+	if adobeRegistrationRecoveryMode(*job) == "manual_reregistration" {
+		if job.AutoRetry != nil && (job.AutoRetry.State == "running" || job.AutoRetry.State == "waiting" || job.AutoRetry.State == "manual_running") {
+			job.AutoRetry.State, job.AutoRetry.Reason, job.AutoRetry.NextAttemptAt = "manual", "manual_reregistration_required", ""
+		}
+		return
+	}
 	if job.AutoRetry == nil {
 		planAdobeRegistrationCompensation(job, nil, now)
 		return
@@ -345,6 +369,8 @@ func (e *AdobeEngine) normalizeAdobeMailboxRetriesLocked(now time.Time) bool {
 				state.State, state.Reason, state.NextAttemptAt = "manual", "cancelled", ""
 			case saved < 0 && e.adobeMailboxCreationBlocked(job):
 				state.State, state.Reason, state.NextAttemptAt = "manual", "registration_result_uncertain", ""
+			case adobeRegistrationRecoveryMode(job) == "manual_reregistration":
+				state.State, state.Reason, state.NextAttemptAt = "manual", "manual_reregistration_required", ""
 			case active || i != owner:
 				state.State, state.Reason, state.NextAttemptAt = "manual", "duplicate_mailbox_retry", ""
 			case attempts >= len(compensationDelays):
@@ -484,6 +510,12 @@ func (e *AdobeEngine) retryAdobeWithConfig(raw map[string]any, id string, savedO
 	}
 	for i, job := range e.jobs {
 		if job.ID == id {
+			// An accepted creation without a saved account is intentionally a
+			// manual fresh-registration case. The legacy retry endpoint must not
+			// turn it back into an old-session verification attempt.
+			if !savedOnly && adobeRegistrationRecoveryMode(job) == "manual_reregistration" {
+				return fail("task", "manual_reregistration_required")
+			}
 			if e.adobeMailboxCreationBlocked(job) {
 				return fail("task", "registration_result_uncertain")
 			}
@@ -514,6 +546,9 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 		return fail("task", "no_saved_mailbox")
 	}
 	mode := adobeRegistrationRecoveryMode(parent)
+	if !manualReregister && mode == "manual_reregistration" {
+		return fail("task", "manual_reregistration_required")
+	}
 	if manualReregister {
 		if automatic {
 			return fail("task", "invalid_retry_state")
@@ -549,7 +584,10 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 		if i != index && (other.Status == "running" || other.Status == "queued") {
 			return fail("task", "already_running")
 		}
-		if !manualReregister && mode == "retry_registration" && adobeRegistrationRecoveryMode(other) == "resume_session" {
+		if !manualReregister && mode == "retry_registration" && i != index && adobeCreationOutcome(other) == "accepted" {
+			// An accepted ancestor already created the upstream identity. An
+			// automatic retry of a later rejected/unknown leaf must not submit
+			// another Create; only an explicit fresh-session action may do so.
 			return fail("task", "registration_result_uncertain")
 		}
 		if i != index && (other.Verified || other.Imported || len(other.Account) > 0) {

@@ -10,10 +10,9 @@ func (e *AdobeEngine) SetReregistrationAccountCheck(check func(string) (bool, er
 	e.reregistrationAccountCheck = check
 }
 
-// Reregister is an explicit administrator action for a failed attempt. Unlike
-// recovery, it starts a new signup when a prior result is unknown. Accepted
-// creation must continue the original session even if credentials are not yet
-// saved. This choice never changes old evidence or authorizes automatic replay.
+// Reregister is an explicit administrator action for an incomplete attempt.
+// It always starts a new signup session when the account result was not saved;
+// this never changes old evidence or authorizes automatic replay.
 func (e *AdobeEngine) Reregister(raw map[string]any, id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -63,11 +62,15 @@ func (e *AdobeEngine) adobeReregistrationEligibleLocked(index int) error {
 		if len(other.Account) > 0 || other.Imported || other.Verified || other.Status == "completed" {
 			return fail("task", "mailbox_already_has_saved_account")
 		}
-		// An older accepted attempt owns this identity even when a later manual
-		// attempt failed with account_already_exists. Missing credentials or a
-		// missing browser environment cannot authorize creating that email again.
-		if adobeCreationOutcome(other) == "accepted" {
-			return fail("task", "registration_already_accepted")
+		// A new accepted leaf may supersede an accepted ancestor from the same
+		// incomplete chain. An unknown/rejected leaf behind an accepted record,
+		// an accepted media handoff, sibling, or unrelated root still protects
+		// the mailbox from a second Create.
+		if adobeCreationOutcome(other) == "accepted" && (other.ID != parent.ID || !adobeRegistrationNeedsManualReregistration(parent)) {
+			allowedAncestor := adobeCreationOutcome(parent) == "accepted" && adobeRegistrationNeedsManualReregistration(parent) && e.adobeIsAncestorLocked(parent.ID, other.ID)
+			if !allowedAncestor {
+				return fail("task", "registration_already_accepted")
+			}
 		}
 		if other.Status == "running" || other.Status == "queued" {
 			return fail("task", "already_running")
@@ -87,6 +90,23 @@ func (e *AdobeEngine) adobeReregistrationEligibleLocked(index int) error {
 		}
 	}
 	return nil
+}
+
+func (e *AdobeEngine) adobeIsAncestorLocked(jobID, ancestorID string) bool {
+	byID := make(map[string]RegistrationJob, len(e.jobs))
+	for _, candidate := range e.jobs {
+		byID[candidate.ID] = candidate
+	}
+	seen := map[string]bool{}
+	current, ok := byID[jobID]
+	for ok && current.ParentJobID != "" && !seen[current.ID] {
+		seen[current.ID] = true
+		if current.ParentJobID == ancestorID {
+			return true
+		}
+		current, ok = byID[current.ParentJobID]
+	}
+	return false
 }
 
 func (e *AdobeEngine) adobeReregistrationNotBeforeLocked(email string) time.Time {
@@ -116,9 +136,10 @@ func (e *AdobeEngine) adobeMailboxHasAcceptedCreationLocked(email string) bool {
 	return false
 }
 
-// Once an explicitly requested fresh attempt is accepted, its own session may
-// continue despite historical uncertainty in its ancestors. This never admits
-// another Create, another branch, or a legacy child lacking the durable marker.
+// Once an explicitly requested fresh attempt reaches a post-creation media
+// handoff, its own session may continue despite historical uncertainty in its
+// ancestors. This never admits another Create, another branch, or a legacy
+// child lacking the durable marker.
 func (e *AdobeEngine) adobeAcceptedReregistrationAncestors(job RegistrationJob) map[string]bool {
 	state := job.AdobeRegistration
 	if job.RetryJobID != "" || adobeRegistrationRecoveryMode(job) != "resume_session" || state == nil || !state.ManualReregistration || state.BrowserProfileID == "" {
