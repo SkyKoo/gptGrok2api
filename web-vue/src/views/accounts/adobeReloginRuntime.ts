@@ -5,7 +5,7 @@ import { createAdobeReloginTracker, isAdobeReloginNotStarted, type AdobeReloginS
 const pendingKey = 'chatgpt2api.adobeRelogin.pending'
 export function useAdobeReloginRuntime(onFinished: () => void) {
   const state = ref<AdobeReloginSnapshot>({ tasks: [], requests: [], pollError: false })
-  const expanded = ref(true), now = ref(Date.now()), dismissed = ref<string[]>([])
+  const expanded = ref(false), now = ref(Date.now()), dismissed = ref<string[]>([])
   let disposed = false
   let pollTimer: ReturnType<typeof setTimeout> | undefined
   let clockTimer: ReturnType<typeof setInterval> | undefined

@@ -45,16 +45,8 @@ func TestAdobePublicVideoVariantsPreservePerTierLimits(t *testing.T) {
 			if len(v.Sizes) != 1 || len(v.Resolutions) != 1 || len(v.AspectRatios) != 1 {
 				t.Fatalf("%s exposes an independent parameter union: %+v", id, v)
 			}
-			baseline := v.Sizes[0] == "1920x1080" && slices.Equal(v.Durations, []int{8})
-			if baseline {
-				if v.MaxReferenceImages != 2 || v.Audio != (id == "veo-3.1-lite") {
-					t.Fatalf("%s baseline limits lost: %+v", id, v)
-				}
-			} else {
-				audioAllowed := id == "veo-3.1-lite" && v.AspectRatios[0] == "9:16"
-				if v.MaxReferenceImages != 0 || v.Audio != audioAllowed || v.AudioRequired || v.DefaultAudio {
-					t.Fatalf("%s text-only tier differs from verified audio/input limits: %+v", id, v)
-				}
+			if v.MaxReferenceImages != 2 || v.Audio != (id == "veo-3.1-lite") || v.AudioRequired || v.DefaultAudio {
+				t.Fatalf("%s tier differs from model-wide frame/audio limits: %+v", id, v)
 			}
 			if v.Sizes[0] != "1920x1080" && !slices.Equal(v.Durations, []int{8}) {
 				t.Fatalf("%s exposed shorter duration at unverified dimensions: %+v", id, v)
@@ -99,12 +91,16 @@ func TestAdobePublicImageVariantsPreserveOfficialSizeContracts(t *testing.T) {
 func TestOmniPublicPortraitVariantKeepsFixedAudioAndReferenceBoundary(t *testing.T) {
 	for _, id := range []string{"gemini-omni-flash-1.1", "gemini-omni-flash-1.2"} {
 		cap := MediaCapability(id)
-		if !cap.Audio || !cap.AudioRequired || !cap.DefaultAudio || len(cap.Variants) != 2 || !slices.Equal(cap.Resolutions, []string{"720p"}) || !slices.Equal(cap.Durations, []int{5}) {
+		wantDurations := []int{5, 8}
+		if id == "gemini-omni-flash-1.1" {
+			wantDurations = []int{5, 10}
+		}
+		if !cap.Audio || !cap.AudioRequired || !cap.DefaultAudio || len(cap.Variants) != 2 || !slices.Equal(cap.Resolutions, []string{"720p"}) || !slices.Equal(cap.Durations, wantDurations) {
 			t.Fatalf("%s fixed-audio contract changed: %+v", id, cap)
 		}
 		portrait := false
 		for _, v := range cap.Variants {
-			if !v.Audio || !v.AudioRequired || !v.DefaultAudio || !slices.Equal(v.Resolutions, []string{"720p"}) || !slices.Equal(v.Durations, []int{5}) {
+			if !v.Audio || !v.AudioRequired || !v.DefaultAudio || !slices.Equal(v.Resolutions, []string{"720p"}) || !slices.Equal(v.Durations, wantDurations) {
 				t.Fatalf("%s variant widened audio or output tiers: %+v", id, v)
 			}
 			if slices.Equal(v.Sizes, []string{"720x1280"}) {

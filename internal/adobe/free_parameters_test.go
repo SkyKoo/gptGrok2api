@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestVerifiedVeoFreeCombinationsDoNotFormCartesianProduct(t *testing.T) {
+func TestVeoFreeCombinationsPreserveFrameAndAudioCapabilities(t *testing.T) {
 	ref := referenceFixture(t, 2, 2)
 	for _, id := range []string{"veo-3.1-lite", "veo-3.1-fast"} {
 		for _, tier := range []struct {
@@ -25,15 +25,14 @@ func TestVerifiedVeoFreeCombinationsDoNotFormCartesianProduct(t *testing.T) {
 				}
 				withAudio := r
 				withAudio.GenerateAudio = true
-				audioAllowed := id == "veo-3.1-lite" && tier.aspect == "9:16"
+				audioAllowed := id == "veo-3.1-lite"
 				if _, _, err := ValidateVideoRequest(withAudio); (err == nil) != audioAllowed {
-					t.Fatalf("audio allowance differs from the verified tier: allowed=%t error=%v", audioAllowed, err)
+					t.Fatalf("audio allowance differs from the model contract: allowed=%t error=%v", audioAllowed, err)
 				}
-				for _, candidate := range []VideoRequest{r, withAudio} {
-					candidate.References = []ReferenceImage{ref}
-					if _, _, err := ValidateVideoRequest(candidate); err == nil {
-						t.Fatal("new text-only tier inherited reference support")
-					}
+				withFrames := r
+				withFrames.References = []ReferenceImage{ref, ref}
+				if _, _, err := ValidateVideoRequest(withFrames); err != nil {
+					t.Fatalf("first/last frame references rejected: %v", err)
 				}
 			})
 		}
@@ -47,17 +46,31 @@ func TestVerifiedVeoFreeCombinationsDoNotFormCartesianProduct(t *testing.T) {
 		if _, ok := m.MatchVideo(1920, 1080, 8, "1080p", "16:9", true, 2); ok != (id == "veo-3.1-lite") {
 			t.Fatalf("%s audio entitlement does not match its free baseline", id)
 		}
-		for _, r := range []VideoRequest{
-			{Width: 1280, Height: 720, Duration: 4, Resolution: "720p", AspectRatio: "16:9"},
-			{Width: 720, Height: 1280, Duration: 6, Resolution: "720p", AspectRatio: "9:16"},
-			{Width: 1080, Height: 1920, Duration: 4, Resolution: "1080p", AspectRatio: "9:16"},
-			{Width: 1920, Height: 1080, Duration: 8, Resolution: "720p", AspectRatio: "16:9"},
-			{Width: 1920, Height: 1080, Duration: 8, Resolution: "1080p", AspectRatio: "9:16"},
-		} {
-			r.Model, r.Prompt = id, "a landscape"
-			if _, _, err := ValidateVideoRequest(r); err == nil {
-				t.Fatalf("%s accepted an unverified combination: %+v", id, r)
+	}
+}
+
+func TestOmniDurationsExposeFreeMaximums(t *testing.T) {
+	for _, tc := range []struct {
+		id        string
+		max       int
+		durations []int
+	}{
+		{"gemini-omni-flash-1.1", 10, []int{5, 10}},
+		{"gemini-omni-flash-1.2", 8, []int{5, 8}},
+	} {
+		m, ok := FindModel(tc.id)
+		if !ok || m.Duration != 5 {
+			t.Fatalf("%s default duration = %d, want 5", tc.id, m.Duration)
+		}
+		for _, size := range []struct{ width, height int }{{1280, 720}, {720, 1280}} {
+			for _, duration := range tc.durations {
+				if _, ok := m.MatchVideo(size.width, size.height, duration, "720p", map[bool]string{true: "16:9", false: "9:16"}[size.width == 1280], true, 0); !ok {
+					t.Fatalf("%s rejected %dx%d at %ds", tc.id, size.width, size.height, duration)
+				}
 			}
+		}
+		if _, ok := m.MatchVideo(1280, 720, tc.max+1, "720p", "16:9", true, 0); ok {
+			t.Fatalf("%s accepted duration beyond maximum", tc.id)
 		}
 	}
 }
@@ -90,6 +103,10 @@ func TestOmniPortraitFreeTierRequiresAudioWithoutInheritingReferences(t *testing
 			if err != nil || !tier.Audio || !tier.AudioRequired || !tier.DefaultAudio || tier.MaxReferenceImages != 0 {
 				t.Fatalf("portrait fixed-audio contract lost: %+v, %v", tier, err)
 			}
+			maxDuration := 8
+			if id == "gemini-omni-flash-1.1" {
+				maxDuration = 10
+			}
 			if m.Size != "1280x720" || m.AspectRatio != "16:9" || m.Duration != 5 || !m.DefaultAudio || !m.AudioRequired {
 				t.Fatalf("existing defaults changed: %+v", m)
 			}
@@ -105,7 +122,7 @@ func TestOmniPortraitFreeTierRequiresAudioWithoutInheritingReferences(t *testing
 				{"1080p", func(r *VideoRequest) { r.Width, r.Height, r.Resolution = 1080, 1920, "1080p" }},
 				{"square", func(r *VideoRequest) { r.Width, r.Height, r.AspectRatio = 720, 720, "1:1" }},
 				{"mismatched-aspect", func(r *VideoRequest) { r.AspectRatio = "16:9" }},
-				{"duration", func(r *VideoRequest) { r.Duration = 8 }},
+				{"duration", func(r *VideoRequest) { r.Duration = maxDuration + 1 }},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					invalid := r

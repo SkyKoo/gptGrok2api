@@ -14,6 +14,14 @@ import (
 )
 
 func adobeFreeVideoRequest(t *testing.T, fields url.Values, reference bool) *http.Request {
+	count := 0
+	if reference {
+		count = 1
+	}
+	return adobeFreeVideoRequestWithReferences(t, fields, count)
+}
+
+func adobeFreeVideoRequestWithReferences(t *testing.T, fields url.Values, referenceCount int) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -24,8 +32,8 @@ func adobeFreeVideoRequest(t *testing.T, fields url.Values, reference bool) *htt
 			}
 		}
 	}
-	if reference {
-		part, err := writer.CreateFormFile("input_reference", "frame.png")
+	for i := 0; i < referenceCount; i++ {
+		part, err := writer.CreateFormFile("input_reference", fmt.Sprintf("frame-%d.png", i+1))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,16 +55,21 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 		model, query, size, resolution, aspect string
 		duration                               int
 		audio                                  bool
+		references                             int
 	}{
-		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4, false},
-		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false},
-		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true},
-		{"veo-3.1-lite", "size=1080x1920&generate_audio=true", "1080x1920", "1080p", "9:16", 8, true},
-		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6, false},
-		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8, false},
-		{"ray-3.14", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, false},
-		{"gemini-omni-flash-1.1", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, true},
-		{"gemini-omni-flash-1.2", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 5, true},
+		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4, false, 0},
+		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false, 0},
+		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 0},
+		{"veo-3.1-lite", "size=1080x1920&generate_audio=true", "1080x1920", "1080p", "9:16", 8, true, 0},
+		{"veo-3.1-lite", "size=1920x1080&generate_audio=true", "1920x1080", "1080p", "16:9", 8, true, 2},
+		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6, false, 0},
+		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8, false, 2},
+		{"veo-3.1-fast", "size=1280x720", "1280x720", "720p", "16:9", 8, false, 2},
+		{"ray-3.14", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, false, 0},
+		{"gemini-omni-flash-1.1", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, true, 0},
+		{"gemini-omni-flash-1.1", "size=1280x720&seconds=10&generate_audio=true", "1280x720", "720p", "16:9", 10, true, 0},
+		{"gemini-omni-flash-1.2", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 5, true, 0},
+		{"gemini-omni-flash-1.2", "size=1280x720&seconds=8&generate_audio=true", "1280x720", "720p", "16:9", 8, true, 0},
 	} {
 		t.Run(tc.model+"/"+tc.query, func(t *testing.T) {
 			s := imageTaskTestServer(t)
@@ -69,7 +82,7 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			fields.Set("prompt", "a blue ceramic mug")
 			fields.Set("client_task_id", "verified-free-video")
 			w := httptest.NewRecorder()
-			s.Handler().ServeHTTP(w, adobeFreeVideoRequest(t, fields, false))
+			s.Handler().ServeHTTP(w, adobeFreeVideoRequestWithReferences(t, fields, tc.references))
 			if w.Code != http.StatusOK {
 				t.Fatalf("create: %d %s", w.Code, w.Body.String())
 			}
@@ -78,12 +91,12 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := waitAdobeVideoIdle(t, s, created.ID)
-			if got.Model != tc.model || got.Size != tc.size || got.ResolutionName != tc.resolution || got.AspectRatio != tc.aspect || got.Seconds != fmt.Sprint(tc.duration) || got.GenerateAudio != tc.audio || got.ReferenceCount != 0 {
+			if got.Model != tc.model || got.Size != tc.size || got.ResolutionName != tc.resolution || got.AspectRatio != tc.aspect || got.Seconds != fmt.Sprint(tc.duration) || got.GenerateAudio != tc.audio || got.ReferenceCount != tc.references {
 				t.Fatalf("request changed: %+v", got)
 			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
-			if fixture.preflights != 1 || fixture.submits != 1 || fixture.uploads != 0 {
+			if fixture.preflights != 1 || fixture.submits != 1 || fixture.uploads != tc.references {
 				t.Fatalf("preflight=%d submit=%d upload=%d", fixture.preflights, fixture.submits, fixture.uploads)
 			}
 			p := fixture.payload
@@ -93,8 +106,21 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			if tc.model != "ray-3.14" && p["generateAudio"] != tc.audio {
 				t.Fatal("upstream audio differs from the resolved request")
 			}
-			if _, exists := p["referenceBlobs"]; exists {
-				t.Fatal("text-only variant gained reference blobs")
+			if refs, exists := p["referenceBlobs"]; exists {
+				if tc.references == 0 {
+					t.Fatal("text-only variant gained reference blobs")
+				}
+				rows, ok := refs.([]any)
+				if !ok || len(rows) != tc.references {
+					t.Fatalf("reference blobs=%v, want %d", refs, tc.references)
+				}
+				for i, raw := range rows {
+					if mapValue(raw)["usage"] != "frame" || mapValue(raw)["order"] != float64(i+1) {
+						t.Fatalf("frame binding %v", refs)
+					}
+				}
+			} else if tc.references != 0 {
+				t.Fatalf("missing %d reference blobs", tc.references)
 			}
 		})
 	}
@@ -102,35 +128,35 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 
 func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
 	for _, tc := range []struct {
-		query string
-		ref   bool
+		query      string
+		references int
 	}{
-		{"model=veo-3.1-fast&generate_audio=true", false},
-		{"model=veo-3.1-fast&size=720x1280&generate_audio=true", false},
-		{"model=veo-3.1-fast&size=1080x1920&generate_audio=true", false},
-		{"model=veo-3.1-lite&seconds=4&generate_audio=true", false},
-		{"model=veo-3.1-lite&resolution=720p&aspect_ratio=16:9&generate_audio=true", false},
-		{"model=veo-3.1-lite&size=1080x1920&seconds=6", false},
-		{"model=veo-3.1-lite&size=720x1280&seconds=4&generate_audio=true", false},
-		{"model=veo-3.1-lite&size=1080x1920&seconds=6&generate_audio=true", false},
-		{"model=veo-3.1-fast&resolution=720p&seconds=4", false},
-		{"model=veo-3.1-lite&size=720x1280", true},
-		{"model=veo-3.1-lite&size=720x1280&generate_audio=true", true},
-		{"model=veo-3.1-lite&size=1080x1920&generate_audio=true", true},
-		{"model=veo-3.1-lite&seconds=4", true},
-		{"model=veo-3.1-fast&size=1080x1920", true},
-		{"model=ray-3.14&aspect_ratio=9:16", true},
-		{"model=veo-3.1-lite&size=1920x1080&resolution=720p", false},
-		{"model=firefly-video&resolution=720p", false},
-		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16&generate_audio=false", false},
-		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&generate_audio=false", false},
-		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16", true},
-		{"model=gemini-omni-flash-1.2&size=720x1280", true},
-		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&resolution=1080p", false},
-		{"model=gemini-omni-flash-1.2&aspect_ratio=1:1", false},
-		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&seconds=8", false},
+		{"model=veo-3.1-fast&generate_audio=true", 0},
+		{"model=veo-3.1-fast&size=720x1280&generate_audio=true", 0},
+		{"model=veo-3.1-fast&size=1080x1920&generate_audio=true", 0},
+		{"model=veo-3.1-lite&size=1920x1080&seconds=3", 0},
+		{"model=veo-3.1-lite&size=1920x1080&resolution=720p", 0},
+		{"model=veo-3.1-lite&size=1280x720&resolution=1080p", 0},
+		{"model=veo-3.1-lite&size=720x1280&seconds=4", 0},
+		{"model=veo-3.1-lite&size=1080x1920&seconds=6", 0},
+		{"model=veo-3.1-fast&resolution=720p&seconds=4", 0},
+		{"model=veo-3.1-fast&size=1920x1080&seconds=5", 0},
+		{"model=veo-3.1-lite&size=1920x1080", 3},
+		{"model=veo-3.1-fast&size=1080x1920", 3},
+		{"model=ray-3.14&aspect_ratio=9:16", 1},
+		{"model=veo-3.1-lite&size=1920x1080&resolution=720p", 0},
+		{"model=firefly-video&resolution=720p", 0},
+		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16&generate_audio=false", 0},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&generate_audio=false", 0},
+		{"model=gemini-omni-flash-1.1&aspect_ratio=9:16", 1},
+		{"model=gemini-omni-flash-1.2&size=720x1280", 1},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=9:16&resolution=1080p", 0},
+		{"model=gemini-omni-flash-1.2&aspect_ratio=1:1", 0},
+		{"model=gemini-omni-flash-1.1&size=1280x720&seconds=11", 0},
+		{"model=gemini-omni-flash-1.2&size=1280x720&seconds=9", 0},
+		{"model=gemini-omni-flash-1.2&size=720x1280&aspect_ratio=16:9", 1},
 	} {
-		t.Run(fmt.Sprintf("%s/ref=%t", tc.query, tc.ref), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/ref=%d", tc.query, tc.references), func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			adobeFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{video: true}
@@ -138,7 +164,7 @@ func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
 			fields, _ := url.ParseQuery(tc.query)
 			fields.Set("prompt", "a blue ceramic mug")
 			w := httptest.NewRecorder()
-			s.Handler().ServeHTTP(w, adobeFreeVideoRequest(t, fields, tc.ref))
+			s.Handler().ServeHTTP(w, adobeFreeVideoRequestWithReferences(t, fields, tc.references))
 			if w.Code != http.StatusBadRequest || len(s.videoJobs) != 0 || fixture.preflights != 0 || fixture.submits != 0 || fixture.uploads != 0 {
 				t.Fatalf("invalid request progressed: status=%d jobs=%d preflight=%d submit=%d upload=%d body=%s", w.Code, len(s.videoJobs), fixture.preflights, fixture.submits, fixture.uploads, w.Body.String())
 			}

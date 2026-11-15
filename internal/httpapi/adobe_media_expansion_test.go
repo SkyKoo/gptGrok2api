@@ -94,8 +94,16 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			if err != nil {
 				t.Errorf("invalid uploaded image: %v", err)
 			}
-			if f.video && (cfg.Width != 1920 || cfg.Height != 1080) {
-				t.Errorf("video frame not fit: %dx%d", cfg.Width, cfg.Height)
+			// Video references are normalized to the selected model tier. The
+			// capability tests cover landscape, portrait, and 720p tiers.
+			if f.video {
+				valid := (cfg.Width == 1920 && cfg.Height == 1080) ||
+					(cfg.Width == 1080 && cfg.Height == 1920) ||
+					(cfg.Width == 1280 && cfg.Height == 720) ||
+					(cfg.Width == 720 && cfg.Height == 1280)
+				if !valid {
+					t.Errorf("video frame not fit: %dx%d", cfg.Width, cfg.Height)
+				}
 			}
 			if r.Header.Get("Content-Type") != "image/png" {
 				t.Errorf("upload MIME %s", r.Header.Get("Content-Type"))

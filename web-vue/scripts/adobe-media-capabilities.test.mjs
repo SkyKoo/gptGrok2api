@@ -8,14 +8,17 @@ const image = { kind: 'image', qualities: ['auto'], sizes: ['1024x1024'], max_co
 const video = { kind: 'video', sizes: ['1920x1080'], resolutions: ['1080p'], durations: [8], audio: false, max_reference_images: 0, variants: [{ sizes: ['1920x1080'], resolutions: ['1080p'], durations: [8], audio: false, max_reference_images: 0, max_count: 1 }] }
 
 test('Veo free tier sends logical model and supported options without channel or Grok preset', t => {
- setMediaCapabilities({ 'veo-3.1-lite': video }); t.after(() => setMediaCapabilities())
+ const lite = {...video,audio:true,max_reference_images:2,variants:[{...video.variants[0],audio:true,max_reference_images:2}]}
+ setMediaCapabilities({ 'veo-3.1-lite': lite }); t.after(() => setMediaCapabilities())
  const form = buildVideoForm('paper plane', { model: 'veo-3.1-lite', seconds: 8, size: '1920x1080', resolution: '1080p', audio: false, preset: 'spicy' }, [])
  assert.equal(form.get('model'), 'veo-3.1-lite')
  assert.equal(form.get('seconds'), '8'); assert.equal(form.get('resolution_name'), '1080p')
  assert.equal(form.get('generate_audio'), 'false')
  assert.equal(form.has('provider'), false); assert.equal(form.has('channel'), false); assert.equal(form.has('preset'), false)
  assert.throws(() => buildVideoForm('test', { model: 'veo-3.1-lite', seconds: 4, size: '1920x1080', resolution: '1080p' }, []), /参数组合/)
- assert.throws(() => buildVideoForm('test', { model: 'veo-3.1-lite', seconds: 8, size: '1920x1080', resolution: '1080p', audio: true }, []), /参数组合/)
+ const file = new File(['frame'], 'frame.png', {type:'image/png'})
+ assert.equal(buildVideoForm('test', { model: 'veo-3.1-lite', seconds: 8, size: '1920x1080', resolution: '1080p', audio: true }, [file, file]).getAll('input_reference').length, 2)
+ assert.throws(() => buildVideoForm('test', { model: 'veo-3.1-lite', seconds: 8, size: '1920x1080', resolution: '1080p', audio: true }, [file, file, file]), /参考图/)
 })
 test('free image enforces count and excludes unverified references', t => {
  setMediaCapabilities({ 'gemini-3.1-flash-image': image }); t.after(() => setMediaCapabilities())
@@ -62,22 +65,27 @@ test('video option changes select one complete combination and constrain depende
  assert.equal(back.size,'1920x1080');assert.equal(back.resolution,'1080p');assert.equal(back.seconds,8);assert.equal(back.audio,true)
 })
 
-test('required video audio defaults to true and cannot be disabled or omitted in serialization', t => {
- const omni = {...video,audio:true,audio_required:true,default_audio:true,variants:[{...video.variants[0],audio:true,audio_required:true,default_audio:true}]}
- setMediaCapabilities({'gemini-omni-flash-1.1':omni});t.after(()=>setMediaCapabilities())
- const options={model:'gemini-omni-flash-1.1',size:'1920x1080',resolution:'1080p',seconds:8}
- assert.equal(normalizeStudioVideoOptions({...options,audio:false},omni,'model').audio,true)
- assert.deepEqual(studioVideoSettingValues({...options,audio:true},omni).audio,[true])
- assert.equal(buildVideoForm('wind through leaves',options,[]).get('generate_audio'),'true')
- assert.throws(()=>buildVideoForm('wind through leaves',{...options,audio:false},[]),/参数组合/)
+test('Omni models expose their own maximum duration while requiring audio', t => {
+ const omni11 = {kind:'video',audio_required:true,default_audio:true,variants:[{sizes:['1280x720'],resolutions:['720p'],durations:[5,10],audio:true,audio_required:true,default_audio:true,max_reference_images:2}]}
+ const omni12 = {kind:'video',audio_required:true,default_audio:true,variants:[{sizes:['1280x720'],resolutions:['720p'],durations:[5,8],audio:true,audio_required:true,default_audio:true,max_reference_images:2}]}
+ setMediaCapabilities({'gemini-omni-flash-1.1':omni11,'gemini-omni-flash-1.2':omni12});t.after(()=>setMediaCapabilities())
+ for (const [model,capability,maxSeconds] of [['gemini-omni-flash-1.1',omni11,10],['gemini-omni-flash-1.2',omni12,8]]) {
+  const options={model,size:'1280x720',resolution:'720p',seconds:maxSeconds}
+  assert.equal(normalizeStudioVideoOptions({...options,audio:false},capability,'model').audio,true)
+  assert.deepEqual(studioVideoSettingValues({...options,audio:true},capability).durations,[5,maxSeconds])
+  assert.equal(buildVideoForm('wind through leaves',options,[]).get('generate_audio'),'true')
+  assert.equal(buildVideoForm('wind through leaves',options,[new File(['frame'],'frame.png',{type:'image/png'})]).getAll('input_reference').length,1)
+  assert.throws(()=>buildVideoForm('wind through leaves',{...options,audio:false},[]),/参数组合/)
+  assert.throws(()=>buildVideoForm('wind through leaves',{...options,seconds:maxSeconds+1},[]),/参数组合/)
+ }
 })
 
-test('Veo reference frame and generated audio are both serialized through the unified API', t => {
+test('Veo Lite serializes first/last frames together with generated audio', t => {
  const enabled={...video,audio:true,max_reference_images:2,variants:[{...video.variants[0],audio:true,max_reference_images:2}]}
  setMediaCapabilities({'veo-3.1-lite':enabled});t.after(()=>setMediaCapabilities())
- const file=new File([new Uint8Array([137,80,78,71])],'frame.png',{type:'image/png'})
- const form=buildVideoForm('steam rises',{model:'veo-3.1-lite',size:'1920x1080',resolution:'1080p',seconds:8,audio:true},[file])
- assert.equal(form.get('generate_audio'),'true');assert.equal(form.getAll('input_reference').length,1)
+ const files=[new File([new Uint8Array([137,80,78,71])],'first.png',{type:'image/png'}),new File([new Uint8Array([137,80,78,71])],'last.png',{type:'image/png'})]
+ const form=buildVideoForm('steam rises',{model:'veo-3.1-lite',size:'1920x1080',resolution:'1080p',seconds:8,audio:true},files)
+ assert.equal(form.get('generate_audio'),'true');assert.equal(form.getAll('input_reference').length,2)
  assert.equal(form.has('provider'),false);assert.equal(form.has('channel'),false)
 })
 

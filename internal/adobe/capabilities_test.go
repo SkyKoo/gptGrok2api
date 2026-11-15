@@ -165,8 +165,8 @@ func TestVariantMatchingRejectsUnsupportedCombinations(t *testing.T) {
 	if _, ok := v.MatchVideo(1920, 1080, 8, "1080p", "16:9", true, 2); !ok {
 		t.Fatal("supported audio frame tier missing")
 	}
-	if _, ok := v.MatchVideo(1920, 1080, 4, "1080p", "16:9", true, 2); ok {
-		t.Fatal("unqualified duration accepted")
+	if _, ok := v.MatchVideo(1920, 1080, 7, "1080p", "16:9", true, 2); ok {
+		t.Fatal("unsupported duration accepted")
 	}
 }
 

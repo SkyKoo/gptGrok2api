@@ -27,15 +27,19 @@ const page=await context.newPage(), errors=[], writes=[]
 page.on('pageerror',error=>errors.push(error.message))
 const lite={kind:'video',max_reference_images:2,variants:[
   {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
-  {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[4,6],audio:false,max_reference_images:0,max_count:1},
-  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[8],audio:false,max_reference_images:0,max_count:1},
-  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[8],audio:true,max_reference_images:0,max_count:1},
-  {sizes:['1080x1920'],aspect_ratios:['9:16'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:0,max_count:1},
+  {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[4,6],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['1080x1920'],aspect_ratios:['9:16'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
 ]}
 const fast={...lite,variants:lite.variants.map(v=>({...v,audio:false}))}
-const omni={kind:'video',max_reference_images:2,audio_required:true,default_audio:true,variants:[
-  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[5],audio:true,audio_required:true,default_audio:true,max_reference_images:2,max_count:1},
-  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[5],audio:true,audio_required:true,default_audio:true,max_reference_images:0,max_count:1},
+const omni11={kind:'video',max_reference_images:2,audio_required:true,default_audio:true,variants:[
+  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[5,10],audio:true,audio_required:true,default_audio:true,max_reference_images:2,max_count:1},
+  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[5,10],audio:true,audio_required:true,default_audio:true,max_reference_images:0,max_count:1},
+]}
+const omni12={kind:'video',max_reference_images:2,audio_required:true,default_audio:true,variants:[
+  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[5,8],audio:true,audio_required:true,default_audio:true,max_reference_images:2,max_count:1},
+  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[5,8],audio:true,audio_required:true,default_audio:true,max_reference_images:0,max_count:1},
 ]}
 const nano={kind:'image',qualities:['auto'],max_reference_images:14,variants:[
   {sizes:['1024x1024'],aspect_ratios:['1:1'],resolutions:['1K'],qualities:['auto'],max_count:1,max_reference_images:14},
@@ -45,7 +49,7 @@ const nano={kind:'image',qualities:['auto'],max_reference_images:14,variants:[
 const catalog={chat_models:[],image_models:['gemini-3.1-flash-image-2.1'],image_edit_models:['gemini-3.1-flash-image-2.1'],video_models:['veo-3.1-lite','veo-3.1-fast','gemini-omni-flash-1.1','gemini-omni-flash-1.2','grok-imagine-video'],models:[
   {id:'gemini-3.1-flash-image-2.1',name:'Nano Banana 2.1'},{id:'veo-3.1-lite',name:'Veo 3.1 Lite'},{id:'veo-3.1-fast',name:'Veo 3.1 Fast'},
   {id:'gemini-omni-flash-1.1',name:'Gemini Omni Flash 1.1'},{id:'gemini-omni-flash-1.2',name:'Gemini Omni Flash 1.2'},{id:'grok-imagine-video',name:'Grok Imagine Video'},
-],media_capabilities:{'gemini-3.1-flash-image-2.1':nano,'veo-3.1-lite':lite,'veo-3.1-fast':fast,'gemini-omni-flash-1.1':omni,'gemini-omni-flash-1.2':omni}}
+],media_capabilities:{'gemini-3.1-flash-image-2.1':nano,'veo-3.1-lite':lite,'veo-3.1-fast':fast,'gemini-omni-flash-1.1':omni11,'gemini-omni-flash-1.2':omni12}}
 await context.route('**/*',async route=>{
   const req=route.request(), url=new URL(req.url()), pathname=url.pathname
   if(url.origin!==origin){await route.abort();return}
@@ -86,15 +90,15 @@ try{
   await button('4 秒').waitFor();await button('6 秒').waitFor();await button('8 秒').click()
   await screenshot('lite-free-silent-options')
   await button('生成音频').click()
-  assert.equal(await button('4 秒').count(),0);assert.equal(await button('6 秒').count(),0)
+  assert.equal(await button('4 秒').count(),1);assert.equal(await button('6 秒').count(),1)
   await button('9:16 竖屏 · 720×1280').click()
   assert.equal(await button('720p').getAttribute('aria-pressed'),'true')
   assert.equal(await button('生成音频').getAttribute('aria-pressed'),'true')
-  assert.equal(await button('上传图片').isDisabled(),true)
+  assert.equal(await button('上传图片').isDisabled(),false)
   await button('9:16 竖屏 · 1080×1920').click()
   assert.equal(await button('1080p').getAttribute('aria-pressed'),'true')
   assert.equal(await button('生成音频').getAttribute('aria-pressed'),'true')
-  assert.equal(await button('16:9 横屏 · 1280×720').count(),0)
+  assert.equal(await button('16:9 横屏 · 1280×720').count(),1)
   await screenshot('lite-audio-combination')
   await button('16:9 横屏 · 1920×1080').click()
   await selectVideoModel('Veo 3.1 Fast')
@@ -111,8 +115,8 @@ try{
   await selectVideoModel('Veo 3.1 Lite')
   await page.locator('input[type=file]').setInputFiles(fixtureFile)
   await page.getByText('参考图 1/2 张',{exact:true}).waitFor()
-  assert.equal(await button('4 秒').count(),0);assert.equal(await button('6 秒').count(),0)
-  assert.equal(await button('9:16 竖屏 · 720×1280').count(),0)
+  assert.equal(await button('4 秒').count(),1);assert.equal(await button('6 秒').count(),1)
+  assert.equal(await button('9:16 竖屏 · 720×1280').count(),1)
   await screenshot('lite-reference-baseline-only')
   await button('移除 fixture-frame.png').click()
   for(const version of ['1.1','1.2']){
@@ -122,6 +126,7 @@ try{
     assert.equal(await button('无音频').count(),0)
     assert.equal(await button('1080p').count(),0)
     assert.equal(await button('5 秒').getAttribute('aria-pressed'),'true')
+    assert.equal(await button(version==='1.1'?'10 秒':'8 秒').count(),1)
     assert.equal(await button('上传图片').isDisabled(),true)
     assert.match(await button('视频设置').innerText(),/9:16 竖屏/)
     await screenshot('omni-'+version+'-portrait-audio')
@@ -175,6 +180,6 @@ try{
   await page.getByText('当前参数不支持参考图，请调整参数或移除参考图。',{exact:true}).waitFor({state:'hidden'})
   await screenshot('nano21-reference-square-only')
   assert.deepEqual(errors,[]);assert.deepEqual(writes,[])
-  console.log(JSON.stringify({ok:true,checks:['lite-portrait-720p-1080p','lite-silent-4-6-8','lite-portrait-audio-720p-1080p-8-only','fast-audio-explicit-correction','invalid-enter-blocked','video-reference-baseline-only','omni-11-12-portrait-required-audio','omni-portrait-reference-rejected','omni-landscape-reference-preserved','omni-mobile-layout','grok-original-video-options','nano21-free-nonsquare','nano21-nonsquare-reference-rejected','nano21-reference-square-only'],apiWrites:writes.length,pageErrors:errors}))
+  console.log(JSON.stringify({ok:true,checks:['lite-portrait-720p-1080p','lite-silent-4-6-8','lite-portrait-audio-720p-1080p-8','fast-audio-explicit-correction','invalid-enter-blocked','video-reference-all-variants','omni-11-12-portrait-required-audio','omni-portrait-reference-rejected','omni-landscape-reference-preserved','omni-mobile-layout','grok-original-video-options','nano21-free-nonsquare','nano21-nonsquare-reference-rejected','nano21-reference-square-only'],apiWrites:writes.length,pageErrors:errors}))
 }catch(error){await screenshot('failure');console.error(JSON.stringify({errors,writes,body:(await page.locator('body').innerText()).slice(-6000)}));throw error}
 finally{await browser.close();await new Promise(resolve=>server.close(resolve))}
