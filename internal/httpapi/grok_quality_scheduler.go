@@ -12,7 +12,7 @@ import (
 )
 
 func qualityNextDue(account oauth.Account, interval time.Duration, now time.Time) int64 {
-	if account.Status == "disabled" || account.AccessToken == "" && !oauth.CPAManaged(account) {
+	if account.Status == "disabled" || oauth.CPARemovalRequested(account) || account.AccessToken == "" && !oauth.CPAManaged(account) {
 		return 0
 	}
 	if q := account.Quality; q != nil {

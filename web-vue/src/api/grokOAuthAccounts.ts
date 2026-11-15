@@ -24,6 +24,7 @@ export type GrokOAuthCPASync = {
   attempted_at?: number
   managed?: boolean
   error?: string
+  manual_removal?: { status: 'pending' | 'removed' | 'manual_required'; pool_id: string; pool_name: string; file_name: string; at: number; error?: string }
 }
 
 export type GrokOAuthCandidate = {
@@ -270,6 +271,12 @@ export const grokOAuthAccountsApi = {
 
   checkCPA(id: string, poolId?: string) {
     return apiClient.post<{ cpa_pool_id?: string }, { account: GrokOAuthAccount; ok: boolean }>(`${BASE_PATH}/accounts/${encodeURIComponent(id)}/cpa/check`, { cpa_pool_id: poolId })
+  },
+
+  removeCPA(id: string, poolId: string, fileName: string) {
+    return apiClient.post<{ cpa_pool_id: string; file_name: string }, { account: GrokOAuthAccount; ok: boolean; error?: string }>(
+      `${BASE_PATH}/accounts/${encodeURIComponent(id)}/cpa/remove`, { cpa_pool_id: poolId, file_name: fileName },
+    )
   },
 
   syncModels(id: string) {

@@ -33,7 +33,7 @@
         <span>已定位 {{ rowScopeIds.length }} 个所选账号；请选择 CPA 目标后，在各账号行开始授权。</span>
         <Button size="xs" variant="outline" @click="rowScopeIds = []">查看全部账号</Button>
       </div>
-      <GrokOAuthCandidates :items="visibleRows" :loading="loading" :busy-rows="displayBusyRows" :target-selected="Boolean(cpaPoolId)" :error="candidateError" @authorize="startProtocolAuthorization" @cpa="handleCPA" @device="startDeviceAuthorization" @details="openDetails" @toggle="toggleAccount" @remove="removeAccount" @quality="checkQuality" @quality-details="openQualityDetails" @cleanup="row => checkQuality(row, true)" />
+      <GrokOAuthCandidates :items="visibleRows" :loading="loading" :busy-rows="displayBusyRows" :target-selected="Boolean(cpaPoolId)" :error="candidateError" @authorize="startProtocolAuthorization" @cpa="handleCPA" @device="startDeviceAuthorization" @details="openDetails" @toggle="toggleAccount" @remove="removeAccount" @remove-cpa="removeCPACredential" @quality="checkQuality" @quality-details="openQualityDetails" @cleanup="row => checkQuality(row, true)" />
     </ModalBody>
     <ModalFooter v-if="!props.embedded" density="compact"><Button size="sm" variant="outline" @click="emit('close')">完成</Button></ModalFooter>
   </ModalShell>
@@ -84,7 +84,8 @@
       <p class="text-sm font-medium">{{ detailAccount.quality.summary }}</p>
       <p class="text-xs text-muted-foreground">{{ formatGrokAccountDate(detailAccount.quality.at) }} · {{ detailAccount.quality.source === 'cpa' ? '使用 CPA 当前凭据检测' : '交付前检测' }} · {{ detailAccount.quality.version }}</p>
       <p v-if="detailAccount.quality.blocked" class="text-sm text-rose-600">该账号已阻止同步。重新授权不会清除风险，复测全部通过后才能解除。</p>
-      <div v-if="detailAccount.quality.removal" class="space-y-2 rounded-lg border border-border p-3 text-sm">
+      <p v-if="cpaRemovalRequested(detailAccount)" class="text-sm text-muted-foreground">已请求移除 CPA 凭据，保留此次检测依据；移除状态请查看账号行。</p>
+      <div v-else-if="detailAccount.quality.removal" class="space-y-2 rounded-lg border border-border p-3 text-sm">
         <p>{{ detailAccount.quality.removal.status === 'removed' ? 'CPA 对应凭据已确认移除' : 'CPA 凭据需要处理' }}</p>
         <p class="break-all">{{ detailAccount.quality.removal.pool_name }} · {{ detailAccount.quality.removal.file_name }}</p>
         <p v-if="detailAccount.quality.removal.error" class="text-rose-600">{{ detailAccount.quality.removal.error }}</p>
@@ -114,7 +115,7 @@ import { grokOAuthAccountsApi, type GrokOAuthAccount, type GrokOAuthCandidate, t
 import { accountImportsApi, type CPAPool } from '@/api/accountImports'
 import type { GrokAccount } from '@/api/grokAccounts'
 import GrokOAuthCandidates from './GrokOAuthCandidates.vue'
-import { cpaAction, grokOAuthImportPayload, isCPAManaged, mergeGrokOAuthRows, type GrokOAuthRow } from './grokOAuthCandidates'
+import { canRemoveCPACredential, cpaAction, cpaRemovalRequested, grokOAuthImportPayload, isCPAManaged, mergeGrokOAuthRows, type GrokOAuthRow } from './grokOAuthCandidates'
 import { formatGrokAccountDate, grokOAuthRemainingQuotaText } from './grokAccountView'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
@@ -143,7 +144,7 @@ const rows = computed(() => mergeGrokOAuthRows(candidates.value, accounts.value,
 const displayBusyRows = computed(() => ({ ...Object.fromEntries(rows.value.filter(row => row.quality_running).map(row => [row.id, 'quality'])), ...busyRows.value }))
 const rowScopeIds = ref<string[]>([])
 const visibleRows = computed(() => rowScopeIds.value.length ? rows.value.filter(row => rowScopeIds.value.includes(row.source_account_id || row.id)) : rows.value)
-const qualityEligible = computed(() => visibleRows.value.filter(row => row.account && row.account.status !== 'disabled' && !row.quality_running && !['queued', 'running'].includes(row.oauth_status)))
+const qualityEligible = computed(() => visibleRows.value.filter(row => row.account && row.account.status !== 'disabled' && !cpaRemovalRequested(row) && !(isCPAManaged(row) && row.cpa_sync?.status === 'quality_removed') && !row.quality_running && !['queued', 'running'].includes(row.oauth_status)))
 watch(() => [props.open, props.focusAccountIds] as const, () => { if (props.open) rowScopeIds.value = [...props.focusAccountIds] }, { immediate: true })
 const dialog = ref<'device' | 'import' | 'details' | 'quality' | null>(null), dialogError = ref(''), modalBusy = ref(false)
 const dialogPoolId = ref(''), dialogPoolName = ref(''), credentialText = ref('')
@@ -199,7 +200,7 @@ async function saveQualitySchedule() {
 
 function openQualityDetails(row: GrokOAuthRow) { detailAccountId.value = row.oauth_account_id; dialog.value = 'quality' }
 async function checkQuality(row: GrokOAuthRow, cleanupOnly = false) {
-  if (!row.oauth_account_id) return
+  if (!row.oauth_account_id || cpaRemovalRequested(row)) return
   setRowBusy(row.id, 'quality')
   try { await grokOAuthAccountsApi.checkQuality([row.oauth_account_id], cleanupOnly); await loadAccounts(false); toast.info(cleanupOnly ? '已提交 CPA 移除核对' : '已提交 grok-4.7 检测，结果会显示在账号行') }
   catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, '无法启动检测') } }
@@ -380,12 +381,30 @@ async function toggleAccount(row: GrokOAuthRow) {
   catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'OAuth 状态更新失败') } }
   finally { clearRowBusy(row.id) }
 }
-async function removeAccount(row: GrokOAuthRow) {
-  if (!row.account || busyRows.value[row.id]) return
+async function removeCPACredential(row: GrokOAuthRow) {
+  if (!canRemoveCPACredential(row) || busyRows.value[row.id] || row.quality_running || ['queued', 'running'].includes(row.oauth_status)) return
+  const target = row.cpa_sync!
   const confirmed = await confirmDialog.ask({
-    title: '移除 OAuth',
-    message: `将移除 ${row.email || row.id} 在 CFM 中保存的 OAuth 凭据。注册账号、SSO 登录态和 CPA 中的凭据保留。是否继续？`,
-    confirmText: '移除 OAuth', cancelText: '取消',
+    title: '移除 CPA 凭据',
+    message: `将从 ${target.pool_name || target.pool_id} 移除 ${row.email || row.id} 对应的 ${target.file_name}。CFM 的授权记录、降智检测结果和 Web SSO 保留；该凭据停止检测及自动补传，需要恢复时请重新授权。是否继续？`,
+    confirmText: '移除 CPA 凭据', cancelText: '取消',
+  })
+  if (!confirmed) return
+  setRowBusy(row.id, 'remove-cpa'); rowErrors.value = { ...rowErrors.value, [row.id]: '' }
+  try {
+    const result = await grokOAuthAccountsApi.removeCPA(row.oauth_account_id, target.pool_id!, target.file_name!)
+    if (result.ok) toast.success('CPA 凭据已移除，授权记录和检测结果已保留')
+    else rowErrors.value = { ...rowErrors.value, [row.id]: result.error || 'CPA 移除结果待核对' }
+    await loadAccounts(false); emit('changed')
+  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'CPA 凭据移除失败') }; await loadAccounts(false) }
+  finally { clearRowBusy(row.id) }
+}
+async function removeAccount(row: GrokOAuthRow) {
+  if (!row.account || busyRows.value[row.id] || row.quality_running || ['queued', 'running'].includes(row.oauth_status)) return
+  const confirmed = await confirmDialog.ask({
+    title: '删除 CFM OAuth 记录',
+    message: `将删除 ${row.email || row.id} 在 CFM 中保存的 OAuth 凭据、授权记录、CPA 交付记录及降智检测结果，无法恢复。注册账号、Web SSO 登录态和 CPA 中的凭据保留。仅需删除远端文件时，请使用“移除 CPA 凭据”。是否继续？`,
+    confirmText: '删除 CFM OAuth 记录', cancelText: '取消',
   })
   if (!confirmed) return
   setRowBusy(row.id, 'remove')
@@ -393,7 +412,7 @@ async function removeAccount(row: GrokOAuthRow) {
     await grokOAuthAccountsApi.remove([row.account.id])
     jobs.value = Object.fromEntries(Object.entries(jobs.value).filter(([, job]) => job.account?.id !== row.account?.id))
     await loadAccounts(false); emit('changed')
-  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'OAuth 移除失败') } }
+  } catch (error) { rowErrors.value = { ...rowErrors.value, [row.id]: errorMessage(error, 'CFM OAuth 记录删除失败') } }
   finally { clearRowBusy(row.id) }
 }
 async function runModelTest() {

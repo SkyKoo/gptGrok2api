@@ -174,6 +174,9 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	if account.Status == "disabled" {
 		return account, errors.New("OAuth 账号已禁用")
 	}
+	if oauth.CPARemovalRequested(account) {
+		return account, errors.New("已请求移除 CPA 凭据，停止交付及自动补传；需要恢复时请重新授权")
+	}
 	if account.Quality != nil && account.Quality.Blocked && (checkOnly || oauth.CPAManaged(account)) {
 		return account, errors.New("该账号已标记降智风险，禁止恢复 CPA 交付；请先复测并处理风险")
 	}

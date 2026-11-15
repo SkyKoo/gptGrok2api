@@ -132,7 +132,8 @@ func (s *Server) qualityCPACaller(ctx context.Context, account oauth.Account) (x
 	return call, target, nil
 }
 
-// removeQualityCPA only deletes the exact identity used by the completed probe.
+// removeQualityCPA only deletes the exact identity pinned by a quality probe or
+// an explicit removal request. It does not change authorization or quality data.
 // A failed/unsupported delete is an actionable manual-removal label, never a
 // reason to clear the quality block or claim the remote file was removed.
 func (s *Server) removeQualityCPA(ctx context.Context, account oauth.Account, target xaiquality.Removal) xaiquality.Removal {

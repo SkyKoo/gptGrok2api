@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -19,17 +20,18 @@ import (
 )
 
 type CPASync struct {
-	Status              string `json:"status"`
-	PoolID              string `json:"pool_id,omitempty"`
-	PoolName            string `json:"pool_name,omitempty"`
-	FileName            string `json:"file_name,omitempty"`
-	At                  int64  `json:"at,omitempty"`
-	Error               string `json:"error,omitempty"`
-	Managed             bool   `json:"managed,omitempty"`
-	AttemptedAt         int64  `json:"attempted_at,omitempty"`
-	VerifiedAt          int64  `json:"verified_at,omitempty"`
-	ReplaceExisting     bool   `json:"replace_existing,omitempty"`
-	AuthorizationTaskID string `json:"authorization_task_id,omitempty"`
+	Status              string              `json:"status"`
+	PoolID              string              `json:"pool_id,omitempty"`
+	PoolName            string              `json:"pool_name,omitempty"`
+	FileName            string              `json:"file_name,omitempty"`
+	At                  int64               `json:"at,omitempty"`
+	Error               string              `json:"error,omitempty"`
+	Managed             bool                `json:"managed,omitempty"`
+	AttemptedAt         int64               `json:"attempted_at,omitempty"`
+	VerifiedAt          int64               `json:"verified_at,omitempty"`
+	ReplaceExisting     bool                `json:"replace_existing,omitempty"`
+	AuthorizationTaskID string              `json:"authorization_task_id,omitempty"`
+	ManualRemoval       *xaiquality.Removal `json:"manual_removal,omitempty"`
 }
 
 type Account struct {
@@ -123,9 +125,9 @@ func (s *Store) Import(item Account) (Account, error) {
 			if current.Quality != nil && (current.Quality.Blocked || SameCredential(item, current)) {
 				item.Quality = current.Quality
 			}
-			if item.CPASync == nil && current.CPASync != nil {
+			if current.CPASync != nil && (item.CPASync == nil || CPARemovalRequested(current) && SameCredential(item, current)) {
 				cp := *current.CPASync
-				if !SameCredential(item, current) {
+				if !SameCredential(item, current) && !CPARemovalRequested(current) {
 					cp.Status = "pending"
 					cp.Error = "凭据已更新，请重新同步"
 				}
@@ -358,6 +360,12 @@ func CPAManaged(item Account) bool {
 	return cp.Managed || cp.AttemptedAt > 0 || (cp.PoolID != "" && (cp.Status == "synced" || (cp.At > 0 && cp.FileName != "")))
 }
 
+// Manual removal remains effective until an explicit new grant replaces the
+// delivery record. Neither stale imports nor background retries may restore it.
+func CPARemovalRequested(item Account) bool {
+	return item.CPASync != nil && item.CPASync.ManualRemoval != nil
+}
+
 // SameCredential excludes telemetry so a quota query does not invalidate CPA delivery state.
 func SameCredential(a, b Account) bool {
 	return a.AccessToken == b.AccessToken && a.RefreshToken == b.RefreshToken && a.IDToken == b.IDToken
@@ -377,7 +385,7 @@ func sameDelivery(a, b *CPASync) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return *a == *b
+	return reflect.DeepEqual(a, b)
 }
 func (s *Store) updateIf(expected Account, delivery bool, apply func(*Account)) (Account, bool, error) {
 	s.mu.Lock()

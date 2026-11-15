@@ -101,6 +101,8 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"provider": "xai_cli_oauth", "items": items, "total": len(items)})
 	case strings.HasPrefix(path, "accounts/") && (strings.HasSuffix(path, "/cpa/sync") || strings.HasSuffix(path, "/cpa/check")) && r.Method == http.MethodPost:
 		s.grokOAuthCPASync(w, r, strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/cpa/sync"), "/cpa/check"))
+	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/cpa/remove") && r.Method == http.MethodPost:
+		s.grokOAuthCPARemove(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/cpa/remove"))
 	case strings.HasPrefix(path, "accounts/") && strings.HasSuffix(path, "/quota") && r.Method == http.MethodPost:
 		s.oauthQuotaAPI(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "accounts/"), "/quota"))
 	case path == "accounts/import" && r.Method == http.MethodPost:

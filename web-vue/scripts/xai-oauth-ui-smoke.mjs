@@ -29,7 +29,7 @@ const candidates = [
   { id: 'grok-managed', email: 'managed@example.test', oauth_status: 'authorized', oauth_account_id: 'oauth-managed', has_access_token: true, has_refresh_token: true },
   { id: 'grok-legacy', email: 'legacy@example.test', oauth_status: 'authorized', oauth_account_id: 'oauth-legacy', has_access_token: true, has_refresh_token: true },
 ].map(item => ({ ...item, login_status: 'active', updated_at: '2026-11-13T10:00:00Z' }))
-function account(id, email, sync, managed = false) { return { id, email, status: 'active', models: [], has_access_token: true, has_refresh_token: true, expires_at: 1, updated_at: '2026-11-13T10:00:00Z', cpa_sync: sync, cpa_managed: managed } }
+function account(id, email, sync, managed = false) { return { id, email, status: 'active', models: [], has_access_token: true, has_refresh_token: true, expires_at: 1, updated_at: '2026-11-13T10:00:00Z', cpa_sync: { ...sync, file_name: `xai-${email}.json` }, cpa_managed: managed } }
 accounts.set('oauth-retry', account('oauth-retry', 'retry@example.test', { status: 'failed', pool_id: 'cpa-a', pool_name: 'O-CPA', error: 'CPA 暂时不可用' }))
 accounts.set('oauth-managed', account('oauth-managed', 'managed@example.test', { status: 'synced', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100 }, true))
 accounts.set('oauth-legacy', account('oauth-legacy', 'legacy@example.test', { status: 'pending', pool_id: 'cpa-a', pool_name: 'O-CPA', at: 100, error: '凭据已刷新，请重新同步' }, true))
@@ -73,6 +73,15 @@ await context.route('**/*', async route => {
     const body = req.postDataJSON(); writes.push({ action: 'remove', ...body })
     for (const id of body.ids) accounts.delete(id)
     data = { removed: body.ids.length }
+  }
+  else if (pathname === '/api/grok/oauth/accounts/oauth-error/cpa/remove' && method === 'POST') {
+    const body = req.postDataJSON(); writes.push({ action: 'remove-cpa', ...body })
+    assert.deepEqual(body, { cpa_pool_id: 'cpa-a', file_name: 'xai-error@example.test.json' })
+    const previous = accounts.get('oauth-error'), first = writes.filter(item => item.action === 'remove-cpa').length === 1
+    const saved = { ...previous, cpa_sync: { ...previous.cpa_sync, status: first ? 'remove_failed' : 'removed', manual_removal: { status: first ? 'manual_required' : 'removed', pool_id: body.cpa_pool_id, file_name: body.file_name, error: first ? '此 CPA 不允许删除，请人工核对' : '' } } }
+    accounts.set(saved.id, saved)
+    if (first) { await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ ok: false, account: saved, error: '此 CPA 不允许删除，请人工核对' }) }); return }
+    data = { ok: true, account: saved }
   }
   else if (pathname === '/api/grok/oauth/candidates') data = { items: candidates, total: candidates.length }
   else if (pathname === '/api/grok/oauth/protocol/start') {
@@ -174,6 +183,24 @@ try {
   assert.equal(await page.getByRole('checkbox', { name: '定时降智检测', exact: true }).isChecked(), false)
   assert.equal(await page.getByRole('spinbutton', { name: '降智检测间隔小时' }).inputValue(), '12')
   assert.deepEqual(writes.find(item => item.action === 'quality'), { action: 'quality', ids: ['oauth-risk'], cleanup_only: true })
+  await row('oauth:oauth-error').locator('summary').click()
+  await row('oauth:oauth-error').getByRole('button', { name: '移除 CPA 凭据', exact: true }).click()
+  await page.getByRole('dialog').getByText(/授权记录、降智检测结果和 Web SSO 保留/).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
+  assert.equal(writes.filter(item => item.action === 'remove-cpa').length, 0)
+  await row('oauth:oauth-error').getByRole('button', { name: '移除 CPA 凭据', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '移除 CPA 凭据', exact: true }).click()
+  await row('oauth:oauth-error').getByText('CPA 移除失败，待处理', { exact: true }).waitFor()
+  await row('oauth:oauth-error').getByRole('button', { name: '重试移除 CPA 凭据', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '移除 CPA 凭据', exact: true }).click()
+  await row('oauth:oauth-error').getByText('CPA 凭据已手动移除', { exact: true }).waitFor()
+  await row('oauth:oauth-error').getByText('已授权', { exact: true }).waitFor()
+  await row('oauth:oauth-error').getByText('检测失败', { exact: true }).waitFor()
+  assert.equal(await row('oauth:oauth-error').getByRole('button', { name: '复测 grok-4.7', exact: true }).isDisabled(), true)
+  assert.equal(await row('oauth:oauth-error').getByRole('button', { name: /^(同步 CPA|核对 CPA)$/ }).count(), 0)
+  assert.deepEqual(accounts.get('oauth-error').quality, failedQuality)
+  assert.equal(writes.filter(item => item.action === 'remove').length, 0)
+  assert.equal(await row('oauth:oauth-error-new').getByRole('button', { name: '移除 CPA 凭据', exact: true }).count(), 0, 'never-delivered records have no remote deletion action')
   if (process.env.CFM_UI_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.CFM_UI_SCREENSHOT_DIR, { recursive: true })
     for (const theme of ['light', 'dark']) {
@@ -198,11 +225,12 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: '启用 OAuth', exact: true }).click()
   await row('grok-managed').getByText('CFM OAuth 已禁用', { exact: true }).waitFor({ state: 'hidden' })
   await row('oauth:oauth-orphan').locator('summary').click()
-  await row('oauth:oauth-orphan').getByRole('button', { name: '移除 OAuth', exact: true }).click()
+  await row('oauth:oauth-orphan').getByRole('button', { name: '删除 CFM OAuth 记录', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
   assert.equal(writes.filter(item => item.action === 'remove').length, 0, 'cancel does not remove a local credential')
-  await row('oauth:oauth-orphan').getByRole('button', { name: '移除 OAuth', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: '移除 OAuth', exact: true }).click()
+  await row('oauth:oauth-orphan').getByRole('button', { name: '删除 CFM OAuth 记录', exact: true }).click()
+  await page.getByRole('dialog').getByText(/降智检测结果，无法恢复/).waitFor()
+  await page.getByRole('dialog').getByRole('button', { name: '删除 CFM OAuth 记录', exact: true }).click()
   await row('oauth:oauth-orphan').waitFor({ state: 'hidden' })
   assert.deepEqual(writes.filter(item => item.action === 'status'), [{ action: 'status', ids: ['oauth-managed'], disabled: true }, { action: 'status', ids: ['oauth-managed'], disabled: false }])
   assert.deepEqual(writes.find(item => item.action === 'remove'), { action: 'remove', ids: ['oauth-orphan'] })

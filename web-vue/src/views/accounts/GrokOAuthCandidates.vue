@@ -20,7 +20,8 @@
             <td class="py-4 pr-5">
               <StateBadge :tone="item.poll_error ? 'warning' : item.oauth_status === 'authorized' ? 'success' : item.oauth_status === 'pending' ? 'muted' : 'warning'" shape="rounded" size="sm">{{ oauthProgressText(item) }}</StateBadge>
               <p v-if="item.poll_error || item.oauth_message" class="mt-2 break-words text-xs text-amber-600">{{ item.poll_error || item.oauth_message }}</p>
-              <p v-if="isCPAManaged(item) && item.cpa_sync?.status === 'synced'" class="mt-2 text-xs text-muted-foreground">由 CPA 负责续期</p>
+              <p v-if="cpaRemovalRequested(item)" class="mt-2 text-xs text-muted-foreground">授权记录保留；恢复交付需重新授权</p>
+              <p v-else-if="isCPAManaged(item) && item.cpa_sync?.status === 'synced'" class="mt-2 text-xs text-muted-foreground">由 CPA 负责续期</p>
               <p v-else-if="item.quality?.blocked" class="mt-2 text-xs text-rose-600">已拦截 CPA 交付</p>
               <p v-else-if="item.quality?.status === 'error'" class="mt-2 text-xs text-amber-600">检测失败，复测通过后再处理交付</p>
               <p v-else-if="item.has_refresh_token && !running(item)" class="mt-2 text-xs text-muted-foreground">授权已保存，可单独同步</p>
@@ -34,13 +35,15 @@
               <button v-if="item.quality" class="mt-2 text-xs text-primary underline" @click="$emit('qualityDetails', item)">查看检测依据</button>
             </td>
             <td class="py-4 pr-5">
-              <StateBadge :tone="item.quality?.blocked ? 'danger' : item.quality?.status === 'error' ? 'warning' : item.cpa_sync?.status === 'synced' ? 'success' : item.cpa_sync ? 'warning' : 'muted'" shape="rounded" size="sm">{{ cpaStatusText(item) }}</StateBadge>
+              <StateBadge :tone="cpaRemovalRequested(item) ? (item.cpa_sync?.manual_removal?.status === 'removed' ? 'muted' : 'warning') : item.quality?.blocked ? 'danger' : item.quality?.status === 'error' ? 'warning' : item.cpa_sync?.status === 'synced' ? 'success' : item.cpa_sync ? 'warning' : 'muted'" shape="rounded" size="sm">{{ cpaStatusText(item) }}</StateBadge>
               <p v-if="item.cpa_sync?.pool_name || item.job?.cpa_pool_name" class="mt-2 break-words text-xs text-muted-foreground">{{ item.job?.status === 'running' ? item.job.cpa_pool_name || item.cpa_sync?.pool_name : item.cpa_sync?.pool_name }}</p>
-              <p v-if="item.quality?.removal?.error" class="mt-2 break-words text-xs text-rose-600">{{ item.quality.removal.error }}</p>
+              <p v-if="cpaRemovalRequested(item)" class="mt-2 text-xs text-muted-foreground">保留原检测结果，暂停检测及补传</p>
+              <p v-if="item.cpa_sync?.manual_removal?.error" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.manual_removal.error }}</p>
+              <p v-else-if="!cpaRemovalRequested(item) && item.quality?.removal?.error" class="mt-2 break-words text-xs text-rose-600">{{ item.quality.removal.error }}</p>
               <p v-if="item.cpa_sync?.status === 'quality_removed' && isCPAManaged(item)" class="mt-2 text-xs text-muted-foreground">重新授权后再复测</p>
-              <p v-if="item.quality?.removal && item.quality.removal.status !== 'removed'" class="mt-2 break-all text-xs text-muted-foreground">{{ item.quality.removal.file_name }}</p>
+              <p v-if="!cpaRemovalRequested(item) && item.quality?.removal && item.quality.removal.status !== 'removed'" class="mt-2 break-all text-xs text-muted-foreground">{{ item.quality.removal.file_name }}</p>
               <p v-if="item.cpa_sync?.error && (!isCPAManaged(item) || item.cpa_sync.status === 'quality_blocked')" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.error }}</p>
-              <p v-else-if="isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
+              <p v-else-if="!cpaRemovalRequested(item) && isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
             </td>
             <td class="py-4 pr-5 text-xs text-muted-foreground">{{ formatGrokAccountDate(item.job?.updated_at || item.account?.updated_at || item.updated_at) }}</td>
             <td class="py-4 pl-4 align-middle text-right">
@@ -49,8 +52,8 @@
                 <Button v-if="cpaAction(item)" size="sm" variant="outline" class="shrink-0 whitespace-nowrap" :disabled="Boolean(busyRows[item.id]) || running(item) || !(item.cpa_sync?.pool_id || targetSelected)" @click="$emit('cpa', item)">{{ busyRows[item.id] === 'cpa' ? '处理中' : cpaAction(item) === 'check' ? '核对 CPA' : item.cpa_sync?.status === 'failed' ? '重试同步' : '同步 CPA' }}</Button>
               </div>
               <div v-if="item.account" class="mt-2 flex flex-wrap justify-end gap-2">
-                <Button size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running || item.account.status === 'disabled' || (item.cpa_sync?.status === 'quality_removed' && isCPAManaged(item))" @click="$emit('quality', item)">{{ item.quality_running ? '检测中' : item.quality ? '复测 grok-4.7' : '降智检测' }}</Button>
-                <Button v-if="item.quality?.blocked && item.quality.confirmed_at && item.quality.removal && item.quality.removal.status !== 'removed'" size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running" @click="$emit('cleanup', item)">重试移除 CPA</Button>
+                <Button size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running || cpaRemovalRequested(item) || item.account.status === 'disabled' || (item.cpa_sync?.status === 'quality_removed' && isCPAManaged(item))" @click="$emit('quality', item)">{{ item.quality_running ? '检测中' : item.quality ? '复测 grok-4.7' : '降智检测' }}</Button>
+                <Button v-if="!cpaRemovalRequested(item) && item.quality?.blocked && item.quality.confirmed_at && item.quality.removal && item.quality.removal.status !== 'removed'" size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running" @click="$emit('cleanup', item)">重试移除 CPA</Button>
               </div>
               <details v-if="item.source_account_id || item.account" class="mt-2 text-xs">
                 <summary class="ml-auto w-fit cursor-pointer text-muted-foreground">更多</summary>
@@ -58,7 +61,8 @@
                   <Button v-if="item.source_account_id" size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item) || !targetSelected || unavailable(item.login_status)" @click="$emit('device', item)">手动设备码</Button>
                   <Button v-if="item.account && !isCPAManaged(item)" size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item)" @click="$emit('details', item)">额度与测试</Button>
                   <Button v-if="item.account" size="xs" variant="outline" :disabled="Boolean(busyRows[item.id]) || running(item)" @click="$emit('toggle', item)">{{ item.account.status === 'disabled' ? '启用 OAuth' : '禁用 OAuth' }}</Button>
-                  <Button v-if="item.account" size="xs" variant="outline" class="text-rose-600" :disabled="Boolean(busyRows[item.id]) || running(item)" @click="$emit('remove', item)">移除 OAuth</Button>
+                  <Button v-if="canRemoveCPACredential(item)" size="xs" variant="outline" class="text-rose-600" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running" @click="$emit('removeCpa', item)">{{ cpaRemovalRequested(item) ? '重试移除 CPA 凭据' : '移除 CPA 凭据' }}</Button>
+                  <Button v-if="item.account" size="xs" variant="outline" class="text-rose-600" :disabled="Boolean(busyRows[item.id]) || running(item) || item.quality_running" @click="$emit('remove', item)">删除 CFM OAuth 记录</Button>
                 </div>
               </details>
               <p v-if="!targetSelected && item.source_account_id && !running(item)" class="mt-2 text-xs text-muted-foreground">{{ item.has_refresh_token ? '重新授权需选择 CPA 目标' : '开始授权需选择 CPA 目标' }}</p>
@@ -79,10 +83,10 @@ import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { formatGrokAccountDate } from './grokAccountView'
-import { cpaAction, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
+import { canRemoveCPACredential, cpaAction, cpaRemovalRequested, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
 
 const props = defineProps<{ items: GrokOAuthRow[]; loading: boolean; busyRows: Record<string, string>; targetSelected: boolean; error: string }>()
-defineEmits<{ authorize: [account: GrokOAuthRow]; cpa: [account: GrokOAuthRow]; device: [account: GrokOAuthRow]; details: [account: GrokOAuthRow]; toggle: [account: GrokOAuthRow]; remove: [account: GrokOAuthRow]; quality: [account: GrokOAuthRow]; qualityDetails: [account: GrokOAuthRow]; cleanup: [account: GrokOAuthRow] }>()
+defineEmits<{ authorize: [account: GrokOAuthRow]; cpa: [account: GrokOAuthRow]; device: [account: GrokOAuthRow]; details: [account: GrokOAuthRow]; toggle: [account: GrokOAuthRow]; remove: [account: GrokOAuthRow]; removeCpa: [account: GrokOAuthRow]; quality: [account: GrokOAuthRow]; qualityDetails: [account: GrokOAuthRow]; cleanup: [account: GrokOAuthRow] }>()
 const keyword = ref(''), filter = ref(''), page = ref(1)
 const filters = [{ label: '全部', value: '' }, { label: '待授权', value: 'pending' }, { label: '已授权', value: 'authorized' }, { label: '授权中', value: 'running' }, { label: '授权失败', value: 'failed' }, { label: 'CPA 待处理', value: 'cpa_attention' }, { label: '降智风险', value: 'quality_risk' }, { label: '检测失败', value: 'quality_error' }]
 const filtered = computed(() => filterGrokOAuthCandidates(props.items, keyword.value, filter.value))

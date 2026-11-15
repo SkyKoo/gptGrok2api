@@ -17,6 +17,16 @@ export function isCPAManaged(item: Pick<GrokOAuthCandidate, 'cpa_managed' | 'cpa
   return Boolean(item.cpa_managed || (item.cpa_sync?.at && item.cpa_sync.pool_id))
 }
 
+export function cpaRemovalRequested(item: Pick<GrokOAuthCandidate, 'cpa_sync'>) {
+  return Boolean(item.cpa_sync?.manual_removal)
+}
+
+export function canRemoveCPACredential(item: GrokOAuthRow) {
+  return Boolean(item.oauth_account_id && isCPAManaged(item) && item.cpa_sync?.pool_id && item.cpa_sync.file_name
+    && item.cpa_sync.manual_removal?.status !== 'removed' && item.cpa_sync.status !== 'quality_removed'
+    && item.quality?.removal?.status !== 'removed')
+}
+
 export function mergeGrokOAuthRows(candidates: GrokOAuthCandidate[], accounts: GrokOAuthAccount[], jobs: GrokOAuthProtocolJob[] = [], pollErrors: Record<string, string> = {}): GrokOAuthRow[] {
   const byId = new Map(accounts.map(item => [item.id, item]))
   const byEmail = new Map(accounts.filter(item => item.email).map(item => [item.email.trim().toLowerCase(), item]))
@@ -80,6 +90,7 @@ export function mergeGrokOAuthRows(candidates: GrokOAuthCandidate[], accounts: G
 }
 
 export function cpaStatusText(item: GrokOAuthRow) {
+  if (item.cpa_sync?.manual_removal) return ({ pending: 'CPA 移除结果待确认', removed: 'CPA 凭据已手动移除', manual_required: 'CPA 移除失败，待处理' })[item.cpa_sync.manual_removal.status]
   if (item.cpa_sync?.status === 'quality_removed' || item.quality?.removal?.status === 'removed') return '降智凭据已移除'
   if (item.quality?.removal) return '降智凭据待移除'
   if (item.quality?.status === 'error' && !item.quality.blocked) {
@@ -94,6 +105,7 @@ export function cpaStatusText(item: GrokOAuthRow) {
 
 export function cpaAction(item: GrokOAuthRow): 'check' | 'sync' | null {
   if (!item.oauth_account_id) return null
+  if (cpaRemovalRequested(item)) return null
   if (item.quality?.blocked || item.quality?.status === 'error' || item.quality_running || item.cpa_sync?.status === 'quality_removed') return null
   if (isCPAManaged(item) || ['unknown', 'uploading'].includes(item.cpa_sync?.status || '')) return 'check'
   return item.has_access_token && item.has_refresh_token ? 'sync' : null

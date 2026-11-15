@@ -30,6 +30,23 @@ test('background progress and attention states remain searchable after reloading
 
 const { mergeGrokOAuthRows, cpaAction, cpaStatusText, oauthProgressText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
 
+test('manual CPA removal retains quality and authorization while exposing only safe retry actions', async () => {
+  const { canRemoveCPACredential, qualityStatusText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
+  for (const status of ['pending', 'manual_required', 'removed']) {
+    const quality = { status: 'error', blocked: false }
+    const rows = mergeGrokOAuthRows([{ id: 'source', email: 'one@example.test', oauth_status: 'requires_renewal', oauth_account_id: 'one' }], [
+      { id: 'one', email: 'one@example.test', has_access_token: true, has_refresh_token: true, cpa_managed: true, quality, cpa_sync: { status: 'remove_failed', pool_id: 'pool', file_name: 'xai-one.json', manual_removal: { status } } },
+    ])
+    assert.equal(rows[0].oauth_status, 'authorized')
+    assert.equal(rows[0].quality, quality)
+    assert.equal(qualityStatusText(rows[0]), '检测失败')
+    assert.equal(cpaAction(rows[0]), null)
+    assert.equal(canRemoveCPACredential(rows[0]), status !== 'removed')
+    assert.match(cpaStatusText(rows[0]), /CPA.*移除/)
+  }
+  assert.equal(canRemoveCPACredential({ oauth_account_id: 'local', cpa_sync: { status: 'quality_blocked', pool_id: 'pool', file_name: 'xai-local.json' } }), false)
+})
+
 test('failed detection blocks delivery actions without labelling historical CPA delivery as degradation', async () => {
   const { qualityStatusText, qualityFailureReason } = await import('../src/views/accounts/grokOAuthCandidates.ts')
   const quality = { status: 'error', blocked: false, summary: '检测未完成', samples: [{ status: 'error', reason: '上游 HTTP 402，未计为降智' }] }

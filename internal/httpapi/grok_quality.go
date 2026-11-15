@@ -15,6 +15,9 @@ import (
 // Caller must hold the per-account action and identity locks. This also covers
 // scoring, persisting the block, and remote cleanup as one account operation.
 func (s *Server) checkGrokQualityLocked(ctx context.Context, account oauth.Account) (oauth.Account, error) {
+	if oauth.CPARemovalRequested(account) {
+		return account, errors.New("CPA 凭据已请求移除，保留原检测结果；重新授权后可恢复检测")
+	}
 	ctx, cancel := context.WithTimeout(ctx, 7*time.Minute)
 	defer cancel()
 	report := xaiquality.Report{Version: xaiquality.Version, Model: xaiquality.Model, Status: "error", At: time.Now().Unix()}
@@ -88,6 +91,9 @@ func (s *Server) checkGrokQualityLocked(ctx context.Context, account oauth.Accou
 }
 
 func (s *Server) cleanupGrokQualityLocked(ctx context.Context, account oauth.Account) (oauth.Account, error) {
+	if oauth.CPARemovalRequested(account) {
+		return account, errors.New("请通过移除 CPA 凭据操作核对移除状态，原检测结果保留")
+	}
 	latest, found, err := s.oauthStore.Get(account.ID)
 	if err != nil || !found || latest.Status == "disabled" || !oauth.SameCredential(account, latest) {
 		return account, errors.New("账号已移除、禁用或重新授权，未删除 CPA 凭据")
@@ -241,7 +247,7 @@ func (s *Server) enqueueGrokQuality(ids []string, cleanupOnly bool) ([]string, e
 	}
 	jobs := []string{}
 	for _, account := range accounts {
-		if !selected[account.ID] || account.Status == "disabled" {
+		if !selected[account.ID] || account.Status == "disabled" || oauth.CPARemovalRequested(account) {
 			continue
 		}
 		if id := active[account.ID]; id != "" {

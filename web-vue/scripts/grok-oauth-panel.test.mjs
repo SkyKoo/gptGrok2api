@@ -28,6 +28,7 @@ function panel(options = {}) {
     startProtocol: async (...args) => { calls.push(['authorize', ...args]); return { job: job(), reused: false } },
     checkCPA: async (...args) => { calls.push(['check', ...args]); return { ok: true, account } },
     syncCPA: async (...args) => { calls.push(['sync', ...args]); return { ok: true, account } },
+    removeCPA: async (...args) => { calls.push(['remove-cpa', ...args]); return { ok: true, account } },
     queryQuota: async (...args) => { calls.push(['quota', ...args]); return { ok: true, account } },
     syncModels: async (...args) => { calls.push(['models', ...args]); return { account, models: [] } },
     setDisabled: async (...args) => { calls.push(['status', ...args]); return { updated: 1 } },
@@ -174,6 +175,36 @@ test('cancelled local deletion does nothing and confirmed deletion uses only loc
   assert.deepEqual(JSON.parse(JSON.stringify(accepted.calls)), [['remove', ['oauth-a']]])
   assert.equal(Object.keys(accepted.state.jobs.value).length, 0)
   assert.match(accepted.confirmations[0].message, /CPA 中的凭据保留/)
+  assert.equal(accepted.confirmations[0].title, '删除 CFM OAuth 记录')
+  assert.match(accepted.confirmations[0].message, /降智检测结果，无法恢复/)
+})
+
+test('CPA removal confirms the saved file and keeps local authorization and quality', async () => {
+  const row = { ...candidate, oauth_account_id: account.id, account, cpa_managed: true, cpa_sync: { status: 'synced', pool_id: 'original-cpa', pool_name: 'Original CPA', file_name: 'xai-a@example.test.json' }, quality: { status: 'error', blocked: false } }
+  const cancelled = panel({ confirmed: false })
+  await cancelled.state.removeCPACredential(row)
+  assert.deepEqual(cancelled.calls, [])
+  const accepted = panel()
+  accepted.state.cpaPoolId.value = 'different-selected-cpa'
+  await accepted.state.removeCPACredential(row)
+  assert.deepEqual(accepted.calls, [['remove-cpa', account.id, 'original-cpa', 'xai-a@example.test.json']])
+  assert.match(accepted.confirmations[0].message, /授权记录、降智检测结果和 Web SSO 保留/)
+  assert.match(accepted.confirmations[0].message, /Original CPA/)
+  assert.equal(accepted.confirmations[0].title, '移除 CPA 凭据')
+  assert.equal(accepted.notifications.some(([type]) => type === 'success'), true)
+})
+
+test('manual CPA removal disables subsequent delivery and excludes the record from probes', async () => {
+  const { state, calls } = panel()
+  const saved = { ...account, cpa_managed: true, cpa_sync: { status: 'removed', pool_id: 'cpa-a', file_name: 'xai-a@example.test.json', manual_removal: { status: 'removed' } } }
+  state.accounts.value = [saved]
+  state.candidates.value = [{ ...candidate, oauth_account_id: account.id, oauth_status: 'authorized' }]
+  const row = state.rows.value[0]
+  assert.equal(state.qualityEligible.value.length, 0)
+  await state.handleCPA(row)
+  await state.checkQuality(row)
+  await state.removeCPACredential(row)
+  assert.deepEqual(calls, [])
 })
 
 test('unmanaged account model discovery stays available in row details', async () => {
