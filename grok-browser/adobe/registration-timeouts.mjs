@@ -8,7 +8,7 @@ export const REGISTRATION_TIMEOUTS = Object.freeze({
   stage: 60_000,
   actionable: 20_000,
   click: 30_000,
-  recovery: 30_000,
+  recovery: 60_000,
   restoration: 30_000,
   navigationObservation: 10_000,
   identity: 20_000,

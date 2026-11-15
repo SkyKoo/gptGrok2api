@@ -594,6 +594,7 @@ func (e *AdobeEngine) startAdobeAttemptLocked(index int, cfg AdobeConfig, automa
 			}
 		} else if job.AdobeProfile != nil {
 			job.AdobeProfile.Country, job.AdobeProfile.CountrySource = "US", ""
+			job.AdobeProfile.CountryDiagnostics = nil
 		}
 	} else {
 		raw := make([]byte, 16)

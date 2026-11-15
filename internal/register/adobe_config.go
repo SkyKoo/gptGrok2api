@@ -2,6 +2,7 @@ package register
 
 import (
 	"crypto/rand"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net/url"
@@ -66,17 +67,35 @@ func ParseAdobeConfig(raw map[string]any) (AdobeConfig, error) {
 // Adobe registration identity is generated once per task, never from shared
 // settings. The encrypted task journal retains it across result recovery.
 type adobeRegistrationProfile struct {
-	Country       string `json:"country"`
-	CountrySource string `json:"countrySource,omitempty"`
-	BirthYear     int    `json:"birthYear"`
-	BirthMonth    int    `json:"birthMonth"`
-	BirthDay      int    `json:"birthDay"`
+	Country            string                   `json:"country"`
+	CountrySource      string                   `json:"countrySource,omitempty"`
+	CountryDiagnostics *adobeCountryDiagnostics `json:"countryDiagnostics,omitempty"`
+	BirthYear          int                      `json:"birthYear"`
+	BirthMonth         int                      `json:"birthMonth"`
+	BirthDay           int                      `json:"birthDay"`
+}
+
+func (p *adobeRegistrationProfile) UnmarshalJSON(raw []byte) error {
+	type profile adobeRegistrationProfile
+	var wire struct {
+		profile
+		CountryDiagnostics json.RawMessage `json:"countryDiagnostics"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		return err
+	}
+	*p = adobeRegistrationProfile(wire.profile)
+	p.CountryDiagnostics = parseAdobeCountryDiagnostics(wire.CountryDiagnostics, p.CountrySource)
+	return nil
 }
 
 func (p adobeRegistrationProfile) fields() map[string]any {
 	fields := map[string]any{"country": p.Country, "birthYear": p.BirthYear, "birthMonth": p.BirthMonth, "birthDay": p.BirthDay}
 	if p.CountrySource != "" {
 		fields["countrySource"] = p.CountrySource
+	}
+	if p.CountryDiagnostics != nil && p.CountryDiagnostics.valid(p.CountrySource) {
+		fields["countryDiagnostics"] = cloneAdobeCountryDiagnostics(p.CountryDiagnostics)
 	}
 	return fields
 }

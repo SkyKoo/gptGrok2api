@@ -362,6 +362,124 @@ test('only normal Sign in entry is clicked and a challenge after navigation is r
   await assert.rejects(openRecoveryLogin(f.browser),error=>error.code==='human_verification_required');
 });
 
+test('recovery accepts a login form that becomes ready after thirty seconds without another navigation',async t=>{
+  const f=await fixture(t);let now=0;
+  f.browser.page.goto=async()=>{f.calls.push('navigate');};
+  f.browser.status=async()=>now>=45000?status('awaiting_email',{fields:[field('email')]}):status('needs_manual');
+  f.browser.authFrame=async()=>({getByRole:()=>({count:async()=>0,click:()=>assert.fail('No login entry is present')})});
+  const before=await f.store.load();
+  const result=await openRecoveryLogin(f.browser,{now:()=>now,wait:async ms=>{now+=ms;}});
+  assert.equal(result.detected,'awaiting_email');assert.equal(now,45000);
+  assert.deepEqual(f.calls,['navigate']);
+  const after=await f.store.load();
+  assert.deepEqual(after.submission,before.submission);assert.deepEqual(after.creationEvidence,before.creationEvidence);
+});
+
+test('recovery stops after sixty seconds with a bounded summary of the last observed empty portal',async t=>{
+  const f=await fixture(t);let now=0;
+  f.browser.page.goto=async()=>{f.calls.push('navigate');};
+  f.browser.status=async()=>status('needs_manual',{host:'account.adobe.com',links:[],notices:['PRIVATE_SECRET']});
+  f.browser.authFrame=async()=>({getByRole:()=>({count:async()=>0,click:()=>assert.fail('No login entry is present')})});
+  await assert.rejects(openRecoveryLogin(f.browser,{now:()=>now,wait:async ms=>{now+=ms;}}),error=>{
+    assert.equal(error.code,'recovery_login_form_unavailable');
+    const diagnostics=registrationDiagnostics({code:error.code,failureDiagnostics:error.failureDiagnostics},null);
+    assert.deepEqual(diagnostics.recovery_page,{page_kind:'account_portal',detected_stage:'needs_manual',
+      field_count:0,email_fields:0,password_fields:0,verification_fields:0,button_count:0,link_count:0,
+      login_entries:0,login_clicked:false,elapsed_ms:60000});
+    assert.doesNotMatch(JSON.stringify(diagnostics),/PRIVATE_SECRET/);
+    return true;
+  });
+  assert.equal(now,60000);assert.deepEqual(f.calls,['navigate']);
+});
+
+test('late or cancelled recovery reads cannot continue to a login entry or accept a late login form',async t=>{
+  for(const stopKind of ['deadline','cancel'])for(const stage of ['status','status_form','observe','auth_frame','button_count','link_count']){
+    const f=await fixture(t);let now=0,stop=false;
+    const reach=point=>{if(point===stage){if(stopKind==='deadline')now=60000;else stop=true;}};
+    f.browser.page.goto=async()=>{};
+    f.browser.status=async()=>{reach('status');reach('status_form');return status(stage==='status_form'?'awaiting_email':'needs_manual');};
+    f.browser.authFrame=async()=>{reach('auth_frame');return {getByRole:role=>({
+      count:async()=>{reach(role==='button'?'button_count':'link_count');return role==='link'?1:0;},
+      click:()=>assert.fail(`No click after ${stopKind} at ${stage}`),
+    })};};
+    await assert.rejects(openRecoveryLogin(f.browser,{now:()=>now,shouldStop:()=>stop,
+      observe:async current=>{reach('observe');return current;},wait:()=>assert.fail('No further wait after the boundary')}),
+    error=>error.code===(stopKind==='deadline'?'recovery_login_form_unavailable':'automatic_interrupted'));
+    assert.deepEqual(f.calls,[]);
+  }
+});
+
+test('a login entry appearing just before the deadline receives only the remaining click budget',async t=>{
+  const f=await fixture(t);let now=0;
+  f.browser.page.goto=async()=>{};
+  f.browser.status=async()=>{now=59900;return status('needs_manual',{host:'account.adobe.com'});};
+  f.browser.authFrame=async()=>({getByRole:role=>({count:async()=>role==='link'?1:0,click:async options=>{
+    assert.equal(options.timeout,100);f.calls.push('sign-in');now+=options.timeout;
+  }})});
+  await assert.rejects(openRecoveryLogin(f.browser,{now:()=>now,wait:()=>assert.fail('No new wait after click exhausts budget')}),error=>{
+    assert.equal(error.code,'recovery_login_form_unavailable');
+    assert.equal(error.failureDiagnostics.recovery_page.login_clicked,true);
+    assert.equal(error.failureDiagnostics.recovery_page.elapsed_ms,60000);
+    return true;
+  });
+  assert.equal(now,60000);assert.deepEqual(f.calls,['sign-in']);
+});
+
+test('passive verification in recovery login shares the remaining observation budget',async t=>{
+  const f=await fixture(t);let now=0,opened=false;
+  f.browser.page.goto=async()=>{opened=true;f.calls.push('navigate');};
+  f.browser.status=async()=>{
+    if(opened)now=Math.max(now,59900);
+    return status('needs_manual',{humanVerification:opened?{required:true,source:'visible_instruction'}:{required:false}});
+  };
+  const before=await f.store.load();
+  const result=await resumeRegistration(f.browser,f.store,{recoveryId:'late-verification',
+    loginOptions:{now:()=>now,wait:()=>assert.fail('Verification consumes the final budget')},
+    verificationWait:{now:()=>now,pause:async ms=>{assert.equal(ms,100);now+=ms;}}});
+  assert.equal(result.code,'recovery_login_form_unavailable');assert.equal(now,60000);
+  assert.deepEqual(f.calls,['navigate']);
+  const after=await f.store.load();
+  assert.ok(after.recoveryAttempts['late-verification'].verificationObservationStartedAt);
+  assert.deepEqual(after.submission,before.submission);assert.deepEqual(after.creationEvidence,before.creationEvidence);
+});
+
+test('a login entry that remains visible after clicking is not clicked again while waiting',async t=>{
+  const f=await fixture(t);let now=0;
+  f.browser.page.goto=async()=>{};
+  f.browser.status=async()=>status('needs_manual',{host:'account.adobe.com',links:[{text:'Sign in'}]});
+  f.browser.authFrame=async()=>({getByRole:role=>({count:async()=>role==='link'?1:0,click:async()=>{f.calls.push('sign-in');}})});
+  const before=await f.store.load();
+  await assert.rejects(openRecoveryLogin(f.browser,{now:()=>now,wait:async ms=>{now+=ms;}}),error=>{
+    assert.equal(error.code,'recovery_login_form_unavailable');
+    assert.equal(error.failureDiagnostics.recovery_page.login_clicked,true);
+    assert.equal(error.failureDiagnostics.recovery_page.login_entries,1);
+    assert.equal(error.failureDiagnostics.recovery_page.elapsed_ms,60000);
+    return true;
+  });
+  assert.deepEqual(f.calls,['sign-in']);
+  const after=await f.store.load();
+  assert.deepEqual(after.submission,before.submission);assert.deepEqual(after.creationEvidence,before.creationEvidence);
+});
+
+test('cancelling recovery observation prevents a newly visible login entry or form from being submitted',async t=>{
+  for(const nextStage of ['needs_manual','awaiting_email']){
+    const f=await fixture(t);let now=0,stop=false;
+    f.browser.page.goto=async()=>{f.calls.push('navigate');};
+    f.browser.status=async()=>status(stop?nextStage:'needs_manual',stop&&nextStage==='awaiting_email'?{fields:[field('email')]}:{});
+    f.browser.authFrame=async()=>({getByRole:role=>({count:async()=>stop&&role==='link'?1:0,
+      click:()=>assert.fail('Cancellation must prevent login-entry clicks')})});
+    const before=await f.store.load();
+    const result=await resumeRegistration(f.browser,f.store,{recoveryId:'cancelled',shouldStop:()=>stop,
+      loginOptions:{now:()=>now,wait:async ms=>{now+=ms;stop=true;}}});
+    assert.equal(result.code,'automatic_interrupted');assert.equal(now,250);
+    assert.deepEqual(f.calls,['navigate']);
+    const after=await f.store.load();
+    assert.deepEqual(after.submission,before.submission);assert.deepEqual(after.creationEvidence,before.creationEvidence);
+    assert.equal(after.recoveryAttempts.cancelled.emailSubmittedAt,undefined);
+    assert.equal(after.recoveryAttempts.cancelled.passwordSubmittedAt,undefined);
+  }
+});
+
 test('real verification keeps the original signup flag and fences a separate recovery OTP before filling',async t=>{
   const f=await fixture(t);
   await f.store.save({verificationSubmitted:true,recoveryAttempts:{attempt1:{verificationRequestedAt:new Date().toISOString()}}});

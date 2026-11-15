@@ -68,6 +68,56 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('proxy',self.launch.call_args.kwargs)
             self.assertEqual((await self.client.get('/health')).json()['capacity'],1)
 
+    async def test_grok_reservation_respects_launch_signature_and_releases_slot(self):
+        started = asyncio.Event()
+        proceed = asyncio.Event()
+        browser = SimpleNamespace(close=AsyncMock())
+        calls = []
+
+        # The real SDK forwards unknown keywords to Playwright. A permissive
+        # **kwargs mock hid the startup_progress callback leaking into launch.
+        async def strict_launch(*, humanize, headless, locale, args=None,
+                                timezone=None, proxy=None, geoip=False):
+            calls.append({'locale': locale, 'proxy': proxy})
+            started.set()
+            await proceed.wait()
+            return browser
+
+        async def consent(**kwargs):
+            self.assertEqual(kwargs['browser'].entry.state, 'active')
+            await kwargs['browser'].close()
+            return {'status': 'approved', 'code': ''}
+
+        key = 'f' * 48
+        with patch.object(server.cloakbrowser, 'launch_async', strict_launch), \
+                patch.object(server, 'authorize_device', consent):
+            response = await self.client.post('/v1/browser/reservations',
+                                              json={'id': key, 'daily_direct': True})
+            self.assertEqual(response.status_code, 200)
+            try:
+                await asyncio.wait_for(started.wait(), timeout=1)
+                status = (await self.client.get('/v1/browser/reservations/' + key)).json()
+                self.assertEqual(status['status'], 'starting_browser')
+                self.assertEqual((await self.client.get('/health')).json()['capacity'], 0)
+            finally:
+                proceed.set()
+            await self.ready(key)
+            self.assertEqual(calls, [{'locale': 'en-US', 'proxy': None}])
+            response = await self.client.post('/v1/oauth/authorize-device', json={
+                'browser_lease': key,
+                'verification_uri_complete': 'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH',
+                'user_code': 'ABCD-EFGH', 'sso': 'fixture-sso',
+                'expected_email': 'selected@example.test',
+            })
+            self.assertEqual(response.json()['status'], 'approved')
+            browser.close.assert_awaited_once()
+            self.assertEqual((await self.client.get('/health')).json()['capacity'], 1)
+            self.assertEqual((await self.client.get('/v1/browser/reservations/' + key)).status_code, 404)
+            # A later caller release is idempotent; it cannot consume another slot.
+            self.assertEqual((await self.client.delete('/v1/browser/reservations/' + key)).json(),
+                             {'status': 'released'})
+            browser.close.assert_awaited_once()
+
     async def test_cancel_during_launch_reports_closing_and_waits_for_real_close(self):
         gate=asyncio.Event();browser=SimpleNamespace(close=AsyncMock())
         async def delayed(**_):await gate.wait();return browser

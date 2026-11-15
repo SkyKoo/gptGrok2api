@@ -5,6 +5,7 @@ import { runAutomaticRegistration, observeAutomaticVerification } from './auto-r
 import { creationOutcome } from './creation-outcome.mjs';
 import { REGISTRATION_TIMEOUTS as TIMEOUT } from './registration-timeouts.mjs';
 import { startupExceptionType } from './startup-progress.mjs';
+import { recoveryPageDiagnostics } from './registration-diagnostics.mjs';
 
 const LOGIN = /^(Continue|Next|Sign in|Log in|继续|下一步|登录)$/i;
 const SIGN_IN = /^(Sign in|Log in|登录)$/i;
@@ -44,34 +45,60 @@ async function patchAttempt(store, id, patch, { allowUnsubmitted = false } = {})
 
 /** 正常登录入口只接受 Sign in；恢复不会进入注册入口或清除原提交标记。 */
 export async function openRecoveryLogin(browser, { timeoutMs = TIMEOUT.recovery, now = Date.now, wait = pause, observe = async status => status, shouldStop = () => false } = {}) {
-  let action = 'open_login', current;
+  let action = 'open_login', current, loginEntries, observationStarted;
+  let clicked = false;
   try {
     if (shouldStop()) throw new RegistrationError('automatic_interrupted');
     await browser.page.goto('https://account.adobe.com/', { waitUntil: 'domcontentloaded', timeout: TIMEOUT.navigation });
-    const deadline = now() + timeoutMs;
-    let clicked = false;
+    observationStarted = now();
+    const deadline = observationStarted + timeoutMs;
+    const remainingBudget = () => {
+      if (shouldStop()) throw new RegistrationError('automatic_interrupted');
+      const remaining = deadline - now();
+      if (remaining <= 0) throw new RegistrationError('recovery_login_form_unavailable');
+      return remaining;
+    };
     while (now() < deadline) {
       action = 'inspect_form';
-      const status = current = await observe(await browser.status());
-      if (shouldStop()) throw new RegistrationError('automatic_interrupted');
+      loginEntries = undefined;
+      remainingBudget();
+      current = await browser.status();
+      remainingBudget();
+      const status = current = await observe(current, { timeoutMs: remainingBudget(),
+        shouldStop: () => shouldStop() || now() >= deadline });
+      remainingBudget();
       const failure = blocked(status);
       if (failure) throw new RegistrationError(failure);
       if (LOGIN_STAGES.has(status.detected) || status.detected === 'awaiting_verification' || status.form.host === 'firefly.adobe.com') return status;
       const frame = await browser.authFrame();
+      remainingBudget();
       const buttons = frame.getByRole('button', { name: SIGN_IN });
       const links = frame.getByRole('link', { name: SIGN_IN });
-      const count = await buttons.count() + await links.count();
+      const buttonCount = await buttons.count();
+      remainingBudget();
+      const linkCount = await links.count();
+      remainingBudget();
+      const count = buttonCount + linkCount;
+      loginEntries = count;
       if (count > 1) throw new RegistrationError('recovery_login_entry_unrecognized');
       if (count === 1 && !clicked) {
-        if (shouldStop()) throw new RegistrationError('automatic_interrupted');
+        const clickTimeout = Math.min(TIMEOUT.click, remainingBudget());
         clicked = true;
         action = 'click_login_entry';
-        await (await buttons.count() ? buttons : links).click({ timeout: TIMEOUT.click });
+        await (buttonCount ? buttons : links).click({ timeout: clickTimeout });
+        remainingBudget();
       }
-      await wait(Math.min(250, Math.max(1, deadline - now())));
+      await wait(Math.min(250, remainingBudget()));
+      remainingBudget();
     }
     throw new RegistrationError('recovery_login_form_unavailable');
-  } catch (error) { throw actionFailure(error, action, 'before_submission', current?.form); }
+  } catch (error) {
+    const failure = actionFailure(error, action, 'before_submission', current?.form);
+    const page = recoveryPageDiagnostics(current, { loginEntries, loginClicked: clicked,
+      elapsedMS: observationStarted === undefined ? undefined : Math.max(0, now() - observationStarted) });
+    if (page) failure.failureDiagnostics = { ...failure.failureDiagnostics, recovery_page: page };
+    throw failure;
+  }
 }
 
 /** 每个恢复任务的邮箱/密码阶段最多提交一次；异常后的再次调用仅观察后续阶段。 */
@@ -181,15 +208,17 @@ export async function resumeRegistration(browser, store, { recoveryId, code = ''
   const stopped = (failure, diagnostics) => ({ ...status, stage: 'needs_manual', code: failure,
     failureDiagnostics: diagnostics || failureDetails(new RegistrationError(failure), action, phase, status.form),
     recovery_mode: 'resume_session' });
-  const observe = async current => {
+  const observe = async (current, { shouldStop: observationShouldStop = shouldStop, timeoutMs } = {}) => {
     const human = current.form?.humanVerification;
     if (human?.required !== true || !['visible_challenge_frame', 'upstream_captcha_response', 'visible_instruction'].includes(human.source)) return current;
     const attempt = (await store.load()).recoveryAttempts?.[recoveryId];
-    if (attempt?.verificationObservationStartedAt || shouldStop()) return current;
+    if (attempt?.verificationObservationStartedAt || observationShouldStop()) return current;
     // This fence belongs to this compensation attempt, not the old signup's
     // terminal stage. Persist before waiting so reconnects cannot extend it.
     await patchAttempt(store, recoveryId, { verificationObservationStartedAt: new Date().toISOString() });
-    return observeAutomaticVerification(browser, current, shouldStop, verificationWait);
+    if (observationShouldStop()) return current;
+    return observeAutomaticVerification(browser, current, observationShouldStop, { ...verificationWait,
+      ...(timeoutMs === undefined ? {} : { timeoutMs: Math.min(timeoutMs, verificationWait.timeoutMs ?? 15_000) }) });
   };
   const openLogin = () => {
     action = 'open_login';

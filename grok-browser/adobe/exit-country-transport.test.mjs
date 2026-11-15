@@ -8,7 +8,13 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { lookupExitCountry } from './exit-country.mjs';
+import { lookupExitCountry as lookupWithDiagnostics } from './exit-country.mjs';
+async function lookupExitCountry(...args) {
+  const { diagnostics, ...selection } = await lookupWithDiagnostics(...args);
+  assert.ok(diagnostics && Number.isInteger(diagnostics.elapsed_ms));
+  assert.equal(diagnostics.failure_kind === 'none', selection.source === 'ipwho_is');
+  return selection;
+}
 
 // No Internet or live account: real curl uses only loopback TLS/proxy fixtures.
 test('real curl honors HTTP/HTTPS and authenticated SOCKS5 routes with no account headers or direct fallback', { timeout: 15000 }, async t => {
@@ -34,11 +40,15 @@ test('real curl honors HTTP/HTTPS and authenticated SOCKS5 routes with no accoun
     res.setHeader('Content-Type', 'application/json'); res.end('{"success":true,"country_code":"JP"}');
   });
   const targetPort = await listen(target);
-  let connects = 0;
+  let connects = 0, tunnelStatus = 200;
   const tunnel = (req, client, head) => {
     connects++;
     assert.equal(req.url, 'ipwho.is:443');
     assert.equal(req.headers['proxy-authorization'], `Basic ${Buffer.from('fixture:secret').toString('base64')}`);
+    if (tunnelStatus !== 200) {
+      client.end(`HTTP/1.1 ${tunnelStatus} ${tunnelStatus === 407 ? 'Proxy Authentication Required' : 'Bad Gateway'}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n`);
+      return;
+    }
     const upstream = net.connect(targetPort, '127.0.0.1'); sockets.add(upstream);
     upstream.once('connect', () => { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head.length) upstream.write(head); client.pipe(upstream); upstream.pipe(client); });
     upstream.on('error', () => client.destroy()); client.on('error', () => upstream.destroy());
@@ -92,4 +102,20 @@ test('real curl honors HTTP/HTTPS and authenticated SOCKS5 routes with no accoun
   redirect = true;
   assert.deepEqual(await lookupExitCountry(`http://fixture:secret@127.0.0.1:${httpPort}`, { spawnProcess }), { country: 'US', source: 'default_us' });
   assert.equal(calls, 6);
+
+  // Real --fail and --write-out must preserve CONNECT response facts even when
+  // curl aborts before sending an HTTPS request to the location service.
+  const priorConnects = connects;
+  for (const [status, kind] of [[502, 'proxy_tunnel'], [407, 'proxy_auth']]) {
+    tunnelStatus = status;
+    const result = await lookupWithDiagnostics(`http://fixture:secret@127.0.0.1:${httpPort}`, { spawnProcess });
+    assert.equal(result.country, 'US'); assert.equal(result.source, 'default_us');
+    assert.equal(result.diagnostics.failure_kind, kind);
+    assert.equal(result.diagnostics.connect_status, status);
+    assert.equal(result.diagnostics.http_status, 0);
+    assert.equal(result.diagnostics.curl_exit_code, 22);
+    assert.ok(Number.isInteger(result.diagnostics.elapsed_ms));
+    assert.equal(calls, 6, 'failed tunnel unexpectedly reached the location service');
+  }
+  assert.equal(connects, priorConnects + 2, 'failed tunnel was retried');
 });

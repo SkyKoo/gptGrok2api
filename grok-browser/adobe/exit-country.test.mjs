@@ -6,6 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrivateRunStore } from './core.mjs';
+import { CreationTracker, creationOutcome } from './creation-outcome.mjs';
 import { countryLookupConfig, lookupExitCountry, prepareRegistrationCountry, validCountry } from './exit-country.mjs';
 
 function processFixture(output, exitCode = 0, hang = false) {
@@ -18,12 +19,12 @@ function processFixture(output, exitCode = 0, hang = false) {
     child.kill = () => { seen.kills++; queueMicrotask(() => child.emit('close', null)); };
     child.stdin.on('finish', () => {
       if (hang) return;
-      child.stdout.write(output);
+      child.stdout.write(output.replace(/\n(\d{3})$/, '\nCFM_COUNTRY_META:$1 200'));
       queueMicrotask(() => child.emit('close', exitCode));
     });
     return child;
   };
-  return { seen, spawnProcess };
+  return { seen, spawnProcess, now: () => 0 };
 }
 
 test('bound proxy is explicit, credentials stay off argv, and no browser context or environment proxy is reused', async () => {
@@ -37,7 +38,7 @@ test('bound proxy is explicit, credentials stay off argv, and no browser context
   ]) {
     const f = processFixture('{"success":true,"country_code":"JP","ip":"DO_NOT_RETAIN"}\n200');
     const result = await lookupExitCountry(input, f);
-    assert.deepEqual(result, { country: 'JP', source: 'ipwho_is' });
+    assert.deepEqual(result, { country: 'JP', source: 'ipwho_is', diagnostics: { failure_kind: 'none', curl_exit_code: 0, http_status: 200, connect_status: 200, elapsed_ms: 0 } });
     assert.ok(f.seen.stdin.includes(expected), f.seen.stdin);
     assert.equal(f.seen.command, 'curl'); assert.equal(f.seen.args[0], '-q');
     assert.ok(!f.seen.args.join(' ').includes('secret'));
@@ -60,7 +61,10 @@ test('redirect, invalid country, failed service, huge body and proxy failure pro
     ['{"country_code":"JP"}\n200', 7], ['x'.repeat(65541), 0],
   ]) {
     const f = processFixture(body, code);
-    assert.deepEqual(await lookupExitCountry('http://proxy.invalid:1234', f), { country: 'US', source: 'default_us' });
+    const result = await lookupExitCountry('http://proxy.invalid:1234', f);
+    assert.equal(result.country, 'US'); assert.equal(result.source, 'default_us');
+    assert.notEqual(result.diagnostics.failure_kind, 'none');
+    assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
     assert.ok(f.seen.stdin.includes('proxy.invalid'));
   }
   assert.equal(validCountry('ZZ'), false); assert.equal(validCountry('GB'), true);
@@ -68,7 +72,8 @@ test('redirect, invalid country, failed service, huge body and proxy failure pro
 
 test('deadline kills the lookup and cancellation never persists fallback as a completed lookup', async () => {
   const timeout = processFixture('', 0, true);
-  assert.deepEqual(await lookupExitCountry('direct', { ...timeout, timeoutMs: 15 }), { country: 'US', source: 'default_us' });
+  assert.deepEqual(await lookupExitCountry('direct', { ...timeout, timeoutMs: 15 }), { country: 'US', source: 'default_us',
+    diagnostics: { failure_kind: 'timeout', http_status: 0, connect_status: 0, elapsed_ms: 0 } });
   assert.equal(timeout.seen.kills, 1);
   const abort = new AbortController(), f = processFixture('', 0, true);
   const pending = lookupExitCountry('direct', { ...f, signal: abort.signal });
@@ -121,9 +126,94 @@ test('lookup cancellation and invalid results leave registration profile unchang
   const store = await storeFixture(t);
   const options = { mode: 'registration', requireNew: true };
   await assert.rejects(prepareRegistrationCountry(store, options, async () => ({ country: 'ZZ', source: 'ipwho_is' })), { code: 'registration_country_invalid' });
+  await assert.rejects(prepareRegistrationCountry(store, options, async () => ({ country: 'US', source: 'PRIVATE' })), { code: 'registration_country_invalid' });
+  await assert.rejects(prepareRegistrationCountry(store, options, async () => ({ country: 'JP', source: 'default_us' })), { code: 'registration_country_invalid' });
   const abort = new AbortController();
   await assert.rejects(prepareRegistrationCountry(store, { ...options, signal: abort.signal }, async () => {
     abort.abort(); return { country: 'JP', source: 'ipwho_is' };
   }), { name: 'AbortError' });
   assert.equal((await store.load()).config.profile.countrySource, undefined);
+});
+
+
+test('fixed curl metadata distinguishes fast CONNECT failures from slow lookup without exposing output', async () => {
+  for (const [raw, exitCode, kind, httpStatus, connectStatus] of [
+    ['\nCFM_COUNTRY_META:000 502', 22, 'proxy_tunnel', 0, 502],
+    ['\nCFM_COUNTRY_META:000 407', 56, 'proxy_auth', 0, 407],
+    ['PRIVATE_BODY\nCFM_COUNTRY_META:429 200', 22, 'http_error', 429, 200],
+    ['PRIVATE_BODY\nCFM_COUNTRY_META:302 200', 0, 'http_redirect', 302, 200],
+    ['\nCFM_COUNTRY_META:000 000', 28, 'timeout', 0, 0],
+    ['\nCFM_COUNTRY_META:000 000', 7, 'proxy_connection', 0, 0],
+    ['\nCFM_COUNTRY_META:000 000', 6, 'dns', 0, 0],
+    ['\nCFM_COUNTRY_META:000 200', 60, 'tls', 0, 200],
+    ['{"success":false,"message":"PRIVATE_BODY"}\nCFM_COUNTRY_META:200 200', 0, 'lookup_rejected', 200, 200],
+    ['PRIVATE_BODY\nCFM_COUNTRY_META:200 200', 0, 'invalid_response', 200, 200],
+    ['PRIVATE_BODY', 0, 'invalid_response', 0, 0],
+    ['x'.repeat(66_000), 0, 'response_too_large', 0, 0],
+  ]) {
+    const fixture = processFixture(raw, exitCode);
+    const result = await lookupExitCountry('http://fixture:PRIVATE_PROXY@127.0.0.1:1', fixture);
+    assert.equal(result.source, 'default_us');
+    assert.deepEqual(result.diagnostics, { failure_kind: kind,
+      ...(kind === 'response_too_large' ? {} : { curl_exit_code: exitCode }),
+      http_status: httpStatus, connect_status: connectStatus, elapsed_ms: 0 });
+    assert.equal(JSON.stringify(result).includes('PRIVATE'), false);
+    assert.equal(fixture.seen.args[fixture.seen.args.indexOf('--max-time') + 1], '15');
+    assert.equal(fixture.seen.args[fixture.seen.args.indexOf('--connect-timeout') + 1], '15');
+    assert.equal(fixture.seen.args.includes('--retry'), false);
+  }
+  const direct = await lookupExitCountry('direct', processFixture('', 7));
+  assert.equal(direct.diagnostics.failure_kind, 'connection_failed');
+  const missing = await lookupExitCountry('direct', { now: () => 0, spawnProcess() { throw new Error('PRIVATE_PATH'); } });
+  assert.deepEqual(missing.diagnostics, { failure_kind: 'spawn_failed', http_status: 0, connect_status: 0, elapsed_ms: 0 });
+});
+
+test('lookup diagnostic survives real store reload and resume without another request or changed country', async t => {
+  const store = await storeFixture(t);
+  const selected = await prepareRegistrationCountry(store, { mode: 'registration', requireNew: true, proxy: 'http://127.0.0.1:1' },
+    proxy => lookupExitCountry(proxy, processFixture('\nCFM_COUNTRY_META:000 502', 22)));
+  assert.equal(selected.diagnostics.failure_kind, 'proxy_tunnel');
+  assert.equal((await store.load()).config.profile.countryDiagnostics.connect_status, 502);
+  await store.markSubmissionStarted();
+  await store.close();
+  const reload = new PrivateRunStore(store.root, store.runId);
+  await reload.init({ email: 'fixture@example.test' }, { requireExisting: true });
+  const saved = await prepareRegistrationCountry(reload, { mode: 'resume', requireNew: false, proxy: 'direct' },
+    () => assert.fail('saved identity was probed again'));
+  assert.deepEqual(saved, selected);
+  await reload.close();
+});
+
+test('untrusted diagnostics are discarded without rejecting a valid new country', async t => {
+  const base = { country: 'US', source: 'default_us', diagnostics: { failure_kind: 'timeout', http_status: 0, connect_status: 0, elapsed_ms: 15 } };
+  for (const diagnostics of [null, [], 'PRIVATE', { failure_kind: 'timeout' },
+    ...[{ failure_kind: 'PRIVATE' }, { failure_kind: 'none' }, { elapsed_ms: -1 }, { http_status: 999 },
+      { connect_status: '502' }, { curl_exit_code: null }, { curl_exit_code: 300 }, { raw: 'PRIVATE' }].map(patch => ({ ...base.diagnostics, ...patch }))]) {
+    const store = await storeFixture(t);
+    assert.deepEqual(await prepareRegistrationCountry(store, { mode: 'registration', requireNew: true }, async () =>
+      ({ ...base, diagnostics })), { country: 'US', source: 'default_us' });
+    const saved = (await store.load()).config.profile;
+    assert.equal(saved.countrySource, 'default_us');
+    assert.equal(saved.countryDiagnostics, undefined);
+  }
+});
+
+test('malformed saved diagnostics cannot block accepted identity recovery or trigger another lookup', async t => {
+  for (const countryDiagnostics of [null, [], 'PRIVATE', { failure_kind: 'timeout', http_status: 'PRIVATE', connect_status: 502, elapsed_ms: 15 },
+    { failure_kind: 'timeout', http_status: 0, connect_status: 502, elapsed_ms: -1 }, { raw: 'PRIVATE' }]) {
+    const store = await storeFixture(t, { country: 'US', countrySource: 'default_us', countryDiagnostics, birthYear: 1988 });
+    await store.markSubmissionStarted();
+    await new CreationTracker(store).accepted();
+    await store.close();
+    const reload = new PrivateRunStore(store.root, store.runId);
+    await reload.init({ email: 'fixture@example.test' }, { requireExisting: true });
+    try {
+      const before = await reload.load();
+      assert.deepEqual(await prepareRegistrationCountry(reload, { mode: 'resume', requireNew: false, proxy: 'direct' },
+        () => assert.fail('accepted identity was probed again')), { country: 'US', source: 'default_us' });
+      assert.deepEqual(await reload.load(), before, 'optional diagnostic changed saved identity or submission ledger');
+      assert.equal(before.submission.started, true);
+      assert.equal(creationOutcome(before).creation_outcome, 'accepted');
+    } finally { await reload.close(); }
+  }
 });

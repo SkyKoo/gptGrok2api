@@ -575,7 +575,10 @@ async def reserve_browser(req: BrowserReservationRequest, authorization: str | N
             timezone=req.timezone or None, locale=req.locale or None, profile=_profile_for_worker(req.browser_profile))
         if req.daily_direct and not proxy:
             options.pop("proxy", None)
-        return queue.enqueue(req.id, options, cloakbrowser.launch_async, startup_progress=True)
+        # Only the Adobe adapter consumes our startup callback. CloakBrowser
+        # forwards unknown launch options to Playwright, which rejects it.
+        # Grok still reports the queue's waiting/starting/ready lifecycle.
+        return queue.enqueue(req.id, options, cloakbrowser.launch_async)
     except InvalidBrowserProxy:
         raise HTTPException(status_code=422, detail={"stage": "browser_start", "error": "proxy_configuration_invalid"}) from None
     except BrowserQueueError as exc:

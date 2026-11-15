@@ -1,6 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { registrationDiagnostics } from './registration-diagnostics.mjs';
+import { registrationDiagnostics, recoveryPageDiagnostics, sanitizeRecoveryPage } from './registration-diagnostics.mjs';
+
+test('recovery page diagnostics expose only fixed categories and bounded counts from the failing observation',()=>{
+  const observed=recoveryPageDiagnostics({detected:'needs_manual',form:{host:'auth.services.adobe.com',
+    url:'https://auth.services.adobe.com/?token=PRIVATE_SECRET',headings:['PRIVATE_SECRET'],
+    fields:[{type:'email',value:'PRIVATE_SECRET'},{type:'password',value:'PRIVATE_SECRET'},{autocomplete:'one-time-code',value:'PRIVATE_SECRET'}],
+    buttons:[{text:'PRIVATE_SECRET'}],links:[]}}, {loginEntries:0,loginClicked:false,elapsedMS:60000});
+  const expected={page_kind:'authentication',detected_stage:'needs_manual',field_count:3,email_fields:1,
+    password_fields:1,verification_fields:1,button_count:1,link_count:0,login_entries:0,login_clicked:false,elapsed_ms:60000};
+  assert.deepEqual(observed,expected);
+  for(const failure_action of ['open_login','inspect_form','click_login_entry']){
+    const result=registrationDiagnostics({code:'recovery_login_form_unavailable',failureDiagnostics:{failure_action,
+      recovery_page:{...observed,raw:'PRIVATE_SECRET',url:'PRIVATE_SECRET',fields:['PRIVATE_SECRET']}}},null);
+    assert.deepEqual(result.recovery_page,expected);assert.doesNotMatch(JSON.stringify(result),/PRIVATE_SECRET|url|raw|values/);
+  }
+  for(const failure_action of ['submit_password','open_firefly','PRIVATE_SECRET']){
+    assert.equal(registrationDiagnostics({code:'recovery_step_failed',failureDiagnostics:{failure_action,recovery_page:observed}},null).recovery_page,undefined);
+  }
+  assert.equal(registrationDiagnostics({stage:'completed',failureDiagnostics:{failure_action:'inspect_form',recovery_page:observed}},null).recovery_page,undefined);
+});
+
+test('recovery summary rejects malformed categories and values without guessing or retaining raw data',()=>{
+  for(const value of [null,[],{},'PRIVATE_SECRET',{page_kind:'PRIVATE_SECRET'},{page_kind:'https://account.adobe.com/'}]){
+    assert.equal(sanitizeRecoveryPage(value),undefined);
+  }
+  for(const value of [-1,101,1.5,'1',NaN,Infinity]){
+    assert.deepEqual(sanitizeRecoveryPage({page_kind:'other',detected_stage:'PRIVATE_SECRET',field_count:value,
+      email_fields:value,password_fields:value,verification_fields:value,button_count:value,link_count:value,
+      login_entries:value,login_clicked:'true',elapsed_ms:300001,raw:'PRIVATE_SECRET'}),{page_kind:'other'});
+  }
+  for(const elapsed_ms of [-1,300001,0.5,'0',NaN,Infinity]){
+    assert.equal(sanitizeRecoveryPage({page_kind:'other',elapsed_ms}).elapsed_ms,undefined);
+  }
+  assert.deepEqual(recoveryPageDiagnostics({form:{host:'PRIVATE_SECRET',fields:new Array(101).fill({value:'PRIVATE_SECRET'}),
+    buttons:new Array(101),links:'PRIVATE_SECRET'}},{loginEntries:101}),{page_kind:'other'});
+});
 
 test('option failures keep only bounded field categories and never option text or selected values', () => {
   const source = { profile_field:'birth_month', profile_option_reason:'incomplete', option_count:1,

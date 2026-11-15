@@ -35,6 +35,7 @@ type adobeRegistrationDiagnostics struct {
 	VerificationWaitOutcome     string                    `json:"verification_wait_outcome"`
 	// Decode optional observations independently: malformed diagnostics must not
 	// discard an otherwise valid creation result or alter compensation policy.
+	RecoveryPage json.RawMessage `json:"recovery_page"`
 	MediaRuntime json.RawMessage `json:"media_runtime"`
 	MediaPage    json.RawMessage `json:"media_page"`
 	MediaTiming  json.RawMessage `json:"media_timing"`
@@ -164,6 +165,9 @@ func adobeStartupEventText(event browserqueue.StartupEvent) string {
 // text and unbounded lists cannot become log content or change retry policy.
 func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 	parts := adobeMediaDiagnosticText(d)
+	if d.FailureAction == "open_login" || d.FailureAction == "inspect_form" || d.FailureAction == "click_login_entry" {
+		parts = append(parts, adobeRecoveryPageDiagnosticText(d.RecoveryPage)...)
+	}
 	if field := map[string]string{"country": "国家/地区", "birth_month": "出生月份", "birth_year": "出生年份", "birth_day": "出生日期（日）"}[d.ProfileField]; field != "" {
 		if reason := map[string]string{"missing": "找不到目标选项", "incomplete": "选项尚未完整加载", "ambiguous": "选项不唯一", "disabled": "目标选项不可用", "invalid": "目标值不符合要求"}[d.ProfileOptionReason]; reason != "" {
 			text := "下拉选项：" + field + "，" + reason
@@ -264,6 +268,59 @@ func adobeFailureDiagnosticText(d adobeRegistrationDiagnostics) string {
 		parts = append(parts, "异常类别："+label)
 	}
 	return strings.Join(parts, "；")
+}
+
+func adobeRecoveryPageDiagnosticText(raw json.RawMessage) []string {
+	if len(raw) == 0 || len(raw) > 4096 {
+		return nil
+	}
+	var page struct {
+		Kind               string `json:"page_kind"`
+		Stage              string `json:"detected_stage"`
+		FieldCount         *int   `json:"field_count"`
+		EmailFields        *int   `json:"email_fields"`
+		PasswordFields     *int   `json:"password_fields"`
+		VerificationFields *int   `json:"verification_fields"`
+		ButtonCount        *int   `json:"button_count"`
+		LinkCount          *int   `json:"link_count"`
+		LoginEntries       *int   `json:"login_entries"`
+		LoginClicked       *bool  `json:"login_clicked"`
+		ElapsedMS          *int64 `json:"elapsed_ms"`
+	}
+	if json.Unmarshal(raw, &page) != nil {
+		return nil
+	}
+	label := map[string]string{"account_portal": "Adobe 账户门户", "authentication": "Adobe 认证页", "firefly": "Firefly", "other": "其他页面"}[page.Kind]
+	if label == "" {
+		return nil
+	}
+	parts := []string{"恢复页面：" + label}
+	if stage := map[string]string{"awaiting_email": "邮箱", "awaiting_password": "密码", "awaiting_profile": "个人资料", "awaiting_approval": "创建确认", "awaiting_verification": "验证码", "needs_manual": "未识别为可继续表单"}[page.Stage]; stage != "" {
+		parts = append(parts, "已识别表单："+stage)
+	}
+	counts := []string{}
+	for _, item := range []struct {
+		label string
+		value *int
+	}{{"字段", page.FieldCount}, {"邮箱", page.EmailFields}, {"密码", page.PasswordFields}, {"验证码", page.VerificationFields}, {"按钮", page.ButtonCount}, {"链接", page.LinkCount}, {"登录入口", page.LoginEntries}} {
+		if item.value != nil && *item.value >= 0 && *item.value <= 100 {
+			counts = append(counts, fmt.Sprintf("%s %d", item.label, *item.value))
+		}
+	}
+	if len(counts) > 0 {
+		parts = append(parts, "页面控件："+strings.Join(counts, "、"))
+	}
+	if page.LoginClicked != nil {
+		label := "尚未点击"
+		if *page.LoginClicked {
+			label = "已点击一次"
+		}
+		parts = append(parts, "登录入口："+label)
+	}
+	if page.ElapsedMS != nil && *page.ElapsedMS >= 0 && *page.ElapsedMS <= 300000 {
+		parts = append(parts, fmt.Sprintf("登录观察 %.1f 秒", float64(*page.ElapsedMS)/1000))
+	}
+	return parts
 }
 
 func adobeMediaDiagnosticText(d adobeRegistrationDiagnostics) []string {

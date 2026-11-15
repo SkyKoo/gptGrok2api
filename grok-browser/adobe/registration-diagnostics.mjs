@@ -42,6 +42,42 @@ const EXCEPTION_TYPES = new Set(['registration', 'timeout', 'navigation', 'page_
   'proxy_tunnel', 'proxy_connection', 'proxy_auth', 'dns', 'network_timeout', 'tls', 'network_connection']);
 const PROFILE_FIELDS = new Set(['country', 'birth_month', 'birth_year', 'birth_day']);
 const OPTION_REASONS = new Set(['missing', 'incomplete', 'ambiguous', 'disabled', 'invalid']);
+const RECOVERY_PAGES = new Map([
+  ['account.adobe.com', 'account_portal'], ['auth.services.adobe.com', 'authentication'],
+  ['firefly.adobe.com', 'firefly'],
+]);
+const RECOVERY_PAGE_KINDS = new Set([...RECOVERY_PAGES.values(), 'other']);
+const RECOVERY_COUNTS = ['field_count', 'email_fields', 'password_fields', 'verification_fields',
+  'button_count', 'link_count', 'login_entries'];
+
+/** 只保存页面类别与有界控件数量；页面正文、URL、控件内容均不进入诊断。 */
+export function sanitizeRecoveryPage(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !RECOVERY_PAGE_KINDS.has(value.page_kind)) return undefined;
+  const result = { page_kind: value.page_kind };
+  if (FORM_STAGES.has(value.detected_stage)) result.detected_stage = value.detected_stage;
+  for (const name of RECOVERY_COUNTS) {
+    if (Number.isSafeInteger(value[name]) && value[name] >= 0 && value[name] <= 100) result[name] = value[name];
+  }
+  if (typeof value.login_clicked === 'boolean') result.login_clicked = value.login_clicked;
+  if (Number.isSafeInteger(value.elapsed_ms) && value.elapsed_ms >= 0 && value.elapsed_ms <= 300_000) result.elapsed_ms = value.elapsed_ms;
+  return result;
+}
+
+export function recoveryPageDiagnostics(status, { loginEntries, loginClicked, elapsedMS } = {}) {
+  if (!status?.form || typeof status.form !== 'object') return undefined;
+  const { form } = status;
+  const fields = Array.isArray(form.fields) && form.fields.length <= 100 ? form.fields : undefined;
+  return sanitizeRecoveryPage({ page_kind: RECOVERY_PAGES.get(form.host) || 'other',
+    detected_stage: status.detected, login_entries: loginEntries, login_clicked: loginClicked,
+    elapsed_ms: elapsedMS,
+    ...(fields ? { field_count: fields.length,
+      email_fields: fields.filter(field => field?.type === 'email' || field?.autocomplete === 'username' || field?.autocomplete === 'email').length,
+      password_fields: fields.filter(field => field?.type === 'password').length,
+      verification_fields: fields.filter(field => field?.autocomplete === 'one-time-code').length } : {}),
+    ...(Array.isArray(form.buttons) ? { button_count: form.buttons.length } : {}),
+    ...(Array.isArray(form.links) ? { link_count: form.links.length } : {}),
+  });
+}
 
 function failureDiagnostics(result) {
   if (typeof result?.code !== 'string' || !result.code) return {};
@@ -52,6 +88,8 @@ function failureDiagnostics(result) {
   const form = result.code === 'form_rejected' && !FAILURE_ACTIONS.has(source.failure_action)
     ? formFailureDiagnostics(result.form) : {};
   const classification = FORM_ERRORS.has(source.form_error) ? source.form_error : form.form_error;
+  const recoveryPage = ['open_login', 'inspect_form', 'click_login_entry'].includes(source.failure_action)
+    ? sanitizeRecoveryPage(source.recovery_page) : undefined;
   const evidence = Array.isArray(source.invalid_fields) ? source : form;
   const invalid = [...new Set((Array.isArray(evidence.invalid_fields) ? evidence.invalid_fields : [])
     .slice(0, 20).filter(value => INVALID_FIELDS.has(value)))].slice(0, INVALID_FIELDS.size);
@@ -73,6 +111,7 @@ function failureDiagnostics(result) {
     ...(FAILURE_ACTIONS.has(source.failure_action) ? { failure_action: source.failure_action } : {}),
     ...(FAILURE_PHASES.has(source.failure_phase) ? { failure_phase: source.failure_phase } : {}),
     ...(EXCEPTION_TYPES.has(source.exception_type) ? { exception_type: source.exception_type } : {}),
+    ...(recoveryPage ? { recovery_page: recoveryPage } : {}),
     ...(STARTUP_STAGES.has(source.failure_action) && Number.isSafeInteger(source.elapsed_ms) && source.elapsed_ms >= 0 && source.elapsed_ms <= STARTUP_LIMIT_MS
       ? { elapsed_ms: source.elapsed_ms } : {}),
     ...(STARTUP_STAGES.has(source.failure_action) && Number.isSafeInteger(source.duration_ms) && source.duration_ms >= 0 && source.duration_ms <= STARTUP_LIMIT_MS

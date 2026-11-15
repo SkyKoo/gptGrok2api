@@ -177,6 +177,7 @@ func TestAdobeRejectedAndUnsubmittedRetryUsesNewAttemptAndSameMailbox(t *testing
 			parent.AdobeRegistration.CreationErrorCode, parent.AdobeRegistration.CreationHTTPStatus = "captcha_required", 400
 			parent.AdobeRegistration.Proxy = "http://previous-attempt.invalid:8080"
 			parent.AdobeProfile.Country, parent.AdobeProfile.CountrySource = "GB", "ipwho_is"
+			parent.AdobeProfile.CountryDiagnostics = &adobeCountryDiagnostics{FailureKind: "none", HTTPStatus: 200, ConnectStatus: 200, ElapsedMS: 750}
 			parent.Error = "adobe: login_ui_not_ready"
 			path := filepath.Join(t.TempDir(), "jobs.enc.json")
 			mail := &adobeCompensationMail{}
@@ -195,6 +196,7 @@ func TestAdobeRejectedAndUnsubmittedRetryUsesNewAttemptAndSameMailbox(t *testing
 					expectedProfile := parent.AdobeProfile.fields()
 					expectedProfile["country"] = "US"
 					delete(expectedProfile, "countrySource")
+					delete(expectedProfile, "countryDiagnostics")
 					if !reflect.DeepEqual(cfg.Profile, expectedProfile) {
 						t.Error("saved user profile changed")
 					}
