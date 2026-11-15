@@ -32,20 +32,20 @@ const waiting = { state: 'waiting', attempts: 1, max_attempts: 3, next_attempt_a
 const base = { email: 'fixture@example.test', status: 'registration_pending', stage: 'needs_manual', imported: false, verified: false, can_retry: false, can_retry_registration: false }
 const jobs = [
   { ...base, id: 'waiting', can_reregister: true, error: 'adobe: verification_request_timeout', recovery_mode: 'retry_registration', auto_retry: waiting, review_hint: 'STALE_REVIEW_HINT' },
-  { ...base, id: 'running', recovery_mode: 'resume_session', auto_retry: { ...waiting, state: 'running', attempts: 2 } },
+  { ...base, id: 'running', can_reregister: true, creation_outcome: 'accepted', recovery_mode: 'manual_reregistration', auto_retry: { ...waiting, state: 'manual', reason: 'registration_requires_manual_reregistration' } },
   { ...base, id: 'exhausted', can_reregister: true, error: 'adobe: verification_dns_failed', auto_retry: { ...waiting, state: 'exhausted', attempts: 3 }, review_hint: 'STALE_EXHAUSTED_HINT' },
-  { ...base, id: 'resume', can_reregister: true, stage: 'adobe_restoring_registration_page', error: 'adobe: recovery_page_observation_timeout', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' },
+  { ...base, id: 'resume', can_reregister: true, stage: 'manual_reregistration', recovery_mode: 'manual_reregistration', creation_outcome: 'accepted' },
   { ...base, id: 'retry', can_reregister: true, can_retry_registration: true, recovery_mode: 'retry_registration' },
   { ...base, id: 'unknown', can_reregister: true, creation_outcome: 'unknown', error: 'adobe: human_verification_required', recovery_mode: 'result_uncertain', auto_retry: { ...waiting, state: 'manual', reason: 'registration_result_uncertain' }, review_hint: 'STALE_UNKNOWN_HINT' },
   { ...base, id: 'unknown-synthetic', error: 'task: registration_result_uncertain', recovery_mode: 'result_uncertain', auto_retry: { ...waiting, state: 'manual', reason: 'registration_result_uncertain' } },
   { ...base, id: 'cancelled', status: 'cancelled', auto_retry: { ...waiting, state: 'manual', reason: 'cancelled' } },
   { ...base, id: 'inflight', status: 'running', stage: 'adobe_waiting_registration_form', recovery_mode: 'result_uncertain', review_hint: 'INFLIGHT_REVIEW_HINT' },
   { ...base, id: 'saved', status: 'import_pending', can_retry: true, can_reregister: true, recovery_mode: 'saved_result' },
-  { ...base, id: 'challenge', error: 'adobe: human_verification_required', recovery_mode: 'resume_session', auto_retry: { ...waiting, state: 'manual', reason: 'human_verification_required' } },
+  { ...base, id: 'challenge', can_reregister: true, error: 'adobe: human_verification_required', recovery_mode: 'manual_reregistration', auto_retry: { ...waiting, state: 'manual', reason: 'human_verification_required' } },
   { ...base, id: 'parent', can_reregister: true, can_retry: true, can_retry_registration: true, retry_job_id: 'child', auto_retry: { ...waiting, state: 'superseded' }, review_hint: 'STALE_PARENT_HINT' },
   { ...base, id: 'child', parent_job_id: 'parent', root_job_id: 'root', recovery_mode: 'resume_session', auto_retry: waiting },
-  { ...base, id: 'cooldown', can_reregister: true, reregister_not_before: waiting.next_attempt_at, recovery_mode: 'result_uncertain' },
-  { ...base, id: 'cooldown-expiry', can_reregister: true, reregister_not_before: new Date(Date.now() + 60000).toISOString(), recovery_mode: 'retry_registration' },
+  { ...base, id: 'cooldown', can_reregister: true, reregister_not_before: waiting.next_attempt_at, recovery_mode: 'manual_reregistration' },
+  { ...base, id: 'cooldown-expiry', can_reregister: true, reregister_not_before: new Date(Date.now() + 60000).toISOString(), recovery_mode: 'manual_reregistration' },
 ]
 let releaseManualRequest
 const manualRequestGate = new Promise(resolve => { releaseManualRequest = resolve })
@@ -54,7 +54,7 @@ const register = { target: 'adobe', total: 1, threads: 1, mode: 'total', enabled
 register.target_runtime.adobe.mailbox_cleanup_error = 'mailbox: reservation_release_failed'
 register.target_runtime.adobe.logs = [
   { action: 'manual_reregistration', detail: '原邮箱启动新流程', time: new Date().toISOString(), level: 'info' },
-  { action: 'adobe_restoring_registration_page', detail: '继续原账号验证', time: new Date().toISOString(), level: 'info' },
+  { action: 'manual_reregistration', detail: '注册未完成，使用新浏览器会话重新开始', time: new Date().toISOString(), level: 'info' },
 ]
 await context.route('**/*', async route => {
   const req = route.request(), url = new URL(req.url()), pathname = url.pathname
@@ -86,19 +86,19 @@ try {
   await page.locator('.register-target-segmented').getByRole('button', { name: 'Adobe', exact: true }).click()
   await page.getByText('地区按本次注册出口自动选择，定位失败时使用美国；生日按 25–50 岁随机生成。验证码由所选邮箱来源自动接收，注册成功后自动加入 Adobe 账号池。', { exact: true }).waitFor()
   await page.getByText('手动重新注册 · 原邮箱启动新流程', { exact: true }).waitFor()
-  await page.getByText('恢复原注册页面 · 继续原账号验证', { exact: true }).waitFor()
+  await page.getByText('手动重新注册 · 注册未完成，使用新浏览器会话重新开始', { exact: true }).waitFor()
   await page.getByText(/部分失败任务的邮箱预占用尚未释放.*核对现有邮箱/).waitFor()
   await job('waiting').getByText('fixture@example.test · 注册失败', { exact: true }).waitFor()
   await job('waiting').getByText(/等待自动重新注册.*1\/3.*分钟后执行/).waitFor()
   await job('waiting').getByText('人机验证组件加载失败：请求超时。', { exact: true }).waitFor()
   for (const hint of ['STALE_REVIEW_HINT', 'STALE_EXHAUSTED_HINT', 'STALE_UNKNOWN_HINT', 'STALE_PARENT_HINT']) assert.equal(await page.getByText(hint, { exact: true }).count(), 0)
-  await job('running').getByText(/正在自动继续账号验证.*2\/3/).waitFor()
-  await job('running').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
+  await job('running').getByText('fixture@example.test · 注册未完成，需手动重新开始', { exact: true }).waitFor()
+  await job('running').getByText('注册未完成，已停止自动重试，请手动重新注册。', { exact: true }).waitFor()
   await job('exhausted').getByText('fixture@example.test · 注册失败', { exact: true }).waitFor()
   await job('exhausted').getByText('自动重试次数已用完（3/3），已停止自动重试。', { exact: true }).waitFor()
   await job('exhausted').getByText('人机验证组件加载失败：域名解析失败。', { exact: true }).waitFor()
-  for (const id of ['running', 'challenge', 'unknown-synthetic', 'inflight', 'parent', 'child']) assert.equal(await job(id).getByRole('button').count(), 0)
-  for (const id of ['waiting', 'exhausted', 'retry', 'unknown']) {
+  for (const id of ['unknown-synthetic', 'inflight', 'parent', 'child']) assert.equal(await job(id).getByRole('button').count(), 0)
+  for (const id of ['waiting', 'exhausted', 'running', 'resume', 'retry', 'unknown', 'challenge']) {
     assert.equal(await job(id).getByRole('button').count(), 1)
     assert.equal(await job(id).getByRole('button', { name: '手动重新注册', exact: true }).isEnabled(), true)
   }
@@ -119,9 +119,9 @@ try {
   }
   await job('unknown').getByText('Adobe 人机验证未完成。', { exact: true }).waitFor()
   assert.equal(await job('unknown-synthetic').getByText('task: registration_result_uncertain', { exact: true }).count(), 0)
-  await job('challenge').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
+  await job('challenge').getByText('fixture@example.test · 注册未完成，需手动重新开始', { exact: true }).waitFor()
   await job('challenge').getByText('Adobe 人机验证未完成。', { exact: true }).waitFor()
-  await job('challenge').getByText('当前错误不支持自动重试。', { exact: true }).waitFor()
+  await job('challenge').getByText('注册未完成，已停止自动重试，请手动重新注册。', { exact: true }).waitFor()
   await job('cancelled').getByText('fixture@example.test · 已取消', { exact: true }).waitFor()
   await job('cancelled').getByText('已停止自动重试。', { exact: true }).waitFor()
   assert.equal(await page.getByText(/注册尚未完成|创建结果尚未确认|自动流程已暂停/).count(), 0)
@@ -131,9 +131,9 @@ try {
   await job('parent').getByText('fixture@example.test · 已发起后续重试', { exact: true }).waitFor()
   assert.equal(await job('parent').getByRole('status').count(), 0)
   await job('saved').getByText('fixture@example.test · 等待入库', { exact: true }).waitFor()
-  await job('resume').getByText('fixture@example.test · 注册未完成', { exact: true }).waitFor()
-  await job('resume').getByText('结束于：恢复原注册页面 · 入库未完成 · 校验未通过', { exact: true }).waitFor()
-  await job('resume').getByText('恢复原浏览器页面超时，未能继续账号验证。', { exact: true }).waitFor()
+  await job('resume').getByText('fixture@example.test · 注册未完成，需手动重新开始', { exact: true }).waitFor()
+  await job('resume').getByText('结束于：注册未完成，需手动重新开始 · 入库未完成 · 校验未通过', { exact: true }).waitFor()
+  await job('resume').getByText('注册未完成，已停止自动重试，请手动重新注册。', { exact: true }).waitFor()
   assert.equal(await job('resume').getByText(/注册失败|创建失败/).count(), 0)
   assert.equal(await job('resume').getByRole('button', { name: '手动重新注册', exact: true }).isEnabled(), true)
   await screenshot('adobe-registration-failure-desktop')
