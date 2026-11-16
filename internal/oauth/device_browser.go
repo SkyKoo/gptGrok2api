@@ -16,6 +16,7 @@ import (
 // BrowserDeviceRequest is sent only over the private Worker connection, never
 // persisted in queue payloads or exposed by management job endpoints.
 type BrowserDeviceRequest struct {
+	TaskID          string `json:"task_id,omitempty"`
 	BrowserLease    string `json:"browser_lease,omitempty"`
 	VerificationURL string `json:"verification_uri_complete"`
 	UserCode        string `json:"user_code"`
@@ -31,6 +32,9 @@ type BrowserDeviceResult struct {
 	Code              string `json:"code"`
 	Stage             string `json:"stage,omitempty"`
 	Detail            string `json:"detail,omitempty"`
+	Operation         string `json:"operation,omitempty"`
+	ExceptionType     string `json:"exception_type,omitempty"`
+	ConsentState      string `json:"consent_state,omitempty"`
 	ElapsedMS         int64  `json:"elapsed_ms,omitempty"`
 	ConsentSubmitted  bool   `json:"consent_submitted,omitempty"`
 	PagePath          string `json:"page_path,omitempty"`
@@ -39,6 +43,18 @@ type BrowserDeviceResult struct {
 	ConsentButtonSeen bool   `json:"consent_button_seen,omitempty"`
 	NetworkFailures   int    `json:"network_failures,omitempty"`
 	NetworkErrorCodes string `json:"network_error_codes,omitempty"`
+}
+
+// EffectiveConsentState treats missing legacy metadata as unknown. A recorded
+// click always wins over contradictory "not attempted" metadata.
+func (r BrowserDeviceResult) EffectiveConsentState() string {
+	if r.ConsentSubmitted || r.ConsentState == "attempted" {
+		return "attempted"
+	}
+	if r.ConsentState == "not_attempted" {
+		return "not_attempted"
+	}
+	return "unknown"
 }
 
 func ConfirmDeviceInBrowser(ctx context.Context, client *http.Client, base, key string, payload BrowserDeviceRequest) (BrowserDeviceResult, error) {

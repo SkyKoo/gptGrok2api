@@ -16,10 +16,17 @@ import (
 func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name, workerStatus, workerCode, email, want string
+		consentState, wantCode                      string
+		consentSubmitted, noPoll                    bool
 		cancel                                      bool
 	}{
 		{name: "success", workerStatus: "approved", email: "selected@example.test", want: "authorized"},
 		{name: "lost_confirmation_response", workerStatus: "uncertain", email: "selected@example.test", want: "authorized"},
+		{name: "observation_failed_before_consent", workerStatus: "failed", workerCode: "oauth_page_observation_failed", consentState: "not_attempted", want: "failed", wantCode: "oauth_page_observation_failed", noPoll: true},
+		{name: "known_preclick_exception", workerStatus: "uncertain", workerCode: "oauth_worker_result_unknown", consentState: "not_attempted", want: "failed", wantCode: "oauth_worker_result_unknown", noPoll: true},
+		{name: "legacy_observation_unknown", workerStatus: "uncertain", workerCode: "oauth_page_observation_failed", email: "selected@example.test", want: "authorized"},
+		{name: "observation_failed_after_click", workerStatus: "uncertain", workerCode: "oauth_page_observation_failed", consentState: "attempted", email: "selected@example.test", want: "authorized"},
+		{name: "contradictory_state_preserves_click", workerStatus: "uncertain", workerCode: "oauth_page_observation_failed", consentState: "not_attempted", consentSubmitted: true, email: "selected@example.test", want: "authorized"},
 		{name: "wrong_identity", workerStatus: "approved", email: "other@example.test", want: "failed"},
 		{name: "missing_identity", workerStatus: "approved", want: "failed"},
 		{name: "login_required", workerStatus: "manual_action_required", workerCode: "oauth_login_required", want: "manual_action_required"},
@@ -59,7 +66,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 				case "/v1/oauth/authorize-device":
 					confirmations.Add(1)
 					var body oauth.BrowserDeviceRequest
-					if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.BrowserLease) != 48 || body.SSO != "SSO-SECRET" || body.Email != "selected@example.test" || body.Proxy != "" || body.UserCode != "ABCD-EFGH" || r.Header.Get("Authorization") != "Bearer WORKER-SECRET" {
+					if json.NewDecoder(r.Body).Decode(&body) != nil || !strings.HasPrefix(body.TaskID, "task_") || len(body.BrowserLease) != 48 || body.SSO != "SSO-SECRET" || body.Email != "selected@example.test" || body.Proxy != "" || body.UserCode != "ABCD-EFGH" || r.Header.Get("Authorization") != "Bearer WORKER-SECRET" {
 						t.Error("worker received wrong account, route or authentication")
 					}
 					if tc.cancel {
@@ -69,7 +76,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 							}
 						}
 					}
-					_ = json.NewEncoder(w).Encode(map[string]string{"status": tc.workerStatus, "code": tc.workerCode})
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": tc.workerStatus, "code": tc.workerCode, "consent_state": tc.consentState, "consent_submitted": tc.consentSubmitted})
 				default:
 					http.NotFound(w, r)
 				}
@@ -134,6 +141,9 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 			if job["status"] != tc.want {
 				t.Fatalf("status %v expected %s", job, tc.want)
 			}
+			if tc.wantCode != "" && job["error"] != grokOAuthMessages[tc.wantCode] {
+				t.Fatalf("original browser error was lost: %v", job)
+			}
 			// A cancelled job becomes terminal before the running handler cleans up.
 			for time.Now().Before(deadline) {
 				if _, live := s.grokOAuthRuns.Load("selected"); !live {
@@ -161,7 +171,7 @@ func TestGrokBackgroundOAuthLifecycle(t *testing.T) {
 			if starts.Load() != 1 || confirmations.Load() != 1 {
 				t.Fatal("flow repeated a device request or confirmation")
 			}
-			if (tc.workerStatus == "manual_action_required" || tc.cancel || tc.workerStatus == "failed") && polls.Load() != 0 {
+			if (tc.noPoll || tc.workerStatus == "manual_action_required" || tc.cancel || tc.workerStatus == "failed") && polls.Load() != 0 {
 				t.Fatal("queried token after explicit stop")
 			}
 		})

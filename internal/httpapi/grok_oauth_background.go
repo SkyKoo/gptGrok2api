@@ -32,7 +32,7 @@ var grokOAuthMessages = map[string]string{
 	"oauth_proxy_unavailable":            "账号绑定的调用出口不可用，请检查账号代理设置",
 	"oauth_worker_config_invalid":        "后台浏览器服务配置无效",
 	"oauth_worker_rejected":              "后台浏览器服务拒绝请求，请检查服务版本及认证配置",
-	"oauth_worker_result_unknown":        "后台确认结果暂不明确，未重复提交授权",
+	"oauth_worker_result_unknown":        "浏览器授权异常或响应丢失，未取得可确认的授权结果；未重复提交授权",
 	"oauth_verification_url_invalid":     "xAI 返回的设备授权地址不符合预期，已停止",
 	"oauth_login_required":               "SSO 未能恢复 xAI 登录，请先恢复账号登录后重试",
 	"oauth_verification_required":        "xAI 要求额外验证，后台授权已停止，请处理后重试",
@@ -110,6 +110,17 @@ func logGrokOAuthDiagnostic(taskID, stage, status, code, detail, pagePath string
 }
 
 func logGrokOAuthDiagnosticWithNetwork(taskID, stage, status, code, detail, pagePath string, elapsedMS int64, consentSubmitted bool, networkFailures int, networkErrorCodes string) {
+	logGrokOAuthWorkerDiagnostic(taskID, oauth.BrowserDeviceResult{
+		Stage: stage, Status: status, Code: code, Detail: detail, PagePath: pagePath,
+		ElapsedMS: elapsedMS, ConsentSubmitted: consentSubmitted,
+		NetworkFailures: networkFailures, NetworkErrorCodes: networkErrorCodes,
+	})
+}
+
+func logGrokOAuthWorkerDiagnostic(taskID string, outcome oauth.BrowserDeviceResult) {
+	stage, status, code, detail, pagePath := outcome.Stage, outcome.Status, outcome.Code, outcome.Detail, outcome.PagePath
+	elapsedMS, consentSubmitted := outcome.ElapsedMS, outcome.EffectiveConsentState() == "attempted"
+	networkFailures, networkErrorCodes := outcome.NetworkFailures, outcome.NetworkErrorCodes
 	stage = safeGrokOAuthDiagnostic(stage, map[string]struct{}{
 		"queued": {}, "waiting_browser": {}, "starting_browser": {}, "browser_ready": {},
 		"authorize": {}, "device_code": {}, "consent_page": {}, "consent_submit": {},
@@ -139,6 +150,7 @@ func logGrokOAuthDiagnosticWithNetwork(taskID, stage, status, code, detail, page
 		"product_marker_missing": {}, "allow_click_timeout": {}, "allow_click_failed": {},
 		"callback_wait_timeout": {}, "consent_button_missing": {}, "navigation_timeout": {},
 		"navigation_failed": {}, "browser_exception": {}, "worker_deadline": {},
+		"observation_timeout": {}, "observation_failed": {}, "authorization_timeout": {},
 	}, "other")
 	pagePath = safeGrokOAuthDiagnostic(pagePath, map[string]struct{}{
 		"/oauth2/device": {}, "/oauth2/device/consent": {}, "/oauth2/device/done": {},
@@ -158,7 +170,40 @@ func logGrokOAuthDiagnosticWithNetwork(taskID, stage, status, code, detail, page
 	networkErrorCodes = safeGrokOAuthNetworkCodes(networkErrorCodes)
 	// Task IDs are already public queue handles. All other fields are fixed
 	// allowlists so worker exceptions, URLs, and credentials cannot leak here.
-	log.Printf("grok oauth diagnostic task=%s stage=%s status=%s code=%s detail=%s elapsed_ms=%d consent_submitted=%t page_path=%s network_failures=%d network_error_codes=%s", taskID, stage, status, code, detail, elapsedMS, consentSubmitted, pagePath, networkFailures, networkErrorCodes)
+	operation := safeGrokOAuthDiagnostic(outcome.Operation, grokOAuthOperations, "unknown")
+	exceptionType := safeGrokOAuthDiagnostic(outcome.ExceptionType, map[string]struct{}{
+		"timeout": {}, "navigation": {}, "page_closed": {}, "unknown": {},
+		"type_error": {}, "attribute_error": {}, "value_error": {}, "strict_mode": {}, "browser_error": {},
+	}, "unknown")
+	log.Printf("grok oauth diagnostic task=%s stage=%s status=%s code=%s detail=%s elapsed_ms=%d consent_submitted=%t page_path=%s network_failures=%d network_error_codes=%s operation=%s exception_type=%s consent_state=%s", taskID, stage, status, code, detail, elapsedMS, consentSubmitted, pagePath, networkFailures, networkErrorCodes, operation, exceptionType, outcome.EffectiveConsentState())
+}
+
+var grokOAuthOperations = map[string]struct{}{
+	// Keep this list in sync with the Worker's fixed operation vocabulary.
+	"browser_start": {}, "browser_context": {}, "browser_cookies": {}, "browser_page": {},
+	"browser_routing": {}, "page_navigation": {}, "page_url": {}, "read_body": {}, "read_title": {},
+	"form_count": {}, "form_method": {}, "code_count": {}, "code_value": {},
+	"button_count": {}, "button_visible": {}, "button_enabled": {},
+	"device_code_click": {}, "consent_click": {}, "wait_callback": {}, "browser_claim": {}, "unknown": {},
+}
+
+// Retain the original browser failure after the same grant reaches its deadline.
+// Account changes, cancellation and explicit upstream failures still win.
+func grokOAuthGrantError(outcome oauth.BrowserDeviceResult, err error) error {
+	if err != nil && (err.Error() == "oauth_cancelled" || err.Error() == "oauth_account_changed") {
+		return err
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && (err == nil || err.Error() != "oauth_deadline") {
+		return err
+	}
+	if outcome.Status == "uncertain" {
+		switch outcome.Code {
+		case "oauth_worker_result_unknown", "oauth_page_observation_timeout", "oauth_page_observation_failed",
+			"oauth_consent_click_timeout", "oauth_consent_click_failed", "oauth_callback_timeout", "oauth_authorization_timeout":
+			return errors.New(outcome.Code)
+		}
+	}
+	return errors.New("oauth_deadline")
 }
 
 func grokOAuthErrorCode(err error) string {
@@ -418,9 +463,15 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 		return nil, err
 	}
 	outcome, err := oauth.ConfirmDeviceInBrowser(ctx, s.requestClient, base, stringValue(config["api_key"]), oauth.BrowserDeviceRequest{
-		BrowserLease: lease.ID, VerificationURL: stringValue(started["verification_uri_complete"]), UserCode: stringValue(started["user_code"]), SSO: sso, SSORW: stringValue(account["sso_rw"]), Email: email, Proxy: proxyURL, Timeout: 120,
+		TaskID: task.ID, BrowserLease: lease.ID, VerificationURL: stringValue(started["verification_uri_complete"]), UserCode: stringValue(started["user_code"]), SSO: sso, SSORW: stringValue(account["sso_rw"]), Email: email, Proxy: proxyURL, Timeout: 120,
 	})
-	logGrokOAuthDiagnosticWithNetwork(task.ID, outcome.Stage, outcome.Status, outcome.Code, "worker_result", outcome.PagePath, outcome.ElapsedMS, outcome.ConsentSubmitted, outcome.NetworkFailures, outcome.NetworkErrorCodes)
+	if err != nil && err.Error() == "oauth_worker_result_unknown" {
+		outcome.Status, outcome.Code, outcome.ConsentState = "uncertain", "oauth_worker_result_unknown", "unknown"
+	}
+	if outcome.Detail == "" {
+		outcome.Detail = "worker_result"
+	}
+	logGrokOAuthWorkerDiagnostic(task.ID, outcome)
 	if err != nil && err.Error() != "oauth_worker_result_unknown" {
 		return nil, err
 	}
@@ -430,13 +481,13 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 	if outcome.Status == "failed" {
 		return nil, errors.New(grokOAuthErrorCode(errors.New(outcome.Code)))
 	}
-	if outcome.Status == "uncertain" && outcome.Code != "" && outcome.Code != "oauth_worker_result_unknown" && !outcome.ConsentSubmitted {
+	if outcome.Status == "uncertain" && outcome.Code != "" && outcome.EffectiveConsentState() == "not_attempted" {
 		return nil, errors.New(grokOAuthErrorCode(errors.New(outcome.Code)))
 	}
 	// A lost worker response is not permission to repeat consent. Query the same
 	// device grant until it succeeds or expires, without issuing a new grant.
 	if err := setStage("polling"); err != nil {
-		return nil, err
+		return nil, grokOAuthGrantError(outcome, err)
 	}
 	interval := time.Duration(intValue(started["interval"])) * time.Second
 	if interval < time.Second {
@@ -444,15 +495,16 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 	}
 	for {
 		if err := guard(); err != nil {
-			return nil, err
+			return nil, grokOAuthGrantError(outcome, err)
 		}
 		value, err := s.deviceOAuth.Poll(ctx, sessionID)
 		if err != nil {
-			logGrokOAuthDiagnostic(task.ID, "polling", "failed", grokOAuthErrorCode(err), "poll_failed", "", time.Since(startedAt).Milliseconds(), outcome.ConsentSubmitted)
+			err = grokOAuthGrantError(outcome, err)
+			logGrokOAuthDiagnostic(task.ID, "polling", "failed", grokOAuthErrorCode(err), "poll_failed", "", time.Since(startedAt).Milliseconds(), outcome.EffectiveConsentState() == "attempted")
 			return nil, err
 		}
 		if stringValue(value["status"]) == "authorized" {
-			logGrokOAuthDiagnostic(task.ID, "polling", "authorized", "", "poll_authorized", "", time.Since(startedAt).Milliseconds(), outcome.ConsentSubmitted)
+			logGrokOAuthDiagnostic(task.ID, "polling", "authorized", "", "poll_authorized", "", time.Since(startedAt).Milliseconds(), outcome.EffectiveConsentState() == "attempted")
 			if _, err := finish("authorized", ""); err != nil {
 				return nil, err
 			}
@@ -470,8 +522,9 @@ func (s *Server) runGrokOAuthTask(task *tasks.Task) (result map[string]any, fina
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			logGrokOAuthDiagnostic(task.ID, "polling", "failed", "oauth_deadline", "worker_timeout", "", time.Since(startedAt).Milliseconds(), outcome.ConsentSubmitted)
-			return nil, errors.New("oauth_deadline")
+			err := grokOAuthGrantError(outcome, errors.New("oauth_deadline"))
+			logGrokOAuthDiagnostic(task.ID, "polling", "failed", grokOAuthErrorCode(err), "worker_timeout", "", time.Since(startedAt).Milliseconds(), outcome.EffectiveConsentState() == "attempted")
+			return nil, err
 		case <-timer.C:
 		}
 	}

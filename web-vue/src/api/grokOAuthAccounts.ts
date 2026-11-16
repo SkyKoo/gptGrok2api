@@ -34,6 +34,7 @@ export type GrokOAuthCandidate = {
   oauth_status: 'pending' | 'queued' | 'running' | 'manual_action_required' | 'authorized' | 'failed' | 'requires_renewal'
   oauth_job_id?: string
   oauth_message?: string
+  oauth_authorization_at?: string
   oauth_account_id: string
   has_access_token: boolean
   has_refresh_token: boolean
@@ -131,7 +132,7 @@ export type GrokOAuthAccount = {
   fail_count: number
   last_used_at: string
   last_error: string
-  created_at: string
+  created_at: string | number
   updated_at: string
 }
 

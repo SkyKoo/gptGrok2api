@@ -186,6 +186,9 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
             'detail': 'callback_wait_timeout',
             'elapsed_ms': 1200,
             'consent_submitted': True,
+            'consent_state': 'attempted',
+            'operation': 'wait_callback',
+            'exception_type': 'navigation',
             'page_path': '/oauth2/device/consent',
             'network_failures': 2,
             'network_error_codes': 'ERR_TUNNEL_CONNECTION_FAILED,TIMED_OUT',
@@ -193,6 +196,7 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, 'authorize_device', AsyncMock(return_value=value)):
             with self.assertLogs(server.log, level=logging.INFO) as records:
                 response = await self.client.post('/v1/oauth/authorize-device', json={
+                    'task_id': 'task_20261116090339.000000000',
                     'verification_uri_complete': 'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH',
                     'user_code': 'ABCD-EFGH',
                     'sso': 'SSO-SECRET',
@@ -202,10 +206,61 @@ class WorkerQueueRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertIn('stage=consent_callback', records.output[0])
         self.assertIn('code=oauth_callback_timeout', records.output[0])
         self.assertIn('consent_submitted=True', records.output[0])
+        self.assertIn('task=task_20261116090339.000000000', records.output[0])
+        self.assertIn('consent_state=attempted', records.output[0])
+        self.assertIn('operation=wait_callback', records.output[0])
+        self.assertIn('exception_type=navigation', records.output[0])
         self.assertIn('network_failures=2', records.output[0])
         self.assertIn('network_error_codes=ERR_TUNNEL_CONNECTION_FAILED,TIMED_OUT', records.output[0])
         for secret in ('SSO-SECRET', 'selected@example.test', 'ABCD-EFGH'):
             self.assertNotIn(secret, records.output[0])
+
+    async def test_oauth_log_boundary_revalidates_worker_fields(self):
+        secret = 'SSO-SECRET selected@example.test ABCD-EFGH'
+        value = {key:secret for key in ('status','code','stage','detail','operation','exception_type','page_path','consent_state','network_error_codes')}
+        value['consent_submitted'] = True
+        with self.assertLogs(server.log, level=logging.INFO) as records:
+            result = server._oauth_device_result(secret, value)
+        self.assertEqual(result['consent_state'], 'attempted')
+        self.assertEqual(result['operation'], 'unknown')
+        self.assertEqual(result['page_path'], '<other>')
+        for text in ('SSO-SECRET','selected@example.test','ABCD-EFGH'):
+            self.assertNotIn(text, str(result))
+            self.assertNotIn(text, '\n'.join(records.output))
+
+    async def test_oauth_task_handle_is_validated_before_authorization(self):
+        authorize = AsyncMock()
+        with patch.object(server, 'authorize_device', authorize):
+            response = await self.client.post('/v1/oauth/authorize-device', json={
+                'task_id':'task_bad\nINJECTED',
+                'verification_uri_complete':'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH',
+                'user_code':'ABCD-EFGH','sso':'SSO-SECRET','expected_email':'selected@example.test'})
+        self.assertEqual(response.status_code, 422)
+        authorize.assert_not_awaited()
+
+    async def test_handler_deadline_preserves_shared_consent_state(self):
+        original_timeout = asyncio.timeout
+        for consent_state in ('not_attempted','attempted','unknown'):
+            with self.subTest(consent_state=consent_state):
+                async def suspended(*, diagnostics, **kwargs):
+                    diagnostics.consent_state = consent_state
+                    diagnostics.operation = 'consent_click' if consent_state == 'attempted' else 'button_count'
+                    await asyncio.Event().wait()
+                with patch.object(server, 'authorize_device', suspended), \
+                        patch.object(server.asyncio, 'timeout', lambda _: original_timeout(.01)):
+                    with self.assertLogs(server.log, level=logging.INFO) as records:
+                        response = await self.client.post('/v1/oauth/authorize-device', json={
+                            'task_id':'task_deadline',
+                            'verification_uri_complete':'https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH',
+                            'user_code':'ABCD-EFGH','sso':'SSO-SECRET','expected_email':'selected@example.test'})
+                value = response.json()
+                self.assertEqual(value['status'], 'failed' if consent_state == 'not_attempted' else 'uncertain')
+                self.assertEqual(value['consent_state'], consent_state)
+                self.assertEqual(value['consent_submitted'], consent_state == 'attempted')
+                self.assertEqual(value['exception_type'], 'timeout')
+                self.assertEqual(value['code'], 'oauth_authorization_timeout')
+                self.assertIn('task=task_deadline', records.output[0])
+                self.assertNotIn('SSO-SECRET', records.output[0])
 
 
 if __name__=='__main__':unittest.main()

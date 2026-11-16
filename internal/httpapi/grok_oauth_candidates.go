@@ -57,6 +57,10 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 			state = "failed"
 		}
 		authorization := mapValue(item["oauth_authorization"])
+		authorizationAt := ""
+		if at, err := time.Parse(time.RFC3339, stringValue(authorization["attempted_at"])); err == nil {
+			authorizationAt = at.UTC().Format(time.RFC3339)
+		}
 		jobID, message := "", ""
 		if job := activeJobs[stringValue(item["id"])]; job != nil {
 			state = stringValue(job["status"])
@@ -79,7 +83,8 @@ func (s *Server) grokOAuthCandidates(w http.ResponseWriter, r *http.Request) {
 			"id": stringValue(item["id"]), "email": email, "login_status": loginStatus,
 			"oauth_status": state, "oauth_account_id": credential.ID,
 			"oauth_job_id": jobID, "oauth_message": message,
-			"cpa_sync": credential.CPASync, "cpa_managed": oauth.CPAManaged(credential),
+			"oauth_authorization_at": authorizationAt,
+			"cpa_sync":               credential.CPASync, "cpa_managed": oauth.CPAManaged(credential),
 			"quality":          credential.Quality,
 			"oauth":            oauth.Public(credential),
 			"has_access_token": credential.AccessToken != "", "has_refresh_token": credential.RefreshToken != "",

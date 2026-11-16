@@ -12,7 +12,7 @@
     <div v-if="filtered.length" class="max-w-full overflow-x-auto">
       <table class="w-full min-w-[1180px] table-fixed text-left text-sm" aria-label="xAI OAuth 账号">
         <colgroup><col class="w-[18%]" /><col class="w-24" /><col class="w-[14%]" /><col class="w-40" /><col /><col class="w-28" /><col class="w-56" /></colgroup>
-        <thead class="whitespace-nowrap text-xs text-muted-foreground"><tr><th class="py-3 pr-5">Grok 账号</th><th class="py-3 pr-5">SSO 登录状态</th><th class="py-3 pr-5">xAI OAuth</th><th class="py-3 pr-5">grok-4.7 质量</th><th class="py-3 pr-5">CPA 同步</th><th class="py-3 pr-5">最近更新</th><th class="py-3 pl-4 text-right">操作</th></tr></thead>
+        <thead class="whitespace-nowrap text-xs text-muted-foreground"><tr><th class="py-3 pr-5">Grok 账号</th><th class="py-3 pr-5">SSO 登录状态</th><th class="py-3 pr-5">xAI OAuth</th><th class="py-3 pr-5">grok-4.7 质量</th><th class="py-3 pr-5">CPA 同步</th><th class="py-3 pr-5">授权记录</th><th class="py-3 pl-4 text-right">操作</th></tr></thead>
         <tbody>
           <tr v-for="item in pageItems" :key="item.id" :data-account-row="item.id" class="border-t border-border/60 align-top">
             <td class="py-4 pr-5"><p class="break-all font-medium">{{ item.email || '未保存邮箱' }}</p><p class="mt-1 break-all text-xs text-muted-foreground">{{ item.source_account_id || item.oauth_account_id }}</p></td>
@@ -45,7 +45,7 @@
               <p v-if="item.cpa_sync?.error && (!isCPAManaged(item) || item.cpa_sync.status === 'quality_blocked')" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.error }}</p>
               <p v-else-if="!cpaRemovalRequested(item) && isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
             </td>
-            <td class="py-4 pr-5 text-xs text-muted-foreground">{{ formatGrokAccountDate(item.job?.updated_at || item.account?.updated_at || item.updated_at) }}</td>
+            <td class="py-4 pr-5 text-xs text-muted-foreground"><template v-if="oauthRecordTime(item)"><p>{{ formatGrokAccountDate(oauthRecordTime(item)?.at) }}</p><p class="mt-1">{{ oauthRecordTime(item)?.label }}</p></template><span v-else>暂无</span></td>
             <td class="py-4 pl-4 align-middle text-right">
               <div class="flex items-center justify-end gap-2">
                 <Button v-if="item.source_account_id" size="sm" variant="outline" class="shrink-0 whitespace-nowrap" :disabled="Boolean(busyRows[item.id]) || !targetSelected || !item.email || running(item) || unavailable(item.login_status)" @click="$emit('authorize', item)">{{ running(item) ? '处理中' : item.has_refresh_token ? '重新授权' : '开始授权' }}</Button>
@@ -83,7 +83,7 @@ import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { formatGrokAccountDate } from './grokAccountView'
-import { canRemoveCPACredential, cpaAction, cpaRemovalRequested, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
+import { canRemoveCPACredential, cpaAction, cpaRemovalRequested, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, oauthRecordTime, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
 
 const props = defineProps<{ items: GrokOAuthRow[]; loading: boolean; busyRows: Record<string, string>; targetSelected: boolean; error: string }>()
 defineEmits<{ authorize: [account: GrokOAuthRow]; cpa: [account: GrokOAuthRow]; device: [account: GrokOAuthRow]; details: [account: GrokOAuthRow]; toggle: [account: GrokOAuthRow]; remove: [account: GrokOAuthRow]; removeCpa: [account: GrokOAuthRow]; quality: [account: GrokOAuthRow]; qualityDetails: [account: GrokOAuthRow]; cleanup: [account: GrokOAuthRow] }>()

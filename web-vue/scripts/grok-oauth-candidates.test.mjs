@@ -30,6 +30,43 @@ test('background progress and attention states remain searchable after reloading
 
 const { mergeGrokOAuthRows, cpaAction, cpaStatusText, oauthProgressText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
 
+const { oauthRecordTime } = await import('../src/views/accounts/grokOAuthCandidates.ts')
+
+test('daily account probes cannot move a failed authorization record to today', () => {
+  const candidate = { id: 'source', email: 'one@example.test', oauth_status: 'failed', oauth_authorization_at: '2026-11-13T08:10:07Z', updated_at: '2026-11-16T01:00:47Z' }
+  const [before] = mergeGrokOAuthRows([candidate], [])
+  const [after] = mergeGrokOAuthRows([{ ...candidate, updated_at: '2026-11-17T01:00:47Z' }], [])
+  assert.deepEqual(oauthRecordTime(before), { at: candidate.oauth_authorization_at, label: '授权状态更新' })
+  assert.deepEqual(oauthRecordTime(after), oauthRecordTime(before))
+})
+
+test('authorization task progress takes precedence without hiding newer authorization evidence', () => {
+  const candidate = { id: 'source', email: 'one@example.test', oauth_status: 'authorized', oauth_authorization_at: '2026-11-16T01:03:42Z' }
+  const job = { id: 'latest', source_account_id: 'source', created_at: 1794791017, updated_at: 1794791199, status: 'authorized', stage: 'completed' }
+  const [row] = mergeGrokOAuthRows([candidate], [], [job])
+  assert.deepEqual(oauthRecordTime(row), { at: job.updated_at, label: '任务更新' })
+  const [newAttempt] = mergeGrokOAuthRows([{ ...candidate, oauth_authorization_at: '2026-11-17T01:03:42Z' }], [], [job])
+  assert.deepEqual(oauthRecordTime(newAttempt), { at: '2026-11-17T01:03:42Z', label: '授权状态更新' })
+})
+
+test('legacy credentials show first storage time and never report refresh or CPA checks as authorization', () => {
+  const account = { id: 'oauth-one', email: 'one@example.test', status: 'active', created_at: 1794490876, updated_at: '2026-11-16T01:00:00Z', last_refresh_at: '2026-11-16T01:00:00Z', cpa_sync: { at: 1794790800 } }
+  const [row] = mergeGrokOAuthRows([], [account])
+  assert.deepEqual(oauthRecordTime(row), { at: account.created_at, label: '首次保存' })
+  const [refreshed] = mergeGrokOAuthRows([], [{ ...account, updated_at: '2026-11-17T01:00:00Z', cpa_sync: { at: 1794877200 } }])
+  assert.deepEqual(oauthRecordTime(refreshed), oauthRecordTime(row))
+})
+
+test('missing or invalid authorization evidence stays unknown on an older API', () => {
+  const candidate = { id: 'source', email: 'one@example.test', oauth_status: 'failed', updated_at: '2026-11-16T01:00:47Z' }
+  for (const value of [undefined, '', 'not-a-date', '0']) {
+    const [row] = mergeGrokOAuthRows([{ ...candidate, oauth_authorization_at: value }], [])
+    assert.equal(oauthRecordTime(row), null)
+  }
+  const [row] = mergeGrokOAuthRows([candidate], [{ id: 'oauth-one', email: candidate.email, updated_at: candidate.updated_at }], [{ id: 'job', source_account_id: 'source', created_at: 0, updated_at: 1e99, status: 'failed' }])
+  assert.equal(oauthRecordTime(row), null)
+})
+
 test('manual CPA removal retains quality and authorization while exposing only safe retry actions', async () => {
   const { canRemoveCPACredential, qualityStatusText } = await import('../src/views/accounts/grokOAuthCandidates.ts')
   for (const status of ['pending', 'manual_required', 'removed']) {

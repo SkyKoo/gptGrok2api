@@ -13,6 +13,25 @@ export type GrokOAuthRow = GrokOAuthCandidate & {
   quality_running?: boolean
 }
 
+export function oauthRecordTime(item: GrokOAuthRow): { at: string | number; label: string } | null {
+  const timestamp = (value: unknown): number => {
+    if (typeof value !== 'string' && typeof value !== 'number') return 0
+    if (typeof value === 'string' && !value.trim()) return 0
+    const numeric = Number(value)
+    const time = Number.isFinite(numeric) ? (numeric > 10_000_000_000 ? numeric : numeric * 1000) : Date.parse(String(value))
+    return Number.isFinite(time) && time >= Date.UTC(1971, 0, 1) && !Number.isNaN(new Date(time).getTime()) ? time : 0
+  }
+  const jobAt = timestamp(item.job?.updated_at)
+  const authorizationAt = timestamp(item.oauth_authorization_at)
+  // The task may also include CPA delivery. Label it as task progress rather
+  // than successful consent, and do not let retained old tasks hide a newer attempt.
+  if (jobAt && jobAt >= authorizationAt) return { at: item.job!.updated_at, label: '任务更新' }
+  if (authorizationAt) return { at: item.oauth_authorization_at!, label: '授权状态更新' }
+  // CreatedAt survives credential replacement; it is only the first saved record.
+  if (timestamp(item.account?.created_at)) return { at: item.account!.created_at, label: '首次保存' }
+  return null
+}
+
 export function isCPAManaged(item: Pick<GrokOAuthCandidate, 'cpa_managed' | 'cpa_sync'>) {
   return Boolean(item.cpa_managed || (item.cpa_sync?.at && item.cpa_sync.pool_id))
 }

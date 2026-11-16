@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 
 from common.browser import browser_context_kwargs, browser_kwargs, InvalidBrowserProxy, is_proxy_configuration_error
 from signup_errors import signup_error_status
-from oauth_device import authorize_device, validate_device_url
+from oauth_device import authorize_device, validate_device_url, FlowDiagnostics, safe_device_result, safe_task_id
 from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
     XaiBrowserFlowError,
@@ -118,6 +118,7 @@ class MaterializeRequest(BaseModel):
 
 
 class OAuthDeviceRequest(BaseModel):
+    task_id: str = Field(default="", max_length=69, pattern=r"^(?:task_[A-Za-z0-9_.-]{1,64})?$")
     browser_lease: str = Field(default="", max_length=64)
     verification_uri_complete: str = Field(min_length=8, max_length=2048)
     user_code: str = Field(min_length=8, max_length=9)
@@ -126,6 +127,19 @@ class OAuthDeviceRequest(BaseModel):
     expected_email: str = Field(min_length=3, max_length=320)
     proxy: str = Field(default="", max_length=2048)
     timeout_s: int = Field(default=120, ge=30, le=120)
+
+
+def _oauth_device_result(task_id: str, value: dict) -> dict:
+    value = safe_device_result(value)
+    task_id = safe_task_id(task_id)
+    # 此处所有动态字段已重新白名单投影，task_id 来自已校验的公开任务句柄。
+    log.info(
+        "oauth device result task=%s status=%s code=%s stage=%s detail=%s elapsed_ms=%s consent_submitted=%s consent_state=%s operation=%s exception_type=%s page_path=%s network_failures=%s network_error_codes=%s",
+        task_id, value["status"], value["code"], value["stage"], value["detail"], value["elapsed_ms"],
+        value["consent_submitted"], value["consent_state"], value["operation"], value["exception_type"],
+        value["page_path"], value["network_failures"], value["network_error_codes"],
+    )
+    return value
 
 
 @app.post("/v1/oauth/authorize-device")
@@ -139,26 +153,22 @@ async def oauth_authorize_device(req: OAuthDeviceRequest, authorization: str | N
     # Bound queue waiting as well as execution. No request body or browser
     # exception is logged, because both may include session credentials.
     started = asyncio.get_running_loop().time()
+    diagnostics = FlowDiagnostics(operation="browser_claim")
     try:
         async with asyncio.timeout(150):
             browser = queue.claim(req.browser_lease) if req.browser_lease else None
-            value = await authorize_device(**req.model_dump(exclude={"proxy", "browser_lease"}), proxy=_normalize_proxy(req.proxy), browser=browser)
-            # Only fixed stage/detail fields are emitted. The request contains
-            # SSO, email and device code values and must never enter logs.
-            log.info(
-                "oauth device result status=%s code=%s stage=%s detail=%s elapsed_ms=%s consent_submitted=%s page_path=%s network_failures=%s network_error_codes=%s",
-                value.get("status", ""), value.get("code", ""), value.get("stage", ""),
-                value.get("detail", ""), value.get("elapsed_ms", int((asyncio.get_running_loop().time() - started) * 1000)),
-                value.get("consent_submitted", False), value.get("page_path", ""),
-                value.get("network_failures", 0), value.get("network_error_codes", ""),
-            )
-            return value
+            value = await authorize_device(**req.model_dump(exclude={"proxy", "browser_lease", "task_id"}),
+                                           proxy=_normalize_proxy(req.proxy), browser=browser, diagnostics=diagnostics)
+            return _oauth_device_result(req.task_id, value)
     except BrowserQueueError:
-        log.warning("oauth device result status=failed code=oauth_browser_unavailable stage=browser_claim detail=queue_claim_failed elapsed_ms=%d", int((asyncio.get_running_loop().time() - started) * 1000))
-        return {"status":"failed", "code":"oauth_browser_unavailable"}
-    except TimeoutError:
-        log.warning("oauth device result status=uncertain code=oauth_authorization_timeout stage=worker_timeout detail=worker_deadline elapsed_ms=%d", int((asyncio.get_running_loop().time() - started) * 1000))
-        return {"status":"uncertain", "code":"oauth_worker_result_unknown"}
+        return _oauth_device_result(req.task_id, {"status":"failed", "code":"oauth_browser_unavailable",
+            "stage":"browser_claim", "detail":"queue_claim_failed",
+            "elapsed_ms":int((asyncio.get_running_loop().time() - started) * 1000), **diagnostics.fields()})
+    except TimeoutError as exc:
+        return _oauth_device_result(req.task_id, {
+            "status":"failed" if diagnostics.consent_state == "not_attempted" else "uncertain",
+            "code":"oauth_authorization_timeout", "stage":"worker_timeout", "detail":"worker_deadline",
+            "elapsed_ms":int((asyncio.get_running_loop().time() - started) * 1000), **diagnostics.fields(exc)})
 
 
 def _authorized(authorization: str | None) -> bool:

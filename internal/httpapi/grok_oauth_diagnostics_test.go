@@ -2,11 +2,15 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
 
 	"github.com/auucoder/gptgrok2api-go/internal/browserqueue"
+	"github.com/auucoder/gptgrok2api-go/internal/oauth"
 )
 
 func TestLogGrokOAuthDiagnosticAllowListsWorkerFields(t *testing.T) {
@@ -55,6 +59,64 @@ func TestLogGrokOAuthDiagnosticAllowListsWorkerFields(t *testing.T) {
 	value = output.String()
 	if !strings.Contains(value, "stage=browser_exception") || !strings.Contains(value, "detail=browser_exception") {
 		t.Fatalf("browser exception stage was reduced: %s", value)
+	}
+}
+
+func TestGrokOAuthWorkerDiagnosticPreservesSafeCauseAndSubmissionState(t *testing.T) {
+	old := log.Writer()
+	defer log.SetOutput(old)
+	var output bytes.Buffer
+	log.SetOutput(&output)
+	result := oauth.BrowserDeviceResult{
+		Stage: "page_observation", Status: "uncertain", Code: "oauth_page_observation_failed",
+		Detail: "observation_failed", Operation: "button_enabled", ExceptionType: "navigation",
+		PagePath: "/oauth2/device/consent", ConsentState: "attempted",
+	}
+	logGrokOAuthWorkerDiagnostic("task_test", result)
+	for _, want := range []string{"detail=observation_failed", "operation=button_enabled", "exception_type=navigation", "consent_state=attempted", "consent_submitted=true"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("lost diagnostic %q: %s", want, output.String())
+		}
+	}
+	output.Reset()
+	result.Operation = "SSO-SECRET"
+	result.ExceptionType = "https://accounts.x.ai/?user_code=DEVICE-SECRET"
+	result.ConsentState = "PRIVATE-STATE"
+	result.Detail = "EMAIL-SECRET"
+	logGrokOAuthWorkerDiagnostic("task_test", result)
+	for _, secret := range []string{"SSO-SECRET", "DEVICE-SECRET", "PRIVATE-STATE", "EMAIL-SECRET"} {
+		if strings.Contains(output.String(), secret) {
+			t.Fatalf("worker diagnostic leaked %q", secret)
+		}
+	}
+	for _, want := range []string{"operation=unknown", "exception_type=unknown", "consent_state=unknown"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("missing fallback %q: %s", want, output.String())
+		}
+	}
+}
+
+func TestGrokOAuthGrantDeadlineRetainsBrowserFailure(t *testing.T) {
+	for _, code := range []string{"oauth_worker_result_unknown", "oauth_page_observation_failed", "oauth_consent_click_timeout", "oauth_callback_timeout", "oauth_authorization_timeout"} {
+		outcome := oauth.BrowserDeviceResult{Status: "uncertain", Code: code, ConsentState: "attempted"}
+		for _, deadline := range []error{errors.New("oauth_deadline"), fmt.Errorf("token query: %w", context.DeadlineExceeded)} {
+			if got := grokOAuthGrantError(outcome, deadline); got == nil || got.Error() != code {
+				t.Fatalf("lost original failure %q: %v", code, got)
+			}
+		}
+		for _, failure := range []string{"oauth_cancelled", "oauth_account_changed", "oauth_identity_mismatch", "oauth_storage_failed", "xAI OAuth returned HTTP 403"} {
+			err := errors.New(failure)
+			if got := grokOAuthGrantError(outcome, err); got != err {
+				t.Fatalf("browser error replaced %q: %v", failure, got)
+			}
+		}
+	}
+	for _, outcome := range []oauth.BrowserDeviceResult{
+		{Status: "approved"}, {Status: "uncertain"}, {Status: "uncertain", Code: "SECRET"},
+	} {
+		if got := grokOAuthGrantError(outcome, context.DeadlineExceeded); got.Error() != "oauth_deadline" {
+			t.Fatalf("unexpected deadline fallback: %v", got)
+		}
 	}
 }
 

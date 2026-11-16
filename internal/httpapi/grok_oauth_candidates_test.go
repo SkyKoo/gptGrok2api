@@ -108,3 +108,61 @@ func TestGrokDevicePollAcceptsFrontendSessionID(t *testing.T) {
 		t.Fatal("poll exposes credentials")
 	}
 }
+
+func TestGrokOAuthCandidatesKeepAuthorizationTimeSeparateFromAccountProbes(t *testing.T) {
+	s := New(adminTestConfig(t.TempDir()))
+	const attemptedAt = "2026-11-13T08:10:07Z"
+	for _, item := range []map[string]any{
+		{"id": "failed", "email": "failed@example.test", "status": "active", "oauth_authorization": map[string]any{"status": "failed", "error": "oauth_deadline", "attempted_at": attemptedAt}},
+		{"id": "pending", "email": "pending@example.test", "status": "active"},
+		{"id": "bad-time", "email": "bad@example.test", "status": "active", "oauth_authorization": map[string]any{"status": "failed", "error": "oauth_deadline", "attempted_at": "private-invalid-timestamp"}},
+	} {
+		if _, _, err := s.registerStore.AddAccount(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, update := range []func() error{
+		func() error { return nil },
+		func() error {
+			_, err := s.registerStore.UpdateAccountFields("failed", map[string]any{"media_quota": map[string]any{"remaining": 5}})
+			return err
+		},
+		func() error {
+			_, err := s.registerStore.UpdateRuntime("failed", map[string]any{"status": "active"}, nil, "active", "")
+			return err
+		},
+	} {
+		if err := update(); err != nil {
+			t.Fatal(err)
+		}
+		response := adminRequest(s.Handler(), "GET", "/api/grok/oauth/candidates", nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("candidates: %d %s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "private-invalid-timestamp") {
+			t.Fatal("invalid timestamp was exposed")
+		}
+		var payload struct {
+			Items []struct {
+				ID              string `json:"id"`
+				AuthorizationAt string `json:"oauth_authorization_at"`
+				UpdatedAt       string `json:"updated_at"`
+			}
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range payload.Items {
+			want := ""
+			if item.ID == "failed" {
+				want = attemptedAt
+				if item.UpdatedAt == attemptedAt {
+					t.Fatal("fixture did not distinguish account and authorization clocks")
+				}
+			}
+			if item.AuthorizationAt != want {
+				t.Fatalf("%s authorization time = %q, want %q", item.ID, item.AuthorizationAt, want)
+			}
+		}
+	}
+}
