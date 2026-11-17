@@ -172,7 +172,40 @@ func (s *Server) checkGrokQuality(ctx context.Context, id string, cleanupOnly bo
 	if cleanupOnly {
 		return s.cleanupGrokQualityLocked(ctx, account)
 	}
-	return s.checkGrokQualityLocked(ctx, account)
+	account, err = s.checkGrokQualityLocked(ctx, account)
+	if err != nil || !xaiquality.Passed(account.Quality, time.Now()) || !pendingGrokQualityDelivery(account) {
+		return account, err
+	}
+	// Keep the locks from the probe through delivery so renewal, reauthorization
+	// and manual removal cannot slip between the accepted result and its upload.
+	account, err = s.syncGrokOAuthCPALocked(ctx, account, account.CPASync.PoolID, false)
+	if err != nil && pendingGrokQualityDelivery(account) && (account.CPASync.Status != "failed" || account.CPASync.Error != err.Error()) {
+		// Preflight failures (for example, a deleted CPA connection) happen
+		// before the uploader writes a receipt. Keep them visible on the row.
+		updated, applied, saveErr := s.oauthStore.UpdateIfDelivery(account, func(current *oauth.Account) {
+			cp := *current.CPASync
+			cp.Status, cp.Error = "failed", err.Error()
+			current.CPASync = &cp
+		})
+		if saveErr != nil || !applied {
+			return account, errors.New("CPA 自动交付失败，交付状态未能保存，请刷新后核对")
+		}
+		account = updated
+	}
+	return account, err
+}
+
+func pendingGrokQualityDelivery(account oauth.Account) bool {
+	cp := account.CPASync
+	if cp == nil || cp.PoolID == "" || cp.At > 0 || cp.VerifiedAt > 0 || oauth.CPAManaged(account) || oauth.CPARemovalRequested(account) || account.Status == "disabled" {
+		return false
+	}
+	switch cp.Status {
+	case "pending", "failed", "quality_blocked":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) qualityAuthorizationBusy(email string) bool {

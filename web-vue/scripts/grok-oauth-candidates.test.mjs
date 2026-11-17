@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { filterGrokOAuthCandidates } from '../src/views/accounts/grokOAuthCandidates.ts'
+import { cpaDeliveryHint, cpaSyncError } from '../src/views/accounts/grokOAuthCandidates.ts'
 
 test('pending inventory remains visible with zero OAuth credentials; filters and search are independent', () => {
  const items=[
@@ -169,4 +170,30 @@ test('CPA JSON import uses the real endpoint top-level credential shape and pinn
   assert.equal(payload.expires_in, 3600)
   assert.throws(() => grokOAuthImportPayload({ ...payload, type: 'codex' }, 'cpa-a'), /xAI/)
   assert.throws(() => grokOAuthImportPayload({ ...payload, expired: '2020-01-01T00:00:00Z' }, 'cpa-a'), /已过期/)
+})
+
+test('a passed recheck distinguishes pending delivery from CPA renewal and retains real upload failures', () => {
+  const row = { oauth_account_id: 'one', has_access_token: true, has_refresh_token: true, cpa_sync: { status: 'pending', pool_id: 'original', error: '凭据已刷新，请重新同步' }, quality: { status: 'normal', blocked: false } }
+  assert.equal(cpaStatusText(row), '待交付 CPA')
+  assert.equal(cpaDeliveryHint(row), '检测已通过，待交付 CPA')
+  assert.equal(cpaSyncError(row), '')
+  assert.equal(cpaAction(row), 'sync')
+  const cleared = { ...row, cpa_sync: { ...row.cpa_sync, status: 'quality_blocked', error: '旧检测未通过' } }
+  assert.equal(cpaStatusText(cleared), '待交付 CPA')
+  assert.equal(cpaSyncError(cleared), '')
+  const failed = { ...row, cpa_sync: { ...row.cpa_sync, status: 'failed', error: 'CPA 连接失败' } }
+  assert.equal(cpaStatusText(failed), '同步失败')
+  assert.equal(cpaSyncError(failed), 'CPA 连接失败')
+  assert.equal(cpaDeliveryHint(failed), '')
+  const managed = { ...row, cpa_managed: true }
+  assert.equal(cpaStatusText(managed), '待核对 CPA')
+  assert.equal(cpaAction(managed), 'check')
+  assert.equal(cpaDeliveryHint(managed), '')
+  assert.equal(cpaSyncError(managed), '')
+  const unknown = { ...managed, cpa_sync: { status: 'unknown', error: 'CPA 上传失败 HTTP 500' } }
+  assert.equal(cpaSyncError(unknown), 'CPA 上传失败 HTTP 500')
+  assert.equal(cpaAction(unknown), 'check')
+  const removed = { ...row, cpa_sync: { ...row.cpa_sync, manual_removal: { status: 'removed' } } }
+  assert.equal(cpaDeliveryHint(removed), '')
+  assert.equal(cpaAction(removed), null)
 })

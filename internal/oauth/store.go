@@ -206,7 +206,10 @@ func (s *Store) Delete(ids []string) (int, error) {
 // UpdateProbe records non-secret probe telemetry and optional rotated tokens.
 // The public projection never includes the credential values themselves.
 func (s *Store) UpdateProbe(expected Account, accessToken, refreshToken, idToken string, expiresAt int64, probe map[string]any, lastError string) (Account, bool, error) {
-	return s.UpdateIfCredential(expected, func(item *Account) {
+	if CPAManaged(expected) {
+		return expected, false, errors.New("该 OAuth 已交给 CPA 续期，不能更新本地凭据")
+	}
+	return s.UpdateIfDelivery(expected, func(item *Account) {
 		if strings.TrimSpace(accessToken) != "" {
 			item.AccessToken = strings.TrimSpace(accessToken)
 		}
@@ -219,12 +222,8 @@ func (s *Store) UpdateProbe(expected Account, accessToken, refreshToken, idToken
 		if expiresAt > 0 || !SameCredential(expected, *item) {
 			item.ExpiresAt = expiresAt
 		}
-		if item.CPASync != nil && !SameCredential(expected, *item) {
-			cp := *item.CPASync
-			cp.Status = "pending"
-			cp.Error = "凭据已刷新，请重新同步"
-			item.CPASync = &cp
-		}
+		// No upload has taken place: token renewal must preserve the delivery
+		// failure/quality block, including its original diagnostic.
 		item.Probe = cloneProbe(probe)
 		if quota, ok := probe["quota"].(map[string]any); ok {
 			item.Quota = cloneProbe(quota)

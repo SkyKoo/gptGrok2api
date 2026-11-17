@@ -3,6 +3,7 @@ package oauth
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -61,16 +62,32 @@ func TestOAuthPublicQuotaCompatibilityAndSecretRemoval(t *testing.T) {
 	}
 }
 
-func TestProbeRotationInvalidatesCPASyncWithoutOverwritingNewAuthorization(t *testing.T) {
+func TestProbeRotationPreservesPendingDeliveryWithoutOverwritingNewAuthorization(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "oauth.enc"), "key")
-	before, _ := store.Import(Account{Email: "one@example.test", AccessToken: "old", RefreshToken: "old-refresh", CPASync: &CPASync{Status: "synced", PoolID: "pool"}})
+	before, _ := store.Import(Account{Email: "one@example.test", AccessToken: "old", RefreshToken: "old-refresh", CPASync: &CPASync{Status: "quality_blocked", PoolID: "pool", Error: "检测未通过"}})
 	after, applied, err := store.UpdateProbe(before, "new", "new-refresh", "", 1900000000, map[string]any{"quota": map[string]any{"remaining_percent": 75}}, "")
-	if err != nil || !applied || after.CPASync.Status != "pending" || after.ExpiresAt != 1900000000 || after.Quota["remaining_percent"] != 75 {
-		t.Fatal("probe rotation lost expiry/quota or left CPA synced")
+	if err != nil || !applied || !reflect.DeepEqual(after.CPASync, before.CPASync) || after.ExpiresAt != 1900000000 || after.Quota["remaining_percent"] != 75 {
+		t.Fatal("probe rotation lost expiry/quota or erased the delivery failure")
 	}
 	_, applied, err = store.UpdateProbe(before, "stale", "stale-refresh", "", 1, nil, "")
 	if err != nil || applied {
 		t.Fatal("delayed probe overwrote a newer credential")
+	}
+}
+
+func TestProbeCannotRotateAfterCPAHandoff(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "oauth.enc"), "key")
+	pending, _ := store.Import(Account{Email: "one@example.test", AccessToken: "old", RefreshToken: "old-refresh", CPASync: &CPASync{Status: "pending", PoolID: "pool"}})
+	managed, _, _ := store.UpdateIfDelivery(pending, func(a *Account) { a.CPASync.Status, a.CPASync.Managed = "synced", true })
+	for _, snapshot := range []Account{pending, managed} {
+		_, applied, _ := store.UpdateProbe(snapshot, "new", "new-refresh", "", 1900000000, nil, "")
+		if applied {
+			t.Fatal("a delayed probe changed a CPA-managed credential")
+		}
+	}
+	after, _, _ := store.Get(managed.ID)
+	if !SameCredential(after, managed) || !reflect.DeepEqual(after.CPASync, managed.CPASync) {
+		t.Fatal("handoff state changed")
 	}
 }
 

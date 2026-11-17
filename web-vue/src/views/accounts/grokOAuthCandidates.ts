@@ -116,10 +116,26 @@ export function cpaStatusText(item: GrokOAuthRow) {
     if (item.cpa_sync?.status === 'synced') return '已交付，检测失败待复测'
     return isCPAManaged(item) ? 'CPA 凭据保留，待复测' : '检测失败，暂缓同步'
   }
-  if (item.quality?.blocked || item.cpa_sync?.status === 'quality_blocked') return isCPAManaged(item) ? 'CPA 凭据保留，检测未通过' : '检测未通过，未同步'
+  if (item.quality?.blocked || item.cpa_sync?.status === 'quality_blocked' && item.quality?.status !== 'normal') return isCPAManaged(item) ? 'CPA 凭据保留，检测未通过' : '检测未通过，未同步'
   if (item.job?.stage === 'syncing_cpa' && item.job.status === 'running') return '正在同步'
   if (isCPAManaged(item)) return item.cpa_sync?.status === 'synced' ? '已交付 CPA' : '待核对 CPA'
-  return ({ synced: '已交付 CPA', pending: '待同步', failed: '同步失败', unknown: '待核对 CPA', uploading: '正在同步' } as Record<string, string>)[item.cpa_sync?.status || ''] || '未同步'
+  return ({ synced: '已交付 CPA', pending: '待交付 CPA', quality_blocked: '待交付 CPA', failed: '同步失败', unknown: '待核对 CPA', uploading: '正在同步' } as Record<string, string>)[item.cpa_sync?.status || ''] || '未同步'
+}
+
+function legacyRenewalHint(item: GrokOAuthRow) {
+  return ['凭据已刷新，请重新同步', '凭据已更新，请重新同步'].includes(item.cpa_sync?.error || '')
+}
+
+export function cpaSyncError(item: GrokOAuthRow) {
+  if (cpaRemovalRequested(item) || item.quality?.removal || legacyRenewalHint(item)) return ''
+  if (item.cpa_sync?.status === 'quality_blocked' && item.quality?.status === 'normal' && !item.quality.blocked) return ''
+  return item.cpa_sync?.error || ''
+}
+
+export function cpaDeliveryHint(item: GrokOAuthRow) {
+  if (isCPAManaged(item) || cpaRemovalRequested(item) || !['pending', 'quality_blocked'].includes(item.cpa_sync?.status || '')) return ''
+  if (item.quality?.status === 'normal' && !item.quality.blocked) return '检测已通过，待交付 CPA'
+  return legacyRenewalHint(item) ? '本次授权尚未交付 CPA' : ''
 }
 
 export function cpaAction(item: GrokOAuthRow): 'check' | 'sync' | null {

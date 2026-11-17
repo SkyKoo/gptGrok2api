@@ -24,6 +24,7 @@
               <p v-else-if="isCPAManaged(item) && item.cpa_sync?.status === 'synced'" class="mt-2 text-xs text-muted-foreground">由 CPA 负责续期</p>
               <p v-else-if="item.quality?.blocked" class="mt-2 text-xs text-rose-600">已拦截 CPA 交付</p>
               <p v-else-if="item.quality?.status === 'error'" class="mt-2 text-xs text-amber-600">检测失败，复测通过后再处理交付</p>
+              <p v-else-if="isCPAManaged(item)" class="mt-2 text-xs text-muted-foreground">授权已保存，待核对 CPA</p>
               <p v-else-if="item.has_refresh_token && !running(item)" class="mt-2 text-xs text-muted-foreground">授权已保存，可单独同步</p>
               <p v-if="item.account?.status === 'disabled'" class="mt-2 text-xs text-muted-foreground">CFM OAuth 已禁用</p>
             </td>
@@ -42,8 +43,9 @@
               <p v-else-if="!cpaRemovalRequested(item) && item.quality?.removal?.error" class="mt-2 break-words text-xs text-rose-600">{{ item.quality.removal.error }}</p>
               <p v-if="item.cpa_sync?.status === 'quality_removed' && isCPAManaged(item)" class="mt-2 text-xs text-muted-foreground">重新授权后再复测</p>
               <p v-if="!cpaRemovalRequested(item) && item.quality?.removal && item.quality.removal.status !== 'removed'" class="mt-2 break-all text-xs text-muted-foreground">{{ item.quality.removal.file_name }}</p>
-              <p v-if="item.cpa_sync?.error && (!isCPAManaged(item) || item.cpa_sync.status === 'quality_blocked')" class="mt-2 break-words text-xs text-rose-600">{{ item.cpa_sync.error }}</p>
-              <p v-else-if="!cpaRemovalRequested(item) && isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
+              <p v-if="cpaSyncError(item)" class="mt-2 break-words text-xs text-rose-600">{{ cpaSyncError(item) }}</p>
+              <p v-if="!cpaRemovalRequested(item) && isCPAManaged(item) && !item.quality?.blocked && item.cpa_sync?.status !== 'synced'" class="mt-2 text-xs text-muted-foreground">核对远端交付记录</p>
+              <p v-else-if="cpaDeliveryHint(item)" class="mt-2 text-xs text-muted-foreground">{{ cpaDeliveryHint(item) }}</p>
             </td>
             <td class="py-4 pr-5 text-xs text-muted-foreground"><template v-if="oauthRecordTime(item)"><p>{{ formatGrokAccountDate(oauthRecordTime(item)?.at) }}</p><p class="mt-1">{{ oauthRecordTime(item)?.label }}</p></template><span v-else>暂无</span></td>
             <td class="py-4 pl-4 align-middle text-right">
@@ -83,7 +85,7 @@ import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { formatGrokAccountDate } from './grokAccountView'
-import { canRemoveCPACredential, cpaAction, cpaRemovalRequested, cpaStatusText, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, oauthRecordTime, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
+import { canRemoveCPACredential, cpaAction, cpaDeliveryHint, cpaRemovalRequested, cpaStatusText, cpaSyncError, filterGrokOAuthCandidates, isCPAManaged, oauthProgressText, oauthRecordTime, qualityFailureReason, qualityStatusText, type GrokOAuthRow } from './grokOAuthCandidates'
 
 const props = defineProps<{ items: GrokOAuthRow[]; loading: boolean; busyRows: Record<string, string>; targetSelected: boolean; error: string }>()
 defineEmits<{ authorize: [account: GrokOAuthRow]; cpa: [account: GrokOAuthRow]; device: [account: GrokOAuthRow]; details: [account: GrokOAuthRow]; toggle: [account: GrokOAuthRow]; remove: [account: GrokOAuthRow]; removeCpa: [account: GrokOAuthRow]; quality: [account: GrokOAuthRow]; qualityDetails: [account: GrokOAuthRow]; cleanup: [account: GrokOAuthRow] }>()

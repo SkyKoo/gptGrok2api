@@ -168,6 +168,15 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	if err != nil || !found {
 		return account, errors.New("无法读取 OAuth 凭据")
 	}
+	return s.syncGrokOAuthCPALocked(ctx, account, requestedPool, checkOnly)
+}
+
+// Caller holds both the account action and identity locks, including when a
+// successful quality recheck continues directly into its original CPA delivery.
+func (s *Server) syncGrokOAuthCPALocked(ctx context.Context, account oauth.Account, requestedPool string, checkOnly bool) (oauth.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return account, err
+	}
 	if strings.TrimSpace(account.Email) == "" {
 		return account, errors.New("OAuth 凭据缺少邮箱，无法核对 CPA 账号身份")
 	}
@@ -190,6 +199,9 @@ func (s *Server) syncGrokOAuthCPA(ctx context.Context, id, requestedPool string,
 	}
 	pool, err := s.xaiCPATarget(target)
 	if err != nil {
+		if target != "" {
+			return account, errors.New("本次授权绑定的 CPA 连接不存在，请恢复连接或重新授权选择目标")
+		}
 		return account, errors.New(grokOAuthMessages["oauth_cpa_required"])
 	}
 	name := xaiCPAFileName(account)

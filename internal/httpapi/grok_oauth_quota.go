@@ -70,12 +70,8 @@ func (s *Server) refreshOAuthQuota(ctx context.Context, id string) (oauth.Accoun
 		current.RefreshToken = result.RefreshToken
 		current.IDToken = result.IDToken
 		current.ExpiresAt = result.ExpiresAt
-		if current.CPASync != nil && !oauth.SameCredential(account, *current) {
-			cp := *current.CPASync
-			cp.Status = "pending"
-			cp.Error = "凭据已刷新，请重新同步"
-			current.CPASync = &cp
-		}
+		// Before handoff, renewal does not change whether delivery was blocked
+		// or failed. Preserve that reason instead of claiming a resync is needed.
 	})
 	if err != nil {
 		return account, err
