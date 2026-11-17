@@ -51,12 +51,13 @@ func adobeFreeVideoRequestWithReferences(t *testing.T, fields url.Values, refere
 // Exercise the public contract through parsing, account selection, exact
 // preflight and submission. The upstream is a fixture, never a live generation.
 func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
-	for _, tc := range []struct {
+	type videoOptionCase struct {
 		model, query, size, resolution, aspect string
 		duration                               int
 		audio                                  bool
 		references                             int
-	}{
+	}
+	cases := []videoOptionCase{
 		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4, false, 0},
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false, 0},
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 0},
@@ -70,8 +71,31 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 		{"gemini-omni-flash-1.1", "size=1280x720&seconds=10&generate_audio=true", "1280x720", "720p", "16:9", 10, true, 0},
 		{"gemini-omni-flash-1.2", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 5, true, 0},
 		{"gemini-omni-flash-1.2", "size=1280x720&seconds=8&generate_audio=true", "1280x720", "720p", "16:9", 8, true, 0},
+		{"gemini-omni-flash-1.1", "", "1280x720", "720p", "16:9", 5, true, 0},
+		{"gemini-omni-flash-1.2", "", "1280x720", "720p", "16:9", 5, true, 0},
+		{"ray-3.14", "", "1280x720", "720p", "16:9", 5, false, 0},
+		{"gemini-omni-flash-1.1", "seconds=10&size=1280x720", "1280x720", "720p", "16:9", 10, true, 2},
+		{"gemini-omni-flash-1.2", "seconds=8&size=1280x720", "1280x720", "720p", "16:9", 8, true, 2},
+		{"ray-3.14", "seconds=5&size=1280x720", "1280x720", "720p", "16:9", 5, false, 2},
+	}
+	// These durations were authorized by the 2026-11-17 Free preflight audit
+	// only for landscape 720p without reference frames. Exercise every added
+	// second through the public API so it cannot be rounded or defaulted.
+	for _, measured := range []struct {
+		model     string
+		durations []int
+		audio     bool
+	}{
+		{"gemini-omni-flash-1.1", []int{3, 4, 6, 7, 8, 9}, true},
+		{"gemini-omni-flash-1.2", []int{3, 4, 6, 7}, true},
+		{"ray-3.14", []int{10}, false},
 	} {
-		t.Run(tc.model+"/"+tc.query, func(t *testing.T) {
+		for _, seconds := range measured.durations {
+			cases = append(cases, videoOptionCase{measured.model, fmt.Sprintf("seconds=%d&size=1280x720&resolution_name=720p", seconds), "1280x720", "720p", "16:9", seconds, measured.audio, 0})
+		}
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%s/ref=%d", tc.model, tc.query, tc.references), func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
 			adobeFixtureAccount(t, s)
@@ -98,6 +122,13 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			defer fixture.mu.Unlock()
 			if fixture.preflights != 1 || fixture.submits != 1 || fixture.uploads != tc.references {
 				t.Fatalf("preflight=%d submit=%d upload=%d", fixture.preflights, fixture.submits, fixture.uploads)
+			}
+			preflight := fixture.preflightPayload
+			if preflight["resolution"] != tc.resolution || preflight["duration"] != float64(tc.duration) || mapValue(preflight["generationSettings"])["aspectRatio"] != tc.aspect {
+				t.Fatalf("preflight parameters changed: %+v", preflight)
+			}
+			if tc.model != "ray-3.14" && preflight["generateAudio"] != tc.audio {
+				t.Fatal("preflight audio differs from the resolved request")
 			}
 			p := fixture.payload
 			if p["resolution"] != tc.resolution || p["duration"] != float64(tc.duration) || mapValue(p["generationSettings"])["aspectRatio"] != tc.aspect {
@@ -127,10 +158,11 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 }
 
 func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
-	for _, tc := range []struct {
+	type invalidVideoCase struct {
 		query      string
 		references int
-	}{
+	}
+	cases := []invalidVideoCase{
 		{"model=veo-3.1-fast&generate_audio=true", 0},
 		{"model=veo-3.1-fast&size=720x1280&generate_audio=true", 0},
 		{"model=veo-3.1-fast&size=1080x1920&generate_audio=true", 0},
@@ -155,7 +187,31 @@ func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
 		{"model=gemini-omni-flash-1.1&size=1280x720&seconds=11", 0},
 		{"model=gemini-omni-flash-1.2&size=1280x720&seconds=9", 0},
 		{"model=gemini-omni-flash-1.2&size=720x1280&aspect_ratio=16:9", 1},
+		{"model=gemini-omni-flash-1.1&seconds=1", 0},
+		{"model=gemini-omni-flash-1.1&seconds=2", 0},
+		{"model=gemini-omni-flash-1.2&seconds=1", 0},
+		{"model=gemini-omni-flash-1.2&seconds=2", 0},
+		{"model=gemini-omni-flash-1.1&seconds=3.5", 0},
+		{"model=gemini-omni-flash-1.2&seconds=3.5", 0},
+		{"model=ray-3.14&seconds=7", 0},
+		{"model=ray-3.14&seconds=10.5", 0},
+	}
+	for _, measured := range []struct {
+		model     string
+		durations []int
+	}{
+		{"gemini-omni-flash-1.1", []int{3, 4, 6, 7, 8, 9}},
+		{"gemini-omni-flash-1.2", []int{3, 4, 6, 7}},
+		{"ray-3.14", []int{10}},
 	} {
+		for _, seconds := range measured.durations {
+			cases = append(cases,
+				invalidVideoCase{fmt.Sprintf("model=%s&seconds=%d&size=1280x720", measured.model, seconds), 1},
+				invalidVideoCase{fmt.Sprintf("model=%s&seconds=%d&size=720x1280", measured.model, seconds), 0},
+			)
+		}
+	}
+	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/ref=%d", tc.query, tc.references), func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			adobeFixtureAccount(t, s)

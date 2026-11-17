@@ -18,14 +18,21 @@ const fast = { ...lite, variants:lite.variants.map(variant => ({...variant,audio
 const omni11 = { kind:'video', max_reference_images:2, audio_required:true, default_audio:true, variants:[
   { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[5,10], audio:true, audio_required:true, default_audio:true, max_reference_images:2 },
   { sizes:['720x1280'], aspect_ratios:['9:16'], resolutions:['720p'], durations:[5,10], audio:true, audio_required:true, default_audio:true, max_reference_images:0 },
+  { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[3,4,6,7,8,9], audio:true, audio_required:true, default_audio:true, max_reference_images:0 },
 ] }
 const omni12 = { kind:'video', max_reference_images:2, audio_required:true, default_audio:true, variants:[
   { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[5,8], audio:true, audio_required:true, default_audio:true, max_reference_images:2 },
   { sizes:['720x1280'], aspect_ratios:['9:16'], resolutions:['720p'], durations:[5,8], audio:true, audio_required:true, default_audio:true, max_reference_images:0 },
+  { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[3,4,6,7], audio:true, audio_required:true, default_audio:true, max_reference_images:0 },
+] }
+const ray = { kind:'video', max_reference_images:2, variants:[
+  { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[5], audio:false, max_reference_images:2 },
+  { sizes:['720x1280'], aspect_ratios:['9:16'], resolutions:['720p'], durations:[5], audio:false, max_reference_images:0 },
+  { sizes:['1280x720'], aspect_ratios:['16:9'], resolutions:['720p'], durations:[10], audio:false, max_reference_images:0 },
 ] }
 const ref = new File(['frame'], 'frame.png', {type:'image/png'})
 function catalog(t) {
-  capabilities.setMediaCapabilities({'veo-3.1-lite':lite,'veo-3.1-fast':fast,'gemini-omni-flash-1.1':omni11,'gemini-omni-flash-1.2':omni12})
+  capabilities.setMediaCapabilities({'veo-3.1-lite':lite,'veo-3.1-fast':fast,'gemini-omni-flash-1.1':omni11,'gemini-omni-flash-1.2':omni12,'ray-3.14':ray})
   t.after(()=>capabilities.setMediaCapabilities())
 }
 
@@ -61,6 +68,41 @@ test('Omni portrait keeps required audio and exposes model-specific maximum dura
       assert.throws(()=>buildVideoForm('a paper boat',invalid,[]),/参数组合/)
     }
     assert.throws(()=>buildVideoForm('a paper boat',portrait,[ref]),/参考图/)
+  }
+})
+
+test('audited landscape durations remain exact in submitted forms and exclude untested combinations',t=>{
+  catalog(t)
+  for(const [model,capability,durations,baseline,audio] of [
+    ['gemini-omni-flash-1.1',omni11,[3,4,5,6,7,8,9,10],[5,10],true],
+    ['gemini-omni-flash-1.2',omni12,[3,4,5,6,7,8],[5,8],true],
+    ['ray-3.14',ray,[5,10],[5],false],
+  ]) {
+    const landscape={model,size:'1280x720',resolution:'720p',seconds:5,audio}
+    assert.deepEqual(studioVideoSettingValues(landscape,capability).durations,durations)
+    assert.deepEqual(studioVideoSettingValues({...landscape,size:'720x1280'},capability).durations,baseline)
+    for(const references of [1,2]) assert.deepEqual(studioVideoSettingValues(landscape,capability,references).durations,baseline)
+    assert.equal(normalizeStudioVideoOptions(landscape,capability,'model').seconds,5)
+    for(const seconds of durations) {
+      const selected=normalizeStudioVideoOptions({...landscape,seconds},capability,'seconds')
+      assert.equal(selected.seconds,seconds)
+      const form=buildVideoForm('a paper boat',selected,[])
+      assert.equal(form.get('seconds'),String(seconds))
+      assert.equal(form.get('generate_audio'),String(audio))
+      if(baseline.includes(seconds)) continue
+      assert.equal(studioReferenceLimit('video',model,studioVideoSelection(selected)),0)
+      assert.throws(()=>buildVideoForm('a paper boat',selected,[ref]),/参考图/)
+      assert.throws(()=>buildVideoForm('a paper boat',{...selected,size:'720x1280'},[]),/参数组合/)
+      assert.throws(()=>buildVideoForm('a paper boat',{...selected,resolution:'1080p'},[]),/参数组合/)
+      const portrait=normalizeStudioVideoOptions({...selected,size:'720x1280'},capability,'size')
+      assert.equal(portrait.size,'720x1280');assert.equal(portrait.seconds,5)
+      const withReference=normalizeStudioVideoOptions(selected,capability,undefined,1)
+      assert.equal(withReference.seconds,5)
+      assert.equal(buildVideoForm('a paper boat',withReference,[ref]).getAll('input_reference').length,1)
+    }
+    for(const seconds of [1,2,3.5,9,11].filter(seconds=>!durations.includes(seconds))) {
+      assert.throws(()=>buildVideoForm('a paper boat',{...landscape,seconds},[]),/参数组合/)
+    }
   }
 })
 

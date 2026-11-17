@@ -49,29 +49,50 @@ func TestVeoFreeCombinationsPreserveFrameAndAudioCapabilities(t *testing.T) {
 	}
 }
 
-func TestOmniDurationsExposeFreeMaximums(t *testing.T) {
+func TestVideoDurationsPreserveVerifiedFreeCombinations(t *testing.T) {
 	for _, tc := range []struct {
-		id        string
-		max       int
-		durations []int
+		id    string
+		max   int
+		audio bool
 	}{
-		{"gemini-omni-flash-1.1", 10, []int{5, 10}},
-		{"gemini-omni-flash-1.2", 8, []int{5, 8}},
+		{"gemini-omni-flash-1.1", 10, true},
+		{"gemini-omni-flash-1.2", 8, true},
+		{"ray-3.14", 10, false},
 	} {
-		m, ok := FindModel(tc.id)
-		if !ok || m.Duration != 5 {
-			t.Fatalf("%s default duration = %d, want 5", tc.id, m.Duration)
-		}
-		for _, size := range []struct{ width, height int }{{1280, 720}, {720, 1280}} {
-			for _, duration := range tc.durations {
-				if _, ok := m.MatchVideo(size.width, size.height, duration, "720p", map[bool]string{true: "16:9", false: "9:16"}[size.width == 1280], true, 0); !ok {
-					t.Fatalf("%s rejected %dx%d at %ds", tc.id, size.width, size.height, duration)
+		t.Run(tc.id, func(t *testing.T) {
+			m, ok := FindModel(tc.id)
+			if !ok || m.Duration != 5 {
+				t.Fatalf("default duration = %d, want 5", m.Duration)
+			}
+			for duration := 1; duration <= tc.max+1; duration++ {
+				landscapeAllowed := duration >= 3 && duration <= tc.max
+				legacyAllowed := duration == 5 || duration == tc.max
+				if tc.id == "ray-3.14" {
+					landscapeAllowed = duration == 5 || duration == 10
+					legacyAllowed = duration == 5
+				}
+				if _, ok := m.MatchVideo(1280, 720, duration, "720p", "16:9", tc.audio, 0); ok != landscapeAllowed {
+					t.Errorf("landscape %ds accepted=%t, want %t", duration, ok, landscapeAllowed)
+				}
+				for _, references := range []int{1, 2} {
+					if _, ok := m.MatchVideo(1280, 720, duration, "720p", "16:9", tc.audio, references); ok != legacyAllowed {
+						t.Errorf("landscape %ds with %d references accepted=%t, want %t", duration, references, ok, legacyAllowed)
+					}
+				}
+				if _, ok := m.MatchVideo(720, 1280, duration, "720p", "9:16", tc.audio, 0); ok != legacyAllowed {
+					t.Errorf("portrait %ds accepted=%t, want %t", duration, ok, legacyAllowed)
+				}
+				if _, ok := m.MatchVideo(720, 1280, duration, "720p", "9:16", tc.audio, 1); ok {
+					t.Errorf("portrait %ds inherited reference support", duration)
+				}
+				if _, ok := m.MatchVideo(1280, 720, duration, "720p", "16:9", !tc.audio, 0); ok {
+					t.Errorf("landscape %ds accepted unsupported audio setting", duration)
+				}
+				if _, ok := m.MatchVideo(1920, 1080, duration, "1080p", "16:9", tc.audio, 0); ok {
+					t.Errorf("landscape %ds inherited 1080p support", duration)
 				}
 			}
-		}
-		if _, ok := m.MatchVideo(1280, 720, tc.max+1, "720p", "16:9", true, 0); ok {
-			t.Fatalf("%s accepted duration beyond maximum", tc.id)
-		}
+		})
 	}
 }
 

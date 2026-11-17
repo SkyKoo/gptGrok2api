@@ -1,5 +1,42 @@
 # Adobe integration validation
 
+## 2026-11-17 Free video duration preflight
+
+An existing Free account was checked with 56 requests to the official
+`generation-preflight` endpoint. All candidates used text-to-video without
+references; only `duration` changed within each model's fixed parameter set.
+There were no generation requests, uploads, browser starts or credential refreshes.
+
+| Model | Free-authorized seconds | Other tested seconds |
+| --- | --- | --- |
+| Gemini Omni Flash 1.1 | 3, 4, 5, 6, 7, 8, 9, 10 | 1, 2: HTTP 400 |
+| Gemini Omni Flash 1.2 | 3, 4, 5, 6, 7, 8 | 1, 2: HTTP 400; 9: `user_not_entitled` |
+| Veo 3.1 Lite / Fast | 4, 6, 8 | Other values from 1 through 9: HTTP 400 |
+| Ray 3.14 | 5, 10 | Other values from 1 through 9: HTTP 422 |
+| Firefly Video | 5 | Other values from 1 through 9: HTTP 422 |
+
+Omni used 720p, 16:9 and audio=true; Ray used 1280×720, 720p, 16:9 without
+an audio field. Veo used 1920×1080, 1080p, 16:9 and audio=false; Firefly used
+1920×1080. All 24 HTTP 200 responses echoed the exact requested `videoDuration`,
+including the denied Omni 1.2 / 9-second request. Of these, 23 authorized the
+complimentary Free resource. The shared video pool stayed provisioned=1,
+consumed=0; this does not represent six independent balances.
+
+The 14 authorized Omni responses echoed duration and 720p but omitted the audio
+field. The cached official schema fixes audio to true; it is separate evidence,
+not an audio echo or generated-media check. Omni 1.2's schema allows up to 15
+seconds, but that does not grant Free entitlement to those longer durations.
+
+The catalog therefore adds Omni's intermediate integer seconds and Ray's 10
+seconds only at 720p / 16:9 without references. Existing portrait and reference
+combinations keep their previous duration sets and all three defaults remain 5
+seconds. Preflight and submission use the caller's exact duration. Every actual
+generation still requires a fresh Free preflight for its complete parameters.
+No generated file durations were verified by this audit.
+
+Sanitized requests, response projections, schema excerpts and checksums are in
+the operations repository at `operations/cfm-adobe-duration-audit-20261117/`.
+
 ## Latest local video success (2026-11-12, 10:20–10:21 CST)
 
 The user's Omni Flash 1.2 request returned a real HTTP/2 408 after 492 ms

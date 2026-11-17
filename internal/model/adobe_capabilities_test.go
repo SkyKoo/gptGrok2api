@@ -54,12 +54,15 @@ func TestAdobePublicVideoVariantsPreservePerTierLimits(t *testing.T) {
 		}
 	}
 	ray := MediaCapability("ray-3.14")
-	if ray.Audio || len(ray.Variants) != 2 {
+	if ray.Audio || len(ray.Variants) != 3 || !slices.Equal(ray.Durations, []int{5, 10}) {
 		t.Fatalf("Ray expanded capabilities incorrect: %+v", ray)
 	}
 	for _, v := range ray.Variants {
 		if v.Sizes[0] == "720x1280" && (v.MaxReferenceImages != 0 || !slices.Equal(v.Durations, []int{5}) || !slices.Equal(v.AspectRatios, []string{"9:16"})) {
 			t.Fatalf("Ray portrait tier lost its limits: %+v", v)
+		}
+		if slices.Contains(v.Durations, 10) && (!slices.Equal(v.Sizes, []string{"1280x720"}) || !slices.Equal(v.Resolutions, []string{"720p"}) || !slices.Equal(v.AspectRatios, []string{"16:9"}) || v.MaxReferenceImages != 0 || v.Audio || v.AudioRequired || v.DefaultAudio) {
+			t.Fatalf("Ray 10 seconds leaked beyond its verified combination: %+v", v)
 		}
 	}
 }
@@ -88,32 +91,47 @@ func TestAdobePublicImageVariantsPreserveOfficialSizeContracts(t *testing.T) {
 	}
 }
 
-func TestOmniPublicPortraitVariantKeepsFixedAudioAndReferenceBoundary(t *testing.T) {
+func TestOmniPublicVariantsKeepDurationAudioAndReferenceBoundaries(t *testing.T) {
 	for _, id := range []string{"gemini-omni-flash-1.1", "gemini-omni-flash-1.2"} {
 		cap := MediaCapability(id)
 		wantDurations := []int{5, 8}
+		wantExtraDurations := []int{3, 4, 6, 7}
 		if id == "gemini-omni-flash-1.1" {
 			wantDurations = []int{5, 10}
+			wantExtraDurations = []int{3, 4, 6, 7, 8, 9}
 		}
-		if !cap.Audio || !cap.AudioRequired || !cap.DefaultAudio || len(cap.Variants) != 2 || !slices.Equal(cap.Resolutions, []string{"720p"}) || !slices.Equal(cap.Durations, wantDurations) {
+		allDurations := append(slices.Clone(wantDurations), wantExtraDurations...)
+		slices.Sort(allDurations)
+		publicDurations := slices.Clone(cap.Durations)
+		slices.Sort(publicDurations)
+		if !cap.Audio || !cap.AudioRequired || !cap.DefaultAudio || len(cap.Variants) != 3 || !slices.Equal(cap.Resolutions, []string{"720p"}) || !slices.Equal(publicDurations, allDurations) {
 			t.Fatalf("%s fixed-audio contract changed: %+v", id, cap)
 		}
-		portrait := false
+		portrait, landscape, extraDurations := false, false, false
 		for _, v := range cap.Variants {
-			if !v.Audio || !v.AudioRequired || !v.DefaultAudio || !slices.Equal(v.Resolutions, []string{"720p"}) || !slices.Equal(v.Durations, wantDurations) {
+			if !v.Audio || !v.AudioRequired || !v.DefaultAudio || !slices.Equal(v.Resolutions, []string{"720p"}) {
 				t.Fatalf("%s variant widened audio or output tiers: %+v", id, v)
 			}
 			if slices.Equal(v.Sizes, []string{"720x1280"}) {
 				portrait = true
-				if !slices.Equal(v.AspectRatios, []string{"9:16"}) || v.MaxReferenceImages != 0 {
+				if !slices.Equal(v.AspectRatios, []string{"9:16"}) || v.MaxReferenceImages != 0 || !slices.Equal(v.Durations, wantDurations) {
 					t.Fatalf("%s portrait reference boundary changed: %+v", id, v)
 				}
-			} else if !slices.Equal(v.Sizes, []string{"1280x720"}) || !slices.Equal(v.AspectRatios, []string{"16:9"}) || v.MaxReferenceImages != 2 {
-				t.Fatalf("%s original landscape contract changed: %+v", id, v)
+			} else {
+				if !slices.Equal(v.Sizes, []string{"1280x720"}) || !slices.Equal(v.AspectRatios, []string{"16:9"}) {
+					t.Fatalf("%s landscape contract changed: %+v", id, v)
+				}
+				if v.MaxReferenceImages == 2 && slices.Equal(v.Durations, wantDurations) {
+					landscape = true
+				} else if v.MaxReferenceImages == 0 && slices.Equal(v.Durations, wantExtraDurations) {
+					extraDurations = true
+				} else {
+					t.Fatalf("%s extra durations inherited reference support: %+v", id, v)
+				}
 			}
 		}
-		if !portrait {
-			t.Fatalf("%s missing portrait capability", id)
+		if !portrait || !landscape || !extraDurations {
+			t.Fatalf("%s missing distinct portrait, landscape or extra-duration capability", id)
 		}
 	}
 }

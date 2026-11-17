@@ -29,6 +29,7 @@ type adobeMediaCapture struct {
 	mu                                  sync.Mutex
 	uploads, submits, polls, preflights int
 	payload                             map[string]any
+	preflightPayload                    map[string]any
 	output                              []byte
 	uploadDenied                        bool
 	preflightPaid                       bool
@@ -71,6 +72,7 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Error(err)
 			}
+			f.preflightPayload = request
 			for _, m := range adobe.FreeModels() {
 				if request["modelId"] == m.ModelID && request["modelVersion"] == m.ModelVersion {
 					var response map[string]any

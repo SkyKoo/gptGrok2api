@@ -76,10 +76,14 @@ func FreeModels() []Model {
 			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{5, 10}, Audio: true, AudioRequired: true, DefaultAudio: true},
 			// Portrait passed the free preflight without references; the schema fixes audio on.
 			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", Durations: []int{5, 10}, Audio: true, AudioRequired: true, DefaultAudio: true},
+			// 2026-11-17 Free preflight verified extra seconds only for landscape without references.
+			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Durations: []int{3, 4, 6, 7, 8, 9}, Audio: true, AudioRequired: true, DefaultAudio: true},
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "gemini-omni-flash-1.2", Name: "Gemini Omni Flash 1.2", OwnedBy: "google", ModelID: "gemini-omni", ModelVersion: "omni-flash-1.2", FeatureID: "firefly_3p:external:gemini_omni_flash_1_2", Kind: "video", Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Duration: 5, AudioRequired: true, DefaultAudio: true, Variants: []Variant{
 			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{5, 8}, Audio: true, AudioRequired: true, DefaultAudio: true},
 			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", Durations: []int{5, 8}, Audio: true, AudioRequired: true, DefaultAudio: true},
+			// The same Free preflight denied 9 seconds despite the schema allowing longer output.
+			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Durations: []int{3, 4, 6, 7}, Audio: true, AudioRequired: true, DefaultAudio: true},
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "veo-3.1-fast", Name: "Veo 3.1 Fast", OwnedBy: "google", ModelID: "veo", ModelVersion: "3.1-fast-generate", FeatureID: "firefly_3p:external:veo_3_fast", Kind: "video", Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", Duration: 8, Variants: []Variant{
 			// Fast supports first/last frames but has no audio output.
@@ -92,6 +96,8 @@ func FreeModels() []Model {
 		{ID: "ray-3.14", Name: "Ray 3.14", OwnedBy: "luma", ModelID: "luma", ModelVersion: "3.14-ray", FeatureID: "firefly_3p:external:luma_ray_3_14", Kind: "video", Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Duration: 5, Variants: []Variant{
 			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{5}},
 			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", Durations: []int{5}},
+			// 10 seconds passed Free preflight only in this text-to-video combination.
+			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Durations: []int{10}},
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 10 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 	}
 }
