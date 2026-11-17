@@ -55,6 +55,10 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAPI(w, r) {
 		return
 	}
+	if r.Method == http.MethodGet {
+		s.videoByClientKey(w, r)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 		return
@@ -94,10 +98,14 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	owner := s.authIdentity(r)
+	owner := s.videoOwnerIdentity(r)
 	clientKey := strings.TrimSpace(firstNonEmpty(r.Header.Get("Idempotency-Key"), r.FormValue("client_task_id")))
 	if len(clientKey) > 128 {
 		writeError(w, 400, "idempotency key too long", "invalid_request_error")
+		return
+	}
+	if clientKey != "" && owner == "anonymous" {
+		writeError(w, http.StatusUnauthorized, "authenticated API identity required for video task keys", "authentication_error")
 		return
 	}
 	requestHash := videoRequestFingerprint(modelName, prompt, options.Aspect, options.Resolution, options.Seconds, options.Preset, inputs, options.GenerateAudio)
@@ -118,6 +126,13 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		copy := *previous
 		s.videoMu.Unlock()
 		writeJSON(w, 200, copy)
+		return
+	}
+	// Old releases assigned all legacy keys to anonymous. A retry cannot safely
+	// claim that record, nor may it silently become a second upstream submission.
+	if strings.HasPrefix(owner, "legacy-key:") && clientKey != "" && s.videoJobs["video_"+imageTaskKey("anonymous", clientKey)] != nil {
+		s.videoMu.Unlock()
+		writeError(w, http.StatusConflict, "legacy video task ownership requires review; generation was not resubmitted", "invalid_request_error")
 		return
 	}
 	if s.videoLoadErr != nil {
@@ -146,6 +161,48 @@ func (s *Server) videosCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	writeJSON(w, http.StatusOK, initial)
+}
+
+// videoByClientKey only reads the original caller-scoped job. It never resumes
+// polling or submits generation, including when the POST acknowledgement was lost.
+func (s *Server) videoByClientKey(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()["client_task_id"]
+	if len(values) != 1 || strings.TrimSpace(values[0]) == "" || len(strings.TrimSpace(values[0])) > 128 {
+		writeError(w, http.StatusBadRequest, "one client_task_id of 1..128 bytes is required", "invalid_request_error")
+		return
+	}
+	key := strings.TrimSpace(values[0])
+	owner := s.videoOwnerIdentity(r)
+	if owner == "anonymous" {
+		writeError(w, http.StatusUnauthorized, "authenticated API identity required for video task keys", "authentication_error")
+		return
+	}
+	id := "video_" + imageTaskKey(owner, key)
+	s.videoMu.RLock()
+	job, ok := s.videoJobs[id]
+	var copy videoJob
+	if ok {
+		copy = *job
+	}
+	s.videoMu.RUnlock()
+	if !ok || copy.OwnerID != owner || copy.ClientKey != key {
+		writeError(w, http.StatusNotFound, "video not found", "not_found")
+		return
+	}
+	writeJSON(w, http.StatusOK, &copy)
+}
+
+// Call only after requireAPI. Legacy credentials without a registered identity
+// must not share the anonymous owner; retain stable registered IDs across rotation.
+func (s *Server) videoOwnerIdentity(r *http.Request) string {
+	token := s.auth.APIKey(r)
+	if identity, ok := s.auth.Identity(token); ok && identity.ID != "" {
+		return identity.ID
+	}
+	if token != "" {
+		return fmt.Sprintf("legacy-key:%x", sha256.Sum256([]byte(token)))
+	}
+	return "anonymous"
 }
 
 func (s *Server) runVideoJob(job *videoJob, prompt, aspect, resolution string, seconds int, preset string, inputs []provider.OpenAIImageInput) {
@@ -496,7 +553,7 @@ func (s *Server) videoByID(w http.ResponseWriter, r *http.Request) {
 		copy = *job
 	}
 	s.videoMu.RUnlock()
-	if !ok || (copy.OwnerID != "" && copy.OwnerID != s.authIdentity(r)) {
+	if !ok || (copy.OwnerID != "" && copy.OwnerID != s.videoOwnerIdentity(r)) {
 		writeError(w, http.StatusNotFound, "video not found", "not_found")
 		return
 	}
@@ -515,7 +572,7 @@ func (s *Server) videoContent(w http.ResponseWriter, r *http.Request, id string)
 		path = job.ContentPath
 	}
 	s.videoMu.RUnlock()
-	if !ok || (job.OwnerID != "" && job.OwnerID != s.authIdentity(r)) {
+	if !ok || (job.OwnerID != "" && job.OwnerID != s.videoOwnerIdentity(r)) {
 		writeError(w, http.StatusNotFound, "video not found", "not_found")
 		return
 	}

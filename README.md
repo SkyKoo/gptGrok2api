@@ -194,6 +194,7 @@ Authorization: Bearer <api-key>
 | `POST` | `/v1/chat/completions` | 文本、多模态和工具调用 |
 | `POST` | `/v1/responses` | Responses 兼容接口 |
 | `POST` | `/v1/messages` | Anthropic Messages 兼容接口 |
+| `GET` | `/v1/videos?client_task_id=<原幂等键>` | 提交响应丢失时，只读查找同一调用身份的原视频任务 |
 | `POST` | `/v1/images/generations` | 图片生成 |
 | `POST` | `/v1/images/edits` | 图片编辑和 mask |
 | `POST` | `/api/image-tasks/generations` | 异步图片生成 |
@@ -386,3 +387,20 @@ Adobe 账号注册、账号管理和共享浏览器维护已作为第三渠道�
 共享浏览器服务现在名为 `cfm-browser-worker`，Grok 与 Adobe 共用单会话队列、分别保存资料。
 `CFM_BROWSER_WORKER_URL` 优先于旧 `CFM_GROK_BROWSER_URL`；Compose 保留旧 DNS 别名，源码目录
 仍为 `grok-browser/`。本地依赖、构建与验证均在 Docker 内执行。
+
+
+## 视频提交响应丢失后的查询（2026-11-16）
+
+提交 `POST /v1/videos` 前由客户端保存稳定任务键，并在 `Idempotency-Key` 头或
+`client_task_id` 表单字段中发送。正常取得视频 ID 后继续使用原有 `GET /v1/videos/{id}`。
+如果提交响应丢失，可使用同一 API 身份调用
+`GET /v1/videos?client_task_id=<原任务键>`，返回原任务的相同状态结构。
+查询不会发起生成、恢复轮询或改变任务状态；不同调用身份即使知道相同键也返回 404。
+键长度为 1–128 字节，省略、空值和重复参数返回 400。旧任务未保存键时不能用该入口查找。
+注册密钥沿用稳定身份 ID；无注册身份的历史格式密钥按密钥摘要隔离，轮换此类密钥会改变任务身份。
+匿名调用不支持按键创建或查询任务（401），无键创建和原有按视频 ID 访问的能力保持。
+旧版本保存为 `anonymous` 的任务无法安全归属某个历史格式密钥，不自动认领或删除；
+按键查询返回 404，历史格式密钥重复提交相同旧键返回 409，避免再发生成请求。
+这些旧记录仅沿用既有允许的匿名按 ID 入口或人工处理，不借助本接口扩大访问权限。
+404 只表示本次未找到记录，不能证明上游从未受理；客户端应有界观察原任务并保持未知状态，
+不能因此自动换键重发。此配套改动与 Lumovart 一起本地验证，生产启用前需要先发布 CFM。

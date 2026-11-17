@@ -40,7 +40,9 @@ func seedAdobeRecoveryVideo(t *testing.T, s *Server, stage string, withHandle bo
 
 func waitAdobeVideoIdle(t *testing.T, s *Server, id string) videoJob {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	// Reference tests perform real 1080p resizing and PNG encoding. Race
+	// instrumentation can exceed five seconds; keep a bounded completion wait.
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		s.videoMu.RLock()
 		copy := *s.videoJobs[id]
