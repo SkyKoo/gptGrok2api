@@ -13,10 +13,11 @@ import { creationOutcome } from './creation-outcome.mjs';
 import { StartupProgress } from './startup-progress.mjs';
 import { prepareRegistrationCountry } from './exit-country.mjs';
 import { validateMediaState, prepareRegisteredMedia } from './registration-media.mjs';
+import { acquireProfileCacheLock, cleanClosedProfileCache } from './profile-cache.mjs';
 const output = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 // Browser libraries may log, but stdout is a credential-bearing RPC pipe only.
 console.log = console.info = console.warn = console.error = () => {};
-let store, browser, context, init, closed = false, browserClosed = false, lifecycle = {};
+let store, browser, context, init, refreshLease, closed = false, browserClosed = false, lifecycle = {}, cacheCleanup;
 function safeCode(error) { return /^[a-z][a-z0-9_]{0,79}$/.test(error?.code || '') ? error.code : 'adobe_browser_failed'; }
 async function recordLifecycle(field) {
   lifecycle = { ...lifecycle, [field]: new Date().toISOString() };
@@ -26,15 +27,31 @@ async function recordLifecycle(field) {
 async function closeBrowser() {
   if (browserClosed) return;
   await recordLifecycle('closeStartedAt');
+  const ownedContext = Boolean(browser?.context || context);
   if (browser) await browser.close();
   else if (context) await context.close();
   await recordLifecycle('closeCompletedAt');
   browserClosed = true;
+  // 启动失败但未取得context不能当作浏览器已关闭，也不会触碰旧profile缓存。
+  if (ownedContext) {
+    try {
+      cacheCleanup = store ? await store.cleanClosedBrowserCache()
+        : await cleanClosedProfileCache(path.join(init.profileRoot, init.profile_id), refreshLease.handle);
+    } catch {
+      // 缓存诊断不覆盖注册结果或成功的关闭；未知锁仍由原关闭逻辑拒绝释放。
+      cacheCleanup = { status: 'blocked', code: 'cache_maintenance_failed' };
+    }
+    if (store) {
+      try { await store.save({ lastCacheCleanup: { ...cacheCleanup, at: new Date().toISOString() } }); }
+      catch { cacheCleanup = { ...cacheCleanup, diagnostic_code: 'cache_report_not_saved' }; }
+    }
+  }
 }
 async function close() {
   if (closed) return;
   await closeBrowser();
   if (store) await store.close();
+  if (refreshLease) await refreshLease.release();
   closed = true;
 }
 async function refresh(request){
@@ -47,6 +64,7 @@ async function command(request) {
   if (request.action === 'init') {
     if (init) throw new RegistrationError('session_already_initialized');
     init = request;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(request.profile_id || '')) throw new RegistrationError('invalid_run_id');
     if (!['registration','resume','refresh','media'].includes(request.mode)) throw new RegistrationError('worker_mode_invalid');
     if (request.mode==='media' && (request.require_new===true || request.defer_media===true || request.password)) throw new RegistrationError('media_mode_invalid');
     const startupProgress = new StartupProgress({ emit: progress => output({ id: request.id, event: 'startup_progress', progress }) });
@@ -54,8 +72,11 @@ async function command(request) {
     process.env.ADOBE_BROWSER_BACKEND = 'cloakbrowser';
     process.env.ADOBE_BROWSER_PROXY = request.proxy || '';
     const root = process.env.CFM_ADOBE_PROFILE_ROOT || '/data/adobe';
+    init.profileRoot = root;
     if (request.mode!=='media') {await mkdir(root, {recursive:true, mode:0o700});await chmod(root, 0o700);}
     if (request.mode === 'refresh') {
+      // 刷新同样持已有profile锁，但不能调用store.init而改写注册账本。
+      refreshLease = await acquireProfileCacheLock(path.join(root, request.profile_id));
       const dir = path.join(root, request.profile_id, 'browser');
       context = await startupProgress.run('starting_browser', () => launchPersistentBrowser(dir, {headless:process.env.TURNSTILE_HEADLESS === '1',restoreLastSession:false}));
     } else {
@@ -91,7 +112,7 @@ async function command(request) {
     }
     return {stage:'ready'};
   }
-  if (request.action === 'close') { await close(); return {stage:'closed'}; }
+  if (request.action === 'close') { await close(); return {stage:'closed', ...(cacheCleanup ? {cache_cleanup:cacheCleanup} : {})}; }
   if (!init) throw new RegistrationError('session_not_initialized');
   if (browserClosed) throw new RegistrationError('registration_attempt_ended');
   if (request.action === 'refresh') return refresh(request);

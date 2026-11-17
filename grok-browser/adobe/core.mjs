@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { cleanClosedProfileCache } from './profile-cache.mjs';
 
 const MAX_STATE_BYTES = 1024 * 1024;
 const ADOBE_HOSTS = new Set([
@@ -360,6 +361,13 @@ export class PrivateRunStore {
       state.updatedAt = new Date().toISOString();
       state.submission.outcome = 'unknown';
       return this.#commit(state);
+    });
+  }
+  // 浏览器关闭已成功后调用；串行队列和现有profile锁跨越全部缓存回收。
+  cleanClosedBrowserCache() {
+    return this.#serial(async () => {
+      await this.#assertReady();
+      return cleanClosedProfileCache(this.runDir, this.#lock);
     });
   }
   close() { return this.#serial(() => this.#unlock()); }

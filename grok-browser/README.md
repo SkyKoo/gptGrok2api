@@ -117,6 +117,25 @@ Singleton 锁不属于恢复资料。复制离线 profile 时只能清除复制�
 不得把许可文件提交到 Git。Go 注册恢复日志为 `adobe_registration_tasks.enc.json`，
 其 JSON envelope 中的 `data` 使用 AES-GCM 加密。
 
+Adobe 浏览器在确认关闭后、释放 profile 锁之前，会有界回收 `Cache`、`Code Cache`、
+GPU/shader 等固定缓存目录，避免每次新注册遗留大块网页缓存。重新登录也使用同一互斥锁；
+关闭失败、有活跃进程、锁不明确、软链接或嵌套挂载时跳过清理。清理失败不覆盖原注册结果，
+诊断只保存状态、原因和数量；超时或中断会明确标记部分/未知结果，不声称零删除。
+任务仍按原规则创建新的 profile，不删除历史 profile、`state.json`、Cookies、Local State、
+Preferences、Local/Session Storage、IndexedDB、Sessions、Service Worker 或许可文件。
+
+已有缓存可在 Linux Worker 内使用同一实现检查：
+
+```bash
+docker exec cfm-browser-worker node /app/adobe/profile-cache-cli.mjs --root /data/adobe
+```
+
+默认只读，输出聚合数量和逻辑文件字节数，不输出账号或 profile 标识。显式增加 `--apply`
+才会持锁清理；有阻断、部分或未知结果时返回非零，不能自动重复执行。执行历史缓存维护前
+应暂停新准入并排空浏览器；尤其升级前的旧刷新流程没有 profile 锁，单次进程扫描不能替代
+外层维护保护。不要通过删除 `.lock` 或 Singleton 文件强制绕过。清理后首开页面可能重新下载缓存，
+认证资料仍需按核心备份规则保存。
+
 2026-11-11 本机验证：共享 Worker 镜像由已有浏览器基础镜像构建；对已注册账号的
 离线 profile 副本，通过显式本机代理进行一次成功会话刷新，取得身份匹配的新 Token
 和 IMS Cookie，未进行新注册或生成。该次首页 Sherlock 仅包含 sid/ftr，不能视为

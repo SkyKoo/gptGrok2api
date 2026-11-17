@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, lstat, mkdir, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -13,8 +13,9 @@ import { PrivateRunStore } from './core.mjs';
 // the browser dependency is replaced, so tests never launch Chromium or make
 // registration requests on the developer's host.
 async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=false,uiFailed=false,rejected=false,closeFailed=false,launchFailed=false,countryProbe=false,mediaFailed=false,
-  checkpoint=false,mediaMode=false,missingBrowser=false,checkpointValue}={}) {
-  const root=await mkdtemp(join(tmpdir(),'adobe-worker-rpc-'));
+  checkpoint=false,mediaMode=false,missingBrowser=false,checkpointValue,cacheProbe=false,cacheThrows=false,cacheSaveFails=false,
+  cacheResult={status:'cleaned',code:'cache_removed',files:2,bytes:8,removedFiles:2,removedBytes:8}}={}) {
+  const root=await realpath(await mkdtemp(join(tmpdir(),'adobe-worker-rpc-')));
   const store=new PrivateRunStore(root,'original');
   if(!missing){
     await store.init({email:'fixture@example.test',config:{profile:{country:'US'},password:'fixture-password'}});
@@ -29,10 +30,13 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   const mock=join(root,'mock-browser.mjs'),loader=join(root,'loader.mjs');
   await writeFile(mock,`
     import {RegistrationError} from ${JSON.stringify(new URL('./core.mjs',import.meta.url).href)};
+    import {writeFile} from 'node:fs/promises';
     export class BrowserRegistration {
       constructor(store,options={}){this.store=store;this.startupProgress=options.startupProgress;this.opened=false;this.phase='awaiting_password';}
       async open(options){
         await this.startupProgress.run('starting_browser',async()=>{});
+        if(${launchFailed})throw Object.assign(new Error('PRIVATE browser failure'),{code:'browser_launch_timeout'});
+        if(${cacheProbe})this.context={};
         this.opened=true;
         const state=await this.store.load();
         await this.store.save({testOpenMode:options.resumeOnly,testRequireExistingProfile:options.requireExistingProfile});
@@ -41,6 +45,10 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         else if(${uiFailed}){this.phase='needs_manual';await this.store.setStage('needs_manual','login_ui_not_ready');}
         else if(${countryProbe}){this.phase='awaiting_profile';await this.store.setStage('awaiting_profile');}
         else await this.store.setStage('awaiting_approval');
+        if(${cacheSaveFails}){
+          const save=this.store.save.bind(this.store);
+          this.store.save=patch=>{if(patch.lastCacheCleanup)throw new Error('PRIVATE state failure');return save(patch)};
+        }
       }
       async status(){
         if(!this.opened)throw new Error('browser not opened');
@@ -80,6 +88,7 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
         if(${closeFailed})throw new Error('PRIVATE close failure');
         const state=await this.store.load();
         if(state.creationEvidence)await this.store.save({creationEvidence:{...state.creationEvidence,sealed:true}});
+        if(${cacheProbe})await writeFile(${JSON.stringify(join(root,'closed-marker'))},'closed');
       }
     }
   `,{mode:0o600});
@@ -111,12 +120,17 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   `,{mode:0o600});
   const refreshMock=join(root,'mock-refresh.mjs');
   if(refresh)await writeFile(refreshMock,`
+    import {writeFile} from 'node:fs/promises';
     let owned;
     const fixed=code=>Object.assign(new Error(code),{code});
     export async function launchPersistentBrowser(){
       if(${launchFailed})throw Object.assign(new Error('PRIVATE browser failure'),{code:'browser_launch_timeout'});
       if(owned)throw fixed('test_duplicate_context');
-      owned={phase:'fresh',close:async()=>{owned.phase='closed'}};return owned;
+      owned={phase:'fresh',close:async()=>{
+        if(${closeFailed})throw new Error('PRIVATE close failure');
+        owned.phase='closed';
+        if(${cacheProbe})await writeFile(${JSON.stringify(join(root,'closed-marker'))},'closed');
+      }};return owned;
     }
     export async function refreshSession(context,expected,options){
       if(context!==owned||options.workerMode!==true)throw fixed('test_wrong_context');
@@ -129,7 +143,23 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
       return {email:expected.email,account_id:expected.account_id,profile_id:expected.profile_id,token:'fixture-token',media_session_refreshed:true};
     }
   `,{mode:0o600});
+  const cacheMock=join(root,'mock-profile-cache.mjs');
+  if(cacheProbe)await writeFile(cacheMock,`
+    import assert from 'node:assert/strict';
+    import {readFile,writeFile,lstat} from 'node:fs/promises';
+    import path from 'node:path';
+    export {acquireProfileCacheLock} from ${JSON.stringify(new URL('./profile-cache.mjs',import.meta.url).href)};
+    export async function cleanClosedProfileCache(runDir,handle){
+      assert.equal(await readFile(${JSON.stringify(join(root,'closed-marker'))},'utf8'),'closed');
+      assert.equal((await lstat(path.join(runDir,'.lock'))).ino,(await handle.stat()).ino);
+      await writeFile(${JSON.stringify(join(root,'cleanup-marker'))},'cleaned');
+      if(${cacheThrows})throw new Error('PRIVATE cleanup failure');
+      return ${JSON.stringify(cacheResult)};
+    }
+  `,{mode:0o600});
   await writeFile(loader,`export async function resolve(specifier,context,next){
+    if(${cacheProbe}&&specifier==='./profile-cache.mjs'&&['/core.mjs','/worker-rpc.mjs'].some(suffix=>context.parentURL?.endsWith(suffix)))
+      return {url:${JSON.stringify(pathToFileURL(cacheMock).href)},shortCircuit:true};
     if(${mediaMode}&&specifier==='./browser-runtime.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
       return {url:${JSON.stringify(pathToFileURL(mediaMock).href)},shortCircuit:true};
     if(${mediaMode}&&specifier==='./registration-media.mjs'&&context.parentURL?.endsWith('/worker-rpc.mjs'))
@@ -180,6 +210,73 @@ async function rpcFixture(t,{submitted=false,saved=false,missing=false,refresh=f
   };
   return {initialize,command,exited,journal,startupFrames,root};
 }
+
+test('cache maintenance follows confirmed close and retains the profile lock in registration and refresh',async t=>{
+  for(const refresh of [false,true])await t.test(refresh?'refresh':'registration',async sub=>{
+    const f=await rpcFixture(sub,{refresh,cacheProbe:true});
+    const before=await readFile(join(f.root,'original','state.json'));
+    assert.equal((await f.initialize({mode:refresh?'refresh':'registration'})).ok,true);
+    const response=await f.command({action:'close'});await f.exited;
+    assert.equal(response.ok,true);assert.equal(response.result.cache_cleanup.status,'cleaned');
+    assert.equal(response.result.cache_cleanup.removedBytes,8);
+    assert.equal(await readFile(join(f.root,'cleanup-marker'),'utf8'),'cleaned');
+    await assert.rejects(lstat(join(f.root,'original','.lock')),{code:'ENOENT'});
+    if(refresh)assert.deepEqual(await readFile(join(f.root,'original','state.json')),before);
+    else assert.equal((await f.journal()).lastCacheCleanup.removedFiles,2);
+  });
+});
+
+test('partial cache counts survive diagnostic journal write failure',async t=>{
+  const result={status:'partial',code:'cache_cleanup_budget',files:2,bytes:8,removedFiles:1,removedBytes:3};
+  const f=await rpcFixture(t,{cacheProbe:true,cacheSaveFails:true,cacheResult:result});
+  assert.equal((await f.initialize({mode:'registration'})).ok,true);
+  const response=await f.command({action:'close'});await f.exited;
+  assert.equal(response.ok,true);
+  assert.deepEqual(response.result.cache_cleanup,{...result,diagnostic_code:'cache_report_not_saved'});
+  await assert.rejects(lstat(join(f.root,'original','.lock')),{code:'ENOENT'});
+});
+
+test('cleanup failure does not replace the original registration diagnosis',async t=>{
+  const f=await rpcFixture(t,{cacheProbe:true,cacheThrows:true,uiFailed:true});
+  assert.equal((await f.initialize({mode:'registration'})).ok,true);
+  const result=await f.command({action:'run'});
+  assert.equal(result.ok,true);assert.equal(result.result.code,'login_ui_not_ready');
+  const response=await f.command({action:'close'});await f.exited;
+  assert.equal(response.ok,true);assert.equal(response.result.cache_cleanup.code,'cache_maintenance_failed');
+  assert.doesNotMatch(JSON.stringify(response),/PRIVATE/);
+});
+
+test('close failure never runs cache maintenance or releases the profile lock',async t=>{
+  const f=await rpcFixture(t,{cacheProbe:true,closeFailed:true});
+  assert.equal((await f.initialize({mode:'registration'})).ok,true);
+  const response=await f.command({action:'close'});await f.exited;
+  assert.equal(response.ok,false);assert.equal(response.code,'adobe_browser_failed');
+  assert.equal((await lstat(join(f.root,'original','.lock'))).isFile(),true);
+  await assert.rejects(lstat(join(f.root,'cleanup-marker')),{code:'ENOENT'});
+});
+
+test('failed refresh launch without a context does not clean the old profile',async t=>{
+  const f=await rpcFixture(t,{refresh:true,launchFailed:true,cacheProbe:true});
+  const before=await readFile(join(f.root,'original','state.json'));
+  assert.equal((await f.initialize({mode:'refresh'})).code,'browser_launch_timeout');
+  const response=await f.command({action:'close'});await f.exited;
+  assert.equal(response.ok,true);assert.equal(response.result.cache_cleanup,undefined);
+  await assert.rejects(lstat(join(f.root,'cleanup-marker')),{code:'ENOENT'});
+  assert.deepEqual(await readFile(join(f.root,'original','state.json')),before);
+});
+
+test('refresh refuses a busy profile before launch without modifying registration state',async t=>{
+  const f=await rpcFixture(t,{refresh:true,cacheProbe:true});
+  const before=await readFile(join(f.root,'original','state.json'));
+  await writeFile(join(f.root,'original','.lock'),'other-owner',{mode:0o600});
+  const response=await f.initialize({mode:'refresh'});
+  assert.equal(response.ok,false);assert.equal(response.code,'profile_busy');
+  assert.equal(f.startupFrames.length,0);
+  await f.command({action:'close'});await f.exited;
+  assert.deepEqual(await readFile(join(f.root,'original','state.json')),before);
+  assert.equal(await readFile(join(f.root,'original','.lock'),'utf8'),'other-owner');
+  await assert.rejects(lstat(join(f.root,'cleanup-marker')),{code:'ENOENT'});
+});
 
 test('real RPC persists safe media export failures for both signup and accepted recovery',async t=>{
   for(const mode of ['registration','resume'])await t.test(mode,async sub=>{

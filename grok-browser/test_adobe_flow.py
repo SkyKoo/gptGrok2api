@@ -1,6 +1,7 @@
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, ANY
 from browser_sessions import BrowserQueue, BrowserQueueError, BrowserStartupError, BrowserStartupCleanupPending
 from adobe_flow import AdobeCommandRequest, AdobeProcess, adobe_command, launch_adobe, creation_result
@@ -271,6 +272,47 @@ class AdobeWorkerTests(unittest.IsolatedAsyncioTestCase):
         gate.set(); await asyncio.sleep(.01)
         self.assertEqual(q.available,1)
         await q.shutdown()
+
+    async def test_close_allows_cache_cleanup_after_browser_close_without_forced_kill(self):
+        process = SimpleNamespace(pid=123456789, wait=AsyncMock())
+        handle = AdobeProcess(process)
+        async def close_command(_payload):
+            # 缩放后的耗时超过旧5秒宽限，但应落在浏览器关闭+有界缓存回收的新窗口内。
+            await asyncio.sleep(.14)
+            return {'stage': 'closed', 'cache_cleanup': {'status': 'cleaned'}}
+        handle.command = close_command
+        timeout = asyncio.timeout
+        with patch('adobe_flow.asyncio.timeout', side_effect=lambda seconds: timeout(seconds * .02)), \
+             patch('adobe_flow.os.killpg', side_effect=AssertionError('unexpected forced kill')):
+            await handle.close()
+        process.wait.assert_awaited_once()
+
+    async def test_real_adobe_close_holds_queue_through_cleanup_reply_and_process_exit(self):
+        q = BrowserQueue(close_timeout=.01)
+        cleanup_started, cleanup_done, process_exited = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        process = SimpleNamespace(pid=123456789, wait=AsyncMock(side_effect=process_exited.wait))
+        handle = AdobeProcess(process)
+        async def close_command(_payload):
+            cleanup_started.set()
+            await cleanup_done.wait()
+            return {'stage': 'closed'}
+        handle.command = close_command
+        async def launcher(): return handle
+        q.enqueue('adobe', {}, launcher)
+        try:
+            for _ in range(50):
+                if q.status('adobe')['status'] == 'ready': break
+                await asyncio.sleep(.01)
+            q.claim('adobe')
+            with self.assertRaises(BrowserQueueError): await q.close('adobe')
+            self.assertTrue(cleanup_started.is_set()); self.assertEqual(q.available, 0)
+            cleanup_done.set(); await asyncio.sleep(.01)
+            self.assertEqual(q.available, 0)
+            process_exited.set(); await asyncio.sleep(.02)
+            self.assertEqual(q.available, 1)
+        finally:
+            cleanup_done.set(); process_exited.set()
+            await q.shutdown()
 
     async def test_adobe_command_rejects_grok_handle(self):
         q=BrowserQueue()

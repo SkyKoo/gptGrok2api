@@ -72,7 +72,8 @@ class AdobeProcess:
     async def close(self):
         try:
             if not self.tainted:
-                async with asyncio.timeout(5):
+                # 关闭成功后还需在profile锁内做有界缓存回收；队列仍等到进程退出才释放。
+                async with asyncio.timeout(12):
                     await self.command({"action":"close"})
                     await self.process.wait()
                     return
