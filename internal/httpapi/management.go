@@ -225,6 +225,12 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &request) {
 			return
 		}
+		unlock, available := s.tryGrokOAuthAccountActions(request.IDs)
+		if !available {
+			writeError(w, http.StatusConflict, "所选 OAuth 账号正在执行其他操作，整批未修改，请稍后重试", "conflict")
+			return
+		}
+		defer unlock()
 		count, err := s.oauthStore.SetDisabled(request.IDs, request.Disabled)
 		if err != nil {
 			writeError(w, 500, err.Error(), "server_error")
@@ -238,6 +244,12 @@ func (s *Server) grokOAuth(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &request) {
 			return
 		}
+		unlock, available := s.tryGrokOAuthAccountActions(request.IDs)
+		if !available {
+			writeError(w, http.StatusConflict, "所选 OAuth 账号正在执行其他操作，整批未修改，请稍后重试", "conflict")
+			return
+		}
+		defer unlock()
 		count, err := s.oauthStore.Delete(request.IDs)
 		if err != nil {
 			writeError(w, 500, err.Error(), "server_error")

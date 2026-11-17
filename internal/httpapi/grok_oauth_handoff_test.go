@@ -24,6 +24,7 @@ type xaiTestCPA struct {
 	postContinue chan struct{}
 	qualityMode  string
 	qualityCalls int
+	beforeList   func()
 }
 
 func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
@@ -57,6 +58,9 @@ func installXAITestCPA(t *testing.T, s *Server) *xaiTestCPA {
 			wrong := state.qualityMode == "high_risk" || state.qualityMode == "suspect" && state.qualityCalls == 1
 			json.NewEncoder(w).Encode(map[string]any{"status_code": status, "body": string(qualityFixtureBody(t, []byte(req.Data), wrong))})
 		case r.Method == "GET" && r.URL.Path == "/v0/management/auth-files":
+			if state.beforeList != nil {
+				state.beforeList()
+			}
 			files := []map[string]any{}
 			for name, row := range state.rows {
 				files = append(files, map[string]any{"name": name, "provider": row["type"], "email": row["email"], "auth_index": name})
