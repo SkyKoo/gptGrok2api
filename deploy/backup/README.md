@@ -56,3 +56,10 @@ Adobe 恢复时先核对主任务记录和 adobe_jobs 加密句柄；已提交�
 没有持久化句柄且提交结果未知的账号保留占用，不能根据余额未变化释放并重新生成。
 浏览器 profile 文件恢复到共享 Worker 的 `/data/adobe`，不可让 Grok/Adobe 同时打开同一 profile。
 此分支仅更新备份实现和离线测试，未改动 1Panel 任务或线上备份入口。
+
+## 浏览器运行时范围
+
+`data/browser-worker/adobe/` 只备份经过审查的认证状态；`data/browser-worker/cloakbrowser/` 和 `browser-cache/cloakbrowser/` 是可重建的 Chromium 运行时/缓存，不进入核心快照或日恢复点。采集器会校验前者顶层只包含 `.font_warning_shown`、`.welcome_shown` 和符合 `chromium-<版本>` 的目录，后者只允许普通文件/目录并受大小和文件数上限约束；两者都拒绝符号链接和特殊文件。前者还要求每个版本目录含 `chrome`/`chromedriver`。日备份也不复制运行时目录，不会把运行时文件当成认证目录。
+
+认证状态当前约 8,973 个文件、约 115.8 MiB；核心快照上限为 256 MiB，文件数上限为 16,000。命令/API 单次输出仍限制为 64 MiB，避免把核心快照上限扩大到外部命令和响应。
+

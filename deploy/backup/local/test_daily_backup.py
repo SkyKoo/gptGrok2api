@@ -227,6 +227,19 @@ class DailyTests(unittest.TestCase):
         self.assertTrue((stage / 'service/data/image_tasks').is_dir())
         self.assertTrue((stage / 'service/data/browser-worker/adobe/profile/browser/Default/IndexedDB/empty').is_dir())
 
+    def test_cloakbrowser_runtime_directory_is_preserved_without_inner_members(self):
+        root = self.root / 'cfm'; root.mkdir()
+        runtime = root / 'data/browser-worker/cloakbrowser/chromium-146.0.1'
+        runtime.mkdir(parents=True)
+        (runtime / 'chrome').write_text('chrome')
+        (root / 'data/browser-worker/cloakbrowser/.welcome_shown').write_text('ok')
+        (root / 'data/browser-worker/adobe/profile').mkdir(parents=True)
+        helper = types.SimpleNamespace(TOP=(), DATA_DIRS=set(), browser_profile_paths=lambda path: [])
+        directories = daily.business_directories(helper, root, [])
+        self.assertNotIn('data/browser-worker/cloakbrowser', directories)
+        self.assertNotIn('data/browser-worker/cloakbrowser/.welcome_shown', directories)
+        self.assertNotIn('data/browser-worker/cloakbrowser/chromium-146.0.1', directories)
+
     def test_unresolved_daily_prevents_additional_packages(self):
         backups = self.root / 'backups'; backups.mkdir()
         failed = backups / 'daily-20261113T000000Z'; failed.mkdir()

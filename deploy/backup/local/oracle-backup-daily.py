@@ -199,8 +199,16 @@ def business_directories(core, root, names):
     if browser_worker.exists():
         # The core helper validates provider identities, active locks and auth files.
         core.browser_profile_paths(browser_worker)
-        shallow = [browser_worker, *browser_worker.iterdir()]
+        cache_names = getattr(core, 'BROWSER_REBUILDABLE_DIRS', {'cloakbrowser'})
+        shallow = [browser_worker]
         for provider in browser_worker.iterdir():
+            # Re-creatable Chromium runtime; the core helper validates its
+            # bounded, link-free tree and excludes its files.
+            if provider.name in cache_names:
+                continue
+            require(provider.is_dir() and not provider.is_symlink(),
+                    'invalid browser provider directory')
+            shallow.append(provider)
             for profile in provider.iterdir():
                 shallow.append(profile)
                 browser = profile / 'browser'

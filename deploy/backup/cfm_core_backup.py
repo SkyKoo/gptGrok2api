@@ -7,6 +7,7 @@ site-specific 1Panel job IDs in private server state, never in this repository.
 import argparse
 import datetime as dt
 import fcntl
+import fnmatch
 import gzip
 import hashlib
 import http.client
@@ -15,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import posixpath
+import re
 import shutil
 import socket
 import sqlite3
@@ -32,7 +34,26 @@ REDIS = 'gptgrok2api-redis-1'
 RUN_NAME = 'O-CFM-Core-GoogleDrive'
 UPLOAD_NAME = 'O-CFM-Core-Upload-GoogleDrive'
 MAX_BYTES = 64 * 1024 * 1024
-MAX_FILES = 5000
+MAX_CORE_BYTES = 256 * 1024 ** 2
+MAX_FILES = 16000
+MAX_REBUILDABLE_CACHE_BYTES = 2 * 1024 ** 3
+MAX_REBUILDABLE_CACHE_FILES = 50000
+BROWSER_REBUILDABLE_DIRS = frozenset({'cloakbrowser'})
+BROWSER_CACHE_LAYOUTS = {
+    'worker': {
+        'files': frozenset({'.font_warning_shown', '.welcome_shown'}),
+        'dirs': frozenset(),
+    },
+    'host': {
+        'files': frozenset({
+            '.font_warning_shown', '.last_pro_version_check_linux-arm64',
+            '.last_pro_version_resolution_linux-arm64', '.license_cache',
+            '.welcome_shown', 'install_id', 'latest_pro_version_linux-arm64',
+            'license.key',
+        }),
+        'dirs': frozenset({'denials'}),
+    },
+}
 TOP = ('.env', 'compose.yaml', 'current.json', 'access.json', 'slot-blue.json',
        'slot-green.json', 'secrets')
 DATA_DIRS = {'image_tasks', 'video_tasks', 'grok_media_reviews', 'adobe_jobs'}
@@ -114,15 +135,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def google(url, token=None, body=None):
+def google(url, token=None, body=None, limit=MAX_BYTES):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     request = urllib.request.Request(url, headers=headers,
                                     data=json.dumps(body).encode() if body else None)
     with urllib.request.build_opener(NoRedirect).open(request, timeout=45) as response:
-        raw = response.read(MAX_BYTES + 1)
-    require(len(raw) <= MAX_BYTES, 'cloud response exceeds size limit')
+        raw = response.read(limit + 1)
+    require(len(raw) <= limit, 'cloud response exceeds size limit')
     return raw
 
 
@@ -162,13 +183,62 @@ def signature(path):
             info.st_mode, info.st_uid, info.st_gid)
 
 
+def validate_rebuildable_cache(root, layout):
+    """Validate an excluded browser runtime/cache without copying it."""
+    require(layout in BROWSER_CACHE_LAYOUTS, 'unknown browser runtime cache layout')
+    require(root.is_dir() and not root.is_symlink(),
+            'linked or invalid browser runtime cache')
+    allowed = BROWSER_CACHE_LAYOUTS[layout]
+    total = files = 0
+    for path in [root, *sorted(root.rglob('*'))]:
+        info = path.lstat()
+        require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),
+                'special file in browser runtime cache')
+        if path.parent == root:
+            if path.name in allowed['files']:
+                require(stat.S_ISREG(info.st_mode),
+                        'browser runtime cache marker has invalid type')
+            elif path.name in allowed['dirs'] or fnmatch.fnmatchcase(path.name, 'chromium-*'):
+                require(stat.S_ISDIR(info.st_mode),
+                        'browser runtime cache directory has invalid type')
+            else:
+                raise BackupError('unknown browser runtime cache member')
+        if stat.S_ISREG(info.st_mode):
+            files += 1
+            total += info.st_size
+            require(total <= MAX_REBUILDABLE_CACHE_BYTES,
+                    'browser runtime cache exceeds capacity bound')
+            require(files <= MAX_REBUILDABLE_CACHE_FILES,
+                    'browser runtime cache has too many files')
+
+def validate_cloakbrowser_runtime(provider):
+    """Validate the bundled browser runtime without copying it into backups."""
+    validate_rebuildable_cache(provider, 'worker')
+    versions = []
+    for child in sorted(provider.iterdir()):
+        if child.name in BROWSER_CACHE_LAYOUTS['worker']['files']:
+            continue
+        require(child.is_dir() and not child.is_symlink()
+                and re.fullmatch(r'chromium-[A-Za-z0-9._-]+', child.name),
+                'unknown cloakbrowser runtime entry')
+        versions.append(child)
+        for name in ('chrome', 'chromedriver'):
+            binary = child / name
+            require(binary.is_file() and not binary.is_symlink(),
+                    'cloakbrowser runtime binary missing')
+    require(versions, 'cloakbrowser runtime version missing')
+
+
 def browser_profile_paths(root):
-    """Include authentication storage; exclude caches, history and live locks."""
+    """Include authentication storage; exclude runtime, caches, history and locks."""
     paths = []
     if not root.exists():
         return paths
     require(not root.is_symlink(), 'linked browser worker storage')
     for provider in sorted(root.iterdir()):
+        if provider.name in BROWSER_REBUILDABLE_DIRS:
+            validate_cloakbrowser_runtime(provider)
+            continue
         require(provider.name == 'adobe' and provider.is_dir() and not provider.is_symlink(),
                 'unknown browser worker state needs scope review')
         for profile in sorted(provider.iterdir()):
@@ -205,6 +275,12 @@ def browser_profile_paths(root):
 
 def source_paths(root):
     require(not (root / 'data/cfm-maintenance').exists(), 'CFM is under maintenance')
+    browser_cache_root = root / 'browser-cache'
+    require(not browser_cache_root.is_symlink(), 'linked browser runtime cache root')
+    browser_cache = browser_cache_root / 'cloakbrowser'
+    require(not browser_cache.is_symlink(), 'linked browser runtime cache')
+    if browser_cache.exists():
+        validate_rebuildable_cache(browser_cache, 'host')
     paths = []
     for name in TOP:
         path = root / name
@@ -248,7 +324,7 @@ def capture(root):
         if path.suffix == '.json':
             json.loads(raw)
         total += len(raw)
-        require(total < MAX_BYTES, 'source total exceeds limit')
+        require(total < MAX_CORE_BYTES, 'source total exceeds limit')
         contents[relative] = raw
         stamps[relative] = before
         manifest[relative] = {'bytes': len(raw), 'sha256': digest(raw),
@@ -326,7 +402,7 @@ def snapshot():
             for name in ('database/postgres.dump', 'database/postgres-globals.sql', 'database/redis.rdb'):
                 manifest[name] = {'bytes': len(contents[name]), 'sha256': digest(contents[name]),
                                   'mode': 0o600, 'uid': 0, 'gid': 0}
-            require(sum(len(raw) for raw in contents.values()) < MAX_BYTES, 'snapshot exceeds total limit')
+            require(sum(len(raw) for raw in contents.values()) < MAX_CORE_BYTES, 'snapshot exceeds total limit')
             receipt = {'schema': 1, 'started_at': started, 'finished_at': now(), 'attempt': attempt,
                        'source_commit': json.loads(contents['current.json'])['commit'],
                        'files': manifest, 'postgres': before_db,
@@ -359,7 +435,7 @@ def write_stage(contents, manifest):
 
 
 def verify_tar(raw, contents, receipt):
-    require(len(raw) < MAX_BYTES, 'tar exceeds bound')
+    require(len(raw) < MAX_CORE_BYTES, 'tar exceeds bound')
     recovered = {}
     with tarfile.open(fileobj=io.BytesIO(raw), mode='r:') as archive:
         for member in archive:
@@ -369,7 +445,8 @@ def verify_tar(raw, contents, receipt):
                 continue
             require(member.isfile() and path.parts[0] == 'cfm-core', 'unexpected archive member type/root')
             name = str(Path(*path.parts[1:]))
-            require(name in contents and name not in recovered and member.size <= MAX_BYTES, 'unexpected or duplicate member')
+            require(name in contents and name not in recovered and member.size <= MAX_CORE_BYTES,
+                    'unexpected or duplicate member')
             content = archive.extractfile(member).read()
             require(content == contents[name], 'cloud content does not match staged snapshot')
             item = receipt['files'].get(name, {'mode': 0o600, 'uid': 0, 'gid': 0})
@@ -384,8 +461,9 @@ def verify_cloud(backup, secret, contents, receipt):
     token, prefix, quota = cloud_session()
     path = posixpath.join(prefix.strip('/'), backup['file_dir'], backup['file_name'])
     meta = cloud_file(token, path)
-    require(int(meta['size']) <= MAX_BYTES, 'cloud backup exceeds bound')
-    encrypted = google('https://www.googleapis.com/drive/v3/files/' + meta['id'] + '?alt=media', token)
+    require(int(meta['size']) <= MAX_CORE_BYTES, 'cloud backup exceeds bound')
+    encrypted = google('https://www.googleapis.com/drive/v3/files/' + meta['id'] + '?alt=media',
+                       token, limit=MAX_CORE_BYTES)
     require(encrypted.startswith(b'Salted__') and len(encrypted) == int(meta['size']) and
             hashlib.md5(encrypted).hexdigest() == meta['md5Checksum'], 'encrypted cloud checksum mismatch')
     env = dict(os.environ, OGG_CFM_SECRET=secret)
@@ -393,8 +471,9 @@ def verify_cloud(backup, secret, contents, receipt):
                                input=encrypted, capture_output=True, env=env, timeout=30)
     require(decrypted.returncode == 0, 'cloud decryption failed')
     with gzip.GzipFile(fileobj=io.BytesIO(decrypted.stdout)) as archive:
-        plain = archive.read(MAX_BYTES + 1)
-        require(len(plain) <= MAX_BYTES and not archive.read(1), 'expanded archive exceeds bound')
+        plain = archive.read(MAX_CORE_BYTES + 1)
+        require(len(plain) <= MAX_CORE_BYTES and not archive.read(1),
+                'expanded archive exceeds bound')
     recovered = verify_tar(plain, contents, receipt)
     pg_command('exec pg_restore --file=/dev/null', recovered['database/postgres.dump'])
     return {'cloud_bytes': len(encrypted), 'fourteen_copies_estimate_bytes': len(encrypted) * 14,

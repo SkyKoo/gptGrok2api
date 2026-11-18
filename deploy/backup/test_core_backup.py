@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+import shutil
 import unittest
 from unittest.mock import patch
 
@@ -70,6 +71,31 @@ class BackupTests(unittest.TestCase):
         self.assertFalse(any('/Cache/' in name or name.endswith('/LOCK') for name in contents))
         (profile / '.lock').touch()
         with self.assertRaisesRegex(b.BackupError, 'active'):
+            b.capture(root)
+
+    def test_cloakbrowser_runtime_is_validated_but_excluded(self):
+        root = self.fixture()
+        runtime = root / 'data/browser-worker/cloakbrowser/chromium-146.0.1'
+        runtime.mkdir(parents=True)
+        (runtime / 'chrome').write_text('chrome')
+        (runtime / 'chromedriver').write_text('driver')
+        (runtime.parent / '.welcome_shown').write_text('ok')
+        cache = root / 'browser-cache/cloakbrowser/chromium-146.0.1'
+        cache.mkdir(parents=True)
+        (cache / 'chrome').write_text('chrome')
+        contents, _, _ = b.capture(root)
+        self.assertFalse(any(name.startswith('data/browser-worker/cloakbrowser/')
+                             for name in contents))
+        self.assertFalse(any(name.startswith('browser-cache/') for name in contents))
+        (runtime.parent / 'unexpected-state').write_text('must reject')
+        with self.assertRaisesRegex(b.BackupError, 'runtime (entry|cache member)'):
+            b.capture(root)
+        (runtime.parent / 'unexpected-state').unlink()
+        cache = root / 'browser-cache/cloakbrowser'
+        shutil.rmtree(cache.parent)
+        cache.parent.mkdir(parents=True)
+        cache.symlink_to(runtime.parent)
+        with self.assertRaisesRegex(b.BackupError, 'linked browser runtime cache'):
             b.capture(root)
 
     def test_unknown_directory_rejected(self):
