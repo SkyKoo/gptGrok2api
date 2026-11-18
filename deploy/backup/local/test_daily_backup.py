@@ -21,6 +21,9 @@ class DailyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
+        self.sleeper = mock.patch.object(daily.time, 'sleep')
+        self.sleeper.start()
+        self.addCleanup(self.sleeper.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -135,7 +138,7 @@ class DailyTests(unittest.TestCase):
                            'mode': 0o600, 'uid': info.st_uid, 'gid': info.st_gid}
                      for name, content in contents.items()}
             return contents, {'files': files}
-        helper = types.SimpleNamespace(source_paths=lambda source: [account], snapshot=snapshot,
+        helper = types.SimpleNamespace(source_paths=lambda source: [account], snapshot_once=snapshot, SnapshotChanged=daily.SnapshotChanged,
                                        TOP=(), DATA_DIRS={'image_tasks'})
         work = self.root / 'work'; work.mkdir()
         return root, account, media, helper, work
@@ -156,31 +159,32 @@ class DailyTests(unittest.TestCase):
 
     def test_media_change_during_core_snapshot_rejected_even_with_mtime_restored(self):
         root, account, media, helper, work = self.core_fixture()
-        snapshot = helper.snapshot
+        snapshot = helper.snapshot_once
         before = media.stat()
         def changed_media():
             media.write_bytes(b'modified media')
             os.utime(media, ns=(before.st_atime_ns, before.st_mtime_ns))
             return snapshot()
-        helper.snapshot = changed_media
+        helper.snapshot_once = changed_media
         with mock.patch.object(daily, 'ROOT', root):
-            with self.assertRaisesRegex(daily.Refused, 'media changed around'):
+            with self.assertRaisesRegex(daily.SnapshotChanged, 'bounded retries'):
                 daily.capture_cfm(helper, work)
 
     def test_empty_directory_permission_change_inside_core_window_rejected(self):
         root, account, media, helper, work = self.core_fixture()
-        snapshot = helper.snapshot
+        snapshot = helper.snapshot_once
         def changed_directory():
-            (root / 'data/image_tasks').chmod(0o711)
+            directory = root / 'data/image_tasks'
+            directory.chmod(0o711 if directory.stat().st_mode & 0o777 != 0o711 else 0o750)
             return snapshot()
-        helper.snapshot = changed_directory
+        helper.snapshot_once = changed_directory
         with mock.patch.object(daily, 'ROOT', root):
-            with self.assertRaisesRegex(daily.Refused, 'business directories changed'):
+            with self.assertRaisesRegex(daily.SnapshotChanged, 'bounded retries'):
                 daily.capture_cfm(helper, work)
 
     def test_account_atomic_replacement_inside_core_window_rejected(self):
         root, account, media, helper, work = self.core_fixture()
-        snapshot = helper.snapshot
+        snapshot = helper.snapshot_once
         # An old fixed directory timestamp makes the atomic rename observable
         # even on filesystems with a coarse timestamp resolution.
         os.utime(root / 'data', ns=(1700000000000000000, 1700000000000000000))
@@ -189,20 +193,20 @@ class DailyTests(unittest.TestCase):
             replacement.write_bytes(b'{"version":2}')
             os.replace(replacement, account)
             return snapshot()
-        helper.snapshot = replaced_account
+        helper.snapshot_once = replaced_account
         with mock.patch.object(daily, 'ROOT', root):
-            with self.assertRaisesRegex(daily.Refused, 'business directories changed'):
+            with self.assertRaisesRegex(daily.SnapshotChanged, 'bounded retries'):
                 daily.capture_cfm(helper, work)
 
     def test_media_addition_inside_core_window_rejected(self):
         root, account, media, helper, work = self.core_fixture()
-        snapshot = helper.snapshot
+        snapshot = helper.snapshot_once
         def added_media():
-            (root / 'data/files/new.bin').write_bytes(b'new media')
+            (root / 'data/files' / f'new-{len(list((root / "data/files").iterdir()))}.bin').write_bytes(b'new media')
             return snapshot()
-        helper.snapshot = added_media
+        helper.snapshot_once = added_media
         with mock.patch.object(daily, 'ROOT', root):
-            with self.assertRaisesRegex(daily.Refused, 'media changed around'):
+            with self.assertRaisesRegex(daily.SnapshotChanged, 'bounded retries'):
                 daily.capture_cfm(helper, work)
 
     def test_original_core_helper_rejects_changes_inside_its_snapshot(self):
@@ -223,9 +227,72 @@ class DailyTests(unittest.TestCase):
              mock.patch.object(core, 'pg_command', return_value=b'PGDMPx'), \
              mock.patch.object(core, 'redis_snapshot', return_value=b'REDISx'), \
              mock.patch.object(core.time, 'sleep'), contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(core.BackupError):
+            with self.assertRaises(daily.SnapshotChanged):
                 daily.capture_cfm(core, work)
         self.assertEqual(len(captured), 6)
+
+    def test_retry_rebuilds_media_and_directory_baselines_after_atomic_write(self):
+        root, account, media, helper, work = self.core_fixture()
+        snapshot = helper.snapshot_once
+        attempts = []
+        def first_changed_then_stable():
+            attempts.append(True)
+            if len(attempts) == 1:
+                replacement = account.with_name('accounts.new')
+                replacement.write_bytes(b'{"version":2}')
+                os.replace(replacement, account)
+                media.write_bytes(b'new media')
+                (root / 'data/image_tasks').chmod(0o711)
+            return snapshot()
+        helper.snapshot_once = first_changed_then_stable
+        sentinel = work / 'keep'; sentinel.write_bytes(b'untouched')
+        with mock.patch.object(daily, 'ROOT', root):
+            stage, _, scope = daily.capture_cfm(helper, work)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(scope['capture_attempt'], 2)
+        self.assertEqual((stage / 'service/data/accounts.json').read_bytes(), b'{"version":2}')
+        self.assertEqual((stage / 'service/data/files/image.bin').read_bytes(), b'new media')
+        self.assertEqual((stage / 'service/data/image_tasks').stat().st_mode & 0o777, 0o711)
+        self.assertEqual(sentinel.read_bytes(), b'untouched')
+
+    def test_selected_media_disappearance_retries_whole_copy(self):
+        root, account, media, helper, work = self.core_fixture()
+        original_entry = daily.entry
+        removed = []
+        def disappear(path):
+            if path == media and not removed:
+                removed.append(True)
+                media.unlink()
+            return original_entry(path)
+        with mock.patch.object(daily, 'ROOT', root), mock.patch.object(daily, 'entry', side_effect=disappear):
+            stage, _, scope = daily.capture_cfm(helper, work)
+        self.assertEqual(scope['capture_attempt'], 2)
+        self.assertFalse((stage / 'service/data/files/image.bin').exists())
+        self.assertTrue((stage / 'service/data/files').is_dir())
+
+    def test_hard_core_error_and_unknown_scope_are_not_retried(self):
+        root, account, media, helper, work = self.core_fixture()
+        helper.snapshot_once = mock.Mock(side_effect=daily.Refused('unknown data scope'))
+        with mock.patch.object(daily, 'ROOT', root):
+            with self.assertRaisesRegex(daily.Refused, 'unknown data scope'):
+                daily.capture_cfm(helper, work)
+        self.assertEqual(helper.snapshot_once.call_count, 1)
+
+    def test_atomic_replacement_during_entry_is_typed_and_symlink_is_hard(self):
+        path = self.root / 'data'; path.write_bytes(b'old')
+        replacement = self.root / 'replacement'; replacement.write_bytes(b'new')
+        original_open = daily.os.open
+        def replace_before_open(name, flags, *args):
+            if name == path:
+                os.replace(replacement, path)
+            return original_open(name, flags, *args)
+        with mock.patch.object(daily.os, 'open', side_effect=replace_before_open):
+            with self.assertRaises(daily.SnapshotChanged):
+                daily.entry(path)
+        path.unlink(); path.symlink_to(self.root / 'missing')
+        with self.assertRaises(daily.Refused) as error:
+            daily.entry(path)
+        self.assertNotIsInstance(error.exception, daily.SnapshotChanged)
 
     def test_empty_business_and_auth_directories_preserved(self):
         root = self.root / 'cfm'; root.mkdir()
@@ -315,6 +382,7 @@ class DailyTests(unittest.TestCase):
         backups = self.root / 'backups'; backups.mkdir()
         failed = backups / 'daily-20261113T000000Z'; failed.mkdir()
         (failed / 'failed.json').write_text('{}')
+        (failed / 'failed.json').chmod(0o600)
         with self.assertRaisesRegex(daily.Refused, 'unresolved'):
             daily.ensure_no_unresolved(backups)
         (failed / 'complete').write_text('{}')

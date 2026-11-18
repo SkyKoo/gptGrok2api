@@ -11,6 +11,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -88,6 +89,12 @@ def make_catalog(destination, logfile):
     return json.loads(destination.read_text())
 
 
+def daily_retry_status():
+    spec = importlib.util.spec_from_file_location('maintenance_daily', CODE / 'oracle-backup-daily.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module.retry_status()
+
+
 def run(execute=False, force=False):
     now = dt.datetime.now(TZ)
     state_path = BASE / 'state.json'
@@ -108,6 +115,9 @@ def run(execute=False, force=False):
     if execute and due:
         for service in SERVICES:
             if not covered_today(catalog, service, now.date()):
+                deferred = daily_retry_status()
+                if deferred:
+                    return dict(deferred, run=str(run_dir))
                 command('oracle-backup-daily.py', ['--dependency-config', CODE / 'dependencies.json', '--execute'],
                         run_dir / (service + '-daily.log'))
         catalog_path = run_dir / 'catalog-ready.json'

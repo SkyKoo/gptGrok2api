@@ -65,6 +65,10 @@ class BackupError(RuntimeError):
     pass
 
 
+class SnapshotChanged(BackupError):
+    """A known source changed during collection; retry the complete window."""
+
+
 def require(condition, message):
     if not condition:
         raise BackupError(message)
@@ -175,23 +179,94 @@ def cloud_file(token, full_path):
     return item
 
 
-def signature(path):
-    info = path.lstat()
+def file_signature(info):
     require(stat.S_ISREG(info.st_mode), 'non-regular source file')
     require(info.st_size <= 16 * 1024 ** 2, 'source file exceeds size bound')
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
             info.st_mode, info.st_uid, info.st_gid)
 
 
+def signature(path):
+    return file_signature(path.lstat())
+
+
+def read_stable_file(path, *, selected=False):
+    """Read a bounded regular file and detect replacement, deletion or writes."""
+    try:
+        before = signature(path)
+    except FileNotFoundError:
+        if selected:
+            raise SnapshotChanged('source disappeared after selection') from None
+        raise
+    try:
+        # A replacement must not turn the read into a symlink traversal or a
+        # blocking special-file read. Those remain fatal validation failures.
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, 'rb') as handle:
+            if file_signature(os.fstat(handle.fileno())) != before:
+                raise SnapshotChanged('source changed before read')
+            raw = handle.read(16 * 1024 ** 2 + 1)
+            require(len(raw) <= 16 * 1024 ** 2, 'source file exceeds size bound')
+            after_open = file_signature(os.fstat(handle.fileno()))
+        after_path = signature(path)
+    except FileNotFoundError:
+        raise SnapshotChanged('source disappeared during read') from None
+    if after_open != before or after_path != before:
+        raise SnapshotChanged('source changed during read')
+    return raw, before
+
+
+def selected_stat(path):
+    """Inspect a previously observed member, distinguishing deletion from I/O errors."""
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        raise SnapshotChanged('selected source disappeared during enumeration') from None
+
+
+def selected_children(path, *, expected=None):
+    try:
+        before = selected_stat(path)
+        require(stat.S_ISDIR(before.st_mode), 'linked or invalid source directory')
+        identity = (before.st_dev, before.st_ino)
+        if expected is not None and identity != (expected.st_dev, expected.st_ino):
+            raise SnapshotChanged('source directory replaced during enumeration')
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != identity:
+                raise SnapshotChanged('source directory replaced before enumeration')
+            names = os.listdir(descriptor)
+            after = selected_stat(path)
+            require(stat.S_ISDIR(after.st_mode), 'linked or invalid source directory')
+            if (after.st_dev, after.st_ino) != identity:
+                raise SnapshotChanged('source directory replaced during enumeration')
+            return sorted(path / name for name in names)
+        finally:
+            os.close(descriptor)
+    except FileNotFoundError:
+        raise SnapshotChanged('selected directory disappeared during enumeration') from None
+
+
+def selected_tree(root, *, expected=None):
+    # pathlib.rglob can silently skip a directory removed during traversal.
+    # Walk observed children explicitly and never descend through a symlink.
+    for child in selected_children(root, expected=expected):
+        info = selected_stat(child)
+        yield child, info
+        if stat.S_ISDIR(info.st_mode):
+            yield from selected_tree(child, expected=info)
+
+
 def validate_rebuildable_cache(root, layout):
     """Validate an excluded browser runtime/cache without copying it."""
     require(layout in BROWSER_CACHE_LAYOUTS, 'unknown browser runtime cache layout')
-    require(root.is_dir() and not root.is_symlink(),
+    root_info = selected_stat(root)
+    require(stat.S_ISDIR(root_info.st_mode),
             'linked or invalid browser runtime cache')
     allowed = BROWSER_CACHE_LAYOUTS[layout]
     total = files = 0
-    for path in [root, *sorted(root.rglob('*'))]:
-        info = path.lstat()
+    for path, info in [(root, root_info), *selected_tree(root)]:
         require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),
                 'special file in browser runtime cache')
         if path.parent == root:
@@ -215,10 +290,11 @@ def validate_cloakbrowser_runtime(provider):
     """Validate the bundled browser runtime without copying it into backups."""
     validate_rebuildable_cache(provider, 'worker')
     versions = []
-    for child in sorted(provider.iterdir()):
+    for child in selected_children(provider):
+        info = selected_stat(child)
         if child.name in BROWSER_CACHE_LAYOUTS['worker']['files']:
             continue
-        require(child.is_dir() and not child.is_symlink()
+        require(stat.S_ISDIR(info.st_mode)
                 and re.fullmatch(r'chromium-[A-Za-z0-9._-]+', child.name),
                 'unknown cloakbrowser runtime entry')
         versions.append(child)
@@ -229,29 +305,46 @@ def validate_cloakbrowser_runtime(provider):
     require(versions, 'cloakbrowser runtime version missing')
 
 
-def browser_profile_paths(root):
+def require_profile_unlocked(profile, info):
+    try:
+        lock = (profile / '.lock').lstat()
+    except FileNotFoundError:
+        return
+    # Both the worker and profile-cache helper create a private regular lock
+    # before writing its small owner record. Never read a locked profile or
+    # infer that an existing lock is stale, even if its owner record is empty.
+    require(stat.S_ISREG(lock.st_mode) and lock.st_nlink == 1
+            and stat.S_IMODE(lock.st_mode) == 0o600 and lock.st_uid == info.st_uid
+            and lock.st_size <= 4096, 'unreviewed browser profile lock')
+    raise SnapshotChanged('browser profile is active; retry backup after it closes')
+
+
+def browser_profile_paths(root, *, selected=False):
     """Include authentication storage; exclude runtime, caches, history and locks."""
     paths = []
-    if not root.exists():
+    if not selected and not root.exists():
         return paths
-    require(not root.is_symlink(), 'linked browser worker storage')
-    for provider in sorted(root.iterdir()):
+    root_info = selected_stat(root)
+    require(not stat.S_ISLNK(root_info.st_mode), 'linked browser worker storage')
+    for provider in selected_children(root):
+        provider_info = selected_stat(provider)
         if provider.name in BROWSER_REBUILDABLE_DIRS:
             validate_cloakbrowser_runtime(provider)
             continue
-        require(provider.name == 'adobe' and provider.is_dir() and not provider.is_symlink(),
+        require(provider.name == 'adobe' and stat.S_ISDIR(provider_info.st_mode),
                 'unknown browser worker state needs scope review')
-        for profile in sorted(provider.iterdir()):
-            require(profile.is_dir() and not profile.is_symlink(), 'invalid browser profile')
-            require(not (profile / '.lock').exists(), 'browser profile is active; retry backup after it closes')
+        for profile in selected_children(provider):
+            profile_info = selected_stat(profile)
+            require(stat.S_ISDIR(profile_info.st_mode), 'invalid browser profile')
+            require_profile_unlocked(profile, profile_info)
             state = profile / 'state.json'
             if state.exists():
-                require(not state.is_symlink(), 'linked browser state')
+                require(not stat.S_ISLNK(selected_stat(state).st_mode), 'linked browser state')
                 paths.append(state)
             browser = profile / 'browser'
             if not browser.exists():
                 continue
-            require(not browser.is_symlink(), 'linked browser profile')
+            require(not stat.S_ISLNK(selected_stat(browser).st_mode), 'linked browser profile')
             # Local State contains OS-cookie encryption metadata. Local/Session
             # Storage and IndexedDB are session data even when filenames end .log.
             for relative in ('Local State', 'Default/Preferences', 'Default/Secure Preferences',
@@ -263,12 +356,13 @@ def browser_profile_paths(root):
                 require(not target.is_symlink(), 'linked browser authentication state')
                 if not target.exists():
                     continue
-                children = sorted(target.rglob('*')) if target.is_dir() else [target]
-                for child in children:
+                target_info = selected_stat(target)
+                children = selected_tree(target) if stat.S_ISDIR(target_info.st_mode) else [(target, target_info)]
+                for child, info in children:
                     if child.name in ('LOCK', 'lockfile') or child.name.startswith('Singleton'):
                         continue
-                    require(not child.is_symlink(), 'linked browser authentication state')
-                    if not child.is_dir():
+                    require(not stat.S_ISLNK(info.st_mode), 'linked browser authentication state')
+                    if not stat.S_ISDIR(info.st_mode):
                         paths.append(child)
     return paths
 
@@ -285,25 +379,28 @@ def source_paths(root):
     for name in TOP:
         path = root / name
         require(path.exists() and not path.is_symlink(), 'required config missing or linked')
-        if path.is_dir():
-            for child in sorted(path.rglob('*')):
-                require(not child.is_symlink(), 'symlink in config tree')
-                if not child.is_dir():
+        info = selected_stat(path)
+        require(not stat.S_ISLNK(info.st_mode), 'required config missing or linked')
+        if stat.S_ISDIR(info.st_mode):
+            for child, info in selected_tree(path):
+                require(not stat.S_ISLNK(info.st_mode), 'symlink in config tree')
+                if not stat.S_ISDIR(info.st_mode):
                     paths.append(child)
         else:
             paths.append(path)
     for path in sorted((root / 'data').iterdir()):
         if path.name in EXCLUDED:
             continue
+        info = selected_stat(path)
         if path.name == 'browser-worker':
-            paths.extend(browser_profile_paths(path))
+            paths.extend(browser_profile_paths(path, selected=True))
             continue
-        require(not path.is_symlink(), 'symlink in business tree')
-        if path.is_dir():
+        require(not stat.S_ISLNK(info.st_mode), 'symlink in business tree')
+        if stat.S_ISDIR(info.st_mode):
             require(path.name in DATA_DIRS, 'new business directory needs scope review')
-            for child in sorted(path.rglob('*')):
-                require(not child.is_symlink(), 'symlink in business tree')
-                if not child.is_dir():
+            for child, info in selected_tree(path):
+                require(not stat.S_ISLNK(info.st_mode), 'symlink in business tree')
+                if not stat.S_ISDIR(info.st_mode):
                     require(child.name.endswith(('.json', '.json.enc')), 'unexpected task file format')
                     paths.append(child)
         else:
@@ -317,9 +414,7 @@ def capture(root):
     contents, manifest, stamps = {}, {}, {}
     total = 0
     for path in source_paths(root):
-        before = signature(path)
-        raw = path.read_bytes()
-        require(signature(path) == before, 'source changed during read')
+        raw, before = read_stable_file(path, selected=True)
         relative = str(path.relative_to(root))
         if path.suffix == '.json':
             json.loads(raw)
@@ -374,45 +469,64 @@ def redis_snapshot():
     else:
         raise BackupError('Redis BGSAVE exceeded 20 seconds')
     path = SOURCE / 'redis-data/dump.rdb'
-    before = signature(path)
-    raw = path.read_bytes()
+    raw, before = read_stable_file(path)
     run(['docker', 'exec', REDIS, 'redis-check-rdb', '/data/dump.rdb'])
-    require(signature(path) == before and raw.startswith(b'REDIS'), 'Redis snapshot changed or invalid')
+    try:
+        after = signature(path)
+    except FileNotFoundError:
+        raise SnapshotChanged('Redis snapshot disappeared during validation') from None
+    if after != before:
+        raise SnapshotChanged('Redis snapshot changed during validation')
+    require(raw.startswith(b'REDIS'), 'invalid Redis snapshot header')
     return raw
 
 
-def snapshot():
+def snapshot_once():
+    """Collect one window without internal retry or publishing backup artifacts."""
     # The full before/after checks bracket the Redis fork and the SQL snapshot.
     # They reject a mixed persisted-state copy without pausing production work.
+    started = now()
+    contents, manifest, stamps = capture(SOURCE)
+    before_db = pg_guard()
+    pg_dump = pg_command('exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc')
+    globals_dump = pg_command('exec pg_dumpall -U "$POSTGRES_USER" --globals-only')
+    rdb = redis_snapshot()
+    after_db = pg_guard()
+    _, after_manifest, after_stamps = capture(SOURCE)
+    if stamps != after_stamps or manifest != after_manifest or before_db != after_db:
+        raise SnapshotChanged('persisted files or SQL rows changed during collection')
+    require(pg_dump.startswith(b'PGDMP'), 'invalid PostgreSQL dump header')
+    pg_command('exec pg_restore --file=/dev/null', pg_dump)
+    contents.update({'database/postgres.dump': pg_dump,
+                     'database/postgres-globals.sql': globals_dump,
+                     'database/redis.rdb': rdb})
+    for name in ('database/postgres.dump', 'database/postgres-globals.sql', 'database/redis.rdb'):
+        manifest[name] = {'bytes': len(contents[name]), 'sha256': digest(contents[name]),
+                          'mode': 0o600, 'uid': 0, 'gid': 0}
+    require(sum(len(raw) for raw in contents.values()) < MAX_CORE_BYTES, 'snapshot exceeds total limit')
+    receipt = {'schema': 1, 'started_at': started, 'finished_at': now(), 'attempt': 1,
+               'source_commit': json.loads(contents['current.json'])['commit'],
+               'files': manifest, 'postgres': before_db,
+               'consistency': 'persisted files and SQL rows stable across collection; Redis point-in-time RDB',
+               'excluded': sorted(EXCLUDED), 'media_included': False,
+               'restore_policy': 'Restore offline. Inspect pending external tasks before enabling workers.'}
+    contents['manifest.json'] = json.dumps(receipt, indent=2).encode()
+    return contents, receipt
+
+
+def snapshot():
+    """Retry only known concurrent changes, at most three complete collections."""
     for attempt in range(1, 4):
-        started = now()
-        contents, manifest, stamps = capture(SOURCE)
-        before_db = pg_guard()
-        pg_dump = pg_command('exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc')
-        globals_dump = pg_command('exec pg_dumpall -U "$POSTGRES_USER" --globals-only')
-        rdb = redis_snapshot()
-        after_db = pg_guard()
-        _, after_manifest, after_stamps = capture(SOURCE)
-        if stamps == after_stamps and manifest == after_manifest and before_db == after_db:
-            require(pg_dump.startswith(b'PGDMP'), 'invalid PostgreSQL dump header')
-            pg_command('exec pg_restore --file=/dev/null', pg_dump)
-            contents.update({'database/postgres.dump': pg_dump,
-                             'database/postgres-globals.sql': globals_dump,
-                             'database/redis.rdb': rdb})
-            for name in ('database/postgres.dump', 'database/postgres-globals.sql', 'database/redis.rdb'):
-                manifest[name] = {'bytes': len(contents[name]), 'sha256': digest(contents[name]),
-                                  'mode': 0o600, 'uid': 0, 'gid': 0}
-            require(sum(len(raw) for raw in contents.values()) < MAX_CORE_BYTES, 'snapshot exceeds total limit')
-            receipt = {'schema': 1, 'started_at': started, 'finished_at': now(), 'attempt': attempt,
-                       'source_commit': json.loads(contents['current.json'])['commit'],
-                       'files': manifest, 'postgres': before_db,
-                       'consistency': 'persisted files and SQL rows stable across collection; Redis point-in-time RDB',
-                       'excluded': sorted(EXCLUDED), 'media_included': False,
-                       'restore_policy': 'Restore offline. Inspect pending external tasks before enabling workers.'}
-            contents['manifest.json'] = json.dumps(receipt, indent=2).encode()
-            return contents, receipt
-        emit('collection_changed', attempt=attempt)
-        time.sleep(2)
+        try:
+            contents, receipt = snapshot_once()
+        except SnapshotChanged:
+            emit('collection_changed', attempt=attempt)
+            if attempt < 3:
+                time.sleep(2)
+            continue
+        receipt['attempt'] = attempt
+        contents['manifest.json'] = json.dumps(receipt, indent=2).encode()
+        return contents, receipt
     raise BackupError('data changed during all three collection attempts; no upload')
 
 

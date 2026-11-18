@@ -22,6 +22,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 
 sys.dont_write_bytecode = True
 
@@ -29,6 +30,7 @@ GIB = 1024 ** 3
 CHUNK = 1024 ** 2
 MAX_TOTAL = 8 * GIB
 MAX_FILE = 2 * GIB
+CAPTURE_ATTEMPTS = 3
 SERVICE = 'gptgrok2api'
 ROOT = Path('/opt/gptgrok2api')
 HELPERS = ['/opt/gptgrok2api/tools/backup-core.py']
@@ -36,6 +38,22 @@ HELPERS = ['/opt/gptgrok2api/tools/backup-core.py']
 
 class Refused(RuntimeError):
     """An expected safety refusal; messages never contain business contents."""
+
+
+class SnapshotChanged(Refused):
+    """An observed source mutation; only a fresh complete window may retry."""
+
+
+def unchanged(condition, message):
+    if not condition:
+        raise SnapshotChanged(message)
+
+
+def selected_stat(path):
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        raise SnapshotChanged('selected source disappeared during inspection') from None
 
 
 def require(condition, message):
@@ -80,7 +98,7 @@ def atomic_json(path, value):
 
 
 def entry(path):
-    before = path.lstat()
+    before = selected_stat(path)
     require(stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode),
             'linked or special source member')
     result = {'type': 'directory' if stat.S_ISDIR(before.st_mode) else 'file',
@@ -88,8 +106,25 @@ def entry(path):
               'gid': before.st_gid, 'mtime_ns': before.st_mtime_ns}
     if result['type'] == 'file':
         require(before.st_size <= MAX_FILE, 'source file exceeds capacity bound')
-        result.update(size=before.st_size, sha256=sha_file(path))
-    require(stamp(path.lstat()) == stamp(before), 'source changed during inventory')
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            raise SnapshotChanged('selected source disappeared before read') from None
+        with os.fdopen(descriptor, 'rb') as source:
+            require(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'special source member')
+            unchanged(stamp(os.fstat(source.fileno())) == stamp(before), 'source changed before inventory')
+            digest = hashlib.sha256(); size = 0
+            for block in iter(lambda: source.read(CHUNK), b''):
+                size += len(block)
+                require(size <= MAX_FILE, 'source file exceeds capacity bound')
+                unchanged(size <= before.st_size, 'source grew during inventory')
+                digest.update(block)
+            unchanged(stamp(os.fstat(source.fileno())) == stamp(before)
+                      and size == before.st_size, 'source changed during inventory')
+        result.update(size=size, sha256=digest.hexdigest())
+    after = selected_stat(path)
+    require(stat.S_ISDIR(after.st_mode) or stat.S_ISREG(after.st_mode), 'linked or special source member')
+    unchanged(stamp(after) == stamp(before), 'source changed during inventory')
     return result, stamp(before)
 
 
@@ -114,18 +149,24 @@ def inventory(roots, destination=None):
                     target.mkdir(parents=True, exist_ok=True, mode=0o700)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    except FileNotFoundError:
+                        raise SnapshotChanged('selected source disappeared before copy') from None
                     with os.fdopen(fd, 'rb') as source, target.open('xb') as output:
-                        require(stamp(os.fstat(source.fileno())) == identity, 'source changed before copy')
+                        require(stat.S_ISREG(os.fstat(source.fileno()).st_mode), 'special source member')
+                        unchanged(stamp(os.fstat(source.fileno())) == identity, 'source changed before copy')
                         digest = hashlib.sha256(); copied = 0
                         for block in iter(lambda: source.read(CHUNK), b''):
                             copied += len(block); digest.update(block); output.write(block)
-                            require(copied <= row['size'], 'source grew during copy')
-                        require(digest.hexdigest() == row['sha256'] and copied == row['size'],
+                            unchanged(copied <= row['size'], 'source grew during copy')
+                        unchanged(digest.hexdigest() == row['sha256'] and copied == row['size'],
                                 'copied content differs from inventory')
-                        require(stamp(os.fstat(source.fileno())) == identity, 'source changed during copy')
+                        unchanged(stamp(os.fstat(source.fileno())) == identity, 'source changed during copy')
                         output.flush(); os.fsync(output.fileno())
-                    require(stamp(path.lstat()) == identity, 'source changed after copy')
+                    after = selected_stat(path)
+                    require(stat.S_ISREG(after.st_mode), 'linked or special source member')
+                    unchanged(stamp(after) == identity, 'source changed after copy')
     if destination:
         apply_metadata(destination, rows)
     return rows, identities
@@ -145,7 +186,7 @@ def stat_inventory(roots):
         require(root.exists() and not root.is_symlink(), 'missing or linked source root')
         paths = [root, *sorted(root.rglob('*'))] if root.is_dir() else [root]
         for path in paths:
-            info = path.lstat()
+            info = selected_stat(path)
             require(stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode),
                     'linked or special media member')
             relative = (PurePosixPath(label) / path.relative_to(root).as_posix()).as_posix()
@@ -164,7 +205,7 @@ def directory_window(core, root):
     identities = {}
     for name, row in directories.items():
         actual, identity = entry(safe_path(root, name))
-        require(actual == row, 'business directory changed during inspection')
+        unchanged(actual == row, 'business directory changed during inspection')
         identities[name] = identity
     return directories, identities
 
@@ -224,14 +265,14 @@ def business_directories(core, root, names):
                             trees.append(browser / name)
         for path in shallow:
             relative = path.relative_to(root).as_posix()
-            require(stat.S_ISDIR(path.lstat().st_mode), 'invalid authentication directory')
+            require(stat.S_ISDIR(selected_stat(path).st_mode), 'invalid authentication directory')
             if relative not in directories:
                 row = entry(path)[0]
                 require(row['type'] == 'directory', 'invalid authentication directory')
                 directories[relative] = row
     for tree in trees:
         for path in [tree, *sorted(tree.rglob('*'))]:
-            info = path.lstat()
+            info = selected_stat(path)
             require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), 'linked or special business member')
             relative = path.relative_to(root).as_posix()
             if stat.S_ISDIR(info.st_mode) and relative not in directories:
@@ -266,26 +307,45 @@ def write_core(stage, contents, receipt, directories):
     apply_metadata(service, directories)
 
 
-def capture_cfm(core, work):
+def capture_cfm_once(core, work):
     root = ROOT
     stage = work / '.staging'; stage.mkdir(mode=0o700)
     media = {'data/files': root / 'data/files', 'data/log_input_images': root / 'data/log_input_images'}
     # Bulk copying happens before the core consistency window. The application
     # may legitimately update core JSON while these media bytes are being read.
     _, copied_media_identities = inventory(media, stage / 'service')
-    require(stat_inventory(media) == copied_media_identities, 'media changed while preparing core snapshot')
+    unchanged(stat_inventory(media) == copied_media_identities, 'media changed while preparing core snapshot')
     directories, directory_identities = directory_window(core, root)
     # The project's helper checks persisted core files and SQL before/after its
     # own collection and rejects a mixed snapshot. Do not weaken that check.
-    contents, receipt = core.snapshot()
-    require(directory_window(core, root) == (directories, directory_identities),
+    contents, receipt = core.snapshot_once()
+    unchanged(directory_window(core, root) == (directories, directory_identities),
             'business directories changed during core snapshot')
-    require(stat_inventory(media) == copied_media_identities, 'media changed around core snapshot')
+    unchanged(stat_inventory(media) == copied_media_identities, 'media changed around core snapshot')
     write_core(stage, contents, receipt, directories)
     preserve_root(root, stage / 'service')
     return stage, receipt, {'media_included': True, 'authentication_state_included': True,
         'excluded': ['logs', 'data/logs.jsonl', 'data/video_logs', 'browser_cache_and_history', 'live_lock_and_gateway_files'],
         'consistency': 'media SHA-verified before core collection; exact media identities and business directories stable across project core/SQL/Redis snapshot; no application pause'}
+
+
+def capture_cfm(core, work):
+    # A successful inner retry cannot repair stale outer media/directory baselines.
+    # Own the sole retry loop here and discard only this invocation's partial stage.
+    stage = work / '.staging'
+    require(not stage.exists() and not stage.is_symlink(), 'capture stage already exists')
+    for attempt in range(1, CAPTURE_ATTEMPTS + 1):
+        try:
+            result = capture_cfm_once(core, work)
+            result[2]['capture_attempt'] = attempt
+            return result
+        except (SnapshotChanged, core.SnapshotChanged) as error:
+            if stage.exists():
+                require(stage.is_dir() and not stage.is_symlink(), 'capture stage changed type')
+                shutil.rmtree(stage)
+            if attempt == CAPTURE_ATTEMPTS:
+                raise SnapshotChanged('complete capture remained unstable after bounded retries') from error
+            time.sleep(1)
 
 
 
@@ -406,17 +466,229 @@ def container_identity():
             for row in json.loads(raw)}
 
 
+RETRY_FORMAT = 'ogg-daily-retry-v1'
+RETRY_LIMIT = 6
+RETRY_COOLDOWN = dt.timedelta(hours=1)
+LOCAL_TZ = dt.timezone(dt.timedelta(hours=8))
+
+
+def policy_time(value):
+    require(isinstance(value, str), 'invalid backup policy timestamp')
+    try:
+        result = dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError as error:
+        raise Refused('invalid backup policy timestamp') from error
+    require(result.tzinfo is not None, 'backup policy timestamp lacks timezone')
+    return result
+
+
+def private_json(path):
+    """Read a small policy record without accepting links or writable evidence."""
+    require(path.resolve() == path, 'linked backup policy evidence')
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+            and not info.st_mode & 0o077 and info.st_nlink == 1 and info.st_size <= 65536,
+            'unsafe backup policy evidence')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as stream:
+        require(stamp(os.fstat(descriptor)) == stamp(info), 'backup policy evidence changed')
+        value = json.loads(stream.read(65537))
+    require(stamp(path.lstat()) == stamp(info) and isinstance(value, dict),
+            'backup policy evidence changed or invalid')
+    return value, stamp(info)
+
+
+def retry_state():
+    path = ROOT / 'backup-policy' / 'daily-retry.json'
+    if not path.exists() and not path.is_symlink():
+        return {'format': RETRY_FORMAT, 'service': SERVICE, 'failures': []}
+    value, _ = private_json(path)
+    require(set(value) == {'format', 'service', 'failures'} and value.get('format') == RETRY_FORMAT
+            and value.get('service') == SERVICE and isinstance(value.get('failures'), list)
+            and len(value['failures']) <= RETRY_LIMIT, 'invalid daily retry state')
+    previous = None
+    for failure in value['failures']:
+        require(isinstance(failure, dict) and set(failure) == {'at', 'work', 'reason'}
+                and failure.get('reason') == 'snapshot_changed', 'unknown daily retry failure')
+        moment = policy_time(failure.get('at'))
+        require(previous is None or moment >= previous, 'unordered daily retry evidence')
+        previous = moment
+        require(isinstance(failure.get('work'), str) and failure['work'].startswith('daily-')
+                and Path(failure['work']).name == failure['work'], 'invalid daily retry work identity')
+    return value
+
+
+def retry_status(at=None):
+    """A bounded retry journal applies to future capture attempts, never old backups."""
+    at = at or dt.datetime.now(dt.timezone.utc)
+    state = retry_state()
+    failures = state['failures']
+    if not failures:
+        return None
+    last = policy_time(failures[-1]['at'])
+    require(last <= at, 'daily retry clock moved backwards')
+    local = at.astimezone(LOCAL_TZ)
+    count = sum(policy_time(item['at']).astimezone(LOCAL_TZ).date() == local.date()
+                for item in failures)
+    retry_after = last + RETRY_COOLDOWN
+    reason = 'cooldown'
+    if count >= RETRY_LIMIT:
+        tomorrow = local.date() + dt.timedelta(days=1)
+        retry_after = max(retry_after, dt.datetime.combine(tomorrow, dt.time(), LOCAL_TZ))
+        reason = 'daily_failure_limit'
+    if at < retry_after:
+        return {'event': 'daily_backup_deferred', 'service': SERVICE, 'reason': reason,
+                'retry_after': retry_after.isoformat(), 'failed_attempts_today': count}
+    return None
+
+
+def record_retry_failure(work, at=None):
+    at = at or dt.datetime.now(dt.timezone.utc)
+    require(retry_status(at) is None, 'daily retry budget is exhausted')
+    state = retry_state()
+    state['failures'] = (state['failures'] + [{'at': at.isoformat(), 'work': work.name,
+                                            'reason': 'snapshot_changed'}])[-RETRY_LIMIT:]
+    directory = ROOT / 'backup-policy'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    info = directory.lstat()
+    require(directory.resolve() == directory and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.geteuid() and not info.st_mode & 0o022,
+            'unsafe backup policy directory')
+    atomic_json(directory / 'daily-retry.json', state)
+    # Persist the journal before discarding this invocation's transient scratch.
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def policy_modules():
+    modules = []
+    for name in ('backup_catalog', 'backup_retention'):
+        spec = importlib.util.spec_from_file_location('daily_' + name, Path(__file__).with_name(name + '.py'))
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        modules.append(module)
+    return modules
+
+
+def verified_newer_recovery(backup_root, failed_at):
+    """Re-read actual success proofs and complete archives; cached booleans are unused."""
+    catalog, retention = policy_modules()
+    external = catalog.external_proofs(backup_root.parent)
+    candidates = []
+    for path in backup_root.iterdir():
+        if not path.is_dir() or path.resolve() != path or not catalog.NAME.fullmatch(path.name):
+            continue
+        try:
+            created = policy_time(catalog.stamp(path.name))
+        except (Refused, catalog.CatalogError, ValueError):
+            continue
+        if created > failed_at and not (path / 'failed.json').exists() and not (path / 'failed.json').is_symlink():
+            candidates.append((created, path))
+    for _, path in sorted(candidates, reverse=True):
+        record = catalog.make_record(SERVICE, path, external, None, {})
+        if not (record.get('completed') is True and record.get('success') is True
+                and record.get('kind') in ('daily', 'release') and record.get('proofs')
+                and policy_time(record.get('created_at')) > failed_at):
+            continue
+        identities = {artifact: catalog.signature(Path(artifact))
+                      for artifact in [*(str(path / name) for name in record['files']),
+                                       *(item['path'] for item in record['proofs'])]}
+        directory_identity = stamp(path.lstat())
+        retention.verify_record(path, record)
+        # verify_record binds files and EOF/CRC; daily archives also bind every
+        # member's content and metadata to the manifest used during restore.
+        if record['kind'] == 'daily':
+            proof = catalog.load(path / 'recovery-point.json')
+            restore = proof.get('database_restore', {})
+            scope = proof.get('scope', {})
+            require(isinstance(restore, dict) and isinstance(scope, dict)
+                    and all(restore.get(key) is True for key in
+                            ('postgres_restored', 'postgres_rows_match', 'redis_restored'))
+                    and restore.get('network') == 'none' and restore.get('production_mounts') is False
+                    and all(type(restore.get(key)) is int and restore[key] >= 0
+                            for key in ('postgres_tables', 'redis_loaded_keys'))
+                    and proof.get('production_containers_unchanged') is True
+                    and all(scope.get(key) is True for key in
+                            ('media_included', 'authentication_state_included')),
+                    'replacement daily recovery lacks isolated restore or full-scope evidence')
+            manifest = catalog.load(path / 'manifest.json')
+            require(manifest.get('format') == 'ogg-daily-manifest-v1'
+                    and manifest.get('service') == SERVICE, 'unknown daily manifest')
+            verify_archive(path / 'backup.tar.gz', manifest['members'])
+        else:
+            require(any(item.get('metadata_file') for item in record['archives']),
+                    'replacement recovery point lacks full archive metadata')
+        require(all(catalog.signature(Path(artifact)) == identity
+                    for artifact, identity in identities.items())
+                and stamp(path.lstat()) == directory_identity,
+                'replacement recovery evidence changed during full verification')
+        return path.name
+    raise Refused('unresolved daily backup has no newer verified recovery point')
+
+
 def ensure_no_unresolved(backup_root):
+    unresolved = []
     for path in backup_root.glob('daily-*'):
-        require(path.is_dir() and not path.is_symlink(), 'daily backup path is linked or not a directory')
-        require((path / 'complete').is_file() and not (path / 'complete').is_symlink()
-                and not (path / 'failed.json').exists(),
-                'unresolved daily backup exists; reconcile it before creating another')
+        require(path.is_dir() and path.resolve() == path, 'daily backup path is linked or not a directory')
+        if ((path / 'complete').is_file() and not (path / 'complete').is_symlink()
+                and not (path / 'failed.json').exists() and not (path / 'failed.json').is_symlink()):
+            continue
+        require({child.name for child in path.iterdir()} == {'failed.json'},
+                'unresolved daily backup contains artifacts; manual review required')
+        try:
+            marker, identity = private_json(path / 'failed.json')
+        except (Refused, ValueError, OSError) as error:
+            raise Refused('unresolved daily backup has unsafe or invalid failure evidence') from error
+        require(set(marker) == {'format', 'at', 'service', 'completed', 'automatic_prune_allowed'}
+                and marker.get('format') == 'ogg-daily-failed-v1' and marker.get('service') == SERVICE
+                and marker.get('completed') is False and marker.get('automatic_prune_allowed') is False,
+                'unresolved daily backup has an unknown failure marker')
+        failed_at = policy_time(marker.get('at'))
+        try:
+            started = dt.datetime.strptime(path.name, 'daily-%Y%m%dT%H%M%SZ').replace(tzinfo=dt.timezone.utc)
+        except ValueError as error:
+            raise Refused('unresolved daily backup has an ambiguous timestamp') from error
+        require(started <= failed_at <= dt.datetime.now(dt.timezone.utc),
+                'unresolved daily backup has an invalid failure time')
+        unresolved.append((path, marker, identity, stamp(path.lstat()), failed_at))
+    if not unresolved:
+        return
+    verified_newer_recovery(backup_root, max(item[-1] for item in unresolved))
+    for path, marker, identity, directory_identity, _ in unresolved:
+        current, current_identity = private_json(path / 'failed.json')
+        require(current == marker and current_identity == identity and stamp(path.lstat()) == directory_identity
+                and {child.name for child in path.iterdir()} == {'failed.json'},
+                'unresolved daily backup changed during recovery verification')
+
+
+def work_identity(work):
+    info = work.lstat()
+    require(work.resolve() == work and stat.S_ISDIR(info.st_mode), 'backup work path changed or linked')
+    return info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid
+
+
+def discard_retry_scratch(work, identity):
+    """Delete only the current invocation's scratch; any other member prevents removal."""
+    require(work_identity(work) == identity, 'backup work directory identity changed')
+    require({path.name for path in work.iterdir()} <= {'.staging', '.restore'},
+            'transient backup failure has archive or unknown residue')
+    for name in ('.staging', '.restore'):
+        path = work / name
+        if path.exists() or path.is_symlink():
+            require(path.is_dir() and not path.is_symlink(), 'transient backup scratch is linked or invalid')
+            shutil.rmtree(path)
+    require(work_identity(work) == identity, 'backup work directory identity changed')
+    work.rmdir()
 
 
 def create(config):
     root = ROOT; backup_root = root / 'backups'
     require(backup_root.is_dir() and backup_root.resolve() == backup_root, 'backup root missing or linked')
+    deferred = retry_status()
+    if deferred:
+        return deferred
     ensure_no_unresolved(backup_root)
     require(shutil.disk_usage(backup_root).free >= 12 * GIB, 'free disk below 12 GiB daily-backup reserve')
     os.umask(0o077); os.nice(15)
@@ -425,9 +697,13 @@ def create(config):
     timestamp = dt.datetime.now(dt.timezone.utc)
     name = 'daily-' + timestamp.strftime('%Y%m%dT%H%M%SZ')
     work = backup_root / name; work.mkdir(mode=0o700)
+    identity = work_identity(work)
     completed = False
+    discarded = False
+    capture_complete = False
     try:
         stage, receipt, scope = capture_cfm(helper, work)
+        capture_complete = True
         manifest = archive_metadata(stage)
         needed = sum(row.get('size', 0) for row in manifest.values())
         require(shutil.disk_usage(backup_root).free >= needed + 2 * GIB,
@@ -473,15 +749,31 @@ def create(config):
         atomic_json(work / 'complete', complete_value)
         completed = True
         return result
+    except SnapshotChanged:
+        require(not capture_complete, 'source-change error outside capture requires review')
+        require(container_identity() == production_before, 'production container identity or health changed')
+        require({path.name for path in work.iterdir()} <= {'.staging', '.restore'},
+                'transient backup failure has archive or unknown residue')
+        record_retry_failure(work)
+        discard_retry_scratch(work, identity)
+        discarded = True
+        raise
     finally:
-        if not completed:
+        if not completed and not discarded:
+            require(work_identity(work) == identity, 'backup work directory identity changed')
             # Only invocation-created scratch directories are discarded. An archive, if
             # already made, remains an explicitly incomplete recovery artifact for review.
-            for name in ('.staging', '.restore'):
-                if (work / name).is_dir() and not (work / name).is_symlink():
-                    shutil.rmtree(work / name)
-            atomic_json(work / 'failed.json', {'format': 'ogg-daily-failed-v1', 'at': now(),
-                'service': SERVICE, 'completed': False, 'automatic_prune_allowed': False})
+            try:
+                for name in ('.staging', '.restore'):
+                    if (work / name).is_dir() and not (work / name).is_symlink():
+                        shutil.rmtree(work / name)
+            finally:
+                # Even a failed scratch cleanup is durable, non-retryable evidence.
+                require(work_identity(work) == identity, 'backup work directory identity changed')
+                atomic_json(work / 'failed.json', {'format': 'ogg-daily-failed-v2', 'at': now(),
+                    'service': SERVICE, 'completed': False, 'automatic_prune_allowed': False,
+                    'reason': 'non_retryable_or_residue',
+                    'phase': 'after_capture' if capture_complete else 'capture'})
 
 
 def main(argv=None):
@@ -500,7 +792,7 @@ def main(argv=None):
             # Re-check hashes after locking so a deploy cannot replace imported helpers.
             config = checked_config(args.dependency_config)
             result = create(config)
-        print(json.dumps(result)); return 0
+        print(json.dumps(result)); return 75 if result['event'] == 'daily_backup_deferred' else 0
     except BlockingIOError:
         print(json.dumps({'event': 'daily_backup_busy', 'service': SERVICE})); return 75
 
