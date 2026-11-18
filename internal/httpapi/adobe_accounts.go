@@ -432,5 +432,5 @@ func (s *Server) refreshDueAdobeAccounts(ctx context.Context) {
 		return
 	}
 	s.refreshAdobeMaintenanceSnapshot(ctx, items, time.Now())
-	s.warmRecentAdobeMediaSessions(ctx)
+	s.refreshAllAdobeMediaSessions(ctx)
 }

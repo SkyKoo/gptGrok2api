@@ -226,6 +226,66 @@ func TestAdobeWarmSchedulerSkipsUnavailableOrUnrequestedAccounts(t *testing.T) {
 	}
 }
 
+func TestAdobeMediaSchedulerRefreshesAllEligibleSessions(t *testing.T) {
+	s := imageTaskTestServer(t)
+	older := adobeSchedulingAccount(t, s, "scan-older", time.Now().Add(-2*time.Minute))
+	newer := adobeSchedulingAccount(t, s, "scan-newer", time.Now().Add(-time.Minute))
+	adobeSchedulingAccount(t, s, "scan-no-profile", time.Now(), false)
+	disabled := adobeSchedulingAccount(t, s, "scan-disabled", time.Now())
+	if err := s.adobeStore.SetEnabled([]string{disabled.ID}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	called := []string{}
+	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+		mu.Lock()
+		called = append(called, current.ID)
+		mu.Unlock()
+		return adobeFixtureMediaRefresh(ctx, current)
+	})
+	s.refreshAllAdobeMediaSessions(context.Background())
+
+	mu.Lock()
+	got := append([]string(nil), called...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != newer.ID {
+		t.Fatalf("media session scan did not start the newest eligible session only: %v", got)
+	}
+
+	// One browser session is allowed per scheduler tick. The next tick advances
+	// to the next eligible account, while a later tick sees both as reusable.
+	s.refreshAllAdobeMediaSessions(context.Background())
+	mu.Lock()
+	second := append([]string(nil), called...)
+	mu.Unlock()
+	if len(second) != 2 || second[1] != older.ID {
+		t.Fatalf("second scheduler tick did not advance to the next account: %v", second)
+	}
+	s.refreshAllAdobeMediaSessions(context.Background())
+	mu.Lock()
+	deferred := append([]string(nil), called...)
+	mu.Unlock()
+	if len(deferred) != len(second) {
+		t.Fatalf("ready sessions were refreshed again: %v", deferred)
+	}
+}
+
+func TestAdobeMediaSchedulerHonorsSessionFailureBackoff(t *testing.T) {
+	s := imageTaskTestServer(t)
+	a := adobeSchedulingAccount(t, s, "scan-failed", time.Now())
+	var calls atomic.Int32
+	s.adobeStore.SetBrowserRefresher(func(context.Context, adobe.Account) (adobe.Account, error) {
+		calls.Add(1)
+		return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: "media_session_incomplete"}
+	})
+	s.refreshAllAdobeMediaSessions(context.Background())
+	s.refreshAllAdobeMediaSessions(context.Background())
+	if calls.Load() != 1 {
+		t.Fatalf("failed session ignored scheduler backoff: calls=%d account=%s", calls.Load(), a.ID)
+	}
+}
+
 func TestAdobeMaintenanceRefreshesPermissionsBeforeWarming(t *testing.T) {
 	s := imageTaskTestServer(t)
 	a := adobeSchedulingAccount(t, s, "recent", time.Now().Add(-time.Minute))

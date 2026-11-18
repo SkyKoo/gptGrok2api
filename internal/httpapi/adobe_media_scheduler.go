@@ -88,6 +88,56 @@ func (s *Server) warmRecentAdobeMediaSessions(ctx context.Context) {
 	_, _ = s.adobeStore.WarmMediaSession(selected.ctx, selected.account.ID, selected.account.Revision)
 }
 
+// refreshAllAdobeMediaSessions checks every account that can be used for media
+// generation and warms at most one missing or expired session. The browser
+// worker supports one session at a time, so the next candidate is left for the
+// next scheduler tick. WarmMediaSession rechecks the account gate, readiness
+// cache and failure backoff before it starts any browser work, so a foreground
+// request or a previous failed refresh wins safely when it races this scan.
+func (s *Server) refreshAllAdobeMediaSessions(ctx context.Context) {
+	if ctx.Err() != nil || s.adobeStore == nil || !s.adobeReconciliationAllowed() {
+		return
+	}
+	cfg, err := s.store.Config()
+	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
+		return
+	}
+	items, err := s.adobeStore.List()
+	if err != nil {
+		return
+	}
+
+	type candidate struct {
+		account adobe.Account
+		ctx     context.Context
+	}
+	now := time.Now()
+	candidates := make([]candidate, 0, len(items))
+	for _, a := range items {
+		if !adobe.Eligible(a, now) || strings.TrimSpace(a.ProfileID) == "" {
+			continue
+		}
+		fixed, resolveErr := s.adobeAccountContext(ctx, a)
+		if resolveErr != nil || !s.adobeStore.MediaPreparationDue(fixed, a) {
+			continue
+		}
+		candidates = append(candidates, candidate{account: a, ctx: fixed})
+	}
+	// Prefer accounts used most recently. The scan only decides which account is
+	// due; the refresh below deliberately starts one browser session per tick.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].account.LastUsedAt > candidates[j].account.LastUsedAt
+	})
+	if len(candidates) == 0 || ctx.Err() != nil || !s.adobeReconciliationAllowed() {
+		return
+	}
+	// Do not start a second browser session in this tick. A failed attempt is
+	// recorded by the store and its backoff removes the same account from the
+	// next scan, allowing the following candidate to proceed.
+	item := candidates[0]
+	_, _ = s.adobeStore.WarmMediaSession(item.ctx, item.account.ID, item.account.Revision)
+}
+
 func adobeHasKnownMediaCapacity(a adobe.Account, now time.Time) bool {
 	generation := a.Quota.Generation
 	if generation == nil || generation.Status != "known" {

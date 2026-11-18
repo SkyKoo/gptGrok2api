@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/config"
 )
 
@@ -80,6 +81,34 @@ func TestRequestMonitorEnrichmentUpdatesLiveEgressAndAccount(t *testing.T) {
 	}
 	if strings.Contains(record.EgressLabel, "proxy-user") || strings.Contains(record.EgressLabel, "proxy-pass") {
 		t.Fatalf("proxy credentials leaked into monitor label: %q", record.EgressLabel)
+	}
+}
+
+func TestAdobeMonitorAccountEnrichmentPersistsSafeIdentity(t *testing.T) {
+	server := &Server{monitor: newRuntimeMonitor()}
+	server.monitor.start("adobe-call", "/v1/images/generations", "gemini-3.1-flash-image", "fixture")
+	server.enrichAdobeMonitorCall("adobe-call", adobe.Account{
+		ID: "adobe:internal-id", AccountID: "adobe-account-id", Email: "adobe@example.test",
+		Token: "PRIVATE_TOKEN", Cookie: "PRIVATE_COOKIE", ProfileID: "private-profile",
+	})
+	item, ok := server.monitor.detail("adobe-call")
+	if !ok {
+		t.Fatal("Adobe monitor record missing")
+	}
+	if item.AccountEmail != "adobe@example.test" || item.AccountID != "adobe-account-id" {
+		t.Fatalf("Adobe account identity missing: email=%q id=%q", item.AccountEmail, item.AccountID)
+	}
+	entry := callLogEntry(item, http.StatusOK, nil, nil, "")
+	detail := mapValue(entry["detail"])
+	if stringValue(detail["account_email"]) != "adobe@example.test" || stringValue(detail["provider_account_id"]) != "adobe-account-id" {
+		t.Fatalf("persisted Adobe identity missing: %#v", detail)
+	}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "PRIVATE_TOKEN") || strings.Contains(string(raw), "PRIVATE_COOKIE") || strings.Contains(string(raw), "private-profile") {
+		t.Fatalf("Adobe credentials/profile leaked into call log: %s", raw)
 	}
 }
 

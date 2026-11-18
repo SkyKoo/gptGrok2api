@@ -18,7 +18,35 @@ import (
 	"time"
 )
 
+// enrichAdobeMonitorCall records only the stable Adobe account identity that
+// was selected for an upstream request. Credentials, cookies and browser
+// profile identifiers deliberately never enter request logs.
+func (s *Server) enrichAdobeMonitorCall(callID string, account adobe.Account) {
+	if s == nil || s.monitor == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	meta := map[string]any{}
+	if email := strings.TrimSpace(account.Email); email != "" {
+		meta["account_email"] = email
+	}
+	if id := strings.TrimSpace(firstNonEmpty(account.AccountID, account.ID)); id != "" {
+		meta["account_id"] = id
+	}
+	if len(meta) > 0 {
+		s.monitor.enrich(callID, meta)
+	}
+}
+
+func (s *Server) enrichAdobeMonitorRequest(r *http.Request, account adobe.Account) {
+	if r == nil {
+		return
+	}
+	callID, _ := r.Context().Value(monitorCallIDKey{}).(string)
+	s.enrichAdobeMonitorCall(callID, account)
+}
+
 func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, selected imageSelection, prompt, id, size, format, publicBase string, count int, inputs []provider.OpenAIImageInput, options provider.ImageOutputOptions) (result []map[string]string, resultErr error) {
+	s.enrichAdobeMonitorRequest(r, selected.Adobe)
 	if selected.Context != nil {
 		if endpoint, fixed := proxyruntime.URLSelectionFromContext(selected.Context); fixed {
 			ctx = proxyruntime.WithURL(ctx, endpoint)
@@ -411,6 +439,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		return
 	}
 	ctx = selectedContext
+	s.enrichAdobeMonitorCall(job.ID, a)
 	m, _ := model.AdobeModel(job.Model)
 	s.videoMu.Lock()
 	job.Route = &mediaRoute{Channel: "adobe", AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
