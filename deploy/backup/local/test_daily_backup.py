@@ -1,5 +1,6 @@
 """Daily recovery-point boundary tests; no Docker or production filesystem."""
 import contextlib
+from collections import Counter
 import hashlib
 import importlib.util
 import io
@@ -177,6 +178,22 @@ class DailyTests(unittest.TestCase):
             with self.assertRaisesRegex(daily.Refused, 'business directories changed'):
                 daily.capture_cfm(helper, work)
 
+    def test_account_atomic_replacement_inside_core_window_rejected(self):
+        root, account, media, helper, work = self.core_fixture()
+        snapshot = helper.snapshot
+        # An old fixed directory timestamp makes the atomic rename observable
+        # even on filesystems with a coarse timestamp resolution.
+        os.utime(root / 'data', ns=(1700000000000000000, 1700000000000000000))
+        def replaced_account():
+            replacement = account.with_name('accounts.new')
+            replacement.write_bytes(b'{"version":2}')
+            os.replace(replacement, account)
+            return snapshot()
+        helper.snapshot = replaced_account
+        with mock.patch.object(daily, 'ROOT', root):
+            with self.assertRaisesRegex(daily.Refused, 'business directories changed'):
+                daily.capture_cfm(helper, work)
+
     def test_media_addition_inside_core_window_rejected(self):
         root, account, media, helper, work = self.core_fixture()
         snapshot = helper.snapshot
@@ -226,6 +243,60 @@ class DailyTests(unittest.TestCase):
         self.assertTrue((stage / 'service/secrets').is_dir())
         self.assertTrue((stage / 'service/data/image_tasks').is_dir())
         self.assertTrue((stage / 'service/data/browser-worker/adobe/profile/browser/Default/IndexedDB/empty').is_dir())
+
+    def test_shared_parent_directories_are_captured_only_once(self):
+        root = self.root / 'cfm'
+        names = []
+        for group in ('one', 'two'):
+            directory = root / 'data/image_tasks' / group
+            directory.mkdir(parents=True)
+            for index in range(20):
+                path = directory / f'{index}.json'
+                path.write_text('{}')
+                names.append(path.relative_to(root).as_posix())
+        with mock.patch.object(daily, 'entry', wraps=daily.entry) as captured:
+            directories = daily.parent_directories(root, names)
+        calls = Counter(call.args[0].relative_to(root).as_posix()
+                        for call in captured.call_args_list)
+        self.assertEqual(calls, Counter({name: 1 for name in directories}))
+        self.assertEqual(set(directories), {'data', 'data/image_tasks',
+                                          'data/image_tasks/one', 'data/image_tasks/two'})
+        for name, row in directories.items():
+            self.assertEqual(row, daily.entry(root / name)[0])
+
+    def test_business_directory_deduplication_keeps_empty_dirs_and_window_recheck(self):
+        root = self.root / 'cfm'
+        names = ['secrets/key', 'data/image_tasks/one/a.json',
+                 'data/image_tasks/one/b.json',
+                 'data/browser-worker/adobe/profile/state.json',
+                 'data/browser-worker/adobe/profile/browser/Default/IndexedDB/store/value']
+        for name in names:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{}')
+        empty = ('data/image_tasks/one/empty',
+                 'data/browser-worker/adobe/profile/browser/Default/IndexedDB/empty')
+        for name in empty:
+            (root / name).mkdir()
+        helper = types.SimpleNamespace(TOP=('secrets',), DATA_DIRS={'image_tasks'},
+                                       source_paths=lambda source: [root / name for name in names],
+                                       browser_profile_paths=lambda path: [])
+        with mock.patch.object(daily, 'entry', wraps=daily.entry) as captured:
+            directories = daily.business_directories(helper, root, names)
+        calls = Counter(call.args[0].relative_to(root).as_posix()
+                        for call in captured.call_args_list)
+        self.assertEqual(calls, Counter({name: 1 for name in directories}))
+        self.assertTrue(set(empty).issubset(directories))
+        with mock.patch.object(daily, 'entry', wraps=daily.entry) as captured:
+            window = daily.directory_window(helper, root)
+        calls = Counter(call.args[0].relative_to(root).as_posix()
+                        for call in captured.call_args_list)
+        self.assertEqual(calls, Counter({name: 2 for name in directories}))
+        self.assertEqual(window[0], directories)
+        # The already captured business tree must still be traversed in full.
+        (root / 'data/image_tasks/one/linked').symlink_to(root / 'secrets/key')
+        with self.assertRaisesRegex(daily.Refused, 'linked or special business member'):
+            daily.business_directories(helper, root, names)
 
     def test_cloakbrowser_runtime_directory_is_preserved_without_inner_members(self):
         root = self.root / 'cfm'; root.mkdir()

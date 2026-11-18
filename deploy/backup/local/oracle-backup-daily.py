@@ -184,6 +184,9 @@ def parent_directories(root, names):
         parent = path.parent
         while parent != root:
             relative = parent.relative_to(root).as_posix()
+            if relative in result:
+                # Its full ancestor chain was captured on the first visit.
+                break
             result[relative] = entry(parent)[0]
             require(result[relative]['type'] == 'directory', 'non-directory source parent')
             parent = parent.parent
@@ -220,17 +223,21 @@ def business_directories(core, root, names):
                         if (browser / name).exists():
                             trees.append(browser / name)
         for path in shallow:
-            row = entry(path)[0]
-            require(row['type'] == 'directory', 'invalid authentication directory')
-            directories[path.relative_to(root).as_posix()] = row
+            relative = path.relative_to(root).as_posix()
+            require(stat.S_ISDIR(path.lstat().st_mode), 'invalid authentication directory')
+            if relative not in directories:
+                row = entry(path)[0]
+                require(row['type'] == 'directory', 'invalid authentication directory')
+                directories[relative] = row
     for tree in trees:
         for path in [tree, *sorted(tree.rglob('*'))]:
             info = path.lstat()
             require(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), 'linked or special business member')
-            if stat.S_ISDIR(info.st_mode):
-                directories[path.relative_to(root).as_posix()] = entry(path)[0]
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISDIR(info.st_mode) and relative not in directories:
+                directories[relative] = entry(path)[0]
     data = root / 'data'
-    if data.exists():
+    if data.exists() and 'data' not in directories:
         directories['data'] = entry(data)[0]
     return directories
 
