@@ -23,6 +23,59 @@ func quotaPool(t *testing.T, reason, image int, status string) (*Pool, *store.St
 func reserveIntent(p *Pool, i Intent) (*Lease, error) {
 	return p.ReserveIntent(context.Background(), []string{"basic"}, nil, nil, 0, i)
 }
+func TestReserveIntentWithSummaryReportsSelectionReasons(t *testing.T) {
+	root := t.TempDir()
+	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	err := repository.SaveAccounts([]map[string]any{
+		{"access_token": "insufficient", "pool": "basic", "enabled": true, "status": "正常", "limits_progress": []any{
+			map[string]any{"feature_name": "reason", "remaining": 0},
+			map[string]any{"feature_name": "image_gen", "remaining": 0},
+			map[string]any{"feature_name": "file_upload", "remaining": 0},
+		}},
+		{"access_token": "unknown", "pool": "basic", "enabled": true, "status": "正常"},
+		{"access_token": "disabled", "pool": "basic", "enabled": false, "status": "禁用"},
+		{"access_token": "selected", "pool": "basic", "enabled": true, "status": "正常", "limits_progress": []any{
+			map[string]any{"feature_name": "reason", "remaining": 2},
+			map[string]any{"feature_name": "image_gen", "remaining": 2},
+			map[string]any{"feature_name": "file_upload", "remaining": 2},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := New(repository)
+	lease, summary, err := pool.ReserveIntentWithSummary(context.Background(), []string{"basic"}, nil, nil, 0, Intent{Kind: "image", Model: "gpt-image-2", ImageCount: 1, Uploads: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Release(lease)
+	if summary.TotalAccounts != 4 || summary.MatchedProviderAccounts != 4 || summary.SelectedCandidates != 2 {
+		t.Fatalf("unexpected account counts: %+v", summary)
+	}
+	if summary.ImageQuotaInsufficient != 1 || summary.ReasonQuotaInsufficient != 1 || summary.FileUploadQuotaInsufficient != 1 {
+		t.Fatalf("missing insufficient quota counts: %+v", summary)
+	}
+	if summary.ImageQuotaUnknown != 1 || summary.ReasonQuotaUnknown != 1 || summary.FileUploadQuotaUnknown != 1 {
+		t.Fatalf("missing unknown quota counts: %+v", summary)
+	}
+	if summary.AccountDisabled != 1 {
+		t.Fatalf("missing disabled count: %+v", summary)
+	}
+}
+
+func TestReserveIntentWithSummaryCountsModelDiscoveryMismatch(t *testing.T) {
+	root := t.TempDir()
+	repository := store.New(filepath.Join(root, "accounts.json"), filepath.Join(root, "keys.json"), filepath.Join(root, "config.json"))
+	if err := repository.SaveAccounts([]map[string]any{{"access_token": "one", "pool": "basic", "enabled": true, "status": "正常"}}); err != nil {
+		t.Fatal(err)
+	}
+	pool := New(repository)
+	_, summary, err := pool.ReserveIntentWithSummary(context.Background(), []string{"basic"}, nil, func(Account) bool { return false }, 0, Intent{Kind: "image", Model: "gpt-image-2"})
+	if !errors.Is(err, ErrUnavailable) || summary.ModelDiscoveryUnavailable != 1 || summary.MatchedProviderAccounts != 0 {
+		t.Fatalf("unexpected discovery summary: err=%v summary=%+v", err, summary)
+	}
+}
+
 func TestQuotaImageExhaustionDoesNotDisableText(t *testing.T) {
 	p, _ := quotaPool(t, 2, 0, "限流")
 	if _, e := reserveIntent(p, Intent{Kind: "image"}); !errors.Is(e, ErrUnavailable) {

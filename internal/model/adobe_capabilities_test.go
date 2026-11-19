@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func TestGPTImage2SupportsChatGPTAndAdobeRoutes(t *testing.T) {
+	if got := MediaChannels("gpt-image-2"); !slices.Equal(got, []string{"chatgpt", "adobe"}) {
+		t.Fatalf("unexpected gpt-image-2 channels: %v", got)
+	}
+	m, ok := AdobeModel("gpt-image-2")
+	if !ok || m.ModelID != "gpt-image" || m.ModelVersion != "2" || m.Kind != "image" {
+		t.Fatalf("missing Adobe gpt-image-2 mapping: ok=%t model=%+v", ok, m)
+	}
+	if _, ok := m.MatchImage(1024, 1024, 1, 2); !ok {
+		t.Fatal("Adobe gpt-image-2 should accept a two-reference edit")
+	}
+}
+
 func TestAdobeCapabilitiesPreserveExactParameterVariants(t *testing.T) {
 	cap := MediaCapability("gemini-3.1-flash-image")
 	if cap.Kind != "image" || cap.MaxReferenceImages != 6 || len(cap.Variants) != 10 {

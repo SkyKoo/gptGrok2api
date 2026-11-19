@@ -93,16 +93,66 @@ func (p *Pool) ReserveMatchingLimit(ctx context.Context, pools []string, exclude
 	return p.ReserveIntent(ctx, pools, excluded, match, maxInflight, Intent{})
 }
 
+// SelectionSummary describes why accounts were excluded from one reservation
+// attempt. It contains counts only and deliberately omits account identities,
+// tokens and other credential material.
+type SelectionSummary struct {
+	TotalAccounts               int `json:"total_accounts"`
+	MatchedProviderAccounts     int `json:"matched_provider_accounts"`
+	ModelDiscoveryUnavailable   int `json:"model_discovery_unavailable"`
+	ImageQuotaUnknown           int `json:"image_quota_unknown"`
+	ImageQuotaInsufficient      int `json:"image_quota_insufficient"`
+	ReasonQuotaUnknown          int `json:"reason_quota_unknown"`
+	ReasonQuotaInsufficient     int `json:"reason_quota_insufficient"`
+	FileUploadQuotaUnknown      int `json:"file_upload_quota_unknown"`
+	FileUploadQuotaInsufficient int `json:"file_upload_quota_insufficient"`
+	AccountDisabled             int `json:"account_disabled"`
+	AccountAbnormal             int `json:"account_abnormal"`
+	AccountCoolingDown          int `json:"account_cooling_down"`
+	AccountConcurrencyBlocked   int `json:"account_concurrency_blocked"`
+	SelectedCandidates          int `json:"selected_candidates"`
+}
+
+// Fields returns a JSON-safe copy for request metrics and structured logs.
+func (s SelectionSummary) Fields() map[string]any {
+	return map[string]any{
+		"total_accounts":                 s.TotalAccounts,
+		"matched_provider_accounts":      s.MatchedProviderAccounts,
+		"model_discovery_unavailable":    s.ModelDiscoveryUnavailable,
+		"image_quota_unknown":            s.ImageQuotaUnknown,
+		"image_quota_insufficient":       s.ImageQuotaInsufficient,
+		"reason_quota_unknown":           s.ReasonQuotaUnknown,
+		"reason_quota_insufficient":      s.ReasonQuotaInsufficient,
+		"file_upload_quota_unknown":      s.FileUploadQuotaUnknown,
+		"file_upload_quota_insufficient": s.FileUploadQuotaInsufficient,
+		"account_disabled":               s.AccountDisabled,
+		"account_abnormal":               s.AccountAbnormal,
+		"account_cooling_down":           s.AccountCoolingDown,
+		"account_concurrency_blocked":    s.AccountConcurrencyBlocked,
+		"selected_candidates":            s.SelectedCandidates,
+	}
+}
+
 func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[string]bool, match func(Account) bool, maxInflight int, intent Intent) (*Lease, error) {
+	lease, _, err := p.ReserveIntentWithSummary(ctx, pools, excluded, match, maxInflight, intent)
+	return lease, err
+}
+
+// ReserveIntentWithSummary is the diagnostic variant of ReserveIntent. The
+// summary is refreshed on every reservation pass and is returned with the
+// terminal error. Successful reservations also return the pass that selected
+// the account.
+func (p *Pool) ReserveIntentWithSummary(ctx context.Context, pools []string, excluded map[string]bool, match func(Account) bool, maxInflight int, intent Intent) (*Lease, SelectionSummary, error) {
+	var summary SelectionSummary
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, summary, err
 		}
 		p.mu.Lock()
 		items, revision, err := p.repository.AccountSnapshot()
 		if err != nil {
 			p.mu.Unlock()
-			return nil, fmt.Errorf("load accounts: %w", err)
+			return nil, summary, fmt.Errorf("load accounts: %w", err)
 		}
 
 		now := time.Now()
@@ -110,6 +160,7 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 			p.accounts = normalizeAccounts(items)
 			p.revision = revision
 		}
+		summary = p.selectionSummaryLocked(pools, excluded, match, maxInflight, intent, now)
 		capacityBlocked := false
 		minInflight := int(^uint(0) >> 1)
 		var selected Account
@@ -146,13 +197,13 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 			p.mu.Unlock()
 			if !capacityBlocked {
 				if p.grokMedia && isMediaIntent(intent) {
-					return nil, fmt.Errorf("Grok 媒体额度不足、未确认或等待结算刷新: %w", ErrUnavailable)
+					return nil, summary, fmt.Errorf("Grok 媒体额度不足、未确认或等待结算刷新: %w", ErrUnavailable)
 				}
-				return nil, ErrUnavailable
+				return nil, summary, ErrUnavailable
 			}
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, summary, ctx.Err()
 			case <-wake:
 				continue
 			}
@@ -165,13 +216,13 @@ func (p *Pool) ReserveIntent(ctx context.Context, pools []string, excluded map[s
 		if intent.Kind != "" {
 			if err := p.reserveQuotaLocked(lease); err != nil {
 				p.mu.Unlock()
-				return nil, err
+				return nil, summary, err
 			}
 			p.capabilityActive[Identity(lease.Account)]++
 		}
 		p.inflight[selected.Token]++
 		p.mu.Unlock()
-		return lease, nil
+		return lease, summary, nil
 	}
 }
 

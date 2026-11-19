@@ -6,11 +6,13 @@
 
 | 请求型号 | 发往 Web 的型号 | 静态输出 | GIF |
 | --- | --- | --- | --- |
-| gpt-image-2 | 配置的 image_conversation_model，缺省 gpt-5-3 | 保留已有行为 | 不支持 |
+| gpt-image-2 | ChatGPT 使用配置的 image_conversation_model，缺省 gpt-5-3；无 ChatGPT 候选时可按模型路由回退 Adobe 的 gpt-image/2 | PNG | 不支持 |
 | gpt-image-2.5-sunburst | 原名 | PNG / JPEG / WebP | 不开放 |
 | gpt-image-2.5-flare | 原名 | PNG / JPEG / WebP | 不开放 |
 | gpt-image-2.6-sunburst | 原名 | PNG / JPEG / WebP | 生成接口支持 |
 | gpt-image-2.6-flare | 原名 | PNG / JPEG / WebP | 生成接口支持 |
+
+`gpt-image-2` 是同时声明 ChatGPT 和 Adobe 的逻辑模型，默认优先 ChatGPT，管理员可以在模型路由中调整顺序。Adobe 回退只接受已验证的 1K 静态参数，单次一个输出，支持最多 6 张参考图，输出固定为 PNG；mask、透明背景和其他 ChatGPT 专属图片选项不会转发到 Adobe。
 
 显式型号不读取旧会话模型配置，也不要求聊天目录包含这些型号；它们只登记为图片模型。
 GIF 能力单独判断，不能因支持原名路由而自动开放。2.5 请求 GIF 会在预占额度、入队和请求上游之前返回 400。

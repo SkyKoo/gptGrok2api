@@ -181,6 +181,131 @@ func (p *Pool) availableForIntent(a Account, pools []string, now time.Time, i In
 	}
 	return true
 }
+func (p *Pool) selectionSummaryLocked(pools []string, excluded map[string]bool, match func(Account) bool, maxInflight int, intent Intent, now time.Time) SelectionSummary {
+	summary := SelectionSummary{TotalAccounts: len(p.accounts)}
+	costs := map[string]int{}
+	if intent.Kind != "" {
+		costs = intent.Costs()
+	}
+	for _, account := range p.accounts {
+		if excluded[account.Token] {
+			continue
+		}
+		if match != nil && !match(account) {
+			summary.ModelDiscoveryUnavailable++
+			continue
+		}
+		summary.MatchedProviderAccounts++
+		if accountDisabled(account) {
+			summary.AccountDisabled++
+		}
+		if IsAbnormal(account.Fields) {
+			summary.AccountAbnormal++
+		}
+		if p.accountCoolingDownLocked(account, now) {
+			summary.AccountCoolingDown++
+		}
+
+		check := account
+		if confirmedImageOnlyLimit(account) {
+			fields := map[string]any{}
+			for k, v := range account.Fields {
+				fields[k] = v
+			}
+			fields["status"] = "正常"
+			check.Fields = fields
+		}
+		if !p.available(check, pools, now) {
+			continue
+		}
+		q := accountQuotas(account)
+		if p.grokMedia && isMediaIntent(intent) {
+			q = GrokMediaQuotas(account.Fields)
+		}
+		pending := pendingQuotas(account.Fields["quota_pending"])
+		blocks, _ := account.Fields["capability_cooldowns"].(map[string]any)
+		for feature, cost := range costs {
+			quota := q[feature]
+			if quota.Remaining == nil {
+				p.incrementUnknownQuota(&summary, feature)
+			} else if *quota.Remaining-pending[feature] < cost {
+				p.incrementInsufficientQuota(&summary, feature)
+			}
+			if t, err := time.Parse(time.RFC3339, stringValue(blocks[feature])); err == nil && t.After(now) {
+				// Capability cooldowns are reported separately from account-wide
+				// cooldowns while the reservation path still rejects the account.
+				summary.AccountCoolingDown++
+			}
+		}
+		if t, err := time.Parse(time.RFC3339, stringValue(blocks["model:"+intent.Model])); err == nil && t.After(now) {
+			summary.AccountCoolingDown++
+		}
+		if p.availableForIntent(account, pools, now, intent) {
+			summary.SelectedCandidates++
+			inflight := p.inflight[account.Token]
+			if intent.Kind != "" {
+				inflight = p.capabilityActive[Identity(account)]
+			}
+			if (intent.Kind != "" || p.grokMedia) && p.refreshing[Identity(account)] ||
+				(p.grokMedia && isMediaIntent(intent) && inflight > 0) ||
+				(maxInflight > 0 && inflight >= maxInflight) {
+				summary.AccountConcurrencyBlocked++
+			}
+		}
+	}
+	return summary
+}
+
+func (p *Pool) incrementUnknownQuota(summary *SelectionSummary, feature string) {
+	switch feature {
+	case "image_gen":
+		summary.ImageQuotaUnknown++
+	case "reason":
+		summary.ReasonQuotaUnknown++
+	case "file_upload":
+		summary.FileUploadQuotaUnknown++
+	}
+}
+
+func (p *Pool) incrementInsufficientQuota(summary *SelectionSummary, feature string) {
+	switch feature {
+	case "image_gen":
+		summary.ImageQuotaInsufficient++
+	case "reason":
+		summary.ReasonQuotaInsufficient++
+	case "file_upload":
+		summary.FileUploadQuotaInsufficient++
+	}
+}
+
+func accountDisabled(account Account) bool {
+	if !boolValue(account.Fields["enabled"], true) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(account.Fields["status"]))) {
+	case "disabled", "auto_disabled", "禁用":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Pool) accountCoolingDownLocked(account Account, now time.Time) bool {
+	if until := p.cooldowns[account.Token]; until.After(now) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(stringValue(account.Fields["status"]))) {
+	case "limited", "rate_limited", "cooling", "backoff", "限流":
+		return true
+	}
+	for _, key := range []string{"cooldown_until", "cooldown_until_ms", "next_retry_at"} {
+		if until := timestamp(account.Fields, key); until.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Pool) currentAccountLocked(a Account) (Account, error) {
 	rows, _, err := p.repository.AccountSnapshot()
 	if err != nil {

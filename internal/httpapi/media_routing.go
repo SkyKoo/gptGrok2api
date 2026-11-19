@@ -2,7 +2,12 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log"
+	"net/http"
+	"strings"
+
 	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
@@ -78,40 +83,107 @@ type imageSelection struct {
 	Context context.Context
 }
 
+type imageSelectionDiagnostics struct {
+	Model                   string
+	ConversationModel       string
+	ChannelOrder            []string
+	ChatGPT                 accounts.SelectionSummary
+	ChatGPTObserved         bool
+	AdobeCandidateCount     int
+	AdobeRejectionReason    string
+	AdobeParameterSupported bool
+}
+
+func (d imageSelectionDiagnostics) fields() map[string]any {
+	channel := strings.Join(d.ChannelOrder, ",")
+	if len(d.ChannelOrder) == 0 {
+		channel = "none"
+	}
+	fields := map[string]any{
+		"model":                 d.Model,
+		"channel":               channel,
+		"conversation_model":    d.ConversationModel,
+		"channel_order":         append([]string(nil), d.ChannelOrder...),
+		"adobe_candidate_count": d.AdobeCandidateCount,
+	}
+	if d.ChatGPTObserved {
+		fields["chatgpt"] = d.ChatGPT.Fields()
+	}
+	if d.AdobeRejectionReason != "" {
+		fields["adobe_rejection_reason"] = d.AdobeRejectionReason
+	}
+	if d.AdobeParameterSupported {
+		fields["adobe_parameter_supported"] = true
+	}
+	return fields
+}
+
+func (s *Server) recordImageSelectionFailure(r *http.Request, diagnostics imageSelectionDiagnostics) {
+	fields := diagnostics.fields()
+	if r != nil {
+		s.enrichRequestMonitor(r, map[string]any{"metrics": map[string]any{"image_account_selection": fields}})
+	}
+	raw, err := json.Marshal(fields)
+	if err == nil {
+		log.Printf("image account selection failed: %s", raw)
+	}
+}
+
+// selectImageImplementation keeps the test and internal callers that do not
+// have an HTTP request compatible. Request handlers use the request-aware form
+// so selection diagnostics reach the call log.
 func (s *Server) selectImageImplementation(ctx context.Context, id, conversation, size, quality string, count, refs int, options provider.ImageOutputOptions, masked bool, eligible func(accounts.Account) bool) (imageSelection, error) {
+	return s.selectImageImplementationForRequest(nil, ctx, id, conversation, size, quality, count, refs, options, masked, eligible)
+}
+
+func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx context.Context, id, conversation, size, quality string, count, refs int, options provider.ImageOutputOptions, masked bool, eligible func(accounts.Account) bool) (imageSelection, error) {
 	order, err := s.channelOrder(id)
 	if err != nil {
 		return imageSelection{}, err
 	}
+	diagnostics := imageSelectionDiagnostics{Model: id, ConversationModel: conversation, ChannelOrder: order}
 	fits := false
 	for _, channel := range order {
 		switch channel {
 		case "adobe":
 			if !adobeImageFits(id, size, quality, count, refs, options, masked) {
+				if diagnostics.AdobeRejectionReason == "" {
+					diagnostics.AdobeRejectionReason = "parameter_mismatch"
+				}
 				continue
 			}
 			fits = true
+			diagnostics.AdobeParameterSupported = true
 			if s.adobeStore == nil || s.adobeClient == nil {
+				diagnostics.AdobeRejectionReason = "adobe_service_unavailable"
 				continue
 			}
 			if err := s.ensureAdobeAccounts(ctx, id); err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
+					diagnostics.AdobeRejectionReason = "no_adobe_candidate"
 					continue
 				}
+				diagnostics.AdobeRejectionReason = adobe.SafeError(err)
+				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, adobeAPIError(err)
 			}
+			diagnostics.AdobeCandidateCount++
 			key := imageExecutionKey(ctx)
 			a, selectedContext, err := s.adobeStore.ReserveMediaForModel(ctx, key, id, s.adobeAccountContext)
 			if err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
+					diagnostics.AdobeRejectionReason = "no_adobe_candidate"
 					continue
 				}
+				diagnostics.AdobeRejectionReason = adobe.SafeError(err)
+				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, adobeAPIError(err)
 			}
 			m, _ := model.AdobeModel(id)
 			route := mediaRoute{Channel: channel, AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
 			if err = s.pinImageRoute(ctx, route); err != nil {
 				s.adobeStore.ReleaseUnsubmittedTask(key, a.ID)
+				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, err
 			}
 			return imageSelection{Channel: channel, Adobe: a, Key: key, Context: selectedContext}, nil
@@ -120,23 +192,30 @@ func (s *Server) selectImageImplementation(ctx context.Context, id, conversation
 				continue
 			}
 			fits = true
-			l, err := s.accountPool.ReserveIntent(ctx, []string{"basic", "super", "heavy"}, nil, eligible, s.cfg.ImageAccountLimit, accounts.Intent{Kind: "image", Model: conversation, ImageCount: count, Uploads: count * (refs + boolInt(masked))})
+			intent := accounts.Intent{Kind: "image", Model: conversation, ImageCount: count, Uploads: count * (refs + boolInt(masked))}
+			l, summary, err := s.accountPool.ReserveIntentWithSummary(ctx, []string{"basic", "super", "heavy"}, nil, eligible, s.cfg.ImageAccountLimit, intent)
+			diagnostics.ChatGPT, diagnostics.ChatGPTObserved = summary, true
 			if err != nil {
 				if errors.Is(err, accounts.ErrUnavailable) {
 					continue
 				}
+				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, err
 			}
 			if err = s.pinImageRoute(ctx, mediaRoute{Channel: channel, AccountID: accounts.Identity(l.Account), UpstreamModel: conversation, Stage: "selected"}); err != nil {
 				s.accountPool.Release(l)
+				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, err
 			}
 			return imageSelection{Channel: channel, Lease: l}, nil
 		}
 	}
 	if !fits {
+		diagnostics.AdobeRejectionReason = firstNonEmpty(diagnostics.AdobeRejectionReason, "no_channel_supports_parameters")
+		s.recordImageSelectionFailure(r, diagnostics)
 		return imageSelection{}, &protocol.UpstreamError{Status: 400, Message: "no channel supports this complete model parameter combination"}
 	}
+	s.recordImageSelectionFailure(r, diagnostics)
 	return imageSelection{}, &protocol.UpstreamError{Status: 429, Message: "no eligible account with confirmed quota for this model"}
 }
 func boolInt(v bool) int {

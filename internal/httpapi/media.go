@@ -129,7 +129,7 @@ func (s *Server) imageGenerations(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer releaseSlot()
-		selection, err := s.selectImageImplementation(r.Context(), request.Model, "", request.Size, request.Quality, request.N, 0, request.ImageOutputOptions, false, nil)
+		selection, err := s.selectImageImplementationForRequest(r, r.Context(), request.Model, "", request.Size, request.Quality, request.N, 0, request.ImageOutputOptions, false, nil)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return
@@ -206,7 +206,7 @@ func (s *Server) generateOpenAIImageData(r *http.Request, ctx context.Context, p
 		return nil, err
 	}
 	defer releaseSlot()
-	selection, err := s.selectImageImplementation(ctx, model, conversationModel, size, quality, count, len(inputs), options, maskCount(masks) > 0, eligible)
+	selection, err := s.selectImageImplementationForRequest(r, ctx, model, conversationModel, size, quality, count, len(inputs), options, maskCount(masks) > 0, eligible)
 	if err != nil {
 		return nil, err
 	}
@@ -794,7 +794,7 @@ func (s *Server) imageEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer releaseSlot()
-		selected, err := s.selectImageImplementation(ctx, modelName, "", request.Size, request.Quality, n, len(inputs), request.ImageOutputOptions, mask != nil, nil)
+		selected, err := s.selectImageImplementationForRequest(r, ctx, modelName, "", request.Size, request.Quality, n, len(inputs), request.ImageOutputOptions, mask != nil, nil)
 		if err != nil {
 			writeError(w, upstreamStatus(err), err.Error(), "upstream_error")
 			return

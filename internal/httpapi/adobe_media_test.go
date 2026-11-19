@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/auucoder/gptgrok2api-go/internal/accounts"
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"github.com/auucoder/gptgrok2api-go/internal/model"
 	"github.com/auucoder/gptgrok2api-go/internal/provider"
@@ -120,6 +121,31 @@ func waitAdobeImage(t *testing.T, s *Server, id string) *imageTaskState {
 	t.Fatal("image task did not terminate")
 	return nil
 }
+func TestGPTImage2FallsBackToAdobeWhenChatGPTUnavailable(t *testing.T) {
+	s := imageTaskTestServer(t)
+	a := adobeSchedulingAccount(t, s, "gpt-image-2-fallback", time.Now())
+	endpoint := "http://adobe-fallback.invalid:8080"
+	s.proxyManager.SetDefault(endpoint, nil)
+	s.adobeStore.SetBrowserRefresher(adobeFixtureMediaRefresh)
+	fixed, err := s.adobeAccountContext(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.adobeStore.WarmMediaSession(fixed, a.ID, a.Revision); err != nil {
+		t.Fatal(err)
+	}
+	var submits, polls atomic.Int32
+	s.adobeClient = adobeFixtureClient(t, &submits, &polls, false)
+	selected, err := s.selectImageImplementation(context.Background(), "gpt-image-2", "gpt-6", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, func(accounts.Account) bool { return false })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Channel != "adobe" || selected.Adobe.ID != a.ID {
+		t.Fatalf("gpt-image-2 did not fall back to Adobe: channel=%s account=%s", selected.Channel, selected.Adobe.ID)
+	}
+	s.adobeStore.ReleaseUnsubmittedTask(selected.Key, selected.Adobe.ID)
+}
+
 func TestAdobeAsyncDuplicateNeverResubmits(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		t.Run(fmt.Sprint(failed), func(t *testing.T) {
