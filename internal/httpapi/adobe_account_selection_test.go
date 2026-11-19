@@ -31,6 +31,17 @@ func TestAdobeMediaRoutesSkipUnavailableModelAccountBeforeBinding(t *testing.T) 
 				t.Fatal(err)
 			}
 			second = adobeFixtureModelPermissions(t, s, rows[0])
+			fixed, err := s.adobeAccountContext(context.Background(), second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.adobeStore.WarmMediaSession(fixed, second.ID, second.Revision); err != nil {
+				t.Fatal(err)
+			}
+			second, err = s.adobeStore.Get(second.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			target, other := "gemini-3.1-flash-image", "veo-3.1-lite"
 			if video {
 				target, other = other, target

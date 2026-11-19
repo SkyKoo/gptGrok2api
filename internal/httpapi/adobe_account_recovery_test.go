@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -149,6 +150,17 @@ func TestAdobeManualResolveRealSyncAndAsyncSubmissionNeverReplays(t *testing.T) 
 		t.Run(mode, func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			a := adobeFixtureAccount(t, s)
+			fixed, err := s.adobeAccountContext(context.Background(), a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.adobeStore.WarmMediaSession(fixed, a.ID, a.Revision); err != nil {
+				t.Fatal(err)
+			}
+			a, err = s.adobeStore.Get(a.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var submits, polls atomic.Int32
 			s.adobeClient = adobeFixtureClient(t, &submits, &polls, true)
 			path := "/v1/images/generations"
