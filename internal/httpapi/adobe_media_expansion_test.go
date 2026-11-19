@@ -38,6 +38,7 @@ type adobeMediaCapture struct {
 	expectedBearer                      string
 	expectedARP                         string
 	afterSubmit                         func()
+	inspectRequest                      func(*http.Request)
 }
 
 func adobeMediaPNG(t *testing.T, width, height int) []byte {
@@ -54,6 +55,9 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 	return adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.inspectRequest != nil {
+			f.inspectRequest(r)
+		}
 		if f.expectedProxy != "" {
 			endpoint, selected := proxyruntime.URLSelectionFromContext(r.Context())
 			if !selected || endpoint != f.expectedProxy {
@@ -162,9 +166,10 @@ func TestAdobeImageSizeAndReferencesReachProtocol(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			adobeFixtureAccount(t, s)
+			a := adobeFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1200, 896), expectedProxy: "http://daily-default.invalid:8080"}
 			s.proxyManager.SetDefault(fixture.expectedProxy, nil)
+			warmAdobeFixtureAccount(t, s, a)
 			fixture.afterSubmit = func() { s.proxyManager.SetDefault("http://next-default.invalid:8080", nil) }
 			s.adobeClient = fixture.client(t)
 			request := map[string]any{"model": "gemini-3.1-flash-image", "prompt": "a paper boat", "size": "1200x896", "n": 1, "response_format": "url"}
@@ -224,7 +229,7 @@ func TestAdobeImageSizeAndReferencesReachProtocol(t *testing.T) {
 
 func TestAdobeReferenceFailureNeverGeneratesOrReplays(t *testing.T) {
 	s := imageTaskTestServer(t)
-	a := adobeFixtureAccount(t, s)
+	a := adobeReadyFixtureAccount(t, s)
 	fixture := &adobeMediaCapture{uploadDenied: true}
 	s.adobeClient = fixture.client(t)
 	request := map[string]any{"client_task_id": "adobe-upload-failure", "model": "gemini-3.1-flash-image", "prompt": "a paper boat", "images": []string{"data:image/png;base64," + base64.StdEncoding.EncodeToString(adobeMediaPNG(t, 20, 20))}}
@@ -277,9 +282,10 @@ func adobeVideoMediaRequest(t *testing.T, audio bool, refs [][]byte) *http.Reque
 func TestAdobeVideoAudioReferencesAndIdempotency(t *testing.T) {
 	s := imageTaskTestServer(t)
 	s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
-	adobeFixtureAccount(t, s)
+	a := adobeFixtureAccount(t, s)
 	fixture := &adobeMediaCapture{video: true, output: videoTestMP4("adobe-video", "fixture"), expectedProxy: "http://daily-default.invalid:8080"}
 	s.proxyManager.SetDefault(fixture.expectedProxy, nil)
+	warmAdobeFixtureAccount(t, s, a)
 	fixture.afterSubmit = func() { s.proxyManager.SetDefault("http://next-default.invalid:8080", nil) }
 	s.adobeClient = fixture.client(t)
 	refs := [][]byte{adobeMediaPNG(t, 40, 30)}
@@ -371,7 +377,7 @@ func TestAdobePaidPreflightStopsBeforeUploadOrGeneration(t *testing.T) {
 	for _, video := range []bool{false, true} {
 		t.Run(fmt.Sprint(video), func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			a := adobeFixtureAccount(t, s)
+			a := adobeReadyFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{video: video, preflightPaid: true}
 			s.adobeClient = fixture.client(t)
 			if video {
@@ -439,7 +445,7 @@ func TestAdobeRecoveryUsesRecordedImageDimensions(t *testing.T) {
 
 func TestAdobeAsyncFourteenReferencesFollowModelCapability(t *testing.T) {
 	s := imageTaskTestServer(t)
-	adobeFixtureAccount(t, s)
+	adobeReadyFixtureAccount(t, s)
 	fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1024, 1024)}
 	s.adobeClient = fixture.client(t)
 	refs := make([]string, 14)
@@ -482,7 +488,7 @@ func TestAdobeOutputKeepsActualEncoding(t *testing.T) {
 	for _, kind := range []string{"png", "jpeg", "webp"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			adobeFixtureAccount(t, s)
+			adobeReadyFixtureAccount(t, s)
 			var output bytes.Buffer
 			canvas := image.NewNRGBA(image.Rect(0, 0, 1024, 1024))
 			var err error
@@ -550,7 +556,7 @@ func TestAdobeRejectsInvalidOrWrongSizeOutput(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			adobeFixtureAccount(t, s)
+			adobeReadyFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{output: tc.output}
 			s.adobeClient = fixture.client(t)
 			w := imageTaskCall(s, "POST", "/v1/images/generations", "api-secret", `{"model":"gemini-3.1-flash-image","prompt":"boat","size":"1024x1024"}`)
@@ -587,7 +593,7 @@ func TestAdobeSharedModelKeepsImageEditDefault(t *testing.T) {
 
 func TestAdobeExplicitOutputEncodingCannotSilentlyChange(t *testing.T) {
 	s := imageTaskTestServer(t)
-	adobeFixtureAccount(t, s)
+	adobeReadyFixtureAccount(t, s)
 	var output bytes.Buffer
 	if err := jpeg.Encode(&output, image.NewRGBA(image.Rect(0, 0, 1024, 1024)), nil); err != nil {
 		t.Fatal(err)

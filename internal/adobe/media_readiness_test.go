@@ -383,6 +383,95 @@ func TestReserveReadyMediaForModelDoesNotBindColdAccount(t *testing.T) {
 	}
 }
 
+func TestReadyMediaReservationDoesNotWaitForBrowserWarmup(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		for _, requireReady := range []bool{false, true} {
+			name := map[bool]string{false: "fresh_permissions", true: "stale_permissions"}[stale] + "/" + map[bool]string{false: "legacy", true: "ready_only"}[requireReady]
+			t.Run(name, func(t *testing.T) {
+				s, a := idleMediaStore(t)
+				generation := strictSelectionGeneration(time.Now(), 1)
+				if stale {
+					generation = strictSelectionGeneration(time.Now().Add(-time.Hour), 1)
+					generation.Status = "stale"
+				}
+				if err := s.UpdateGenerationPermissions(a.ID, a.Revision, generation); err != nil {
+					t.Fatal(err)
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var calls atomic.Int32
+				s.SetBrowserRefresher(func(ctx context.Context, current Account) (Account, error) {
+					calls.Add(1)
+					close(entered)
+					<-release
+					return freshMediaAccount(current), nil
+				})
+				warm := make(chan error, 1)
+				go func() { _, err := s.WarmMediaSession(mediaTestContext(), a.ID, a.Revision); warm <- err }()
+				t.Cleanup(func() {
+					close(release)
+					select {
+					case err := <-warm:
+						if err != nil {
+							t.Errorf("controlled warmup failed: %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Error("warmup did not release its browser gate")
+					}
+				})
+				select {
+				case <-entered:
+				case <-time.After(time.Second):
+					t.Fatal("warmup never entered browser callback")
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				reserved := make(chan error, 1)
+				go func() {
+					var err error
+					if requireReady {
+						_, _, err = s.ReserveReadyMediaForModel(ctx, "foreground", "veo-3.1-lite", mediaDirectResolver)
+					} else {
+						_, _, err = s.ReserveMediaForModel(ctx, "foreground", "veo-3.1-lite", mediaDirectResolver)
+					}
+					reserved <- err
+				}()
+				if requireReady {
+					select {
+					case err := <-reserved:
+						if !errors.Is(err, ErrMediaSessionNotReady) {
+							t.Fatalf("ready-only reservation did not reject the warming session: %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("ready-only reservation waited for the blocked browser")
+					}
+				} else {
+					select {
+					case err := <-reserved:
+						t.Fatalf("legacy reservation stopped waiting for warmup: %v", err)
+					case <-time.After(25 * time.Millisecond):
+					}
+					cancel()
+					select {
+					case err := <-reserved:
+						if SafeError(err) != "adobe_media_prepare_cancelled" {
+							t.Fatalf("legacy wait did not honor caller cancellation: %v", err)
+						}
+					case <-time.After(time.Second):
+						t.Fatal("legacy wait ignored cancellation")
+					}
+				}
+				d, err := s.load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, bound := d.Bindings["foreground"]; bound || calls.Load() != 1 {
+					t.Fatal("waiting/rejected request reserved an account or opened another browser")
+				}
+			})
+		}
+	}
+}
+
 func TestBrowserReloginAndFallbackPopulateReadyButIMSDoesNot(t *testing.T) {
 	for _, mode := range []string{"relogin", "fallback", "ims"} {
 		t.Run(mode, func(t *testing.T) {
@@ -430,6 +519,9 @@ func TestBrowserReloginAndFallbackPopulateReadyButIMSDoesNot(t *testing.T) {
 
 func TestRefreshDuePermissionsRechecksAndKeepsGateThroughTail(t *testing.T) {
 	s, a := idleMediaStore(t)
+	if err := s.UpdateGenerationPermissions(a.ID, a.Revision, strictSelectionGeneration(time.Now(), 1)); err != nil {
+		t.Fatal(err)
+	}
 	if _, attempted, err := s.RefreshDueWithPermissions(mediaTestContext(), NewClient(nil), a.ID, time.Now()); err != nil || attempted {
 		t.Fatal("fresh snapshot refreshed", err)
 	}

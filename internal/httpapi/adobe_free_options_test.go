@@ -98,7 +98,7 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 		t.Run(fmt.Sprintf("%s/%s/ref=%d", tc.model, tc.query, tc.references), func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
-			adobeFixtureAccount(t, s)
+			adobeReadyFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{video: true}
 			s.adobeClient = fixture.client(t)
 			fields, _ := url.ParseQuery(tc.query)
@@ -239,7 +239,7 @@ func TestAdobeNewImageRatiosReachUnifiedProtocol(t *testing.T) {
 	} {
 		t.Run(tc.model+"/"+tc.aspect, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			adobeFixtureAccount(t, s)
+			adobeReadyFixtureAccount(t, s)
 			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, tc.width, tc.height)}
 			s.adobeClient = fixture.client(t)
 			body, _ := json.Marshal(map[string]any{"model": tc.model, "prompt": "a blue ceramic mug", "size": tc.size, "n": 1})

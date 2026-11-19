@@ -492,7 +492,7 @@ func (s *Store) reserveMediaForModel(ctx context.Context, taskKey, model string,
 					continue
 				}
 				if model != "" && current.Quota.Generation.ModelSelectionState(model, now) != ModelUsable {
-					if !waited && current.Quota.Generation.ModelSelectionState(model, now) == ModelNeedsRefresh && (s.maintenance[current.ID] || s.quotaQueries[current.ID]) && waitFor == nil {
+					if !requireReady && !waited && current.Quota.Generation.ModelSelectionState(model, now) == ModelNeedsRefresh && (s.maintenance[current.ID] || s.quotaQueries[current.ID]) && waitFor == nil {
 						waitFor = s.accountChangeSignalLocked(current.ID)
 					}
 					continue
@@ -520,10 +520,9 @@ func (s *Store) reserveMediaForModel(ctx context.Context, taskKey, model string,
 				}
 				ready := s.mediaReadyLocked(candidate.ctx, current, 0, now)
 				if requireReady && !ready {
-					// A concurrent warmup is handled by the existing flight wait
-					// above. A cold account is deliberately left for the scheduler;
-					// binding it here would make the foreground request start a
-					// browser session in PrepareMediaForTask.
+					// Missing sessions remain the scheduler's responsibility.
+					// Foreground admission neither waits for a warmup nor binds
+					// a cold account that would need browser preparation.
 					continue
 				}
 				if selected < 0 || ready && !selectedReady || ready == selectedReady && current.LastUsedAt < d.Accounts[selected].LastUsedAt {

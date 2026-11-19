@@ -121,7 +121,7 @@ func markAdobeFixturePermissionsStale(t *testing.T, s *Server, a adobe.Account, 
 	}
 }
 
-func TestAdobeForegroundSelectionRefreshesStaleModelQuotaWithMaintenanceDisabled(t *testing.T) {
+func TestAdobeExplicitQuotaRefreshSelectsFreshModelWithMaintenanceDisabled(t *testing.T) {
 	for _, target := range []string{"gemini-3.1-flash-image", "veo-3.1-lite"} {
 		for _, failFirst := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/failed-first=%v", target, failFirst), func(t *testing.T) {
@@ -189,51 +189,28 @@ func TestAdobeForegroundSelectionRefreshesStaleModelQuotaWithMaintenanceDisabled
 	}
 }
 
-func TestAdobeMediaEntrypointsStopWhenEntitlementsCannotBeRefreshed(t *testing.T) {
+func TestAdobeMediaEntrypointsRejectStaleEntitlementsWithoutRefresh(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			a := adobeFixtureAccount(t, s)
+			a := adobeReadyFixtureAccount(t, s)
 			markAdobeFixturePermissionsStale(t, s, a, 10)
-			browserCalls, submits := 0, 0
+			browserCalls, upstreamCalls := 0, 0
 			s.adobeStore.SetBrowserRefresher(func(context.Context, adobe.Account) (adobe.Account, error) {
 				browserCalls++
 				return adobe.Account{}, errors.New("unexpected browser")
 			})
 			s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-				status, body := 200, `{"total":{"quota":{"available":0}}}`
-				if r.URL.Path == "/v1/feature-auth-profile" {
-					status, body = 503, `{"error_code":"upstream_error"}`
-				} else if r.URL.Path != "/v1/credits/balance" {
-					submits++
-					t.Errorf("failed entitlement read advanced to %s", r.URL.Path)
-				}
-				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+				upstreamCalls++
+				return nil, errors.New("foreground must not refresh stale entitlements")
 			})})
-			var status string
-			var route *mediaRoute
-			if kind == "sync_image" {
-				response := imageTaskCall(s, "POST", "/v1/images/edits", "api-secret", adobePreparationImageBody(t))
-				if response.Code < 400 {
-					t.Fatalf("failed entitlement read accepted sync request: %d", response.Code)
-				}
-				status = "error"
-				s.imageTaskMu.RLock()
-				for _, task := range s.imageTasks {
-					if task.Route != nil {
-						route = task.Route
-					}
-				}
-				s.imageTaskMu.RUnlock()
-			} else {
-				status, route, _ = adobePreparationRequest(t, s, kind)
+			status, route, _ := adobePreparationRequest(t, s, kind)
+			if (status != "error" && status != "failed") || route != nil || browserCalls != 0 || upstreamCalls != 0 {
+				t.Fatalf("stale entitlement request bound/refreshed: status=%s route=%+v browsers=%d upstream=%d", status, route, browserCalls, upstreamCalls)
 			}
-			if (status != "error" && status != "failed") || route != nil || browserCalls != 0 || submits != 0 {
-				t.Fatalf("failed observation bound/generated: status=%s route=%+v browsers=%d submits=%d", status, route, browserCalls, submits)
-			}
-			current, _ := s.adobeStore.Get(a.ID)
-			if current.InFlight != "" || current.Quota.Generation.Status != "error" {
-				t.Fatal("failed observation retained usable historical quota")
+			current, err := s.adobeStore.Get(a.ID)
+			if err != nil || current.InFlight != "" || current.Quota.Generation.Status != "stale" {
+				t.Fatal("foreground request changed stale entitlement observation")
 			}
 		})
 	}

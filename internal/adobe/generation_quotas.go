@@ -41,6 +41,10 @@ type GenerationPool struct {
 	Models        []string `json:"models"`
 }
 
+// GenerationObservationMaxAge is the local freshness limit shared by model
+// admission and background quota maintenance; it is not an upstream quota TTL.
+const GenerationObservationMaxAge = 5 * time.Minute
+
 // ModelSelectionState distinguishes missing observations from zero entitlement.
 // Only a fresh positive observation may bind a new generation task.
 type ModelSelectionState string
@@ -56,7 +60,7 @@ func (e *GenerationEntitlements) ModelSelectionState(model string, now time.Time
 		return ModelNeedsRefresh
 	}
 	checked, err := time.Parse(time.RFC3339Nano, e.CheckedAt)
-	if err != nil || checked.After(now) || now.Sub(checked) > 5*time.Minute {
+	if err != nil || checked.After(now) || now.Sub(checked) > GenerationObservationMaxAge {
 		return ModelNeedsRefresh
 	}
 	for _, m := range e.Models {
@@ -283,7 +287,7 @@ func (e GenerationEntitlements) Exhausted() bool {
 // model. Missing or stale evidence still requires the exact request preflight.
 func (e GenerationEntitlements) ModelAvailable(model string, now time.Time) bool {
 	checked, err := time.Parse(time.RFC3339Nano, e.CheckedAt)
-	if e.Status != "known" || err != nil || checked.After(now) || now.Sub(checked) > 5*time.Minute {
+	if e.Status != "known" || err != nil || checked.After(now) || now.Sub(checked) > GenerationObservationMaxAge {
 		return true
 	}
 	for _, m := range e.Models {

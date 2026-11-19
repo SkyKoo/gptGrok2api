@@ -158,20 +158,8 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 				diagnostics.AdobeRejectionReason = "adobe_service_unavailable"
 				continue
 			}
-			if err := s.ensureAdobeAccounts(ctx, id); err != nil {
-				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
-					diagnostics.AdobeRejectionReason = "no_adobe_candidate"
-					continue
-				}
-				if errors.Is(err, adobe.ErrMediaSessionNotReady) {
-					diagnostics.AdobeRejectionReason = "media_session_not_ready"
-					continue
-				}
-				diagnostics.AdobeRejectionReason = adobe.SafeError(err)
-				s.recordImageSelectionFailure(r, diagnostics)
-				return imageSelection{}, adobeAPIError(err)
-			}
-			diagnostics.AdobeCandidateCount++
+			// Foreground admission uses local readiness and entitlement evidence only.
+			// Background maintenance owns credential and model-permission refreshes.
 			key := imageExecutionKey(ctx)
 			a, selectedContext, err := s.adobeStore.ReserveReadyMediaForModel(ctx, key, id, s.adobeAccountContext)
 			if err != nil {
@@ -180,6 +168,7 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 					continue
 				}
 				if errors.Is(err, adobe.ErrMediaSessionNotReady) {
+					diagnostics.AdobeCandidateCount++
 					diagnostics.AdobeRejectionReason = "media_session_not_ready"
 					continue
 				}
@@ -187,6 +176,7 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, adobeAPIError(err)
 			}
+			diagnostics.AdobeCandidateCount++
 			m, _ := model.AdobeModel(id)
 			route := mediaRoute{Channel: channel, AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
 			if err = s.pinImageRoute(ctx, route); err != nil {

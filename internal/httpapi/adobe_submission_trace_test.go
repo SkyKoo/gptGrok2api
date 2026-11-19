@@ -21,7 +21,7 @@ func TestAdobeFailedSubmissionRetainsTraceWithoutMakingItResumable(t *testing.T)
 		for _, failure := range []string{"upstream_timeout", "transport", "rejected"} {
 			t.Run(mode+"/"+failure, func(t *testing.T) {
 				s := imageTaskTestServer(t)
-				a := adobeFixtureAccount(t, s)
+				a := adobeReadyFixtureAccount(t, s)
 				var submits, polls atomic.Int32
 				var requestID atomic.Value
 				s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -193,7 +193,7 @@ func TestAdobeFailedSubmissionRetainsTraceWithoutMakingItResumable(t *testing.T)
 
 func TestAdobeFailedTraceWriteStillPreservesUnknownReservation(t *testing.T) {
 	s := imageTaskTestServer(t)
-	a := adobeFixtureAccount(t, s)
+	a := adobeReadyFixtureAccount(t, s)
 	var submits, polls atomic.Int32
 	s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch {

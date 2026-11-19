@@ -234,6 +234,7 @@ func TestAdobeSyncPollFailureReturnsResumableTaskWithoutResubmission(t *testing.
 		prepares.Add(1)
 		return adobeFixtureMediaRefresh(ctx, current)
 	})
+	warmAdobeFixtureAccount(t, s, account)
 	s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body, status, mime := `{}`, 200, "application/json"
 		switch {

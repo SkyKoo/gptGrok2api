@@ -114,7 +114,7 @@ func (s *Server) refreshAllAdobeMediaSessions(ctx context.Context) {
 	now := time.Now()
 	candidates := make([]candidate, 0, len(items))
 	for _, a := range items {
-		if !adobe.Eligible(a, now) || strings.TrimSpace(a.ProfileID) == "" {
+		if !adobe.Eligible(a, now) || strings.TrimSpace(a.ProfileID) == "" || !adobeHasKnownMediaCapacity(a, now) {
 			continue
 		}
 		fixed, resolveErr := s.adobeAccountContext(ctx, a)
@@ -144,7 +144,7 @@ func adobeHasKnownMediaCapacity(a adobe.Account, now time.Time) bool {
 		return false
 	}
 	checked, err := time.Parse(time.RFC3339Nano, generation.CheckedAt)
-	if err != nil || checked.After(now) || now.Sub(checked) > 5*time.Minute {
+	if err != nil || checked.After(now) || now.Sub(checked) > adobe.GenerationObservationMaxAge {
 		return false
 	}
 	for _, entitlement := range generation.Models {

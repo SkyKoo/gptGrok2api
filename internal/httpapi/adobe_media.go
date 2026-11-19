@@ -474,10 +474,12 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "invalid_request", "message": err.Error()})
 		return
 	}
-	if err := s.ensureAdobeAccounts(ctx, job.Model); err != nil {
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_entitlements_unavailable", "message": adobe.SafeError(err)})
+	if s.adobeStore == nil || s.adobeClient == nil {
+		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_entitlements_unavailable", "message": adobe.SafeError(adobe.ErrNoAccount)})
 		return
 	}
+	// Reserve only from local warm-session and entitlement evidence. The
+	// foreground path must not refresh credentials or wait for browser work.
 	key := "video-" + job.ID
 	a, selectedContext, err := s.adobeStore.ReserveReadyMediaForModel(ctx, key, job.Model, s.adobeAccountContext)
 	if err != nil {

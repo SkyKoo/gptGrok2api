@@ -40,6 +40,26 @@ func adobeFixtureAccount(t *testing.T, s *Server) adobe.Account {
 	return adobeFixtureModelPermissions(t, s, a)
 }
 
+// adobeReadyFixtureAccount opts a generation fixture into the same background
+// preparation required by the foreground routes; ordinary import fixtures stay cold.
+func adobeReadyFixtureAccount(t *testing.T, s *Server) adobe.Account {
+	t.Helper()
+	return warmAdobeFixtureAccount(t, s, adobeFixtureAccount(t, s))
+}
+
+func warmAdobeFixtureAccount(t *testing.T, s *Server, a adobe.Account) adobe.Account {
+	t.Helper()
+	fixed, err := s.adobeAccountContext(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warmed, err := s.adobeStore.WarmMediaSession(fixed, a.ID, a.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return warmed
+}
+
 func adobeFixtureModelPermissions(t *testing.T, s *Server, a adobe.Account) adobe.Account {
 	t.Helper()
 	one, available := 1.0, 10.0
@@ -150,12 +170,13 @@ func TestAdobeAsyncDuplicateNeverResubmits(t *testing.T) {
 	for _, failed := range []bool{false, true} {
 		t.Run(fmt.Sprint(failed), func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			adobeFixtureAccount(t, s)
+			a := adobeFixtureAccount(t, s)
 			var submits, polls, prepares atomic.Int32
 			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
 				prepares.Add(1)
 				return adobeFixtureMediaRefresh(ctx, current)
 			})
+			warmAdobeFixtureAccount(t, s, a)
 			s.adobeClient = adobeFixtureClient(t, &submits, &polls, failed)
 			body := `{"client_task_id":"adobe-once","model":"gemini-3.1-flash-image","prompt":"one blue circle","size":"1024x1024"}`
 			first := imageTaskCall(s, "POST", "/api/image-tasks/generations", "api-secret", body)

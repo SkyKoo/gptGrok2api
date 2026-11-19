@@ -148,7 +148,7 @@ func TestAdobeVideoSafetyFailureReleasesOnlyOriginalReservation(t *testing.T) {
 
 func TestAdobeExactPreflightRefusalIsRecordedBeforeUpload(t *testing.T) {
 	s := imageTaskTestServer(t)
-	a := adobeFixtureAccount(t, s)
+	a := adobeReadyFixtureAccount(t, s)
 	fixture := &adobeMediaCapture{video: true, preflightPaid: true}
 	s.adobeClient = fixture.client(t)
 	w := httptest.NewRecorder()

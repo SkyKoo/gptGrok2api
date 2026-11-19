@@ -774,10 +774,35 @@ func QuotaRefreshDueAt(a Account, now time.Time) time.Time {
 	if tokenDue := time.Unix(a.ExpiresAt, 0).Add(-5 * time.Minute); tokenDue.Before(due) {
 		due = tokenDue
 	}
+	// Even idle accounts need fresh model permissions before foreground
+	// admission. Leave one minute for the bounded background scan to refresh.
+	if generationDue := generationPermissionsRefreshDueAt(a.Quota.Generation, now); generationDue.Before(due) {
+		due = generationDue
+	}
 	if retry := time.Unix(a.NextRefreshAt, 0); a.LastError != "" && retry.After(due) {
 		due = retry
 	}
 	return due
+}
+
+func generationPermissionsRefreshDueAt(generation *GenerationEntitlements, now time.Time) time.Time {
+	if generation == nil {
+		return time.Time{}
+	}
+	checked, err := time.Parse(time.RFC3339Nano, generation.CheckedAt)
+	if err != nil || checked.After(now) {
+		return time.Time{}
+	}
+	switch generation.Status {
+	case "known":
+		return checked.Add(GenerationObservationMaxAge - time.Minute)
+	case "error", "unknown":
+		// Persisted unsuccessful observations retain their short retry window
+		// across restarts instead of becoming immediately due on every scan.
+		return checked.Add(modelPermissionFailureBackoff)
+	default:
+		return time.Time{}
+	}
 }
 
 // RefreshDueWithPermissions rechecks the scheduler's due decision while holding
@@ -845,10 +870,13 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 			}
 			state := a.Quota.Generation.ModelSelectionState(due.model, time.Now())
 			needed = state == ModelNeedsRefresh || (state == ModelUsable && !Eligible(a, time.Now()))
-			if needed && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
-				s.mu.Unlock()
+		}
+		if needed && includePermissions && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
+			s.mu.Unlock()
+			if due.model != "" {
 				return a, &Error{Stage: "entitlements", Code: "observation_incomplete"}
 			}
+			return a, nil
 		}
 		if !needed {
 			s.mu.Unlock()

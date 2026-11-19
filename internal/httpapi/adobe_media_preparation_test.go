@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -62,12 +61,15 @@ func adobePreparationRequest(t *testing.T, s *Server, kind string) (string, *med
 	}
 	s.imageTaskMu.RUnlock()
 	if task == nil {
+		if w.Code >= 400 {
+			return "error", nil, w.Body.String()
+		}
 		t.Fatalf("sync task missing: %d %s", w.Code, w.Body.String())
 	}
 	return task.Status, task.Route, w.Body.String()
 }
 
-func TestAdobeNewMediaPreparesSelectedAccountBeforeAnyUpstreamRequest(t *testing.T) {
+func TestAdobeNewMediaUsesBackgroundPreparedSessionBeforeAnyUpstreamRequest(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
@@ -82,8 +84,8 @@ func TestAdobeNewMediaPreparesSelectedAccountBeforeAnyUpstreamRequest(t *testing
 			var prepares atomic.Int32
 			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
 				prepares.Add(1)
-				if current.ID != a.ID || current.InFlight == "" {
-					t.Error("media preparation did not use the reserved account")
+				if current.ID != a.ID || current.InFlight != "" {
+					t.Error("background preparation bound a foreground task or changed account")
 				}
 				fixture.mu.Lock()
 				if fixture.preflights != 0 || fixture.uploads != 0 || fixture.submits != 0 {
@@ -94,6 +96,7 @@ func TestAdobeNewMediaPreparesSelectedAccountBeforeAnyUpstreamRequest(t *testing
 				current.Token = freshToken
 				return current, err
 			})
+			warmAdobeFixtureAccount(t, s, a)
 			status, route, detail := adobePreparationRequest(t, s, kind)
 			if kind != "video" && status != "success" || kind == "video" && !strings.Contains(detail, "upstream_poll_failed") {
 				t.Fatalf("unexpected outcome: %s %s", status, detail)
@@ -110,25 +113,12 @@ func TestAdobeNewMediaPreparesSelectedAccountBeforeAnyUpstreamRequest(t *testing
 	}
 }
 
-func TestAdobeMediaPreparationFailureStopsWithoutSwitchingAccountOrReplay(t *testing.T) {
+func TestAdobeBackgroundPreparationFailureDoesNotTriggerForegroundBrowserOrReplay(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
 			first := adobeFixtureAccount(t, s)
-			second := first
-			second.AccountID = "alternative-adobe"
-			second.Email = "alternative@example.test"
-			claims, _ := json.Marshal(map[string]any{"user_id": second.AccountID, "exp": time.Now().Add(time.Hour).Unix()})
-			second.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
-			rows, err := s.adobeStore.Import([]adobe.Account{second})
-			if err != nil {
-				t.Fatal(err)
-			}
-			second = adobeFixtureModelPermissions(t, s, rows[0])
-			available := 10.0
-			if err = s.adobeStore.UpdateQuota(second.ID, second.Revision, adobe.Quota{Status: "known", Available: &available, CheckedAt: time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
-				t.Fatal(err)
-			}
+			second := adobeSchedulingAccount(t, s, "alternative-adobe", time.Now())
 			fixture := &adobeMediaCapture{video: kind == "video"}
 			s.adobeClient = fixture.client(t)
 			var prepares atomic.Int32
@@ -139,36 +129,45 @@ func TestAdobeMediaPreparationFailureStopsWithoutSwitchingAccountOrReplay(t *tes
 				}
 				return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: &adobe.MediaPreparationDiagnostic{State: "pending", ReadinessReason: "vendors_pending", ValueKind: "PRIVATE_TOKEN"}}
 			})
+			fixed, err := s.adobeAccountContext(context.Background(), first)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = s.adobeStore.WarmMediaSession(fixed, first.ID, first.Revision)
+			if err == nil || !strings.Contains(adobe.SafeError(err), "session_incomplete [vendors_pending]") {
+				t.Fatalf("background failure concealed: %v", err)
+			}
+			diagnostic, marshalErr := json.Marshal(adobe.MediaDiagnosticFromError(err))
+			if marshalErr != nil || !strings.Contains(string(diagnostic), `"readiness_reason":"vendors_pending"`) || strings.Contains(string(diagnostic), "PRIVATE_TOKEN") {
+				t.Fatalf("unsafe background diagnostic: %s %v", diagnostic, marshalErr)
+			}
 			status, route, detail := adobePreparationRequest(t, s, kind)
-			if status != "error" && status != "failed" || !strings.Contains(detail, "media_session_prepare_failed") || !strings.Contains(detail, "session_incomplete [vendors_pending]") || strings.Contains(detail, "PRIVATE_TOKEN") {
-				t.Fatalf("preparation error concealed: %s %s", status, detail)
+			expected := "Adobe media session is warming"
+			if kind == "video" {
+				expected = "media_session_not_ready"
 			}
-			monitor, marshalErr := json.Marshal(s.monitor.snapshot())
-			if marshalErr != nil || !strings.Contains(string(monitor), `"media_session_diagnostic":{"state":"pending","readiness_reason":"vendors_pending"}`) || strings.Contains(string(monitor), "PRIVATE_TOKEN") {
-				t.Fatalf("safe preparation diagnostic missing from monitor: %s %v", monitor, marshalErr)
+			if (status != "error" && status != "failed") || !strings.Contains(detail, expected) || strings.Contains(detail, "PRIVATE_TOKEN") {
+				t.Fatalf("foreground readiness failure concealed: %s %s", status, detail)
 			}
-			if route == nil || route.AccountID != first.ID || route.Stage != "media_session_preparing" {
-				t.Fatalf("failed task lost its selected route: %+v", route)
+			if route != nil {
+				t.Fatalf("cold request bound an account: %+v", route)
+			}
+			if kind != "sync_image" {
+				repeatedStatus, repeatedRoute, _ := adobePreparationRequest(t, s, kind)
+				if repeatedRoute != nil || repeatedStatus != status {
+					t.Fatal("duplicate request changed failed selection")
+				}
 			}
 			for _, id := range []string{first.ID, second.ID} {
 				account, err := s.adobeStore.Get(id)
 				if err != nil || account.InFlight != "" || account.SettlementUntil != 0 || account.Quota.Status != "known" {
-					t.Fatalf("unsubmitted preparation changed account reservation/quota: %+v %v", account, err)
-				}
-			}
-			if _, err = s.adobeStore.ReserveForModel(route.JobKey, "gemini-3.1-flash-image"); err == nil || errors.Is(err, adobe.ErrNoAccount) {
-				t.Fatalf("failed task's durable selection was lost: %v", err)
-			}
-			if kind != "sync_image" {
-				_, repeatedRoute, _ := adobePreparationRequest(t, s, kind)
-				if repeatedRoute == nil || repeatedRoute.JobKey != route.JobKey {
-					t.Fatal("duplicate request created another task")
+					t.Fatalf("unsubmitted request changed account reservation/quota: %+v %v", account, err)
 				}
 			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			if prepares.Load() != 1 || fixture.preflights != 0 || fixture.uploads != 0 || fixture.submits != 0 || fixture.polls != 0 {
-				t.Fatalf("failed preparation reached upstream or replayed: prepares=%d preflight=%d upload=%d submit=%d poll=%d", prepares.Load(), fixture.preflights, fixture.uploads, fixture.submits, fixture.polls)
+				t.Fatalf("cold request started browser or reached upstream: prepares=%d preflight=%d upload=%d submit=%d poll=%d", prepares.Load(), fixture.preflights, fixture.uploads, fixture.submits, fixture.polls)
 			}
 		})
 	}

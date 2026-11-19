@@ -296,8 +296,14 @@ func TestAdobeMaintenanceBusyAccountsDoNotConsumeRefreshBudget(t *testing.T) {
 	entered, release := make(chan struct{}, 4), make(chan struct{})
 	var workers sync.WaitGroup
 	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
-		entered <- struct{}{}
-		<-release
+		if current.ID != accounts[4].ID {
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return adobe.Account{}, ctx.Err()
+			}
+		}
 		return adobeFixtureMediaRefresh(ctx, current)
 	})
 	for _, a := range accounts[:4] {
@@ -353,7 +359,7 @@ func TestAdobeMaintenanceRefreshesMostOverdueAccountsFirst(t *testing.T) {
 	s := imageTaskTestServer(t)
 	for i, id := range []string{"newest", "later", "middle", "older", "oldest"} {
 		a := adobeSchedulingAccount(t, s, id, time.Now().Add(-2*time.Hour))
-		if err := s.adobeStore.UpdateQuota(a.ID, a.Revision, adobe.Quota{Status: "known", CheckedAt: time.Now().Add(-time.Duration(i+2) * time.Hour).UTC().Format(time.RFC3339Nano)}); err != nil {
+		if err := s.adobeStore.UpdateQuota(a.ID, a.Revision, adobe.Quota{Status: "known", CheckedAt: time.Now().Add(-time.Duration(i+2) * time.Hour).UTC().Format(time.RFC3339Nano), Generation: a.Quota.Generation}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -409,5 +415,165 @@ func TestAdobeMissingProxyManagerPinsDirectSelection(t *testing.T) {
 	endpoint, fixed := proxyruntime.URLSelectionFromContext(ctx)
 	if err != nil || !fixed || endpoint != "" {
 		t.Fatal("missing proxy manager did not pin explicit direct egress")
+	}
+}
+
+// The complete public entrypoints must remain read-only until a local ready
+// account is found, including stale rights while a browser refresh owns the gate.
+func TestAdobeForegroundMediaDoesNotRefreshOrWaitForUnreadyAccount(t *testing.T) {
+	for _, kind := range []string{"sync_image", "async_image", "video"} {
+		for _, state := range []string{"cold", "expired", "maintenance"} {
+			t.Run(kind+"/"+state, func(t *testing.T) {
+				s := imageTaskTestServer(t)
+				a := adobeFixtureAccount(t, s)
+				if state == "expired" {
+					claims, _ := json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(-time.Minute).Unix()})
+					a.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".expired"
+					rows, err := s.adobeStore.Import([]adobe.Account{a})
+					if err != nil {
+						t.Fatal(err)
+					}
+					a = rows[0]
+				}
+				entered, release, warmDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				var releaseOnce sync.Once
+				unblock := func() { releaseOnce.Do(func() { close(release) }) }
+				defer unblock()
+				var browserCalls, upstreamCalls atomic.Int32
+				s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+					if browserCalls.Add(1) == 1 && state == "maintenance" {
+						close(entered)
+					}
+					if state == "maintenance" {
+						select {
+						case <-release:
+						case <-ctx.Done():
+							return adobe.Account{}, ctx.Err()
+						}
+					}
+					return adobeFixtureMediaRefresh(ctx, current)
+				})
+				s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					upstreamCalls.Add(1)
+					return nil, errors.New("unready foreground account must not call upstream")
+				})})
+				if state == "maintenance" {
+					markAdobeFixturePermissionsStale(t, s, a, 10)
+					fixed, err := s.adobeAccountContext(context.Background(), a)
+					if err != nil {
+						t.Fatal(err)
+					}
+					go func() { defer close(warmDone); _, _ = s.adobeStore.WarmMediaSession(fixed, a.ID, a.Revision) }()
+					defer func() { unblock(); <-warmDone }()
+					select {
+					case <-entered:
+					case <-time.After(time.Second):
+						t.Fatal("background warmup did not start")
+					}
+				}
+				var status string
+				var route *mediaRoute
+				finished := make(chan struct{})
+				go func() { defer close(finished); status, route, _ = adobePreparationRequest(t, s, kind) }()
+				select {
+				case <-finished:
+				case <-time.After(time.Second):
+					unblock()
+					<-finished
+					t.Fatal("foreground request waited for background browser preparation")
+				}
+				expectedBrowsers := int32(0)
+				if state == "maintenance" {
+					expectedBrowsers = 1
+				}
+				if (status != "error" && status != "failed") || route != nil || browserCalls.Load() != expectedBrowsers || upstreamCalls.Load() != 0 {
+					t.Fatalf("unready request started work: status=%s route=%+v browsers=%d upstream=%d", status, route, browserCalls.Load(), upstreamCalls.Load())
+				}
+				current, err := s.adobeStore.Get(a.ID)
+				if err != nil || current.InFlight != "" {
+					t.Fatal("unready request retained account reservation")
+				}
+			})
+		}
+	}
+}
+
+func TestAdobeReadyImagePreservesLaterCallerContext(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "value_and_deadline", true: "cancelled"}[cancelled], func(t *testing.T) {
+			s := imageTaskTestServer(t)
+			adobeReadyFixtureAccount(t, s)
+			selected, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			type callerKey struct{}
+			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), callerKey{}, "caller-value"), time.Minute)
+			defer cancel()
+			deadline, _ := ctx.Deadline()
+			if cancelled {
+				cancel()
+			}
+			var prepares, requests atomic.Int32
+			s.adobeStore.SetBrowserRefresher(func(context.Context, adobe.Account) (adobe.Account, error) {
+				prepares.Add(1)
+				return adobe.Account{}, errors.New("ready foreground request must not refresh")
+			})
+			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1024, 1024), inspectRequest: func(r *http.Request) {
+				requests.Add(1)
+				if r.Context().Value(callerKey{}) != "caller-value" {
+					t.Error("selected context replaced later caller value")
+				}
+				observed, ok := r.Context().Deadline()
+				if !ok || observed.After(deadline) {
+					t.Error("selected context lost or extended caller deadline")
+				}
+			}}
+			s.adobeClient = fixture.client(t)
+			r := httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+			_, err = s.generateAdobeImageData(r, ctx, selected, "a paper boat", "gemini-3.1-flash-image", "1024x1024", "url", "", 1, nil, provider.ImageOutputOptions{})
+			if cancelled {
+				if err == nil || !strings.Contains(err.Error(), "cancelled") || requests.Load() != 0 || fixture.preflights != 0 || fixture.submits != 0 {
+					t.Fatalf("cancelled caller generated: err=%v requests=%d", err, requests.Load())
+				}
+			} else if err != nil || requests.Load() == 0 || fixture.preflights != 1 || fixture.submits != 1 {
+				t.Fatalf("ready request lost caller context: err=%v requests=%d", err, requests.Load())
+			}
+			if prepares.Load() != 0 {
+				t.Fatal("foreground request refreshed warmed session")
+			}
+		})
+	}
+}
+
+func TestAdobeMaintenanceRefreshesExpiredPermissionsBeforeUsingBrowser(t *testing.T) {
+	for _, status := range []string{"known", "stale"} {
+		t.Run(status, func(t *testing.T) {
+			s := imageTaskTestServer(t)
+			a := adobeSchedulingAccount(t, s, "expired-model-permissions", time.Now().Add(-time.Minute))
+			generation := *a.Quota.Generation
+			generation.Status = status
+			generation.CheckedAt = time.Now().Add(-6 * time.Minute).UTC().Format(time.RFC3339Nano)
+			if err := s.adobeStore.UpdateGenerationPermissions(a.ID, a.Revision, generation); err != nil {
+				t.Fatal(err)
+			}
+			var reads, prepares atomic.Int32
+			s.adobeClient = adobeReconciliationQuotaClient(t, &reads, false)
+			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+				prepares.Add(1)
+				if reads.Load() != 2 || !adobeHasKnownMediaCapacity(current, time.Now()) {
+					t.Error("browser occupied before expired permissions were refreshed")
+				}
+				return adobeFixtureMediaRefresh(ctx, current)
+			})
+			s.refreshAllAdobeMediaSessions(context.Background())
+			if reads.Load() != 0 || prepares.Load() != 0 {
+				t.Fatal("media-only scan refreshed an account with stale model permissions")
+			}
+			s.refreshDueAdobeAccounts(context.Background())
+			if reads.Load() != 2 || prepares.Load() != 1 {
+				t.Fatalf("maintenance did not prepare model-eligible account: quota=%d browser=%d", reads.Load(), prepares.Load())
+			}
+		})
 	}
 }
