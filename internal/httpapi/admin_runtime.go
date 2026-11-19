@@ -907,6 +907,19 @@ func callLogEntry(record monitorRecord, statusCode int, requestShape any, respon
 	if record.Endpoint == "/v1/videos" {
 		detail["error_code"] = record.Metrics["video_error_code"]
 		detail["video_verification"] = record.Metrics["video_verification"]
+		// Promote bounded Adobe submission identifiers and status to the stable
+		// log shape so callers do not need provider-specific metric keys.
+		if requestID := stringValue(record.Metrics["upstream_request_id"]); requestID != "" {
+			detail["upstream_request_id"] = requestID
+		} else if requestID := stringValue(record.Metrics["adobe_upstream_request_id"]); requestID != "" {
+			detail["upstream_request_id"] = requestID
+		}
+		if status := monitorNumber(record.Metrics["video_upstream_status"]); status > 0 {
+			detail["upstream_status"] = status
+		}
+		if diagnostic := record.Metrics["adobe_submission_diagnostic"]; diagnostic != nil {
+			detail["adobe_submission_diagnostic"] = diagnostic
+		}
 	}
 	entry := map[string]any{
 		"id":      record.CallID,
@@ -987,6 +1000,10 @@ func monitorStageLabel(stage string) string {
 		return "创建上游视频任务"
 	case "video_post_created":
 		return "上游视频任务已关联"
+	case "adobe_preflight":
+		return "核对 Adobe 免费权限"
+	case "adobe_submit":
+		return "提交 Adobe 视频任务"
 	case "grok_media_regenerating":
 		return "已确认替代内容，重新生成一次"
 	case "grok_media_content_review":

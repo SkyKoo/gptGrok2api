@@ -69,6 +69,9 @@ const detailTimelineSteps: DetailTimelineStepConfig[] = [
   { key: 'requirements_ms', label: '获取请求令牌', group: '上游准备', hint: 'requirements / token' },
   { key: 'prepare_conversation_ms', label: '准备会话', group: '上游准备', hint: '图片会话上下文' },
   { key: 'generation_start_ms', label: '启动生成', group: '上游准备', hint: '提交上游请求' },
+  { key: 'adobe_preflight_ms', label: 'Adobe 权限预检', group: '上游准备', hint: 'generation-preflight' },
+  { key: 'adobe_reference_upload_ms', label: 'Adobe 参考图上传', group: '上游准备', hint: '参考图上传总耗时' },
+  { key: 'adobe_submit_ms', label: 'Adobe 提交任务', group: '上游准备', hint: 'generate-async' },
   { key: 'http_dns_ms', label: 'HTTP DNS', group: 'HTTP 连接', hint: '域名解析' },
   { key: 'http_tcp_ms', label: 'HTTP TCP', group: 'HTTP 连接', hint: '代理 / TCP 建连' },
   { key: 'http_tls_ms', label: 'HTTP TLS', group: 'HTTP 连接', hint: 'TLS 握手' },
@@ -114,6 +117,9 @@ const timelineWarningThresholdMs: Record<string, number> = {
   requirements_ms: 60_000,
   prepare_conversation_ms: 60_000,
   generation_start_ms: 60_000,
+  adobe_preflight_ms: 30_000,
+  adobe_reference_upload_ms: 60_000,
+  adobe_submit_ms: 60_000,
   http_dns_ms: 1_000,
   http_tcp_ms: 3_000,
   http_tls_ms: 5_000,
@@ -475,8 +481,10 @@ export function buildPrimaryDetailFields(item: SystemLogRow | null): DetailField
 
 export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailField[] {
   if (!item) return []
+  const detail = detailRecord(item)
   const metrics = monitorRecord(item).metrics || {}
-  const review = detailRecord(item).video_verification
+  const review = detail.video_verification
+  const submissionDiagnostic = detail.adobe_submission_diagnostic
   const stream = metrics.video_stream
   if (!hasDiagnosticSignal(item) && item.endpoint !== '/v1/videos') return []
   const shouldShowBooleans = isFailed(item) || isLimited(item) || Boolean(item.errorCode || item.error || item.reason)
@@ -489,6 +497,9 @@ export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailFi
     stream ? { label: '上游审核标记', value: stream.moderated ? '已拦截' : '未报告拦截' } : null,
     stream ? { label: '上游拒绝标记', value: stream.rejected ? '已拒绝' : '未报告拒绝' } : null,
     item.endpoint === '/v1/videos' ? { label: '参考图上传', value: `${metrics.video_upload_completed || 0} / ${metrics.video_reference_count || 0}` } : null,
+    item.endpoint === '/v1/videos' ? { label: 'Adobe 提交状态', value: formatInlineValue(metrics.adobe_submission_status) } : null,
+    item.endpoint === '/v1/videos' && detail.upstream_status ? { label: 'Adobe 上游状态码', value: formatInlineValue(detail.upstream_status) } : null,
+    submissionDiagnostic ? { label: 'Adobe 提交诊断', value: formatInlineValue(submissionDiagnostic), wide: true } : null,
     { label: '状态码', value: item.statusCode },
     { label: '错误码', value: item.errorCode, copyable: true },
     { label: '阶段', value: diagnosticStageValue(item), copyable: true },

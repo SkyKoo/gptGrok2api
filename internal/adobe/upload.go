@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"net/http"
 	"strings"
+	"time"
 
 	"golang.org/x/image/draw"
 )
@@ -28,19 +29,28 @@ func generationSession(a Account) (string, error) {
 // uploadReferences runs only after every input and the account identity have
 // passed validation. A failed upload ends the operation before generation.
 func (c *Client) uploadReferences(ctx context.Context, a Account, m Model, references []ReferenceImage) ([]referenceBlob, error) {
+	blobs, _, _, err := c.uploadReferencesObserved(ctx, a, m, references)
+	return blobs, err
+}
+
+// uploadReferencesObserved keeps bounded phase timing for the video monitor.
+// It never retains image bytes, response bodies or upload handles in the
+// diagnostic record.
+func (c *Client) uploadReferencesObserved(ctx context.Context, a Account, m Model, references []ReferenceImage) ([]referenceBlob, int, int64, error) {
+	started := time.Now()
 	blobs := make([]referenceBlob, 0, len(references))
 	for index, ref := range references {
 		data, _, err := c.request(ctx, "upload", http.MethodPost, uploadImageURL, a, ref.Data, map[string]string{"Content-Type": http.DetectContentType(ref.Data)})
 		if err != nil {
-			return nil, err
+			return blobs, len(blobs), time.Since(started).Milliseconds(), err
 		}
 		items, _ := data["images"].([]any)
 		if len(items) == 0 {
-			return nil, &Error{Stage: "upload", Code: "missing_reference_handle"}
+			return blobs, len(blobs), time.Since(started).Milliseconds(), &Error{Stage: "upload", Code: "missing_reference_handle"}
 		}
 		id := str(object(items[0])["id"])
 		if id == "" || len(id) > 2048 || strings.TrimSpace(id) != id || strings.ContainsAny(id, "\r\n\x00") {
-			return nil, &Error{Stage: "upload", Code: "invalid_reference_handle"}
+			return blobs, len(blobs), time.Since(started).Milliseconds(), &Error{Stage: "upload", Code: "invalid_reference_handle"}
 		}
 		blob := referenceBlob{ID: id, Usage: m.ReferenceUsage}
 		if m.ReferenceUsage == "frame" {
@@ -48,7 +58,7 @@ func (c *Client) uploadReferences(ctx context.Context, a Account, m Model, refer
 		}
 		blobs = append(blobs, blob)
 	}
-	return blobs, nil
+	return blobs, len(blobs), time.Since(started).Milliseconds(), nil
 }
 
 // The Firefly video composer fits each first/last frame to the requested canvas.

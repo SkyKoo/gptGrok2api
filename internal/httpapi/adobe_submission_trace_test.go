@@ -125,6 +125,37 @@ func TestAdobeFailedSubmissionRetainsTraceWithoutMakingItResumable(t *testing.T)
 				if kind == "video" && (handle.Width != 1920 || handle.Height != 1080 || handle.Duration != 8 || !handle.GenerateAudio) {
 					t.Fatalf("video parameters were lost: %+v", handle)
 				}
+				if kind == "video" {
+					entries := s.loadVideoCallLogs()
+					if len(entries) == 0 {
+						t.Fatal("video call log was not persisted")
+					}
+					var entry map[string]any
+					for _, candidate := range entries {
+						if detail, ok := candidate["detail"].(map[string]any); ok && detail["call_id"] == videoTask.ID {
+							entry = candidate
+							break
+						}
+					}
+					detail, ok := entry["detail"].(map[string]any)
+					if !ok {
+						t.Fatalf("video call log detail missing: %#v", entry)
+					}
+					monitor, _ := detail["monitor"].(map[string]any)
+					metrics, _ := monitor["metrics"].(map[string]any)
+					wantReferences := float64(handle.ReferenceCount)
+					if detail["upstream_request_id"] != requestID.Load() || metrics["video_upload_completed"] != wantReferences || metrics["video_reference_count"] != wantReferences || metrics["adobe_submit_ms"] == nil {
+						t.Fatalf("video diagnostics missing from call log: %#v", detail)
+					}
+					wantStatus := map[string]float64{"upstream_timeout": 408, "rejected": 403}[failure]
+					if wantStatus > 0 && detail["upstream_status"] != wantStatus {
+						t.Fatalf("video upstream status missing from call log: %#v", detail)
+					}
+					rawLog, _ := json.Marshal(entry)
+					if strings.Contains(string(rawLog), "PRIVATE_CONTEXT") || strings.Contains(string(rawLog), "sherlockToken") {
+						t.Fatalf("video diagnostics leaked upstream credentials: %s", rawLog)
+					}
+				}
 
 				fresh := NewWithWorkers(s.cfg, false)
 				fresh.adobeClient = s.adobeClient

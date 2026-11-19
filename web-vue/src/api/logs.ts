@@ -396,7 +396,8 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const errorCode = detailValue(detail, 'error_code')
   const stage = detailValue(detail, 'stage')
   const upstreamErrorType = detailValue(detail, 'upstream_error_type')
-  const upstreamRequestId = detailValue(detail, 'upstream_request_id')
+  const metrics = monitor.metrics && typeof monitor.metrics === 'object' ? monitor.metrics as Record<string, unknown> : {}
+  const upstreamRequestId = detailValue(detail, 'upstream_request_id') || cleanString(metrics.upstream_request_id || metrics.adobe_upstream_request_id)
   const canResumePoll = detail.can_resume_poll === true || detailValue(detail, 'can_resume_poll') === 'true'
   const toolInvoked = boolDetailLabel(detailRawValue(detail, 'tool_invoked'))
   const blocked = boolDetailLabel(detailRawValue(detail, 'blocked'))

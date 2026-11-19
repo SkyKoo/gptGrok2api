@@ -37,6 +37,57 @@ func (s *Server) enrichAdobeMonitorCall(callID string, account adobe.Account) {
 	}
 }
 
+// enrichAdobeMonitorEgress records only the selected egress class and a
+// sanitized label. The actual proxy URL, credentials and browser profile stay
+// out of call logs.
+func (s *Server) enrichAdobeMonitorEgress(callID string, ctx context.Context) {
+	if s == nil || s.monitor == nil || strings.TrimSpace(callID) == "" {
+		return
+	}
+	endpoint, selected := proxyruntime.URLSelectionFromContext(ctx)
+	if !selected {
+		return
+	}
+	label := sanitizedEgressLabel(endpoint)
+	meta := map[string]any{"has_proxy": label != ""}
+	if label == "" {
+		meta["proxy_source"] = "direct"
+		meta["egress_label"] = "direct"
+	} else {
+		meta["egress_label"] = label
+		if s.proxyManager != nil {
+			info := s.proxyManager.DescribeImageEgress(endpoint)
+			meta["proxy_source"] = info.Source
+			if info.Source == "group" {
+				meta["egress_mode"] = "proxy_group"
+				meta["proxy_group_id"] = info.GroupID
+				meta["proxy_group_name"] = info.GroupName
+				meta["proxy_node_id"] = info.NodeID
+				meta["proxy_node_name"] = info.NodeName
+			}
+		}
+	}
+	s.monitor.enrich(callID, meta)
+}
+
+func adobeSubmissionMetrics(job adobe.Job) map[string]any {
+	metrics := map[string]any{
+		"video_upload_completed":    job.ReferenceUploadCompleted,
+		"video_reference_count":     job.ReferenceCount,
+		"adobe_reference_upload_ms": job.ReferenceUploadElapsedMS,
+		"adobe_submit_ms":           job.SubmitElapsedMS,
+		"adobe_upstream_request_id": job.RequestID,
+		"upstream_request_id":       job.RequestID,
+		"adobe_submission_status":   job.Status,
+	}
+	if diagnostic := job.SubmissionDiagnostic; diagnostic != nil {
+		metrics["adobe_submission_diagnostic"] = diagnostic
+		metrics["video_upstream_status"] = diagnostic.HTTPStatus
+		metrics["adobe_upstream_error_code"] = diagnostic.ErrorCode
+	}
+	return metrics
+}
+
 func (s *Server) enrichAdobeMonitorRequest(r *http.Request, account adobe.Account) {
 	if r == nil {
 		return
@@ -440,6 +491,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	}
 	ctx = selectedContext
 	s.enrichAdobeMonitorCall(job.ID, a)
+	s.enrichAdobeMonitorEgress(job.ID, selectedContext)
 	m, _ := model.AdobeModel(job.Model)
 	s.videoMu.Lock()
 	job.Route = &mediaRoute{Channel: "adobe", AccountID: a.ID, UpstreamModel: m.ModelID + "/" + m.ModelVersion, Stage: "selected", JobKey: key}
@@ -470,7 +522,15 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		return
 	}
 	a = fresh
-	if _, err := s.adobeClient.PreflightVideo(ctx, a, request); err != nil {
+	if !s.videoStage(job, "adobe_preflight", nil) {
+		return
+	}
+	preflightStarted := time.Now()
+	_, preflightErr := s.adobeClient.PreflightVideo(ctx, a, request)
+	preflightMS := time.Since(preflightStarted).Milliseconds()
+	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"adobe_preflight_ms": preflightMS}})
+	if preflightErr != nil {
+		err := preflightErr
 		if diagnostic := adobe.PreflightDiagnosticFromError(err); diagnostic != nil {
 			s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"adobe_preflight_diagnostic": diagnostic}})
 		}
@@ -489,15 +549,23 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		return
 	}
 	s.monitor.enrich(job.ID, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion, "generate_audio": options.GenerateAudio, "reference_count": len(inputs)})
+	if !s.videoStage(job, "adobe_submit", nil) {
+		return
+	}
 	s.setVideoStatus(job, "in_progress", 1, nil)
 	handle, err := s.adobeClient.SubmitVideo(ctx, a, request)
+	s.monitor.enrich(job.ID, map[string]any{"metrics": adobeSubmissionMetrics(handle)})
 	if err != nil {
 		s.adobeStore.InvalidateMediaSession(a.ID, a.Revision)
 		if stateErr := s.adobeSubmissionFailed(key, handle, err); stateErr != nil {
 			s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": adobe.SafeError(err) + "; upstream request state could not be saved; automatic resubmission disabled"})
 			return
 		}
-		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "upstream_submit_failed", "message": adobe.SafeError(err)})
+		failure := map[string]any{"code": "upstream_submit_failed", "message": adobe.SafeError(err)}
+		if diagnostic := handle.SubmissionDiagnostic; diagnostic != nil {
+			failure["upstream_status"] = diagnostic.HTTPStatus
+		}
+		s.setVideoStatus(job, "failed", 0, failure)
 		return
 	}
 	if err = s.adobeStore.SaveJob(key, handle); err != nil {

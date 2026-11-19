@@ -132,6 +132,48 @@ func TestRequestMonitorDoesNotCountHandlerExecutionAsQueueTime(t *testing.T) {
 	}
 }
 
+func TestAdobeVideoCallLogPromotesSubmissionDiagnostics(t *testing.T) {
+	record := monitorRecord{
+		CallID:    "video-call",
+		Endpoint:  "/v1/videos",
+		Model:     "veo-3.1-lite",
+		Status:    "failed",
+		Stage:     "failed",
+		StartedAt: time.Now().Add(-2 * time.Second).UnixMilli(),
+		EndedAt:   time.Now().UnixMilli(),
+		Metrics: map[string]any{
+			"video_error_code":            "upstream_submit_failed",
+			"video_upstream_status":       408,
+			"video_upload_completed":      2,
+			"video_reference_count":       2,
+			"adobe_preflight_ms":          int64(120),
+			"adobe_reference_upload_ms":   int64(900),
+			"adobe_submit_ms":             int64(3000),
+			"upstream_request_id":         "request-123",
+			"adobe_submission_diagnostic": map[string]any{"http_status": 408, "error_code": "timeout_error", "response_received": true},
+		},
+	}
+	entry := callLogEntry(record, http.StatusBadGateway, nil, nil, "adobe_submit_timeout_error (HTTP 408)")
+	detail, ok := entry["detail"].(map[string]any)
+	if !ok {
+		t.Fatalf("detail missing: %#v", entry)
+	}
+	if detail["upstream_request_id"] != "request-123" || detail["upstream_status"] != int64(408) && detail["upstream_status"] != 408 {
+		t.Fatalf("submission fields were not promoted: %#v", detail)
+	}
+	if detail["adobe_submission_diagnostic"] == nil {
+		t.Fatalf("submission diagnostic missing: %#v", detail)
+	}
+	monitor, ok := detail["monitor"].(map[string]any)
+	if !ok || monitor["metrics"] == nil {
+		t.Fatalf("monitor metrics missing: %#v", detail["monitor"])
+	}
+	raw, _ := json.Marshal(entry)
+	if strings.Contains(string(raw), "cookie") || strings.Contains(string(raw), "token") || strings.Contains(string(raw), "PRIVATE") {
+		t.Fatalf("sensitive submission data leaked: %s", raw)
+	}
+}
+
 func TestMonitorSnapshotWithHistorySummary(t *testing.T) {
 	root := t.TempDir()
 	cfg := adminTestConfig(root)

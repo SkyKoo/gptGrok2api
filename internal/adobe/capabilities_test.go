@@ -146,7 +146,7 @@ func TestAudioVideoReferencesFitCanvasAndKeepOrder(t *testing.T) {
 		return nil, errors.New("generation response unknown")
 	})})
 	j, err := c.SubmitVideo(context.Background(), fixtureAccount(t), VideoRequest{Model: "veo-3.1-lite", Prompt: "gentle motion with birdsong", Width: 1920, Height: 1080, Duration: 8, Resolution: "1080p", AspectRatio: "16:9", GenerateAudio: true, References: refs})
-	if err == nil || calls != 3 || j.Status != "SUBMISSION_UNKNOWN" || !j.GenerateAudio || j.ReferenceCount != 2 || j.Duration != 8 {
+	if err == nil || calls != 3 || j.Status != "SUBMISSION_UNKNOWN" || !j.GenerateAudio || j.ReferenceCount != 2 || j.ReferenceUploadCompleted != 2 || j.ReferenceUploadElapsedMS < 0 || j.SubmitElapsedMS < 0 || j.RequestID == "" || j.Duration != 8 {
 		t.Fatalf("job=%+v calls=%d error=%v", j, calls, err)
 	}
 }

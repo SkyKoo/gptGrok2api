@@ -127,24 +127,27 @@ type SubmissionDiagnostic struct {
 }
 
 type Job struct {
-	Width                int                   `json:"width,omitempty"`
-	Height               int                   `json:"height,omitempty"`
-	AspectRatio          string                `json:"aspect_ratio,omitempty"`
-	Resolution           string                `json:"resolution,omitempty"`
-	Duration             int                   `json:"duration,omitempty"`
-	GenerateAudio        bool                  `json:"generate_audio,omitempty"`
-	ReferenceCount       int                   `json:"reference_count,omitempty"`
-	Kind                 string                `json:"kind"`
-	Model                string                `json:"model"`
-	ModelID              string                `json:"model_id"`
-	ModelVersion         string                `json:"model_version"`
-	RequestID            string                `json:"request_id"`
-	PollURL              string                `json:"poll_url,omitempty"`
-	Status               string                `json:"status"`
-	Progress             float64               `json:"progress"`
-	OutputURLs           []string              `json:"output_urls,omitempty"`
-	SubmissionDiagnostic *SubmissionDiagnostic `json:"submission_diagnostic,omitempty"`
-	PollDiagnostic       *SubmissionDiagnostic `json:"poll_diagnostic,omitempty"`
+	Width                    int                   `json:"width,omitempty"`
+	Height                   int                   `json:"height,omitempty"`
+	AspectRatio              string                `json:"aspect_ratio,omitempty"`
+	Resolution               string                `json:"resolution,omitempty"`
+	Duration                 int                   `json:"duration,omitempty"`
+	GenerateAudio            bool                  `json:"generate_audio,omitempty"`
+	ReferenceCount           int                   `json:"reference_count,omitempty"`
+	ReferenceUploadCompleted int                   `json:"reference_upload_completed,omitempty"`
+	ReferenceUploadElapsedMS int64                 `json:"reference_upload_elapsed_ms,omitempty"`
+	SubmitElapsedMS          int64                 `json:"submit_elapsed_ms,omitempty"`
+	Kind                     string                `json:"kind"`
+	Model                    string                `json:"model"`
+	ModelID                  string                `json:"model_id"`
+	ModelVersion             string                `json:"model_version"`
+	RequestID                string                `json:"request_id"`
+	PollURL                  string                `json:"poll_url,omitempty"`
+	Status                   string                `json:"status"`
+	Progress                 float64               `json:"progress"`
+	OutputURLs               []string              `json:"output_urls,omitempty"`
+	SubmissionDiagnostic     *SubmissionDiagnostic `json:"submission_diagnostic,omitempty"`
+	PollDiagnostic           *SubmissionDiagnostic `json:"poll_diagnostic,omitempty"`
 }
 
 // Error never includes response bodies, URLs, headers, prompts or credentials.

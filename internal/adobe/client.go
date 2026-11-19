@@ -301,13 +301,15 @@ func (c *Client) SubmitVideo(ctx context.Context, a Account, r VideoRequest) (Jo
 	if err = validateReferences(m, inputs); err != nil {
 		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
 	}
-	refs, err := c.uploadReferences(ctx, a, m, inputs)
+	refs, uploaded, uploadElapsed, err := c.uploadReferencesObserved(ctx, a, m, inputs)
 	if err != nil {
-		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED"}, err
+		return Job{Kind: m.Kind, Model: m.ID, Status: "REJECTED", ReferenceCount: len(inputs), ReferenceUploadCompleted: uploaded, ReferenceUploadElapsedMS: uploadElapsed}, err
 	}
 	payload := videoPayload(m, v, r, refs)
+	submitStarted := time.Now()
 	j, err := c.submit(ctx, a, m, r.Prompt, payload)
 	j.Width, j.Height, j.AspectRatio, j.Resolution, j.Duration, j.GenerateAudio, j.ReferenceCount = r.Width, r.Height, v.AspectRatio, v.Resolution, r.Duration, r.GenerateAudio, len(refs)
+	j.ReferenceUploadCompleted, j.ReferenceUploadElapsedMS, j.SubmitElapsedMS = uploaded, uploadElapsed, time.Since(submitStarted).Milliseconds()
 	return j, err
 }
 func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[string]any {
