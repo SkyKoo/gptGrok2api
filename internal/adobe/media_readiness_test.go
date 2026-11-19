@@ -355,6 +355,34 @@ func TestMediaReservationPrefersReadyAndFiltersProfileless(t *testing.T) {
 	}
 }
 
+func TestReserveReadyMediaForModelDoesNotBindColdAccount(t *testing.T) {
+	s, a := idleMediaStore(t)
+	if _, _, err := s.ReserveReadyMediaForModel(context.Background(), "cold-request", "", mediaDirectResolver); !errors.Is(err, ErrMediaSessionNotReady) {
+		t.Fatalf("cold account was bound for foreground request: %v", err)
+	}
+	d, err := s.load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.Bindings["cold-request"]; ok || a.InFlight != "" {
+		t.Fatal("cold account reservation was persisted")
+	}
+
+	s.SetBrowserRefresher(func(ctx context.Context, current Account) (Account, error) {
+		return freshMediaAccount(current), nil
+	})
+	warm, err := s.WarmMediaSession(mediaTestContext(), a.ID, a.Revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ReserveReadyMediaForModel(context.Background(), "warm-request", "", mediaDirectResolver); err != nil {
+		t.Fatalf("warm account was not reserved: %v", err)
+	}
+	if warm.ID == "" {
+		t.Fatal("warm account missing")
+	}
+}
+
 func TestBrowserReloginAndFallbackPopulateReadyButIMSDoesNot(t *testing.T) {
 	for _, mode := range []string{"relogin", "fallback", "ims"} {
 		t.Run(mode, func(t *testing.T) {

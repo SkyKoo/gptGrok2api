@@ -407,7 +407,22 @@ func (s *Store) MediaAccountSelectable(ctx context.Context, expected Account, mo
 // ReserveMediaForModel prefers ready accounts before LRU, and may wait for one
 // in-progress warmup before binding. After binding it never switches accounts.
 // Resolver must pin the actual daily egress, including an explicit direct exit.
+// It retains the historical behavior of allowing a cold account to be bound;
+// callers that must never start a foreground browser refresh should use
+// ReserveReadyMediaForModel instead.
 func (s *Store) ReserveMediaForModel(ctx context.Context, taskKey, model string, resolver func(context.Context, Account) (context.Context, error)) (Account, context.Context, error) {
+	return s.reserveMediaForModel(ctx, taskKey, model, resolver, false)
+}
+
+// ReserveReadyMediaForModel binds only an account whose media session is
+// already warm for the resolved egress. It may wait for an in-progress warmup,
+// but it never selects a cold account, so foreground requests cannot launch a
+// browser-worker session and block while the session is prepared.
+func (s *Store) ReserveReadyMediaForModel(ctx context.Context, taskKey, model string, resolver func(context.Context, Account) (context.Context, error)) (Account, context.Context, error) {
+	return s.reserveMediaForModel(ctx, taskKey, model, resolver, true)
+}
+
+func (s *Store) reserveMediaForModel(ctx context.Context, taskKey, model string, resolver func(context.Context, Account) (context.Context, error), requireReady bool) (Account, context.Context, error) {
 	if taskKey == "" || resolver == nil {
 		return Account{}, ctx, &Error{Stage: "media_prepare", Code: "selection_invalid"}
 	}
@@ -488,14 +503,14 @@ func (s *Store) ReserveMediaForModel(ctx context.Context, taskKey, model string,
 					changed = true
 					continue
 				}
-				if !waited && s.mediaFlights[current.ID] != nil {
+				if !requireReady && !waited && s.mediaFlights[current.ID] != nil {
 					if waitFor == nil {
 						waitFor = s.mediaFlights[current.ID].done
 					}
 					continue
 				}
 				if s.maintenance[current.ID] || s.quotaQueries[current.ID] {
-					if !waited && waitFor == nil {
+					if !requireReady && !waited && waitFor == nil {
 						waitFor = s.accountChangeSignalLocked(current.ID)
 					}
 					continue
@@ -504,6 +519,13 @@ func (s *Store) ReserveMediaForModel(ctx context.Context, taskKey, model string,
 					continue
 				}
 				ready := s.mediaReadyLocked(candidate.ctx, current, 0, now)
+				if requireReady && !ready {
+					// A concurrent warmup is handled by the existing flight wait
+					// above. A cold account is deliberately left for the scheduler;
+					// binding it here would make the foreground request start a
+					// browser session in PrepareMediaForTask.
+					continue
+				}
 				if selected < 0 || ready && !selectedReady || ready == selectedReady && current.LastUsedAt < d.Accounts[selected].LastUsedAt {
 					selected, selectedReady, selectedCtx = i, ready, candidate.ctx
 				}
@@ -526,6 +548,9 @@ func (s *Store) ReserveMediaForModel(ctx context.Context, taskKey, model string,
 			s.mu.Unlock()
 			if routingErr != nil {
 				return Account{}, ctx, routingErr
+			}
+			if requireReady && len(candidates) > 0 {
+				return Account{}, ctx, ErrMediaSessionNotReady
 			}
 			return Account{}, ctx, ErrNoAccount
 		}

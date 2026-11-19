@@ -9,9 +9,11 @@ const REASONS = new Set(['performance_unavailable', 'instance_missing', 'instanc
 const VALUE_KINDS = new Set(['unobserved', 'null', 'undefined', 'empty_string']);
 const ROUTES = new Set(['unavailable', 'editor', 'other']);
 const PAGE_COUNTS = ['matching_host_count', 'authentication_count', 'arp_observer_count'];
+const MARK_CATEGORIES = new Set(['init_start', 'vendor_start', 'vendor_duration', 'unknown']);
 const TIMING_COUNTS = ['candidate_changes', 'source_changes', 'authentication_changes',
   'emissions', 'value_changes', 'proof_changes'];
 const TIMING_MS = ['first_source_ms', 'first_nonempty_ms', 'vendors_ready_ms', 'last_candidate_ms'];
+const PHASES = new Set(['navigation', 'observation', 'verification', 'cleanup']);
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const bounded = (value, max) => Number.isSafeInteger(value) && value >= 0 && value <= max;
@@ -41,11 +43,24 @@ export function sanitizeMediaDiagnostics(value) {
     for (const key of PAGE_COUNTS) delete safePage[key];
   }
   if (typeof page.scan_complete === 'boolean') safePage.scan_complete = page.scan_complete;
+  if (typeof page.performance_available === 'boolean') safePage.performance_available = page.performance_available;
+  if (bounded(page.mark_count, 1024)) safePage.mark_count = page.mark_count;
+  if (Array.isArray(page.mark_categories)) {
+    const categories = [];
+    for (const category of page.mark_categories) {
+      if (typeof category === 'string' && MARK_CATEGORIES.has(category) && !categories.includes(category) && categories.length < 16) categories.push(category);
+    }
+    if (categories.length) safePage.mark_categories = categories;
+  }
   if (Object.keys(safePage).length) output.media_page = safePage;
 
   const timing = record(source.media_timing), safeTiming = {};
   addCounts(safeTiming, timing, TIMING_COUNTS, 65535);
   addCounts(safeTiming, timing, TIMING_MS, 60000);
+  if (PHASES.has(timing.phase)) safeTiming.phase = timing.phase;
+  for (const key of ['phase_elapsed_ms', 'navigation_elapsed_ms', 'observation_elapsed_ms']) {
+    if (bounded(timing[key], 60000)) safeTiming[key] = timing[key];
+  }
   if (Object.keys(safeTiming).length) output.media_timing = safeTiming;
   return output;
 }

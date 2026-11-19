@@ -104,6 +104,49 @@ func TestPrepareMediaForTaskCollectsOnceAndPreservesReservation(t *testing.T) {
 	}
 }
 
+func TestPrepareReadyMediaForTaskNeverStartsBrowserOnColdCache(t *testing.T) {
+	s, a := reservedMediaStore(t)
+	calls := 0
+	s.SetBrowserRefresher(func(context.Context, Account) (Account, error) {
+		calls++
+		return freshMediaAccount(a), nil
+	})
+	_, err := s.PrepareReadyMediaForTask(mediaTestContext(), a.InFlight, a.ID, a.Revision)
+	if SafeError(err) != "adobe_media_prepare_session_not_ready" || calls != 0 {
+		t.Fatalf("cold foreground preparation started browser or returned wrong error: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestPrepareReadyMediaForTaskRejectsExpiredCacheWithoutBrowser(t *testing.T) {
+	s, a := idleMediaStore(t)
+	calls := 0
+	s.SetBrowserRefresher(func(ctx context.Context, current Account) (Account, error) {
+		calls++
+		return freshMediaAccount(current), nil
+	})
+	if _, err := s.WarmMediaSession(mediaTestContext(), a.ID, a.Revision); err != nil {
+		t.Fatal(err)
+	}
+	reserved, ctx, err := s.ReserveReadyMediaForModel(context.Background(), "expired-media-task", "", mediaDirectResolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("unexpected warmup count: %d", calls)
+	}
+	s.mu.Lock()
+	readiness := s.mediaReady[reserved.ID]
+	readiness.ReusableTo = time.Now().Add(-time.Second)
+	s.mediaReady[reserved.ID] = readiness
+	s.mu.Unlock()
+	if _, err := s.PrepareReadyMediaForTask(ctx, "expired-media-task", reserved.ID, reserved.Revision); SafeError(err) != "adobe_media_prepare_session_not_ready" {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("expired foreground preparation started browser-worker: %d", calls)
+	}
+}
+
 func TestPrepareMediaForTaskNewTaskReusesTrustedRecentCollection(t *testing.T) {
 	s, a := reservedMediaStore(t)
 	calls := 0

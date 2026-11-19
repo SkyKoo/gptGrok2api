@@ -163,16 +163,24 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 					diagnostics.AdobeRejectionReason = "no_adobe_candidate"
 					continue
 				}
+				if errors.Is(err, adobe.ErrMediaSessionNotReady) {
+					diagnostics.AdobeRejectionReason = "media_session_not_ready"
+					continue
+				}
 				diagnostics.AdobeRejectionReason = adobe.SafeError(err)
 				s.recordImageSelectionFailure(r, diagnostics)
 				return imageSelection{}, adobeAPIError(err)
 			}
 			diagnostics.AdobeCandidateCount++
 			key := imageExecutionKey(ctx)
-			a, selectedContext, err := s.adobeStore.ReserveMediaForModel(ctx, key, id, s.adobeAccountContext)
+			a, selectedContext, err := s.adobeStore.ReserveReadyMediaForModel(ctx, key, id, s.adobeAccountContext)
 			if err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
 					diagnostics.AdobeRejectionReason = "no_adobe_candidate"
+					continue
+				}
+				if errors.Is(err, adobe.ErrMediaSessionNotReady) {
+					diagnostics.AdobeRejectionReason = "media_session_not_ready"
 					continue
 				}
 				diagnostics.AdobeRejectionReason = adobe.SafeError(err)
@@ -216,6 +224,9 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 		return imageSelection{}, &protocol.UpstreamError{Status: 400, Message: "no channel supports this complete model parameter combination"}
 	}
 	s.recordImageSelectionFailure(r, diagnostics)
+	if diagnostics.AdobeRejectionReason == "media_session_not_ready" {
+		return imageSelection{}, &protocol.UpstreamError{Status: http.StatusServiceUnavailable, Message: "Adobe media session is warming; retry later"}
+	}
 	return imageSelection{}, &protocol.UpstreamError{Status: 429, Message: "no eligible account with confirmed quota for this model"}
 }
 func boolInt(v bool) int {
@@ -243,6 +254,9 @@ func adobeAPIError(err error) error {
 	}
 	if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
 		return &protocol.UpstreamError{Status: 429, Message: adobe.SafeError(err)}
+	}
+	if errors.Is(err, adobe.ErrMediaSessionNotReady) {
+		return &protocol.UpstreamError{Status: http.StatusServiceUnavailable, Message: adobe.SafeError(err)}
 	}
 	return &protocol.UpstreamError{Status: 502, Message: adobe.SafeError(err)}
 }

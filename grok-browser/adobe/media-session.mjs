@@ -27,12 +27,14 @@ export function isCompleteMediaSession(media) {
 
 // SPL initially publishes null before the host's asynchronous ARP callback.
 // A nonempty token can also be provisional. Observe the normal lifecycle until
-// the document's sole SDK instance reports a token for every known vendor.
+// the document's authentication service reports a stable token. Performance
+// marks are useful diagnostics, but Adobe may rename or omit them; they are
+// never the sole proof that an otherwise valid media session is unusable.
 export function runtimeARPInPage({timeoutMs, cancelEvent}) {
   return new Promise(resolve => {
     let finished = false, tick, deadline, inspectionQueued = false;
     let authentication, source, stop, subscribed = false, emitted = false, value;
-    let stableCandidate = '', stableSince = 0;
+    let stableCandidate = '', stableCandidateMode = '', stableSince = 0;
     let observation = {state:'unavailable',readiness_reason:'authentication_missing'};
     const startedAt = Date.now();
     // Failure-only, bounded observations; changes exclude the first value.
@@ -65,12 +67,27 @@ export function runtimeARPInPage({timeoutMs, cancelEvent}) {
     // Only counts and fixed route categories leave the page. This bounded,
     // read-only failure snapshot never changes which authentication is used.
     const pageDiagnostics = () => {
-      const result = {route:'unavailable',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:false};
+      const result = {route:'unavailable',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:false,
+        performance_available:false,mark_count:0,mark_categories:[]};
       const authentications = new Set(), observers = new Set(), visited = new Set();
       let inspected = 0;
       try {
         const location = globalThis.location;
         if (location) result.route = location.origin === 'https://firefly.adobe.com' && location.pathname === '/generate/image' ? 'editor' : 'other';
+        const marks = globalThis.performance?.getEntriesByType('mark');
+        if (Array.isArray(marks)) {
+          result.performance_available = true;
+          result.mark_count = Math.min(1024, marks.length);
+          const categories = new Set();
+          for (const entry of marks) {
+            if (typeof entry?.name !== 'string') continue;
+            if (/^sherlock:[a-zA-Z0-9_-]{1,128}:init:start$/.test(entry.name)) categories.add('init_start');
+            else if (/^sherlock:[a-zA-Z0-9_-]{1,128}:(?:arkose|bfp|forter):start$/.test(entry.name)) categories.add('vendor_start');
+            else if (/^sherlock:[a-zA-Z0-9_-]{1,128}:(?:arkose|bfp|forter):start:duration$/.test(entry.name)) categories.add('vendor_duration');
+            else if (entry.name.startsWith('sherlock:')) categories.add('unknown');
+          }
+          result.mark_categories = [...categories].sort();
+        }
         const roots = [document];
         for (const root of roots) {
           if (visited.has(root)) continue;
@@ -206,24 +223,42 @@ export function runtimeARPInPage({timeoutMs, cancelEvent}) {
         }
         if (typeof value === 'string' && value.length <= 65536 && /^[\x21-\x7e]+$/.test(value) && !/[;,]/.test(value)) {
           const readiness = inspectVendorReadiness();
-          if (readiness.state !== 'ready') { observation=readiness;stableCandidate='';return; }
-          if (timing.vendors_ready_ms === undefined) timing.vendors_ready_ms=elapsed();
-          const proof = JSON.stringify(readiness.proof);
-          if (previousProof !== undefined && proof !== previousProof) count('proof_changes');
-          previousProof=proof;
-          const candidate = JSON.stringify([value,readiness.proof]);
+          // The runtime token is the hard requirement. Vendor lifecycle
+          // marks are not stable across Firefly deployments, so retain their
+          // bounded result for diagnostics and only attach a proof when the
+          // complete official mark set is available.
+          const runtimeDiagnostic = readiness.state === 'ready' ? undefined : {
+            state: readiness.state,
+            ...(readiness.readiness_reason ? {readiness_reason: readiness.readiness_reason} : {}),
+            ...(Number.isInteger(readiness.vendors_started) ? {vendors_started: readiness.vendors_started} : {}),
+            ...(Number.isInteger(readiness.vendors_complete) ? {vendors_complete: readiness.vendors_complete} : {}),
+          };
+          if (readiness.state === 'ready' && timing.vendors_ready_ms === undefined) timing.vendors_ready_ms=elapsed();
+          const proof = readiness.state === 'ready' ? JSON.stringify(readiness.proof) : '';
+          if (proof && previousProof !== undefined && proof !== previousProof) count('proof_changes');
+          if (proof) previousProof=proof;
+          const candidateMode = readiness.state === 'ready' ? 'proof' : 'token';
+          const candidate = JSON.stringify([value,proof]);
           if (candidate !== stableCandidate) {
-            if (candidateSeen) count('candidate_changes');
+            // A token may first arrive before Adobe publishes performance
+            // marks. Transitioning from token-only evidence to a later proof
+            // is diagnostic enrichment, not a token change; real proof
+            // changes and token changes still reset/count as before.
+            if (candidateSeen && !(stableCandidateMode === 'token' && candidateMode === 'proof')) count('candidate_changes');
             candidateSeen=true;timing.last_candidate_ms=elapsed();
-            stableCandidate=candidate;stableSince=Date.now();
+            stableCandidate=candidate;stableCandidateMode=candidateMode;stableSince=Date.now();
           }
           // First vendor callbacks can be followed immediately by richer
           // official updates. Require a short unchanged observation window,
           // within the existing deadline, without reading token internals.
           if (Date.now()-stableSince < 250) {
-            observation={state:'pending',source:'spl_runtime',readiness_reason:'token_settling',vendors_started:3,vendors_complete:3};return;
+            observation={state:'pending',source:'spl_runtime',readiness_reason:'token_settling',
+              ...(runtimeDiagnostic?.vendors_started !== undefined ? {vendors_started:runtimeDiagnostic.vendors_started} : {}),
+              ...(runtimeDiagnostic?.vendors_complete !== undefined ? {vendors_complete:runtimeDiagnostic.vendors_complete} : {})};return;
           }
-          return finish({state:'ready', source:'spl_runtime', token:value, runtime_proof:readiness.proof});
+          return finish({state:'ready', source:'spl_runtime', token:value,
+            ...(readiness.state === 'ready' ? {runtime_proof:readiness.proof} : {}),
+            ...(runtimeDiagnostic ? {runtime_diagnostic:runtimeDiagnostic} : {})});
         }
         finish({state:'invalid', source:'spl_runtime'});
       } catch { finish({state:'invalid_contract'}); }
@@ -265,7 +300,11 @@ export function mediaSessionMatchesInPage({token, identity, runtimeProof, timeou
       return null;
     };
     const sameProof = () => {
-      if (!runtimeProof || typeof runtimeProof.instance !== 'string' || !Array.isArray(runtimeProof.entries)) return false;
+      // Older/newer Firefly documents may not expose the performance marks.
+      // In that case identity and ARP observers remain the authoritative
+      // consistency check; a captured proof is still enforced when present.
+      if (!runtimeProof) return true;
+      if (typeof runtimeProof.instance !== 'string' || !Array.isArray(runtimeProof.entries)) return false;
       const marks = globalThis.performance?.getEntriesByType('mark'), measures = globalThis.performance?.getEntriesByType('measure');
       if (!Array.isArray(marks) || !Array.isArray(measures)) return false;
       const inits = marks.filter(entry=>/^sherlock:[a-zA-Z0-9_-]{1,128}:init:start$/.test(entry.name) && Number.isFinite(entry.startTime) && entry.startTime>=0);
@@ -619,10 +658,11 @@ async function collectMediaSession(page,context,{deadline,now,pause,signal,navig
     const observation = await observeRuntimeARP(page, Math.max(1, deadline-now()), signal);
     if (signal?.aborted) throw cancelledError();
     if (observation?.media_timing?.first_nonempty_ms!==undefined || typeof observation?.token==='string'&&observation.token.length>0) onNonempty();
+    const runtimeDiagnostic = observation?.runtime_diagnostic || observation;
     runtimeState = {state:observation?.state || 'unavailable', ...(observation?.value_kind?{value_kind:observation.value_kind}:{}),
-      ...(observation?.readiness_reason?{readiness_reason:observation.readiness_reason}:{}),
-      ...(Number.isInteger(observation?.vendors_started)?{vendors_started:observation.vendors_started}:{}),
-      ...(Number.isInteger(observation?.vendors_complete)?{vendors_complete:observation.vendors_complete}:{})};
+      ...(runtimeDiagnostic?.readiness_reason?{readiness_reason:runtimeDiagnostic.readiness_reason}:{}),
+      ...(Number.isInteger(runtimeDiagnostic?.vendors_started)?{vendors_started:runtimeDiagnostic.vendors_started}:{}),
+      ...(Number.isInteger(runtimeDiagnostic?.vendors_complete)?{vendors_complete:runtimeDiagnostic.vendors_complete}:{})};
     mediaPage=observation?.media_page;
     mediaTiming=observation?.media_timing;
     const present = observation?.state === 'ready' && isUsableSherlock(observation.token);

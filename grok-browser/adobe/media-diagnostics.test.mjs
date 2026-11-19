@@ -5,9 +5,11 @@ import { registrationDiagnostics } from './registration-diagnostics.mjs';
 
 const diagnostic = () => ({
   media_runtime:{state:'pending',readiness_reason:'vendors_pending',value_kind:'null',vendors_started:3,vendors_complete:2},
-  media_page:{route:'editor',matching_host_count:2,authentication_count:1,arp_observer_count:1,scan_complete:true},
+  media_page:{route:'editor',matching_host_count:2,authentication_count:1,arp_observer_count:1,scan_complete:true,
+    performance_available:true,mark_count:4,mark_categories:['init_start','vendor_start']},
   media_timing:{candidate_changes:0,source_changes:1,authentication_changes:1,emissions:8,
-    value_changes:2,proof_changes:0,first_source_ms:0,first_nonempty_ms:16,vendors_ready_ms:1000,last_candidate_ms:1200},
+    value_changes:2,proof_changes:0,first_source_ms:0,first_nonempty_ms:16,vendors_ready_ms:1000,last_candidate_ms:1200,
+    phase:'observation',phase_elapsed_ms:800,navigation_elapsed_ms:120,observation_elapsed_ms:680},
 });
 
 test('media diagnostic projection retains only bounded evidence, with no credential-bearing runtime objects',()=>{
@@ -25,14 +27,14 @@ test('media diagnostic projection rejects arrays, unknown categories, invalid co
   for(const value of [null,undefined,'PRIVATE',42,[],['PRIVATE']]) assert.deepEqual(sanitizeMediaDiagnostics(value),{});
   assert.deepEqual(sanitizeMediaDiagnostics({media_runtime:[],media_page:'PRIVATE',media_timing:[]}),{});
   assert.deepEqual(sanitizeMediaDiagnostics({media_runtime:{state:'PRIVATE',readiness_reason:'PRIVATE',value_kind:'PRIVATE'},
-    media_page:{route:'PRIVATE',scan_complete:'PRIVATE'},media_timing:{raw:'PRIVATE'}}),{});
+    media_page:{route:'PRIVATE',scan_complete:'PRIVATE',mark_categories:['PRIVATE']},media_timing:{raw:'PRIVATE',phase:'PRIVATE'}}),{});
   for(const value of [-1,NaN,Infinity,'0',0.5]) {
     assert.deepEqual(sanitizeMediaDiagnostics({media_runtime:{vendors_started:value,vendors_complete:value},
       media_page:{matching_host_count:value,authentication_count:value,arp_observer_count:value},
-      media_timing:{emissions:value,first_source_ms:value}}),{});
+      media_timing:{emissions:value,first_source_ms:value,phase_elapsed_ms:value},}),{});
   }
   assert.deepEqual(sanitizeMediaDiagnostics({media_runtime:{vendors_started:4,vendors_complete:4},
-    media_page:{matching_host_count:33},media_timing:{emissions:65536,first_source_ms:60001}}),{});
+    media_page:{matching_host_count:33,mark_count:1025},media_timing:{emissions:65536,first_source_ms:60001,phase_elapsed_ms:60001}}),{});
   assert.deepEqual(sanitizeMediaDiagnostics({media_runtime:{state:'pending',vendors_started:1,vendors_complete:2}}),
     {media_runtime:{state:'pending'}});
   for(const counts of [{matching_host_count:1,authentication_count:2,arp_observer_count:1},

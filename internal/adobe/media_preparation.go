@@ -30,7 +30,20 @@ func newMediaPreparationGuard(ctx context.Context, taskKey string, a Account) *m
 // PrepareMediaForTask reuses a trusted recent media session or collects one for
 // this already reserved task. Either path durably records the task preparation;
 // it never submits a job, renews after submission, or replays an earlier task.
+// Callers that must never start a foreground browser refresh should use
+// PrepareReadyMediaForTask instead.
 func (s *Store) PrepareMediaForTask(ctx context.Context, taskKey, accountID string, revision uint64) (Account, error) {
+	return s.prepareMediaForTask(ctx, taskKey, accountID, revision, false)
+}
+
+// PrepareReadyMediaForTask consumes only an already warmed media session. If
+// the cache expired after reservation, it returns session_not_ready without
+// launching browser-worker; the background scheduler will refresh the account.
+func (s *Store) PrepareReadyMediaForTask(ctx context.Context, taskKey, accountID string, revision uint64) (Account, error) {
+	return s.prepareMediaForTask(ctx, taskKey, accountID, revision, true)
+}
+
+func (s *Store) prepareMediaForTask(ctx context.Context, taskKey, accountID string, revision uint64, requireReady bool) (Account, error) {
 	if ctx.Err() != nil {
 		return Account{}, &Error{Stage: "media_prepare", Code: "cancelled"}
 	}
@@ -72,6 +85,10 @@ func (s *Store) PrepareMediaForTask(ctx context.Context, taskKey, accountID stri
 		err = s.save(d)
 		s.mu.Unlock()
 		return a, err
+	}
+	if requireReady {
+		s.mu.Unlock()
+		return a, &Error{Stage: "media_prepare", Code: "session_not_ready"}
 	}
 	if s.mediaBackoffLocked(d, ctx, a, time.Now()) {
 		s.mu.Unlock()

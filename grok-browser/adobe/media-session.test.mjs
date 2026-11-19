@@ -102,13 +102,13 @@ test('a missing source is not confused with the official null default and times 
  const h=pageHarness(null);
  const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:15,cancelEvent:'cancel-test'});
  assert.equal(result.state,'unavailable');assert.equal(result.readiness_reason,'authentication_missing');assert.equal(result.source,undefined);assert.equal(h.listeners,0);
- assert.deepEqual({...result.media_page},{route:'editor',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:true});
+ assert.deepEqual({...result.media_page,mark_categories:[...result.media_page.mark_categories]},{route:'editor',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:true,performance_available:true,mark_count:4,mark_categories:['init_start','vendor_start']});
 });
 test('an authentication without an ARP observer is distinguished from a missing authentication',async()=>{
  const h=pageHarness({});
  const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:15,cancelEvent:'cancel-test'});
  assert.equal(result.state,'unavailable');assert.equal(result.readiness_reason,'arp_observer_missing');assert.equal(h.listeners,0);
- assert.deepEqual({...result.media_page},{route:'editor',matching_host_count:1,authentication_count:1,arp_observer_count:0,scan_complete:true});
+ assert.deepEqual({...result.media_page,mark_categories:[...result.media_page.mark_categories]},{route:'editor',matching_host_count:1,authentication_count:1,arp_observer_count:0,scan_complete:true,performance_available:true,mark_count:4,mark_categories:['init_start','vendor_start']});
 });
 test('failure diagnostics count distinct hosts without selecting a later usable authentication',async()=>{
  const source=observable('later-private-token'),h=pageHarness({});
@@ -117,7 +117,7 @@ test('failure diagnostics count distinct hosts without selecting a later usable 
  h.globals.document.querySelectorAll=selector=>selector==='*'?[]:[first,second,second];
  const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:15,cancelEvent:'cancel-test'});
  assert.equal(result.readiness_reason,'arp_observer_missing');assert.equal(source.subscribed,0);assert.equal(h.listeners,0);
- assert.deepEqual({...result.media_page},{route:'editor',matching_host_count:3,authentication_count:2,arp_observer_count:1,scan_complete:true});
+ assert.deepEqual({...result.media_page,mark_categories:[...result.media_page.mark_categories]},{route:'editor',matching_host_count:3,authentication_count:2,arp_observer_count:1,scan_complete:true,performance_available:true,mark_count:4,mark_categories:['init_start','vendor_start']});
  assert.equal(JSON.stringify(result).includes('later-private-token'),false);
 });
 test('failure page diagnostics cap candidate counts and label an incomplete scan',async()=>{
@@ -150,7 +150,7 @@ test('in-page discovery exceptions are fixed diagnostics without runtime values 
 test('failed observations record when a source, nonempty value and complete vendors first appeared',async()=>{
  const perf=performanceFixture({complete:false}),source=observable(null),h=pageHarness(source,{performance:perf});
  let time=0;h.globals.Date={now:()=>time};
- const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:30,cancelEvent:'cancel-test'});
+ const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:700,cancelEvent:'cancel-test'});
  await Promise.resolve();time=10;source.emit('private-opaque-value');await Promise.resolve();
  time=20;
  for(const [vendor,start] of [['arkose',2],['bfp',3],['forter',4]])perf.measure(`sherlock:fixture-sdk:${vendor}:start:duration`,start);
@@ -182,7 +182,7 @@ test('equal emissions do not reset a candidate but continued performance proof a
 test('source and authentication replacements are counted independently from equal token values',async()=>{
  const old=observable('same-value'),fresh=observable('same-value'),h=pageHarness(old);
  let time=0;h.globals.Date={now:()=>time};
- const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:30,cancelEvent:'cancel-test'});
+ const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:700,cancelEvent:'cancel-test'});
  await Promise.resolve();time=10;h.setSource(fresh);old.emit('same-value');await Promise.resolve();await Promise.resolve();
  const replacement={service:{serviceName:'spl-commerce-dialog-service',authentication:{arpSessionToken:fresh.observe}}};
  time=20;h.globals.document.querySelectorAll=selector=>selector==='*'?[]:[replacement];
@@ -248,7 +248,7 @@ test('pending and absent runtime sources produce different sanitized diagnostics
  const missing=pageHarness(null);
  await assert.rejects(ensureMediaSession(missing.page,{cookies:async()=>assert.fail('missing runtime')},{timeoutMs:15}),e=>{
   assert.equal(e.code,'media_session_incomplete');assert.deepEqual(e.diagnostics.media_runtime,{state:'unavailable',readiness_reason:'authentication_missing'});
-  assert.deepEqual({...e.diagnostics.media_page},{route:'editor',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:true});return true;
+  assert.deepEqual({...e.diagnostics.media_page,mark_categories:[...e.diagnostics.media_page.mark_categories]},{route:'editor',matching_host_count:0,authentication_count:0,arp_observer_count:0,scan_complete:true,performance_available:true,mark_count:4,mark_categories:['init_start','vendor_start']});return true;
  });
 });
 test('an unresponsive page is distinguished from a completed pending runtime observation',{timeout:3000},async()=>{
@@ -308,19 +308,21 @@ test('provisional nonempty tokens wait for the latest instance vendor token meas
  const result=await pending;
  assert.equal(result.token,'final-opaque');assert.equal(result.state,'ready');assert.equal(source.active,0);assert.equal(h.listeners,0);
 });
-test('an old completed SDK instance cannot validate a new instance provisional token',async()=>{
+test('an old completed SDK instance is diagnostic-only when a new token is present',async()=>{
  const perf=performanceFixture(),next=performanceFixture({instance:'new-sdk',start:10,complete:false});perf.entries.push(...next.entries);
  const source=observable('new-initial'),h=pageHarness(source,{performance:perf});
- const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:30,cancelEvent:'cancel-test'});
+ const pending=h.page.evaluate(runtimeARPInPage,{timeoutMs:700,cancelEvent:'cancel-test'});
  const result=await pending;
- assert.equal(result.state,'pending');assert.equal(result.readiness_reason,'instance_ambiguous');assert.equal(result.vendors_complete,0);assert.equal('token' in result,false);
+ assert.equal(result.state,'ready');assert.equal(result.token,'new-initial');
+ assert.equal(result.runtime_diagnostic.readiness_reason,'instance_ambiguous');assert.equal(result.runtime_diagnostic.vendors_complete,0);
  assert.equal(source.active,0);assert.equal(h.listeners,0);
 });
-test('a new completed SDK cannot lend its vendor evidence to a stale SPL source',async()=>{
+test('a new completed SDK is diagnostic-only when the existing token remains stable',async()=>{
  const perf=performanceFixture({complete:false}),next=performanceFixture({instance:'new-sdk',start:10});perf.entries.push(...next.entries);
  const source=observable('old-sdk-opaque'),h=pageHarness(source,{performance:perf});
- const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:30,cancelEvent:'cancel-test'});
- assert.equal(result.state,'pending');assert.equal(result.readiness_reason,'instance_ambiguous');assert.equal('token' in result,false);
+ const result=await h.page.evaluate(runtimeARPInPage,{timeoutMs:700,cancelEvent:'cancel-test'});
+ assert.equal(result.state,'ready');assert.equal(result.token,'old-sdk-opaque');
+ assert.equal(result.runtime_diagnostic.readiness_reason,'instance_ambiguous');
  assert.equal(source.active,0);assert.equal(h.listeners,0);
 });
 test('post-vendor updates reset the stable window and preserve the final official token',async()=>{
@@ -338,12 +340,12 @@ test('transient token changes in one call stack still reset the stable observati
  await new Promise(resolve=>setTimeout(resolve,140));assert.equal(source.active,1);
  assert.equal((await pending).token,'same-final');assert.equal(source.active,0);
 });
-test('missing performance evidence or vendor participation times out without inferring token contents',async()=>{
+test('missing performance evidence or vendor participation remains usable with a stable runtime token',async()=>{
  for(const [perf,reason] of [[null,'performance_unavailable'],[{getEntriesByType:()=>[]},'instance_missing'],[performanceFixture({vendors:['forter']}),'vendors_pending'],[performanceFixture({vendors:['arkose','bfp','forter','unknown']}),'vendor_unrecognized']]){
   const source=observable('opaque-with-any-length'),h=pageHarness(source,{performance:perf});
-  await assert.rejects(ensureMediaSession(h.page,{cookies:async()=>assert.fail('incomplete vendors cannot export')},{timeoutMs:20}),error=>{
-   assert.equal(error.code,'media_session_incomplete');assert.equal(error.diagnostics.media_runtime.readiness_reason,reason);return true;
-  });
+  const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:500});
+  assert.equal(media.cookie,'sherlockToken=opaque-with-any-length');
+  assert.equal(media.runtime_state.readiness_reason,reason);
   assert.equal(source.active,0);assert.equal(h.listeners,0);
  }
 });
@@ -378,6 +380,13 @@ function verifiedMediaHarness(token='runtime') {
 }
 test('final media verification confirms ARP and identity from one current SPL instance',async()=>{
  const h=verifiedMediaHarness(),media=await ensureMediaSession(h.page,fixtureContext([]));
+ await verifyMediaSession(h.page,media,h.identity);
+ assert.equal(h.source.active,0);for(const value of Object.values(h.values))assert.equal(value.active,0);
+});
+test('final media verification uses identity and ARP when performance marks are unavailable',async()=>{
+ const h=verifiedMediaHarness('runtime-without-marks');h.globals.performance={getEntriesByType:()=>[]};
+ const media=await ensureMediaSession(h.page,fixtureContext([]),{timeoutMs:500});
+ assert.equal(media.runtime_proof,undefined);assert.equal(media.runtime_state.readiness_reason,'instance_missing');
  await verifyMediaSession(h.page,media,h.identity);
  assert.equal(h.source.active,0);for(const value of Object.values(h.values))assert.equal(value.active,0);
 });

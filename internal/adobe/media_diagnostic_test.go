@@ -10,10 +10,16 @@ import (
 )
 
 func TestMediaDiagnosticDropsUntrustedFieldsAndValues(t *testing.T) {
-	raw := json.RawMessage(`{"state":"pending","readiness_reason":"vendors_pending","value_kind":"null","vendors_started":3,"vendors_complete":2,"url":"https://private.invalid/?token=PRIVATE","email":"PRIVATE@example.test","token":"PRIVATE","proof":{"instance":"PRIVATE"},"vendor_response":"PRIVATE"}`)
+	raw := json.RawMessage(`{"state":"pending","readiness_reason":"vendors_pending","value_kind":"null","vendors_started":3,"vendors_complete":2,"media_page":{"route":"editor","matching_host_count":2,"authentication_count":1,"arp_observer_count":1,"scan_complete":true,"performance_available":true,"mark_count":4,"mark_categories":["init_start","vendor_start","PRIVATE"]},"media_timing":{"phase":"observation","phase_elapsed_ms":800,"navigation_elapsed_ms":120,"observation_elapsed_ms":680},"url":"https://private.invalid/?token=PRIVATE","email":"PRIVATE@example.test","token":"PRIVATE","proof":{"instance":"PRIVATE"},"vendor_response":"PRIVATE"}`)
 	diagnostic := SanitizeMediaPreparationDiagnostic(raw)
 	if diagnostic == nil || diagnostic.State != "pending" || diagnostic.ReadinessReason != "vendors_pending" || diagnostic.ValueKind != "null" || diagnostic.VendorsStarted == nil || *diagnostic.VendorsStarted != 3 || diagnostic.VendorsComplete == nil || *diagnostic.VendorsComplete != 2 {
 		t.Fatal("valid fixed diagnostic fields were dropped")
+	}
+	if diagnostic.Page == nil || diagnostic.Page.Route != "editor" || diagnostic.Page.MatchingHostCount == nil || *diagnostic.Page.MatchingHostCount != 2 || diagnostic.Page.AuthenticationCount == nil || *diagnostic.Page.AuthenticationCount != 1 || diagnostic.Page.ARPObserverCount == nil || *diagnostic.Page.ARPObserverCount != 1 || diagnostic.Page.PerformanceAvailable == nil || !*diagnostic.Page.PerformanceAvailable || diagnostic.Page.MarkCount == nil || *diagnostic.Page.MarkCount != 4 || len(diagnostic.Page.MarkCategories) != 2 {
+		t.Fatal("bounded page diagnostic fields were dropped")
+	}
+	if diagnostic.Timing == nil || diagnostic.Timing.Phase != "observation" || diagnostic.Timing.PhaseElapsedMS == nil || *diagnostic.Timing.PhaseElapsedMS != 800 || diagnostic.Timing.NavigationElapsedMS == nil || *diagnostic.Timing.NavigationElapsedMS != 120 || diagnostic.Timing.ObservationElapsedMS == nil || *diagnostic.Timing.ObservationElapsedMS != 680 {
+		t.Fatal("bounded timing diagnostic fields were dropped")
 	}
 	safe, err := json.Marshal(diagnostic)
 	if err != nil || strings.Contains(string(safe), "PRIVATE") || strings.Contains(string(safe), "https:") || strings.Contains(string(safe), "email") || strings.Contains(string(safe), "proof") || strings.Contains(string(safe), "token") {
@@ -26,6 +32,30 @@ func TestMediaDiagnosticDropsUntrustedFieldsAndValues(t *testing.T) {
 	} {
 		if SanitizeMediaPreparationDiagnostic(value) != nil {
 			t.Fatal("untrusted enum, malformed object or unbounded count was accepted")
+		}
+	}
+	if diagnostic := SanitizeMediaPreparationDiagnostic(map[string]any{
+		"media_page": map[string]any{"route": "editor", "matching_host_count": 1, "authentication_count": 2},
+	}); diagnostic == nil || diagnostic.Page == nil || diagnostic.Page.AuthenticationCount != nil {
+		t.Fatal("inconsistent page counts were not rejected")
+	}
+}
+
+func TestMediaDiagnosticPhaseAndMarkBounds(t *testing.T) {
+	valid := SanitizeMediaPreparationDiagnostic(map[string]any{
+		"media_page":   map[string]any{"performance_available": true, "mark_count": float64(1024), "mark_categories": []any{"init_start", "vendor_start", "vendor_start", "PRIVATE"}},
+		"media_timing": map[string]any{"phase": "verification", "phase_elapsed_ms": float64(60000)},
+	})
+	if valid == nil || valid.Page == nil || valid.Page.MarkCount == nil || *valid.Page.MarkCount != 1024 || len(valid.Page.MarkCategories) != 2 || valid.Timing == nil || valid.Timing.Phase != "verification" || valid.Timing.PhaseElapsedMS == nil || *valid.Timing.PhaseElapsedMS != 60000 {
+		t.Fatal("valid phase and mark summary was dropped")
+	}
+	for _, value := range []map[string]any{
+		{"media_page": map[string]any{"mark_count": 1025}},
+		{"media_timing": map[string]any{"phase": "PRIVATE"}},
+		{"media_timing": map[string]any{"observation_elapsed_ms": float64(60001)}},
+	} {
+		if SanitizeMediaPreparationDiagnostic(value) != nil {
+			t.Fatal("invalid phase or mark summary was accepted")
 		}
 	}
 }

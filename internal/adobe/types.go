@@ -17,14 +17,15 @@ import (
 )
 
 var (
-	ErrNotFound           = errors.New("adobe_account_not_found")
-	ErrNoAccount          = errors.New("adobe_no_available_account")
-	ErrBusy               = errors.New("adobe_account_busy")
-	ErrRevision           = errors.New("adobe_credentials_changed")
-	ErrIdentity           = errors.New("adobe_account_identity_mismatch")
-	ErrTaskResolved       = errors.New("adobe_submission_already_resolved")
-	ErrResolutionConflict = errors.New("adobe_submission_state_changed")
-	ErrResolutionReview   = errors.New("adobe_submission_review_required")
+	ErrNotFound             = errors.New("adobe_account_not_found")
+	ErrNoAccount            = errors.New("adobe_no_available_account")
+	ErrMediaSessionNotReady = errors.New("adobe_media_session_not_ready")
+	ErrBusy                 = errors.New("adobe_account_busy")
+	ErrRevision             = errors.New("adobe_credentials_changed")
+	ErrIdentity             = errors.New("adobe_account_identity_mismatch")
+	ErrTaskResolved         = errors.New("adobe_submission_already_resolved")
+	ErrResolutionConflict   = errors.New("adobe_submission_state_changed")
+	ErrResolutionReview     = errors.New("adobe_submission_review_required")
 )
 
 type Quota struct {
@@ -215,6 +216,8 @@ func SafeError(err error) string {
 		return ErrNotFound.Error()
 	case errors.Is(err, ErrNoAccount):
 		return ErrNoAccount.Error()
+	case errors.Is(err, ErrMediaSessionNotReady):
+		return ErrMediaSessionNotReady.Error()
 	case errors.Is(err, ErrTaskResolved):
 		return ErrTaskResolved.Error()
 	case errors.Is(err, ErrResolutionConflict):

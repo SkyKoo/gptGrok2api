@@ -85,44 +85,20 @@ func TestAdobeImageSelectionUsesReadyAccountAndPreservesSelectedEgress(t *testin
 	}
 }
 
-func TestAdobeImageSelectionPreservesLaterCallerContext(t *testing.T) {
-	for _, cancelled := range []bool{false, true} {
-		t.Run(map[bool]string{false: "value_and_deadline", true: "cancelled"}[cancelled], func(t *testing.T) {
-			s := imageTaskTestServer(t)
-			adobeSchedulingAccount(t, s, "cold", time.Now())
-			selected, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			type callerKey struct{}
-			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), callerKey{}, "caller-value"), time.Minute)
-			defer cancel()
-			if cancelled {
-				cancel()
-			}
-			var prepares atomic.Int32
-			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
-				prepares.Add(1)
-				if ctx.Value(callerKey{}) != "caller-value" {
-					t.Error("selected context replaced the caller's later value")
-				}
-				if _, ok := ctx.Deadline(); !ok {
-					t.Error("selected context replaced the caller's later deadline")
-				}
-				return adobeFixtureMediaRefresh(ctx, current)
-			})
-			fixture := &adobeMediaCapture{output: adobeMediaPNG(t, 1024, 1024)}
-			s.adobeClient = fixture.client(t)
-			r := httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
-			_, err = s.generateAdobeImageData(r, ctx, selected, "a paper boat", "gemini-3.1-flash-image", "1024x1024", "url", "", 1, nil, provider.ImageOutputOptions{})
-			if cancelled {
-				if err == nil || !strings.Contains(err.Error(), "cancelled") || prepares.Load() != 0 || fixture.preflights != 0 || fixture.submits != 0 {
-					t.Fatalf("cancelled caller still generated: err=%v prepare=%d preflight=%d submit=%d", err, prepares.Load(), fixture.preflights, fixture.submits)
-				}
-			} else if err != nil || prepares.Load() != 1 {
-				t.Fatalf("caller context request failed: err=%v prepares=%d", err, prepares.Load())
-			}
-		})
+func TestAdobeImageSelectionRejectsColdAccountWithoutBrowser(t *testing.T) {
+	s := imageTaskTestServer(t)
+	adobeSchedulingAccount(t, s, "cold", time.Now())
+	var prepares atomic.Int32
+	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+		prepares.Add(1)
+		return adobeFixtureMediaRefresh(ctx, current)
+	})
+	_, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "Adobe media session is warming") {
+		t.Fatalf("cold account was accepted: %v", err)
+	}
+	if prepares.Load() != 0 {
+		t.Fatalf("cold selection launched browser-worker: %d", prepares.Load())
 	}
 }
 
