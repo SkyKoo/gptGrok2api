@@ -415,9 +415,9 @@ func (s *Store) ReserveMediaForModel(ctx context.Context, taskKey, model string,
 }
 
 // ReserveReadyMediaForModel binds only an account whose media session is
-// already warm for the resolved egress. It may wait for an in-progress warmup,
-// but it never selects a cold account, so foreground requests cannot launch a
-// browser-worker session and block while the session is prepared.
+// already warm for the resolved egress. It does not wait for an in-progress or
+// cold warmup; the scheduler owns that work, so foreground requests cannot
+// launch a browser-worker session or block while the session is prepared.
 func (s *Store) ReserveReadyMediaForModel(ctx context.Context, taskKey, model string, resolver func(context.Context, Account) (context.Context, error)) (Account, context.Context, error) {
 	return s.reserveMediaForModel(ctx, taskKey, model, resolver, true)
 }
