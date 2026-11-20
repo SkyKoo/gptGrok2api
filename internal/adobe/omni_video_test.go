@@ -66,7 +66,8 @@ func TestOmni12SubmitMatchesOfficialVideoContract(t *testing.T) {
 					"modelId": "gemini-omni", "modelVersion": "omni-flash-1.2", "n": float64(1),
 					"prompt": request.Prompt, "resolution": "720p", "duration": float64(5), "generateAudio": true,
 					"generationSettings": map[string]any{"aspectRatio": "16:9"},
-					"generationMetadata": map[string]any{"module": "text2video", "submodule": "ff-video-generate"},
+					"caiClaimVersion":    float64(2),
+					"generationMetadata": map[string]any{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"},
 					"output":             map[string]any{"storeInputs": true},
 				}
 				if !reflect.DeepEqual(body, want) {

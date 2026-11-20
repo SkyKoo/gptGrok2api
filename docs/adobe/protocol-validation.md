@@ -199,6 +199,12 @@ The Go adapter now includes those two previously omitted defaults only for
 `gemini-flash/nano-banana-2026-09`. The mock HTTP transport checks the complete
 request contract; it does not prove that these defaults caused the prior 408.
 
+The 2026-11-20 logged-in Firefly page sends the same upstream version,
+`gemini-flash/nano-banana-2026-09`, for the current Nano Banana 2 label. The
+older 2026-11-10 success recorded below used `nano-banana-3`, so that historical
+request remains evidence for the older version and is not the current Nano Banana 2
+wire contract.
+
 Official UGS module 212587 classifies HTTP 408 with `error_code:"timeout_error"`
 as `backend_overload`. That classification alone cannot establish an actual
 capacity problem or rule out session compatibility. The failed CFM submissions
@@ -218,7 +224,7 @@ account enter the Adobe allowlist. Public discovery visibility is not sufficient
 
 | Logical model | Adobe implementation | Enabled parameter tier | Evidence |
 | --- | --- | --- | --- |
-| `gemini-3.1-flash-image` | `gemini-flash / nano-banana-3` | One 1024×1024 PNG, text input | Node protocol success on 2026-11-10; new Go client success on 2026-11-11 |
+| `gemini-3.1-flash-image` | `gemini-flash / nano-banana-2026-09` | One 1024×1024 PNG, text input | Logged-in Firefly request on 2026-11-20; the older `nano-banana-3` success remains historical |
 | `veo-3.1-lite` | `veo / 3.1-lite-generate` | One 1920×1080 / 1080p / 8s / 16:9 video, no audio, text input | Node protocol success on 2026-11-10; current Go and Node control requests rejected as recorded below |
 
 Unverified image sizes, image references/masks, multiple outputs, video audio and

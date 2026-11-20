@@ -353,6 +353,7 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "seeds": []int{seed()}, "output": map[string]bool{"storeInputs": true}, "generationMetadata": map[string]string{"module": "text2image", "submodule": "ff-image-generate"}, "referenceBlobs": refs}
 	switch m.ModelID {
 	case "gemini-flash":
+		setFireflyStudioEnvelope(payload)
 		if m.ModelVersion == "nano-banana-2026-09" {
 			delete(payload, "size")
 			payload["groundSearch"] = false
@@ -362,6 +363,7 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 			payload["modelSpecificPayload"] = map[string]any{"aspectRatio": v.AspectRatio}
 		}
 	case "gpt-image":
+		setFireflyStudioEnvelope(payload)
 		delete(payload, "seeds")
 		delete(payload, "resolution")
 		payload["generationSettings"] = map[string]int{"detailLevel": 3}
@@ -376,6 +378,9 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 }
 func videoPayload(m Model, v Variant, r VideoRequest, refs []referenceBlob) map[string]any {
 	payload := map[string]any{"modelId": m.ModelID, "modelVersion": m.ModelVersion, "n": 1, "prompt": r.Prompt, "seeds": []int{seed()}, "size": map[string]int{"width": r.Width, "height": r.Height}, "resolution": v.Resolution, "duration": r.Duration, "generateAudio": r.GenerateAudio, "generationSettings": map[string]string{"aspectRatio": v.AspectRatio}, "generationMetadata": map[string]string{"module": "text2video", "submodule": "ff-video-generate"}, "output": map[string]bool{"storeInputs": true}}
+	if m.ModelID == "veo" || m.ModelID == "gemini-omni" {
+		setFireflyStudioEnvelope(payload)
+	}
 	// The official UGS video mapper omits this optional field for text-only
 	// requests. Keep uploaded frame handles only when references are present.
 	if len(refs) > 0 {
@@ -395,6 +400,10 @@ func videoPayload(m Model, v Variant, r VideoRequest, refs []referenceBlob) map[
 		payload["modelSpecificPayload"] = map[string]string{"resolution": v.Resolution, "aspect_ratio": v.AspectRatio}
 	}
 	return payload
+}
+func setFireflyStudioEnvelope(payload map[string]any) {
+	payload["caiClaimVersion"] = 2
+	payload["generationMetadata"] = map[string]string{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}
 }
 func seed() int {
 	var b [4]byte

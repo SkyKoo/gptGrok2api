@@ -197,9 +197,10 @@ func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
 		want := map[string]any{
 			"modelId": "gemini-flash", "modelVersion": "nano-banana-2026-09",
 			"n": float64(1), "prompt": "blue ceramic cup", "resolution": "1K",
-			"groundSearch": false, "modelSpecificPayload": map[string]any{},
+			"caiClaimVersion": float64(2),
+			"groundSearch":    false, "modelSpecificPayload": map[string]any{},
 			"generationSettings": map[string]any{"aspectRatio": "1:1"},
-			"generationMetadata": map[string]any{"module": "text2image", "submodule": "ff-image-generate"},
+			"generationMetadata": map[string]any{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"},
 			"output":             map[string]any{"storeInputs": true}, "referenceBlobs": []any{},
 		}
 		if !reflect.DeepEqual(body, want) {
@@ -212,6 +213,45 @@ func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
 		t.Fatalf("calls=%d status=%s error=%v", calls, j.Status, err)
 	}
 }
+
+func TestNanoBanana2UsesCurrentOfficialModelVersionAndEnvelope(t *testing.T) {
+	m, ok := FindModel("gemini-3.1-flash-image")
+	if !ok || m.ModelVersion != "nano-banana-2026-09" {
+		t.Fatalf("Nano Banana 2 model version is not current: %#v", m)
+	}
+	payload := imagePayload(m, Variant{AspectRatio: "9:16", Resolution: "1K"}, ImageRequest{Prompt: "blue ceramic cup"}, nil)
+	if payload["caiClaimVersion"] != 2 || !reflect.DeepEqual(payload["generationMetadata"], map[string]string{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}) {
+		t.Fatalf("Nano Banana 2 envelope differs from official request: %#v", payload)
+	}
+}
+
+func TestVerifiedPartnerPayloadsUseFireflyStudioEnvelope(t *testing.T) {
+	for _, id := range []string{"gpt-image-2", "gpt-image-2.5-flare"} {
+		t.Run(id, func(t *testing.T) {
+			m, ok := FindModel(id)
+			if !ok {
+				t.Fatal("model missing")
+			}
+			payload := imagePayload(m, Variant{AspectRatio: "9:16", Resolution: "1K"}, ImageRequest{Prompt: "blue ceramic cup"}, nil)
+			if payload["caiClaimVersion"] != 2 || !reflect.DeepEqual(payload["generationMetadata"], map[string]string{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}) {
+				t.Fatalf("image envelope differs from official request: %#v", payload)
+			}
+		})
+	}
+	for _, id := range []string{"gemini-omni-flash-1.2", "veo-3.1-lite"} {
+		t.Run(id, func(t *testing.T) {
+			m, ok := FindModel(id)
+			if !ok {
+				t.Fatal("model missing")
+			}
+			payload := videoPayload(m, Variant{AspectRatio: "16:9", Resolution: "720p"}, VideoRequest{Prompt: "blue ceramic cup"}, nil)
+			if payload["caiClaimVersion"] != 2 || !reflect.DeepEqual(payload["generationMetadata"], map[string]string{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}) {
+				t.Fatalf("video envelope differs from official request: %#v", payload)
+			}
+		})
+	}
+}
+
 func TestPollWaitsForTerminalStatusEvenWithOutputAnd100Percent(t *testing.T) {
 	count := 0
 	c := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
@@ -332,7 +372,7 @@ func TestVeoPayloadMatchesVerifiedNodeProtocol(t *testing.T) {
 			t.Fatal("seed outside verified range")
 		}
 		got["seeds"] = []any{float64(445760)}
-		want := map[string]any{"modelId": "veo", "modelVersion": "3.1-lite-generate", "n": float64(1), "seeds": []any{float64(445760)}, "prompt": prompt, "output": map[string]any{"storeInputs": true}, "size": map[string]any{"width": float64(1920), "height": float64(1080)}, "resolution": "1080p", "duration": float64(8), "generateAudio": false, "generationMetadata": map[string]any{"module": "text2video", "submodule": "ff-video-generate"}, "generationSettings": map[string]any{"aspectRatio": "16:9"}}
+		want := map[string]any{"modelId": "veo", "modelVersion": "3.1-lite-generate", "n": float64(1), "seeds": []any{float64(445760)}, "prompt": prompt, "output": map[string]any{"storeInputs": true}, "size": map[string]any{"width": float64(1920), "height": float64(1080)}, "resolution": "1080p", "duration": float64(8), "generateAudio": false, "caiClaimVersion": float64(2), "generationMetadata": map[string]any{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}, "generationSettings": map[string]any{"aspectRatio": "16:9"}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatal("Veo request fields differ from successful Node fixture")
 		}

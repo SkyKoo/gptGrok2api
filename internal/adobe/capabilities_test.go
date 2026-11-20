@@ -51,7 +51,7 @@ func TestImageReferenceUsesCurrentUploadThenNamedAspect(t *testing.T) {
 		if json.NewDecoder(r.Body).Decode(&payload) != nil {
 			t.Fatal("invalid body")
 		}
-		if object(payload["size"])["width"] != float64(1200) || object(payload["size"])["height"] != float64(896) || object(payload["modelSpecificPayload"])["aspectRatio"] != "4:3" || payload["resolution"] != "1K" {
+		if payload["size"] != nil || len(object(payload["modelSpecificPayload"])) != 0 || object(payload["generationSettings"])["aspectRatio"] != "4:3" || payload["resolution"] != "1K" {
 			t.Fatal("named output tier lost")
 		}
 		refs := payload["referenceBlobs"].([]any)
