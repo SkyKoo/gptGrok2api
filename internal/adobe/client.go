@@ -21,6 +21,7 @@ const refreshURL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?js
 const refreshScope = "AdobeID,firefly_api,openid,pps.read,pps.write,additional_info.projectedProductContext,additional_info.ownerOrg,uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,account_cluster.read,creative_production,profile"
 
 var pollHost = regexp.MustCompile(`^bks-epo[0-9]+\.adobe\.io$`)
+var responseRequestID = regexp.MustCompile(`^[A-Za-z0-9_-]{16,80}$`)
 
 type Client struct{ http *http.Client }
 
@@ -53,7 +54,11 @@ func trustedURL(raw, kind string) bool {
 	case "refresh":
 		return u.Hostname() == "adobeid-na1.services.adobe.com" && u.Path == "/ims/check/v6/token"
 	case "poll":
-		return (pollHost.MatchString(u.Hostname()) || u.Hostname() == "firefly-3p.ff.adobe.io") && strings.HasPrefix(u.Path, "/v2/jobs/result/")
+		id, ok := strings.CutPrefix(u.Path, "/v2/jobs/result/")
+		if !ok || id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/%\\?#\x00\r\n") || !strings.HasPrefix(u.EscapedPath(), "/v2/jobs/result/") {
+			return false
+		}
+		return pollHost.MatchString(u.Hostname()) || u.Hostname() == "firefly-3p.ff.adobe.io"
 	case "download":
 		return u.Hostname() == "pre-signed-firefly-prod.s3-accelerate.amazonaws.com"
 	}
@@ -117,15 +122,21 @@ func (c *Client) request(ctx context.Context, stage, method, endpoint string, a 
 		return nil, nil, &Error{Stage: stage, Code: "transport_error", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "transport_error", "transport", nil)}
 	}
 	defer resp.Body.Close()
+	success := resp.StatusCode >= 200 && resp.StatusCode < 300
+	ambiguous := resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode >= 500 && resp.StatusCode < 600
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024+1))
 	if err != nil || len(raw) > 4*1024*1024 {
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "response_unreadable", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "response_unreadable", "response_read", nil)}
+		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "response_unreadable", SubmissionUnknown: stage == "submit" && (success || ambiguous), Diagnostic: requestDiagnostic(resp, started, "response_unreadable", "response_read", nil)}
 	}
 	var data map[string]any
 	decodeErr := json.Unmarshal(raw, &data)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if !success {
 		code := responseCode(resp.StatusCode, data)
-		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: code, SubmissionUnknown: stage == "submit" && (resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout), Diagnostic: requestDiagnostic(resp, started, code, "http_status", data)}
+		upstream := &Error{Stage: stage, Status: resp.StatusCode, Code: code, SubmissionUnknown: stage == "submit" && ambiguous, Diagnostic: requestDiagnostic(resp, started, code, "http_status", data)}
+		if upstream.SubmissionUnknown && decodeErr == nil {
+			return data, resp.Header, upstream
+		}
+		return nil, resp.Header, upstream
 	}
 	if decodeErr != nil || data == nil {
 		return nil, resp.Header, &Error{Stage: stage, Status: resp.StatusCode, Code: "invalid_response", SubmissionUnknown: stage == "submit", Diagnostic: requestDiagnostic(resp, started, "invalid_response", "response_decode", nil)}
@@ -201,6 +212,32 @@ func responseCode(status int, data map[string]any) string {
 }
 func object(v any) map[string]any { m, _ := v.(map[string]any); return m }
 func str(v any) string            { s, _ := v.(string); return s }
+func safeResponseRequestID(h http.Header, data map[string]any) string {
+	for _, key := range []string{"x-adobe-request-id", "request-id"} {
+		if value := h.Get(key); responseRequestID.MatchString(value) {
+			return value
+		}
+	}
+	for _, key := range []string{"request_id", "requestId"} {
+		if value := str(data[key]); responseRequestID.MatchString(value) {
+			return value
+		}
+	}
+	if value := h.Get("x-request-id"); responseRequestID.MatchString(value) {
+		return value
+	}
+	return ""
+}
+func responsePollURL(h http.Header, data map[string]any) string {
+	links := object(data["links"])
+	result := links["result"]
+	for _, link := range []string{h.Get("x-override-status-link"), str(result), str(object(result)["href"])} {
+		if trustedURL(link, "poll") {
+			return link
+		}
+	}
+	return ""
+}
 func number(v any) *float64 {
 	n, ok := v.(float64)
 	if !ok {
@@ -383,29 +420,29 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 		headers["x-arp-session-id"] = sherlock
 	}
 	d, h, err := c.request(ctx, "submit", http.MethodPost, "https://firefly-3p.ff.adobe.io/v2/3p-"+m.Kind+"s/generate-async", a, raw, headers)
+	j.ResponseRequestID = safeResponseRequestID(h, d)
 	if err != nil {
 		j.Status = "SUBMISSION_UNKNOWN"
-		if e, ok := err.(*Error); ok {
-			j.SubmissionDiagnostic = e.Diagnostic
-			if !e.SubmissionUnknown {
-				j.Status = "REJECTED"
-			}
+		var upstream *Error
+		if !errors.As(err, &upstream) {
+			return j, err
 		}
-		return j, err
+		j.SubmissionDiagnostic = upstream.Diagnostic
+		if !upstream.SubmissionUnknown {
+			j.Status = "REJECTED"
+			return j, err
+		}
 	}
-	j.PollURL = h.Get("x-override-status-link")
+	j.PollURL = responsePollURL(h, d)
 	if j.PollURL == "" {
-		result := object(d["links"])["result"]
-		j.PollURL = str(result)
-		if j.PollURL == "" {
-			j.PollURL = str(object(result)["href"])
-		}
-	}
-	if !trustedURL(j.PollURL, "poll") {
-		j.PollURL = ""
 		j.Status = "SUBMISSION_UNKNOWN"
+		if err != nil {
+			return j, err
+		}
 		return j, &Error{Stage: "submit", Code: "missing_or_untrusted_poll_link", SubmissionUnknown: true}
 	}
+	// A job-specific receipt lets both callers persist the handle and perform
+	// their normal GET-only polling, even when the submit response was a timeout.
 	j.Status = "SUBMITTED"
 	return j, nil
 }

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -75,6 +76,85 @@ func TestSubmitIsSinglePOSTAndNonceForBothKinds(t *testing.T) {
 			}
 			if calls != 1 || err == nil || j.Status != "SUBMISSION_UNKNOWN" || strings.Contains(err.Error(), "private") {
 				t.Fatalf("calls=%d job=%+v error=%v", calls, j, err)
+			}
+		})
+	}
+}
+
+func TestSubmitTimeoutWithTrustedHandleIsPollableWithoutResubmit(t *testing.T) {
+	calls := 0
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Path != "/v2/3p-images/generate-async" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		response := jsonResponse(http.StatusRequestTimeout, `{"error_code":"timeout_error","links":{"result":{"href":"https://bks-epo1234.adobe.io/v2/jobs/result/timeout-fixture"}}}`)
+		response.Header.Set("x-adobe-request-id", "adobe-receipt-fixture")
+		return response, nil
+	})})
+	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+	if err != nil || job.Status != "SUBMITTED" || job.PollURL == "" || job.ResponseRequestID != "adobe-receipt-fixture" || job.SubmissionDiagnostic == nil || calls != 1 {
+		t.Fatalf("timeout receipt was not retained: calls=%d job=%+v err=%v", calls, job, err)
+	}
+}
+func TestSubmitTimeoutWithStringHandleIsPollableWithoutResubmit(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusRequestTimeout, `{"error_code":"timeout_error","links":{"result":"https://bks-epo1234.adobe.io/v2/jobs/result/string-fixture"}}`), nil
+	})})
+	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+	if err != nil || job.Status != "SUBMITTED" || job.PollURL != "https://bks-epo1234.adobe.io/v2/jobs/result/string-fixture" {
+		t.Fatalf("string timeout receipt was not retained: job=%+v err=%v", job, err)
+	}
+}
+func TestSubmitTimeoutWithUntrustedHandleStaysUnknown(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusRequestTimeout, `{"error_code":"timeout_error","links":{"result":{"href":"https://evil.example/v2/jobs/result/fixture"}}}`), nil
+	})})
+	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+	var upstream *Error
+	if err == nil || !errors.As(err, &upstream) || !upstream.SubmissionUnknown || job.Status != "SUBMISSION_UNKNOWN" || job.PollURL != "" {
+		t.Fatalf("untrusted timeout receipt was accepted: job=%+v err=%v", job, err)
+	}
+}
+
+func TestPollLinkIdentifiesOneTask(t *testing.T) {
+	const base = "https://bks-epo1234.adobe.io/v2/jobs/result/"
+	for _, suffix := range []string{"", ".", "..", "a/b", "a%2fb", "%2e%2e", "a%5cb", "a%252fb"} {
+		if trustedURL(base+suffix, "poll") {
+			t.Errorf("accepted non-task path %q", suffix)
+		}
+	}
+	want := base + "fixture%3Aid?version=2"
+	headers := http.Header{}
+	headers.Set("x-override-status-link", base+"../other")
+	if got := responsePollURL(headers, map[string]any{"links": map[string]any{"result": want}}); got != want {
+		t.Fatalf("valid body receipt was lost: %q", got)
+	}
+}
+
+func TestDefinitiveRejectionWithUnreadableBodyCannotResume(t *testing.T) {
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		resp := jsonResponse(http.StatusForbidden, "")
+		resp.Body = io.NopCloser(iotest.ErrReader(errors.New("interrupted read")))
+		resp.Header.Set("x-override-status-link", "https://bks-epo1234.adobe.io/v2/jobs/result/fixture")
+		return resp, nil
+	})})
+	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+	if err == nil || job.Status != "REJECTED" || job.PollURL != "" {
+		t.Fatalf("explicit rejection entered polling: status=%s has_link=%t err=%v", job.Status, job.PollURL != "", err)
+	}
+}
+func TestSubmitResponseRequestIDRejectsUnsafeValues(t *testing.T) {
+	for _, value := range []string{"short", "contains space", "https://evil.example/request", strings.Repeat("x", 81)} {
+		t.Run(value, func(t *testing.T) {
+			client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+				response := jsonResponse(http.StatusRequestTimeout, `{"error_code":"timeout_error"}`)
+				response.Header.Set("x-adobe-request-id", value)
+				return response, nil
+			})})
+			job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+			if err == nil || job.ResponseRequestID != "" || job.Status != "SUBMISSION_UNKNOWN" {
+				t.Fatalf("unsafe response id was retained: value=%q job=%+v err=%v", value, job, err)
 			}
 		})
 	}

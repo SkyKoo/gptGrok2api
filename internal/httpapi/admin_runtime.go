@@ -907,19 +907,21 @@ func callLogEntry(record monitorRecord, statusCode int, requestShape any, respon
 	if record.Endpoint == "/v1/videos" {
 		detail["error_code"] = record.Metrics["video_error_code"]
 		detail["video_verification"] = record.Metrics["video_verification"]
-		// Promote bounded Adobe submission identifiers and status to the stable
-		// log shape so callers do not need provider-specific metric keys.
-		if requestID := stringValue(record.Metrics["upstream_request_id"]); requestID != "" {
-			detail["upstream_request_id"] = requestID
-		} else if requestID := stringValue(record.Metrics["adobe_upstream_request_id"]); requestID != "" {
-			detail["upstream_request_id"] = requestID
-		}
 		if status := monitorNumber(record.Metrics["video_upstream_status"]); status > 0 {
 			detail["upstream_status"] = status
 		}
-		if diagnostic := record.Metrics["adobe_submission_diagnostic"]; diagnostic != nil {
-			detail["adobe_submission_diagnostic"] = diagnostic
-		}
+	}
+	if requestID := firstNonEmpty(stringValue(record.Metrics["upstream_request_id"]), stringValue(record.Metrics["adobe_upstream_request_id"])); requestID != "" {
+		detail["upstream_request_id"] = requestID
+	}
+	if responseID := stringValue(record.Metrics["adobe_response_request_id"]); responseID != "" {
+		detail["adobe_response_request_id"] = responseID
+	}
+	if status := monitorNumber(record.Metrics["adobe_upstream_status"]); status > 0 {
+		detail["upstream_status"] = status
+	}
+	if diagnostic := record.Metrics["adobe_submission_diagnostic"]; diagnostic != nil {
+		detail["adobe_submission_diagnostic"] = diagnostic
 	}
 	entry := map[string]any{
 		"id":      record.CallID,

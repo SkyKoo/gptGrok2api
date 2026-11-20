@@ -33,6 +33,7 @@ type adobeMediaCapture struct {
 	output                              []byte
 	uploadDenied                        bool
 	preflightPaid                       bool
+	submitResponseIDOnTimeout           string
 	video                               bool
 	expectedProxy                       string
 	expectedBearer                      string
@@ -65,6 +66,7 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			}
 		}
 		status, body, mime := 200, `{}`, "application/json"
+		responseHeaders := make(http.Header)
 		if r.URL.Hostname() != "pre-signed-firefly-prod.s3-accelerate.amazonaws.com" && f.expectedBearer != "" && r.Header.Get("Authorization") != "Bearer "+f.expectedBearer {
 			t.Error("Adobe API request did not use the freshly prepared access token")
 		}
@@ -128,6 +130,11 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 				t.Error(err)
 			}
 			body = `{"links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/fixture"}}}`
+			if f.submitResponseIDOnTimeout != "" {
+				status = http.StatusRequestTimeout
+				body = `{"error_code":"timeout_error","links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/fixture"}}}`
+				responseHeaders.Set("X-Adobe-Request-Id", f.submitResponseIDOnTimeout)
+			}
 			if f.afterSubmit != nil {
 				f.afterSubmit()
 			}
@@ -151,8 +158,88 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 		default:
 			t.Errorf("unexpected Adobe request path %s", r.URL.Path)
 		}
-		return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{mime}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		responseHeaders.Set("Content-Type", mime)
+		return &http.Response{StatusCode: status, Header: responseHeaders, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	})})
+}
+
+func TestAdobeTimeoutReceiptCompletesOriginalMediaJob(t *testing.T) {
+	const responseID = "adobe-response-id-fixture"
+	const pollURL = "https://bks-epo8552.adobe.io/v2/jobs/result/fixture"
+	for _, kind := range []string{"image", "video"} {
+		t.Run(kind, func(t *testing.T) {
+			s := imageTaskTestServer(t)
+			adobeReadyFixtureAccount(t, s)
+			fixture := &adobeMediaCapture{video: kind == "video", submitResponseIDOnTimeout: responseID}
+			var requestID string
+			fixture.inspectRequest = func(r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/generate-async"):
+					if r.Method != http.MethodPost {
+						t.Errorf("submit method = %s", r.Method)
+					}
+					requestID = r.Header.Get("x-request-id")
+				case strings.Contains(r.URL.Path, "/v2/jobs/result/"):
+					if r.Method != http.MethodGet || r.URL.String() != pollURL {
+						t.Errorf("unexpected task lookup %s %s", r.Method, r.URL)
+					}
+				}
+			}
+			s.adobeClient = fixture.client(t)
+			var route *mediaRoute
+			if fixture.video {
+				s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
+				fixture.output = videoTestMP4("adobe-video", "fixture")
+				w := httptest.NewRecorder()
+				s.Handler().ServeHTTP(w, adobeVideoMediaRequest(t, true, nil))
+				if w.Code != http.StatusOK {
+					t.Fatalf("video creation: %d %s", w.Code, w.Body.String())
+				}
+				var created videoJob
+				if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+					t.Fatal(err)
+				}
+				job := waitAdobeVideoIdle(t, s, created.ID)
+				if job.Status != "completed" {
+					t.Fatalf("video status %s: %v", job.Status, job.Error)
+				}
+				route = job.Route
+			} else {
+				fixture.output = adobeMediaPNG(t, 1024, 1024)
+				const request = `{"client_task_id":"receipt-image","model":"gemini-3.1-flash-image","prompt":"a paper boat","size":"1024x1024"}`
+				w := imageTaskCall(s, http.MethodPost, "/api/image-tasks/generations", "api-secret", request)
+				if w.Code != http.StatusAccepted {
+					t.Fatalf("image creation: %d %s", w.Code, w.Body.String())
+				}
+				task := waitAdobeImage(t, s, "receipt-image")
+				if task.Status != "success" {
+					t.Fatalf("image status %s: %v", task.Status, task.Error)
+				}
+				route = task.Route
+			}
+			if route == nil {
+				t.Fatal("missing pinned task route")
+			}
+			fresh := NewWithWorkers(s.cfg, false)
+			handle, err := fresh.adobeStore.LoadJob(route.JobKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if fixture.submits != 1 || fixture.polls != 1 {
+				t.Fatalf("generation submits=%d polls=%d", fixture.submits, fixture.polls)
+			}
+			if requestID == "" || handle.RequestID != requestID || handle.ResponseRequestID != responseID ||
+				handle.PollURL != pollURL || handle.Status != "COMPLETED" {
+				t.Fatal("saved job lost its original submit or polling receipt")
+			}
+			diagnostic := handle.SubmissionDiagnostic
+			if diagnostic == nil || diagnostic.HTTPStatus != http.StatusRequestTimeout || diagnostic.ErrorCode != "timeout_error" {
+				t.Fatalf("saved submit diagnostic = %+v", diagnostic)
+			}
+		})
+	}
 }
 
 func TestAdobeImageSizeAndReferencesReachProtocol(t *testing.T) {

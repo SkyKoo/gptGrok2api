@@ -72,17 +72,25 @@ func (s *Server) enrichAdobeMonitorEgress(callID string, ctx context.Context) {
 
 func adobeSubmissionMetrics(job adobe.Job) map[string]any {
 	metrics := map[string]any{
-		"video_upload_completed":    job.ReferenceUploadCompleted,
-		"video_reference_count":     job.ReferenceCount,
-		"adobe_reference_upload_ms": job.ReferenceUploadElapsedMS,
-		"adobe_submit_ms":           job.SubmitElapsedMS,
 		"adobe_upstream_request_id": job.RequestID,
 		"upstream_request_id":       job.RequestID,
 		"adobe_submission_status":   job.Status,
 	}
+	if job.Kind == "video" {
+		metrics["video_upload_completed"] = job.ReferenceUploadCompleted
+		metrics["video_reference_count"] = job.ReferenceCount
+		metrics["adobe_reference_upload_ms"] = job.ReferenceUploadElapsedMS
+		metrics["adobe_submit_ms"] = job.SubmitElapsedMS
+	}
+	if job.ResponseRequestID != "" {
+		metrics["adobe_response_request_id"] = job.ResponseRequestID
+	}
 	if diagnostic := job.SubmissionDiagnostic; diagnostic != nil {
 		metrics["adobe_submission_diagnostic"] = diagnostic
-		metrics["video_upstream_status"] = diagnostic.HTTPStatus
+		metrics["adobe_upstream_status"] = diagnostic.HTTPStatus
+		if job.Kind == "video" {
+			metrics["video_upstream_status"] = diagnostic.HTTPStatus
+		}
 		metrics["adobe_upstream_error_code"] = diagnostic.ErrorCode
 	}
 	return metrics
@@ -205,6 +213,7 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 	}
 	s.stageRequestMonitor(r, "image_starting_generation", 35, nil)
 	job, err := s.adobeClient.SubmitImage(ctx, selected.Adobe, request)
+	s.enrichRequestMonitor(r, map[string]any{"metrics": adobeSubmissionMetrics(job)})
 	if err != nil {
 		s.adobeStore.InvalidateMediaSession(selected.Adobe.ID, selected.Adobe.Revision)
 		if stateErr := s.adobeSubmissionFailed(selected.Key, job, err); stateErr != nil {

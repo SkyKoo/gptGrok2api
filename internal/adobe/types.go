@@ -143,6 +143,7 @@ type Job struct {
 	ModelID                  string                `json:"model_id"`
 	ModelVersion             string                `json:"model_version"`
 	RequestID                string                `json:"request_id"`
+	ResponseRequestID        string                `json:"response_request_id,omitempty"`
 	PollURL                  string                `json:"poll_url,omitempty"`
 	Status                   string                `json:"status"`
 	Progress                 float64               `json:"progress"`
