@@ -22,6 +22,7 @@ const refreshScope = "AdobeID,firefly_api,openid,pps.read,pps.write,additional_i
 
 var pollHost = regexp.MustCompile(`^bks-epo[0-9]+\.adobe\.io$`)
 var responseRequestID = regexp.MustCompile(`^[A-Za-z0-9_-]{16,80}$`)
+var generationTraceID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type Client struct{ http *http.Client }
 
@@ -228,15 +229,25 @@ func safeResponseRequestID(h http.Header, data map[string]any) string {
 	}
 	return ""
 }
-func responsePollURL(h http.Header, data map[string]any) string {
+func responsePollURL(h http.Header, data map[string]any) (string, string) {
 	links := object(data["links"])
 	result := links["result"]
-	for _, link := range []string{h.Get("x-override-status-link"), str(result), str(object(result)["href"])} {
-		if trustedURL(link, "poll") {
-			return link
-		}
+	status := "missing"
+	if data == nil {
+		status = "body_unavailable"
+	} else if result != nil {
+		status = "unrecognized"
 	}
-	return ""
+	for _, link := range []string{h.Get("x-override-status-link"), str(result), str(object(result)["href"])} {
+		if link == "" {
+			continue
+		}
+		if trustedURL(link, "poll") {
+			return link, "trusted"
+		}
+		status = "untrusted"
+	}
+	return "", status
 }
 func number(v any) *float64 {
 	n, ok := v.(float64)
@@ -430,6 +441,9 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 	}
 	d, h, err := c.request(ctx, "submit", http.MethodPost, "https://firefly-3p.ff.adobe.io/v2/3p-"+m.Kind+"s/generate-async", a, raw, headers)
 	j.ResponseRequestID = safeResponseRequestID(h, d)
+	if traceID := h.Get("x-generation-trace-id"); generationTraceID.MatchString(traceID) {
+		j.GenerationTraceID = traceID
+	}
 	if err != nil {
 		j.Status = "SUBMISSION_UNKNOWN"
 		var upstream *Error
@@ -442,7 +456,9 @@ func (c *Client) submit(ctx context.Context, a Account, m Model, prompt string, 
 			return j, err
 		}
 	}
-	j.PollURL = responsePollURL(h, d)
+	if err == nil || (j.SubmissionDiagnostic != nil && j.SubmissionDiagnostic.ResponseReceived) {
+		j.PollURL, j.PollLinkStatus = responsePollURL(h, d)
+	}
 	if j.PollURL == "" {
 		j.Status = "SUBMISSION_UNKNOWN"
 		if err != nil {

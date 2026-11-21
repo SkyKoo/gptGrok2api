@@ -74,7 +74,7 @@ func TestSubmitIsSinglePOSTAndNonceForBothKinds(t *testing.T) {
 			} else {
 				j, err = client.SubmitVideo(context.Background(), a, VideoRequest{Model: "veo-3.1-lite", Prompt: "test", Width: 1920, Height: 1080, Duration: 8, Resolution: "1080p", AspectRatio: "16:9"})
 			}
-			if calls != 1 || err == nil || j.Status != "SUBMISSION_UNKNOWN" || strings.Contains(err.Error(), "private") {
+			if calls != 1 || err == nil || j.Status != "SUBMISSION_UNKNOWN" || j.PollLinkStatus != "" || strings.Contains(err.Error(), "private") {
 				t.Fatalf("calls=%d job=%+v error=%v", calls, j, err)
 			}
 		})
@@ -82,6 +82,7 @@ func TestSubmitIsSinglePOSTAndNonceForBothKinds(t *testing.T) {
 }
 
 func TestSubmitTimeoutWithTrustedHandleIsPollableWithoutResubmit(t *testing.T) {
+	const traceID = "132cf294-5c81-48c9-9017-b14879798991"
 	calls := 0
 	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -90,11 +91,15 @@ func TestSubmitTimeoutWithTrustedHandleIsPollableWithoutResubmit(t *testing.T) {
 		}
 		response := jsonResponse(http.StatusRequestTimeout, `{"error_code":"timeout_error","links":{"result":{"href":"https://bks-epo1234.adobe.io/v2/jobs/result/timeout-fixture"}}}`)
 		response.Header.Set("x-adobe-request-id", "adobe-receipt-fixture")
+		response.Header.Set("x-generation-trace-id", traceID)
 		return response, nil
 	})})
 	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
 	if err != nil || job.Status != "SUBMITTED" || job.PollURL == "" || job.ResponseRequestID != "adobe-receipt-fixture" || job.SubmissionDiagnostic == nil || calls != 1 {
 		t.Fatalf("timeout receipt was not retained: calls=%d job=%+v err=%v", calls, job, err)
+	}
+	if job.GenerationTraceID != traceID || job.PollLinkStatus != "trusted" {
+		t.Fatal("trusted receipt lost its trace or link classification")
 	}
 }
 func TestSubmitTimeoutWithStringHandleIsPollableWithoutResubmit(t *testing.T) {
@@ -112,8 +117,28 @@ func TestSubmitTimeoutWithUntrustedHandleStaysUnknown(t *testing.T) {
 	})})
 	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
 	var upstream *Error
-	if err == nil || !errors.As(err, &upstream) || !upstream.SubmissionUnknown || job.Status != "SUBMISSION_UNKNOWN" || job.PollURL != "" {
+	if err == nil || !errors.As(err, &upstream) || !upstream.SubmissionUnknown || job.Status != "SUBMISSION_UNKNOWN" || job.PollURL != "" || job.PollLinkStatus != "untrusted" {
 		t.Fatalf("untrusted timeout receipt was accepted: job=%+v err=%v", job, err)
+	}
+}
+
+func TestTimeoutReceiptDistinguishesMissingAndUnreadableBody(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"error_code":"timeout_error"}`, "missing"},
+		{`{"links":{"result":{"unexpected":"private"}}}`, "unrecognized"},
+		{`invalid JSON`, "body_unavailable"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			client := NewClient(&http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+				resp := jsonResponse(http.StatusRequestTimeout, tc.body)
+				resp.Header.Set("x-generation-trace-id", "unsafe diagnostic text")
+				return resp, nil
+			})})
+			job, err := client.SubmitImage(context.Background(), fixtureAccount(t), ImageRequest{Model: "gemini-3.1-flash-image", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+			if err == nil || job.Status != "SUBMISSION_UNKNOWN" || job.PollLinkStatus != tc.want || job.GenerationTraceID != "" || job.PollURL != "" {
+				t.Fatalf("unexpected receipt status=%q link=%q", job.Status, job.PollLinkStatus)
+			}
+		})
 	}
 }
 
@@ -127,7 +152,7 @@ func TestPollLinkIdentifiesOneTask(t *testing.T) {
 	want := base + "fixture%3Aid?version=2"
 	headers := http.Header{}
 	headers.Set("x-override-status-link", base+"../other")
-	if got := responsePollURL(headers, map[string]any{"links": map[string]any{"result": want}}); got != want {
+	if got, status := responsePollURL(headers, map[string]any{"links": map[string]any{"result": want}}); got != want || status != "trusted" {
 		t.Fatalf("valid body receipt was lost: %q", got)
 	}
 }

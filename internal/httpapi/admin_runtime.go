@@ -914,8 +914,10 @@ func callLogEntry(record monitorRecord, statusCode int, requestShape any, respon
 	if requestID := firstNonEmpty(stringValue(record.Metrics["upstream_request_id"]), stringValue(record.Metrics["adobe_upstream_request_id"])); requestID != "" {
 		detail["upstream_request_id"] = requestID
 	}
-	if responseID := stringValue(record.Metrics["adobe_response_request_id"]); responseID != "" {
-		detail["adobe_response_request_id"] = responseID
+	for _, field := range []string{"adobe_response_request_id", "adobe_generation_trace_id", "adobe_poll_link_status"} {
+		if value := stringValue(record.Metrics[field]); value != "" {
+			detail[field] = value
+		}
 	}
 	if status := monitorNumber(record.Metrics["adobe_upstream_status"]); status > 0 {
 		detail["upstream_status"] = status

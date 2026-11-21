@@ -144,6 +144,8 @@ type Job struct {
 	ModelVersion             string                `json:"model_version"`
 	RequestID                string                `json:"request_id"`
 	ResponseRequestID        string                `json:"response_request_id,omitempty"`
+	GenerationTraceID        string                `json:"generation_trace_id,omitempty"`
+	PollLinkStatus           string                `json:"poll_link_status,omitempty"`
 	PollURL                  string                `json:"poll_url,omitempty"`
 	Status                   string                `json:"status"`
 	Progress                 float64               `json:"progress"`

@@ -85,6 +85,12 @@ func adobeSubmissionMetrics(job adobe.Job) map[string]any {
 	if job.ResponseRequestID != "" {
 		metrics["adobe_response_request_id"] = job.ResponseRequestID
 	}
+	if job.GenerationTraceID != "" {
+		metrics["adobe_generation_trace_id"] = job.GenerationTraceID
+	}
+	if job.PollLinkStatus != "" {
+		metrics["adobe_poll_link_status"] = job.PollLinkStatus
+	}
 	if diagnostic := job.SubmissionDiagnostic; diagnostic != nil {
 		metrics["adobe_submission_diagnostic"] = diagnostic
 		metrics["adobe_upstream_status"] = diagnostic.HTTPStatus
