@@ -198,8 +198,6 @@ func TestPaidAndUnverifiedParametersNeverSubmit(t *testing.T) {
 	}
 }
 func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
-	// Official Firefly cX/lX/Gxe builders (2026-11-11): Nano 2.1 uses
-	// resolution/aspectRatio, an empty modelSpecificPayload and explicit search=false.
 	calls := 0
 	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -222,11 +220,11 @@ func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
 		want := map[string]any{
 			"modelId": "gemini-flash", "modelVersion": "nano-banana-2026-09",
 			"n": float64(1), "prompt": "blue ceramic cup", "resolution": "1K",
-			"caiClaimVersion": float64(2),
-			"groundSearch":    false, "modelSpecificPayload": map[string]any{},
+			"caiClaimVersion":    float64(2),
+			"groundSearch":       false,
 			"generationSettings": map[string]any{"aspectRatio": "1:1"},
 			"generationMetadata": map[string]any{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"},
-			"output":             map[string]any{"storeInputs": true}, "referenceBlobs": []any{},
+			"output":             map[string]any{"storeInputs": true},
 		}
 		if !reflect.DeepEqual(body, want) {
 			t.Fatalf("Nano 2.1 request differs from official contract: got %#v, want %#v", body, want)
@@ -239,12 +237,49 @@ func TestNanoBanana21SubmitMatchesOfficialResolutionContract(t *testing.T) {
 	}
 }
 
+func TestNanoBanana21SingleReferenceEdit(t *testing.T) {
+	calls := 0
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		calls++
+		switch r.URL.Path {
+		case "/v2/storage/image":
+			return jsonResponse(200, `{"images":[{"id":"image-fixture"}]}`), nil
+		case "/v2/3p-images/generate-async":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{"size", "modelSpecificPayload"} {
+				if _, ok := body[key]; ok {
+					t.Fatalf("unexpected field %s in Nano Banana 2.1 edit", key)
+				}
+			}
+			want := []any{map[string]any{"id": "image-fixture", "usage": "general"}}
+			if body["modelVersion"] != "nano-banana-2026-09" || !reflect.DeepEqual(body["referenceBlobs"], want) {
+				t.Fatalf("unexpected edit version or reference: %v %v", body["modelVersion"], body["referenceBlobs"])
+			}
+			return jsonResponse(200, `{"links":{"result":{"href":"https://bks-epo8552.adobe.io/v2/jobs/result/image-fixture"}}}`), nil
+		default:
+			t.Fatalf("unexpected request path %q", r.URL.Path)
+			return nil, nil
+		}
+	})})
+	req := ImageRequest{Model: "gemini-3.1-flash-image-2.1", Prompt: "add a red scarf", Width: 1024, Height: 1024, N: 1, References: []ReferenceImage{referenceFixture(t, 4, 3)}}
+	job, err := client.SubmitImage(context.Background(), fixtureAccount(t), req)
+	if err != nil || job.Status != "SUBMITTED" || calls != 2 {
+		t.Fatalf("edit calls=%d status=%s error=%v", calls, job.Status, err)
+	}
+}
+
 func TestNanoBanana2UsesCurrentOfficialModelVersionAndEnvelope(t *testing.T) {
 	m, ok := FindModel("gemini-3.1-flash-image")
-	if !ok || m.ModelVersion != "nano-banana-2026-09" {
+	if !ok || m.ModelVersion != "nano-banana-3" {
 		t.Fatalf("Nano Banana 2 model version is not current: %#v", m)
 	}
-	payload := imagePayload(m, Variant{AspectRatio: "9:16", Resolution: "1K"}, ImageRequest{Prompt: "blue ceramic cup"}, nil)
+	payload := imagePayload(m, Variant{AspectRatio: "9:16", Resolution: "1K"}, ImageRequest{Prompt: "blue ceramic cup", Width: 768, Height: 1376}, nil)
+	if !reflect.DeepEqual(payload["size"], map[string]int{"width": 768, "height": 1376}) || payload["groundSearch"] != false {
+		t.Fatalf("unexpected Nano Banana 2 size or search setting: %#v", payload)
+	}
 	if payload["caiClaimVersion"] != 2 || !reflect.DeepEqual(payload["generationMetadata"], map[string]string{"module": "firefly-studio", "submodule": "firefly-studio-combined-generations"}) {
 		t.Fatalf("Nano Banana 2 envelope differs from official request: %#v", payload)
 	}

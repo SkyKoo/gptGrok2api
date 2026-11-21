@@ -365,11 +365,13 @@ func imagePayload(m Model, v Variant, r ImageRequest, refs []referenceBlob) map[
 	switch m.ModelID {
 	case "gemini-flash":
 		setFireflyStudioEnvelope(payload)
+		payload["groundSearch"] = false
+		payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
 		if m.ModelVersion == "nano-banana-2026-09" {
 			delete(payload, "size")
-			payload["groundSearch"] = false
-			payload["modelSpecificPayload"] = map[string]any{}
-			payload["generationSettings"] = map[string]string{"aspectRatio": v.AspectRatio}
+			if len(refs) == 0 {
+				delete(payload, "referenceBlobs")
+			}
 		} else {
 			payload["modelSpecificPayload"] = map[string]any{"aspectRatio": v.AspectRatio}
 		}

@@ -192,18 +192,22 @@ The complete task took about 47 seconds and retained its existing unknown media
 submission. This verified session renewal, not a new password/OTP exchange or
 successful generation.
 
-The current official Nano Banana 2.1 builders (`cX`, `lX`, `Gxe` in the inspected
+The November 11 Nano Banana 2.1 builders (`cX`, `lX`, `Gxe` in the inspected
 Firefly `current-index.js`) send `groundSearch:false` and `modelSpecificPayload:{}`
 alongside `resolution:"1K"` and `generationSettings.aspectRatio`, without `size`.
-The Go adapter now includes those two previously omitted defaults only for
-`gemini-flash/nano-banana-2026-09`. The mock HTTP transport checks the complete
-request contract; it does not prove that these defaults caused the prior 408.
 
-The 2026-11-20 logged-in Firefly page sends the same upstream version,
-`gemini-flash/nano-banana-2026-09`, for the current Nano Banana 2 label. The
-older 2026-11-10 success recorded below used `nano-banana-3`, so that historical
-request remains evidence for the older version and is not the current Nano Banana 2
-wire contract.
+On November 21 we matched the two successful Firefly requests to their
+individual generation history entries. Nano Banana 2 used `nano-banana-3`
+with a 768×1376 size, 1K resolution and a named 9:16 aspect ratio. Its
+request included `modelSpecificPayload`, `generationSettings` and `groundSearch`.
+Nano Banana 2.1 used `nano-banana-2026-09` for its 1K square text-only image
+and omitted size, modelSpecificPayload and referenceBlobs. A separate 2.1
+single-reference edit returned HTTP 200 and produced the requested image.
+It sent one referenceBlobs entry with an id and usage `general`, and omitted
+size and modelSpecificPayload. Both 2.1 requests sent groundSearch=false.
+The adapter now follows these observations. The successful edit used a panda
+from the Firefly project. Its account, reference bytes and network egress
+have not been matched to the production edit that returned HTTP 408.
 
 Official UGS module 212587 classifies HTTP 408 with `error_code:"timeout_error"`
 as `backend_overload`. That classification alone cannot establish an actual
@@ -224,7 +228,7 @@ account enter the Adobe allowlist. Public discovery visibility is not sufficient
 
 | Logical model | Adobe implementation | Enabled parameter tier | Evidence |
 | --- | --- | --- | --- |
-| `gemini-3.1-flash-image` | `gemini-flash / nano-banana-2026-09` | One 1024×1024 PNG, text input | Logged-in Firefly request on 2026-11-20; the older `nano-banana-3` success remains historical |
+| `gemini-3.1-flash-image` | `gemini-flash / nano-banana-3` | One 1024×1024 PNG, text input | Node success on 2026-11-10 and Go success on 2026-11-11. The 768×1376 Firefly request rechecked on 2026-11-21 used the same version. |
 | `veo-3.1-lite` | `veo / 3.1-lite-generate` | One 1920×1080 / 1080p / 8s / 16:9 video, no audio, text input | Node protocol success on 2026-11-10; current Go and Node control requests rejected as recorded below |
 
 Unverified image sizes, image references/masks, multiple outputs, video audio and

@@ -48,7 +48,7 @@ func FreeModels() []Model {
 		imageVariants = append(imageVariants, Variant{Size: p.size, AspectRatio: p.aspect, Resolution: "1K", MaxReferenceImages: 6})
 	}
 	return []Model{
-		{ID: "gemini-3.1-flash-image", Name: "Gemini 3.1 Flash Image (Nano Banana 2)", OwnedBy: "google", ModelID: "gemini-flash", ModelVersion: "nano-banana-2026-09", FeatureID: "firefly_3p:external:nano_banana_3", Kind: "image", Size: "1024x1024", AspectRatio: "1:1", Resolution: "1K", Variants: imageVariants, ReferenceUsage: "general", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg", "image/webp"}},
+		{ID: "gemini-3.1-flash-image", Name: "Gemini 3.1 Flash Image (Nano Banana 2)", OwnedBy: "google", ModelID: "gemini-flash", ModelVersion: "nano-banana-3", FeatureID: "firefly_3p:external:nano_banana_3", Kind: "image", Size: "1024x1024", AspectRatio: "1:1", Resolution: "1K", Variants: imageVariants, ReferenceUsage: "general", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg", "image/webp"}},
 		{ID: "veo-3.1-lite", Name: "Veo 3.1 Lite", OwnedBy: "google", ModelID: "veo", ModelVersion: "3.1-lite-generate", FeatureID: "firefly_3p:external:veo_3_1_lite", Kind: "video", Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", Duration: 8, Variants: []Variant{
 			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8}, Audio: true},
 			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{4, 6}, Audio: true},

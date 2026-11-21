@@ -34,6 +34,9 @@ func TestPreflightChecksFreeResourceWithoutUploadOrGeneration(t *testing.T) {
 				}
 				var b map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&b)
+				if b["modelVersion"] != "nano-banana-3" || object(b["size"])["width"] != float64(1200) || object(b["generationSettings"])["aspectRatio"] != "4:3" {
+					t.Fatal("preflight lost the Nano Banana 2 model version or output tier")
+				}
 				if _, ok := b["referenceBlobs"]; ok {
 					t.Fatal("preflight carried uploaded handles")
 				}
