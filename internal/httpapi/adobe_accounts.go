@@ -401,7 +401,8 @@ func (s *Server) adobeMaintenanceScheduler() {
 		return
 	case <-timer.C:
 	}
-	ticker := time.NewTicker(30 * time.Second)
+	// The Worker has one browser slot. Keep background warming infrequent; foreground requests prepare on demand.
+	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
 		if s.beginDeploymentBackground() {
