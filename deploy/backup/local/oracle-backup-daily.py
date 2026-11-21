@@ -590,6 +590,7 @@ def verified_newer_recovery(backup_root, failed_at):
         record = catalog.make_record(SERVICE, path, external, None, {})
         if not (record.get('completed') is True and record.get('success') is True
                 and record.get('kind') in ('daily', 'release') and record.get('proofs')
+                and record.get('media_included', True) is True
                 and policy_time(record.get('created_at')) > failed_at):
             continue
         identities = {artifact: catalog.signature(Path(artifact))
@@ -641,8 +642,12 @@ def ensure_no_unresolved(backup_root):
             marker, identity = private_json(path / 'failed.json')
         except (Refused, ValueError, OSError) as error:
             raise Refused('unresolved daily backup has unsafe or invalid failure evidence') from error
-        require(set(marker) == {'format', 'at', 'service', 'completed', 'automatic_prune_allowed'}
-                and marker.get('format') == 'ogg-daily-failed-v1' and marker.get('service') == SERVICE
+        fields = {'format', 'at', 'service', 'completed', 'automatic_prune_allowed'}
+        recognized = (marker.get('format') == 'ogg-daily-failed-v1' and set(marker) == fields
+                      or marker.get('format') == 'ogg-daily-failed-v2' and set(marker) == fields | {'phase', 'reason'}
+                      and marker.get('phase') in ('capture', 'after_capture')
+                      and marker.get('reason') == 'non_retryable_or_residue')
+        require(recognized and marker.get('service') == SERVICE
                 and marker.get('completed') is False and marker.get('automatic_prune_allowed') is False,
                 'unresolved daily backup has an unknown failure marker')
         failed_at = policy_time(marker.get('at'))

@@ -1,10 +1,11 @@
 {
   "files": {
-    "backup_catalog.py": "b2bfc67a941a1e3dcdaa08ca95d938cd45325b68ba0227da834a8bd6b4a5277f",
-    "backup_retention.py": "7c636677b64e8587695ad842d07d6e75360d144d23a40417023ee9f11617ec75",
-    "oracle-backup-daily.py": "1ef32b3d88f634dd9956520506d674122db13d89ce957752a4997076bf42072f",
-    "oracle-backup-maintenance.py": "a52197bab9368aadcfcdb4caf43d51c9787edb244a1a244d99a8f47f2892e0bc"
+    "backup_catalog.py": "a32ad2910520ec4e45629c67749d400ab58e4e626af6b83d9c02b33839c9dbb6",
+    "backup_retention.py": "54c442bb595e9bf9a855935ea281837150a29e21c3ef54b6850d35158b2a0a7a",
+    "oracle-backup-daily.py": "baeb676566adc1a3b6f4876c00991a43b8d16b3423162807fb920748f452b75a",
+    "oracle-backup-maintenance.py": "0df35cb8c8be01b8fda8a770e6960a21eb31df55de42ccaf7715dc88a51df738"
   },
   "format": "ogg-backup-local-package-v1",
+  "release_media_policy": "daily",
   "service": "gptgrok2api"
 }

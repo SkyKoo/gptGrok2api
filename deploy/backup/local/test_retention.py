@@ -85,6 +85,15 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual({n for n, r in rows.items() if r["action"] == "keep"},
                          {"today-0", "today-1", "today-2", "yesterday"})
 
+    def test_core_only_releases_cannot_displace_daily_media(self):
+        self.add("full-daily", AT - dt.timedelta(hours=1), kind="daily")
+        for n in range(4):
+            self.add(f"core-{n}", AT - dt.timedelta(minutes=n))["media_included"] = False
+        rows = self.rows(self.plan())
+        self.assertIn("daily-within-seven-calendar-days", rows["full-daily"]["reasons"])
+        self.assertNotIn("daily-within-seven-calendar-days", rows["core-0"]["reasons"])
+        self.assertEqual(rows["core-3"]["action"], "delete")
+
     def test_seven_calendar_days_in_shanghai_not_168_hours(self):
         for index in range(3):
             self.add("recent-" + str(index), AT - dt.timedelta(minutes=index))

@@ -228,7 +228,7 @@ class FailurePolicyTests(unittest.TestCase):
             self.assertEqual(daily.create({'helpers': {}})['event'], 'daily_backup_deferred')
             capture.assert_not_called()
 
-    def test_unknown_failure_is_v2_and_never_auto_retried(self):
+    def test_marker_only_v2_requires_a_newer_verified_full_backup(self):
         def unknown(helper, work):
             (work / '.staging').mkdir()
             raise daily.Refused('unknown scope')
@@ -237,7 +237,7 @@ class FailurePolicyTests(unittest.TestCase):
         created = next(self.backups.glob('daily-*'))
         self.assertEqual(json.loads((created / 'failed.json').read_text())['format'], 'ogg-daily-failed-v2')
         self.assertFalse((self.root / 'backup-policy/daily-retry.json').exists())
-        with self.assertRaisesRegex(daily.Refused, 'unknown failure marker'):
+        with self.assertRaisesRegex(daily.Refused, 'no newer verified recovery point'):
             daily.ensure_no_unresolved(self.backups)
 
     def test_transient_with_archive_or_container_change_remains_failed(self):

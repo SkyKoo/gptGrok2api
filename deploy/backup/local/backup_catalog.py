@@ -241,6 +241,8 @@ def make_record(service, backup, external, attested, prior):
         checks = {}
         if service == "gptgrok2api":
             complete = load(backup / "complete")
+            record["media_included"] = complete.get("media_included", True)
+            require(type(record["media_included"]) is bool, "Unknown release media scope")
             checks = load(backup / "checksums.json")
             required = {"snapshot.tar.gz", "postgres.dump", "postgres-globals.sql", "redis.rdb"}
             require(complete.get("protocol") == "cfm-single-writer-v1" and required <= checks.keys(),
@@ -248,8 +250,11 @@ def make_record(service, backup, external, attested, prior):
             names = required | {"checksums.json", "complete"}
             archive = {"path": "snapshot.tar.gz", "required_roots": ["snapshot"],
                        "required_members": ["snapshot/.env", "snapshot/compose.yaml", "snapshot/current.json"]}
-            if complete.get("metadata_verified") is True:
+            if complete.get("metadata_verified") is True or complete.get("archive_mode") == "direct":
                 require("snapshot-metadata.json" in checks, "CFM metadata checksum missing")
+                if complete.get("archive_mode") == "direct":
+                    require(complete.get("manifest_sha256") == checks["snapshot-metadata.json"],
+                            "Direct archive manifest checksum differs")
                 names.add("snapshot-metadata.json"); archive["metadata_file"] = "snapshot-metadata.json"
         else:
             names = {"media.tar.gz", "postgres.dump", ".env", "compose.yaml", "current.json", "release.json"}

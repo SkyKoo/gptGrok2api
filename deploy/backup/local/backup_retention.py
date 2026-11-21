@@ -236,6 +236,7 @@ def build_plan(catalog, at=None, runtime_snapshot=None):
                 stamp = timestamp(record["created_at"])
                 require(stamp <= at + dt.timedelta(minutes=5), "Backup timestamp is in the future")
                 row.update(eligible=True, created_at=stamp.isoformat(), kind=record["kind"],
+                           media_included=record.get("media_included", True) is True,
                            proofs=proof_state(record), record_sha256=digest(record))
                 row["reasons"].extend(record.get("protected_reasons", []))
                 if record["kind"] == "migration" or child.name.startswith("schema-"):
@@ -256,13 +257,15 @@ def build_plan(catalog, at=None, runtime_snapshot=None):
         daily = set()
         first_day = at.astimezone(TZ).date() - dt.timedelta(days=6)
         today = at.astimezone(TZ).date()
-        for row in candidates:
+        full_points = [r for r in candidates if r["media_included"]]
+        # Prefer the independent daily backup, including on days with a later release.
+        for row in sorted(full_points, key=lambda r: r["kind"] != "daily"):
             day = timestamp(row["created_at"]).astimezone(TZ).date()
             if first_day <= day <= today and day not in daily:
                 row["reasons"].append("daily-within-seven-calendar-days")
                 daily.add(day)
         # Even catalogs with only daily points retain at least three valid points.
-        for row in candidates[:3]:
+        for row in full_points[:3]:
             row["reasons"].append("minimum-three-recoverable")
         if len(candidates) < 3:
             for row in candidates:

@@ -120,3 +120,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/backup/local -p
 成功、持续变化有限失败、原子替换/删除、未知错误不重试、冷却与跨日预算、瞬时留证、
 未知残留保护、旧标记字节/身份不变、更新发布/日恢复点完整复验及数据库恢复证据拒绝测试。
 本次仅修改后续方法，尚未安装至线上或重新处理历史备份。
+
+## 发布日的媒体恢复
+
+定时任务每天建立独立的完整恢复点，覆盖生成图片、视频、输入参考图及同时点的核心状态。新发布归档通过 `complete.media_included=false` 标记精简范围。保留策略分别计算最近三个成功发布和最近七个自然日的含媒体恢复点，同日优先保留独立日备份。恢复历史媒体时从相应日备份的 `backup.tar.gz` 读取 `payload/service/data/files` 及 `payload/service/data/log_input_images`，按同批 `manifest.json` 校验。

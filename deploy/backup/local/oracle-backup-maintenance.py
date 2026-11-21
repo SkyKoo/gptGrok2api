@@ -61,7 +61,7 @@ def completion_signal():
 def covered_today(catalog, service, today):
     for record in catalog['services'][service]['backups']:
         if record.get('completed') is True and record.get('success') is True:
-            if record.get('kind') not in ('daily', 'release') or not record.get('proofs'):
+            if record.get('kind') != 'daily' or not record.get('proofs'):
                 continue
             date = dt.datetime.fromisoformat(record['created_at'].replace('Z', '+00:00'))
             if date.tzinfo is None:
@@ -102,7 +102,7 @@ def run(execute=False, force=False):
     signal = completion_signal()
     due = now.time().replace(tzinfo=None) >= dt.time(5, 20)
     same_day = state.get('date') == now.date().isoformat()
-    if execute and not force and same_day and state.get('signal') == signal:
+    if execute and not force and same_day and state.get('signal') == signal and state.get('daily_media_policy') == 1:
         if not due or all(state.get('covered', {}).get(s) for s in SERVICES):
             return {'event': 'unchanged', 'checked_at': now.isoformat()}
     run_dir = BASE / 'runs' / now.strftime('%Y%m%dT%H%M%S%f')
@@ -140,7 +140,7 @@ def run(execute=False, force=False):
     final = make_catalog(run_dir / 'catalog-after.json', run_dir / 'catalog-after.log')
     atomic_json(BASE / 'catalog.json', final)
     result = {'event': 'maintenance_complete', 'date': now.date().isoformat(),
-              'finished_at': dt.datetime.now(TZ).isoformat(), 'signal': completion_signal(),
+              'finished_at': dt.datetime.now(TZ).isoformat(), 'signal': completion_signal(), 'daily_media_policy': 1,
               'covered': {s: covered_today(final, s, now.date()) for s in SERVICES},
               'run': str(run_dir), 'removed': selected}
     atomic_json(state_path, result)
