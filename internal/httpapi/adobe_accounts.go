@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
@@ -260,6 +260,25 @@ func (s *Server) refreshAdobeAccount(ctx context.Context, id string, credentials
 	}
 	return s.adobeStore.RefreshWithPermissions(ctx, s.adobeClient, id, credentials)
 }
+
+// Reserve from current evidence first. Only when it yields no candidate do we
+// refresh model permissions on demand and retry the durable reservation.
+func (s *Server) reserveAdobeMediaForModel(ctx context.Context, key, model string) (adobe.Account, context.Context, error) {
+	a, fixed, err := s.adobeStore.ReserveMediaForModel(ctx, key, model, s.adobeAccountContext)
+	var upstream *adobe.Error
+	if !errors.Is(err, adobe.ErrNoAccount) && !(errors.As(err, &upstream) && upstream.Stage == "routing") {
+		return a, fixed, err
+	}
+	if checkErr := s.ensureAdobeAccounts(ctx, model); checkErr != nil {
+		// Preserve a known unusable bound proxy when no other account can serve.
+		if errors.Is(checkErr, adobe.ErrNoAccount) {
+			return a, fixed, err
+		}
+		return a, fixed, checkErr
+	}
+	return s.adobeStore.ReserveMediaForModel(ctx, key, model, s.adobeAccountContext)
+}
+
 func (s *Server) ensureAdobeAccounts(ctx context.Context, targetModel string) error {
 	if s.adobeStore == nil || s.adobeClient == nil {
 		return adobe.ErrNoAccount
@@ -282,9 +301,9 @@ func (s *Server) ensureAdobeAccounts(ctx context.Context, targetModel string) er
 	count := 0
 	var observationErr error
 	for _, a := range items {
-		// Freshly unavailable model observations need no immediate recheck.
-		// They must not prevent another account from renewing its credentials.
-		if modelState(a) == adobe.ModelUnavailable || a.ProfileID == "" || !a.Enabled || a.Status == "invalid" || a.InFlight != "" || a.SettlementUntil > time.Now().Unix() || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
+		// Only a missing or stale observation needs a quota query. Expired or
+		// otherwise unavailable identities belong to account maintenance.
+		if modelState(a) != adobe.ModelNeedsRefresh || a.ProfileID == "" || !adobe.Eligible(a, time.Now()) {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -401,7 +420,7 @@ func (s *Server) adobeMaintenanceScheduler() {
 		return
 	case <-timer.C:
 	}
-	// The Worker has one browser slot. Keep background warming infrequent; foreground requests prepare on demand.
+	// Background warming is opportunistic. Requests can prepare their own sessions.
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {

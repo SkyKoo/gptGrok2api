@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -189,28 +190,45 @@ func TestAdobeExplicitQuotaRefreshSelectsFreshModelWithMaintenanceDisabled(t *te
 	}
 }
 
-func TestAdobeMediaEntrypointsRejectStaleEntitlementsWithoutRefresh(t *testing.T) {
+func TestAdobeMediaEntrypointsRefreshStaleEntitlementsWithMaintenanceDisabled(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
-			a := adobeReadyFixtureAccount(t, s)
+			a := adobeFixtureAccount(t, s)
 			markAdobeFixturePermissionsStale(t, s, a, 10)
-			browserCalls, upstreamCalls := 0, 0
-			s.adobeStore.SetBrowserRefresher(func(context.Context, adobe.Account) (adobe.Account, error) {
-				browserCalls++
-				return adobe.Account{}, errors.New("unexpected browser")
-			})
-			s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-				upstreamCalls++
-				return nil, errors.New("foreground must not refresh stale entitlements")
-			})})
-			status, route, _ := adobePreparationRequest(t, s, kind)
-			if (status != "error" && status != "failed") || route != nil || browserCalls != 0 || upstreamCalls != 0 {
-				t.Fatalf("stale entitlement request bound/refreshed: status=%s route=%+v browsers=%d upstream=%d", status, route, browserCalls, upstreamCalls)
+			if _, err := s.store.UpdateConfig("adobe_maintenance", map[string]any{"enabled": false}); err != nil {
+				t.Fatal(err)
 			}
-			current, err := s.adobeStore.Get(a.ID)
-			if err != nil || current.InFlight != "" || current.Quota.Generation.Status != "stale" {
-				t.Fatal("foreground request changed stale entitlement observation")
+			video := kind == "video"
+			fixture := &adobeMediaCapture{video: video, quotaModel: "gemini-3.1-flash-image", expectedARP: "fixture-fresh-media-session"}
+			want := "success"
+			if video {
+				s.cfg.VideoDataDir = filepath.Join(s.cfg.DataDir, "videos")
+				fixture.quotaModel = "veo-3.1-lite"
+				fixture.output = videoTestMP4("adobe-video", "on-demand")
+				want = "completed"
+			} else {
+				fixture.output = adobeMediaPNG(t, 1024, 1024)
+			}
+			browserCalls := 0
+			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
+				browserCalls++
+				fixture.mu.Lock()
+				defer fixture.mu.Unlock()
+				if current.ID != a.ID || current.InFlight == "" || fixture.balanceChecks != 1 || fixture.modelChecks != 1 || fixture.preflights != 0 || fixture.submits != 0 {
+					t.Error("request did not confirm quota and bind before preparing the session")
+				}
+				return adobeFixtureMediaRefresh(ctx, current)
+			})
+			s.adobeClient = fixture.client(t)
+			status, route, detail := adobePreparationRequest(t, s, kind)
+			if status != want || route == nil || route.AccountID != a.ID {
+				t.Fatalf("request did not finish on the checked account: status=%s route=%+v detail=%s", status, route, detail)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if browserCalls != 1 || fixture.balanceChecks != 1 || fixture.modelChecks != 1 || fixture.preflights != 1 || fixture.submits != 1 {
+				t.Fatalf("unexpected work: browser=%d balance=%d permissions=%d preflight=%d submit=%d", browserCalls, fixture.balanceChecks, fixture.modelChecks, fixture.preflights, fixture.submits)
 			}
 		})
 	}
@@ -306,98 +324,5 @@ func TestAdobeFreshButUnselectableAccountDoesNotBlockStaleCandidateRefresh(t *te
 				t.Fatalf("selection=%s reads=%d err=%v", chosen.ID, reads, err)
 			}
 		})
-	}
-}
-
-func TestEnsureAdobeAccountsRefreshesOtherModelCandidatesBeforeBinding(t *testing.T) {
-	for _, target := range []string{"gemini-3.1-flash-image", "veo-3.1-lite"} {
-		for _, denyFirstRefresh := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/first-refresh-denied=%v", target, denyFirstRefresh), func(t *testing.T) {
-				s := imageTaskTestServer(t)
-				first := adobeFixtureAccount(t, s)
-				zero, one := 0.0, 1.0
-				knownEmpty := adobe.GenerationEntitlements{Status: "known", CheckedAt: time.Now().UTC().Format(time.RFC3339Nano),
-					Models: []adobe.ModelEntitlement{{Model: target, Authorized: true, ResourceType: "firefly_complimentary_generations", PoolID: "empty", Cost: &one}},
-					Pools:  []adobe.GenerationPool{{ID: "empty", ResourceType: "firefly_complimentary_generations", Available: &zero}},
-				}
-				if err := s.adobeStore.UpdateGenerationPermissions(first.ID, first.Revision, knownEmpty); err != nil {
-					t.Fatal(err)
-				}
-				freshTokens := map[string]string{}
-				candidateCount := 1
-				if denyFirstRefresh {
-					candidateCount = 2
-				}
-				var expected adobe.Account
-				for i := 1; i <= candidateCount; i++ {
-					a := first
-					a.AccountID = fmt.Sprintf("refresh-candidate-%d", i)
-					a.RefreshCookie = "imsSession=" + a.AccountID
-					claims, _ := json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(30 * time.Second).Unix()})
-					a.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
-					rows, err := s.adobeStore.Import([]adobe.Account{a})
-					if err != nil {
-						t.Fatal(err)
-					}
-					expected = rows[0]
-					claims, _ = json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(time.Hour).Unix()})
-					freshTokens[a.AccountID] = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
-				}
-				refreshes, balances, entitlements := 0, 0, 0
-				s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-					var body any
-					switch r.URL.Path {
-					case "/ims/check/v6/token":
-						refreshes++
-						id := strings.TrimPrefix(r.Header.Get("Cookie"), "imsSession=")
-						token, ok := freshTokens[id]
-						if !ok {
-							t.Fatalf("refreshed unexpected account: %s", id)
-						}
-						body = map[string]any{"access_token": token}
-					case "/v1/credits/balance":
-						balances++
-						if _, ok := freshTokens[r.Header.Get("x-account-id")]; !ok {
-							t.Fatal("rechecked known unavailable account")
-						}
-						body = map[string]any{"total": map[string]any{"quota": map[string]any{"available": 0}}}
-					case "/v1/feature-auth-profile":
-						entitlements++
-						profiles := []any{}
-						for _, m := range adobe.FreeModels() {
-							result, reason := "authorized", "quota_available"
-							if denyFirstRefresh && r.Header.Get("Authorization") == "Bearer "+freshTokens["refresh-candidate-1"] && m.ID == target {
-								result, reason = "unauthorized_not_entitled", "user_not_entitled"
-							}
-							profiles = append(profiles, map[string]any{"featureId": m.FeatureID, "authorizationResult": map[string]any{"result": result, "reasonCode": reason}, "selectedResource": map[string]any{"resourceType": "firefly_complimentary_generations", "effectiveQuotaReferenceId": "free-pool", "computedCost": 1}})
-						}
-						body = map[string]any{"featuresAuthorization": profiles, "effectiveQuotas": []any{map[string]any{"effectiveQuotaReferenceId": "free-pool", "resourceType": "firefly_complimentary_generations", "provisionedQuota": 3, "consumedQuota": 0}}}
-					default:
-						t.Fatalf("unexpected upstream generation/preflight during maintenance: %s", r.URL.Path)
-					}
-					raw, _ := json.Marshal(body)
-					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(raw))), Request: r}, nil
-				})})
-				if err := s.ensureAdobeAccounts(context.Background(), target); err != nil {
-					t.Fatal(err)
-				}
-				if refreshes != candidateCount || balances != candidateCount || entitlements != candidateCount {
-					t.Fatalf("refresh=%d balance=%d entitlements=%d expected=%d", refreshes, balances, entitlements, candidateCount)
-				}
-				all, err := s.adobeStore.List()
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, a := range all {
-					if a.InFlight != "" {
-						t.Fatal("read-only maintenance bound a generation")
-					}
-				}
-				got, err := s.adobeStore.ReserveForModel("task", target)
-				if err != nil || got.ID != expected.ID {
-					t.Fatalf("selected=%s want=%s err=%v", got.ID, expected.ID, err)
-				}
-			})
-		}
 	}
 }

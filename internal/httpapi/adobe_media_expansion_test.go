@@ -28,6 +28,8 @@ import (
 type adobeMediaCapture struct {
 	mu                                  sync.Mutex
 	uploads, submits, polls, preflights int
+	balanceChecks, modelChecks          int
+	quotaModel                          string
 	payload                             map[string]any
 	preflightPayload                    map[string]any
 	output                              []byte
@@ -71,6 +73,13 @@ func (f *adobeMediaCapture) client(t *testing.T) *adobe.Client {
 			t.Error("Adobe API request did not use the freshly prepared access token")
 		}
 		switch {
+		case f.quotaModel != "" && r.URL.Path == "/v1/credits/balance":
+			f.balanceChecks++
+			body = `{"total":{"quota":{"available":0}}}`
+		case f.quotaModel != "" && r.URL.Path == "/v1/feature-auth-profile":
+			f.modelChecks++
+			raw, _ := json.Marshal(adobeSelectionPermissionsBody(f.quotaModel, 1))
+			body = string(raw)
 		case r.URL.Path == "/v2/models/generation-preflight":
 			f.preflights++
 			body = adobeFreePreflightFixture(f.video)

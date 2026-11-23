@@ -85,17 +85,17 @@ func TestAdobeImageSelectionUsesReadyAccountAndPreservesSelectedEgress(t *testin
 	}
 }
 
-func TestAdobeImageSelectionRejectsColdAccountWithoutBrowser(t *testing.T) {
+func TestAdobeImageSelectionBindsColdAccountBeforeBrowserPreparation(t *testing.T) {
 	s := imageTaskTestServer(t)
-	adobeSchedulingAccount(t, s, "cold", time.Now())
+	a := adobeSchedulingAccount(t, s, "cold", time.Now())
 	var prepares atomic.Int32
 	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
 		prepares.Add(1)
 		return adobeFixtureMediaRefresh(ctx, current)
 	})
-	_, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
-	if err == nil || !strings.Contains(err.Error(), "Adobe media session is warming") {
-		t.Fatalf("cold account was accepted: %v", err)
+	selected, err := s.selectImageImplementation(context.Background(), "gemini-3.1-flash-image", "", "1024x1024", "auto", 1, 0, provider.ImageOutputOptions{}, false, nil)
+	if err != nil || selected.Adobe.ID != a.ID || selected.Adobe.InFlight != selected.Key {
+		t.Fatalf("cold account not bound: %s %v", selected.Adobe.ID, err)
 	}
 	if prepares.Load() != 0 {
 		t.Fatalf("cold selection launched browser-worker: %d", prepares.Load())
@@ -420,81 +420,37 @@ func TestAdobeMissingProxyManagerPinsDirectSelection(t *testing.T) {
 
 // The complete public entrypoints must remain read-only until a local ready
 // account is found, including stale rights while a browser refresh owns the gate.
-func TestAdobeForegroundMediaDoesNotRefreshOrWaitForUnreadyAccount(t *testing.T) {
+func TestAdobeMediaRequestDoesNotRefreshExpiredLogin(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
-		for _, state := range []string{"cold", "expired", "maintenance"} {
-			t.Run(kind+"/"+state, func(t *testing.T) {
-				s := imageTaskTestServer(t)
-				a := adobeFixtureAccount(t, s)
-				if state == "expired" {
-					claims, _ := json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(-time.Minute).Unix()})
-					a.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".expired"
-					rows, err := s.adobeStore.Import([]adobe.Account{a})
-					if err != nil {
-						t.Fatal(err)
-					}
-					a = rows[0]
-				}
-				entered, release, warmDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-				var releaseOnce sync.Once
-				unblock := func() { releaseOnce.Do(func() { close(release) }) }
-				defer unblock()
-				var browserCalls, upstreamCalls atomic.Int32
-				s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
-					if browserCalls.Add(1) == 1 && state == "maintenance" {
-						close(entered)
-					}
-					if state == "maintenance" {
-						select {
-						case <-release:
-						case <-ctx.Done():
-							return adobe.Account{}, ctx.Err()
-						}
-					}
-					return adobeFixtureMediaRefresh(ctx, current)
-				})
-				s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-					upstreamCalls.Add(1)
-					return nil, errors.New("unready foreground account must not call upstream")
-				})})
-				if state == "maintenance" {
-					markAdobeFixturePermissionsStale(t, s, a, 10)
-					fixed, err := s.adobeAccountContext(context.Background(), a)
-					if err != nil {
-						t.Fatal(err)
-					}
-					go func() { defer close(warmDone); _, _ = s.adobeStore.WarmMediaSession(fixed, a.ID, a.Revision) }()
-					defer func() { unblock(); <-warmDone }()
-					select {
-					case <-entered:
-					case <-time.After(time.Second):
-						t.Fatal("background warmup did not start")
-					}
-				}
-				var status string
-				var route *mediaRoute
-				finished := make(chan struct{})
-				go func() { defer close(finished); status, route, _ = adobePreparationRequest(t, s, kind) }()
-				select {
-				case <-finished:
-				case <-time.After(time.Second):
-					unblock()
-					<-finished
-					t.Fatal("foreground request waited for background browser preparation")
-				}
-				expectedBrowsers := int32(0)
-				if state == "maintenance" {
-					expectedBrowsers = 1
-				}
-				if (status != "error" && status != "failed") || route != nil || browserCalls.Load() != expectedBrowsers || upstreamCalls.Load() != 0 {
-					t.Fatalf("unready request started work: status=%s route=%+v browsers=%d upstream=%d", status, route, browserCalls.Load(), upstreamCalls.Load())
-				}
-				current, err := s.adobeStore.Get(a.ID)
-				if err != nil || current.InFlight != "" {
-					t.Fatal("unready request retained account reservation")
-				}
+		t.Run(kind, func(t *testing.T) {
+			s := imageTaskTestServer(t)
+			a := adobeFixtureAccount(t, s)
+			claims, _ := json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(-time.Minute).Unix()})
+			a.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".expired"
+			rows, err := s.adobeStore.Import([]adobe.Account{a})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a = adobeFixtureModelPermissions(t, s, rows[0])
+			markAdobeFixturePermissionsStale(t, s, a, 10)
+			var browserCalls, upstreamCalls atomic.Int32
+			s.adobeStore.SetBrowserRefresher(func(context.Context, adobe.Account) (adobe.Account, error) {
+				browserCalls.Add(1)
+				return adobe.Account{}, errors.New("expired login cannot prepare media")
 			})
-		}
+			s.adobeClient = adobe.NewClient(&http.Client{Transport: updateRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+				upstreamCalls.Add(1)
+				return nil, errors.New("expired login cannot query quota")
+			})})
+			status, route, _ := adobePreparationRequest(t, s, kind)
+			if (status != "error" && status != "failed") || route != nil || browserCalls.Load() != 0 || upstreamCalls.Load() != 0 {
+				t.Fatalf("expired account started work: status=%s route=%+v browsers=%d upstream=%d", status, route, browserCalls.Load(), upstreamCalls.Load())
+			}
+			current, err := s.adobeStore.Get(a.ID)
+			if err != nil || current.InFlight != "" {
+				t.Fatal("expired account retained a reservation")
+			}
+		})
 	}
 }
 

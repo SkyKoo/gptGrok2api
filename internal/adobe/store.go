@@ -813,9 +813,9 @@ func (s *Store) RefreshDueWithPermissions(ctx context.Context, c *Client, id str
 	return a, guard.attempted, err
 }
 
-// RefreshModelPermissions is request-driven and independent of background
-// maintenance settings. Concurrent readers share the existing account gate;
-// once admitted the latest model observation is checked again before any read.
+// RefreshModelPermissions checks quota for an eligible login without renewing
+// credentials. Concurrent readers share the existing account gate and recheck
+// the latest model observation before issuing a network read.
 func (s *Store) RefreshModelPermissions(ctx context.Context, c *Client, id, model string) (Account, bool, error) {
 	guard := &maintenanceDueGuard{model: model, now: time.Now()}
 	a, err := s.refresh(ctx, c, id, false, true, guard)
@@ -840,6 +840,7 @@ func (s *Store) RefreshModelPermissions(ctx context.Context, c *Client, id, mode
 }
 
 func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, includePermissions bool, due *maintenanceDueGuard) (Account, error) {
+	modelCheck := due != nil && due.model != ""
 	s.mu.Lock()
 	d, err := s.load()
 	if err != nil {
@@ -863,13 +864,12 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 	}
 	if due != nil {
 		needed := MaintenanceDue(a, due.now)
-		if due.model != "" {
-			if !a.Enabled || a.Status == "invalid" || (a.NextRefreshAt > time.Now().Unix() && a.LastError != "") {
+		if modelCheck {
+			if !Eligible(a, time.Now()) || strings.TrimSpace(a.ProfileID) == "" {
 				s.mu.Unlock()
 				return a, ErrBusy
 			}
-			state := a.Quota.Generation.ModelSelectionState(due.model, time.Now())
-			needed = state == ModelNeedsRefresh || (state == ModelUsable && !Eligible(a, time.Now()))
+			needed = a.Quota.Generation.ModelSelectionState(due.model, time.Now()) == ModelNeedsRefresh
 		}
 		if needed && includePermissions && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
 			s.mu.Unlock()
@@ -918,18 +918,21 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 		}
 		return e
 	}
-	if credentials || a.ExpiresAt <= time.Now().Add(5*time.Minute).Unix() {
+	if !modelCheck && (credentials || a.ExpiresAt <= time.Now().Add(5*time.Minute).Unix()) {
 		if err = refreshCredentials(); err != nil {
 			return a, err
 		}
 	}
 	q, e := c.Balance(ctx, a)
 	var upstream *Error
-	if e != nil && !refreshedOnce && errors.As(e, &upstream) && upstream.Status == http.StatusUnauthorized {
+	if !modelCheck && e != nil && !refreshedOnce && errors.As(e, &upstream) && upstream.Status == http.StatusUnauthorized {
 		if refreshErr := refreshCredentials(); refreshErr != nil {
 			return a, refreshErr
 		}
 		q, e = c.Balance(ctx, a)
+	}
+	if modelCheck && ctx.Err() != nil {
+		return a, ctx.Err()
 	}
 	if e != nil {
 		q = a.Quota
@@ -947,6 +950,9 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 	a.Quota = q
 	if e == nil && includePermissions {
 		generation, generationErr := c.GenerationPermissions(ctx, a)
+		if modelCheck && ctx.Err() != nil {
+			return a, ctx.Err()
+		}
 		if generationErr != nil {
 			generation.Status, generation.Error = "error", SafeError(generationErr)
 		}

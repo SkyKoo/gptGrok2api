@@ -40,8 +40,8 @@ func adobeFixtureAccount(t *testing.T, s *Server) adobe.Account {
 	return adobeFixtureModelPermissions(t, s, a)
 }
 
-// adobeReadyFixtureAccount opts a generation fixture into the same background
-// preparation required by the foreground routes; ordinary import fixtures stay cold.
+// adobeReadyFixtureAccount models an account already prepared by background
+// maintenance; ordinary import fixtures stay cold.
 func adobeReadyFixtureAccount(t *testing.T, s *Server) adobe.Account {
 	t.Helper()
 	return warmAdobeFixtureAccount(t, s, adobeFixtureAccount(t, s))

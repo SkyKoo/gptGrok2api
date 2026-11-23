@@ -158,10 +158,8 @@ func (s *Server) selectImageImplementationForRequest(r *http.Request, ctx contex
 				diagnostics.AdobeRejectionReason = "adobe_service_unavailable"
 				continue
 			}
-			// Foreground admission uses local readiness and entitlement evidence only.
-			// Background maintenance owns credential and model-permission refreshes.
 			key := imageExecutionKey(ctx)
-			a, selectedContext, err := s.adobeStore.ReserveReadyMediaForModel(ctx, key, id, s.adobeAccountContext)
+			a, selectedContext, err := s.reserveAdobeMediaForModel(ctx, key, id)
 			if err != nil {
 				if errors.Is(err, adobe.ErrNoAccount) || errors.Is(err, adobe.ErrBusy) {
 					diagnostics.AdobeRejectionReason = "no_adobe_candidate"

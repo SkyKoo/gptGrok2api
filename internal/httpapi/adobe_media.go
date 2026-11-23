@@ -196,7 +196,7 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 	s.stageRequestMonitor(r, "media_session_preparing", 15, nil)
 	prepareStarted := time.Now()
 	wasReady := s.adobeStore.MediaSessionReady(ctx, selected.Adobe, 0)
-	fresh, err := s.adobeStore.PrepareReadyMediaForTask(ctx, selected.Key, selected.Adobe.ID, selected.Adobe.Revision)
+	fresh, err := s.adobeStore.PrepareMediaForTask(ctx, selected.Key, selected.Adobe.ID, selected.Adobe.Revision)
 	s.enrichRequestMonitor(r, map[string]any{"metrics": map[string]any{"media_session_cache_hit": wasReady, "media_session_prepare_ms": time.Since(prepareStarted).Milliseconds()}})
 	if err != nil {
 		if diagnostic := adobe.MediaDiagnosticFromError(err); diagnostic != nil {
@@ -493,10 +493,8 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "account_entitlements_unavailable", "message": adobe.SafeError(adobe.ErrNoAccount)})
 		return
 	}
-	// Reserve only from local warm-session and entitlement evidence. The
-	// foreground path must not refresh credentials or wait for browser work.
 	key := "video-" + job.ID
-	a, selectedContext, err := s.adobeStore.ReserveReadyMediaForModel(ctx, key, job.Model, s.adobeAccountContext)
+	a, selectedContext, err := s.reserveAdobeMediaForModel(ctx, key, job.Model)
 	if err != nil {
 		code := "no_available_account"
 		var upstream *adobe.Error
@@ -531,7 +529,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 	}
 	prepareStarted := time.Now()
 	wasReady := s.adobeStore.MediaSessionReady(ctx, a, 0)
-	fresh, err := s.adobeStore.PrepareReadyMediaForTask(ctx, key, a.ID, a.Revision)
+	fresh, err := s.adobeStore.PrepareMediaForTask(ctx, key, a.ID, a.Revision)
 	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"media_session_cache_hit": wasReady, "media_session_prepare_ms": time.Since(prepareStarted).Milliseconds()}})
 	if err != nil {
 		if diagnostic := adobe.MediaDiagnosticFromError(err); diagnostic != nil {

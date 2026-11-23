@@ -530,7 +530,7 @@ func (s *Store) reserveMediaForModel(ctx context.Context, taskKey, model string,
 				}
 			}
 		}
-		if !selectedReady && waitFor != nil && !waited {
+		if selected < 0 && waitFor != nil && !waited {
 			s.mu.Unlock()
 			if err := waitMediaSignal(ctx, waitFor); err != nil {
 				return Account{}, ctx, err

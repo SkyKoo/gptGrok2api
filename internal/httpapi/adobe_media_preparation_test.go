@@ -113,7 +113,7 @@ func TestAdobeNewMediaUsesBackgroundPreparedSessionBeforeAnyUpstreamRequest(t *t
 	}
 }
 
-func TestAdobeBackgroundPreparationFailureDoesNotTriggerForegroundBrowserOrReplay(t *testing.T) {
+func TestAdobeForegroundPreparationFailureDoesNotSwitchAccountsOrReplay(t *testing.T) {
 	for _, kind := range []string{"sync_image", "async_image", "video"} {
 		t.Run(kind, func(t *testing.T) {
 			s := imageTaskTestServer(t)
@@ -129,33 +129,17 @@ func TestAdobeBackgroundPreparationFailureDoesNotTriggerForegroundBrowserOrRepla
 				}
 				return adobe.Account{}, &adobe.Error{Stage: "relogin", Code: "media_session_incomplete", MediaDiagnostic: &adobe.MediaPreparationDiagnostic{State: "pending", ReadinessReason: "vendors_pending", ValueKind: "PRIVATE_TOKEN"}}
 			})
-			fixed, err := s.adobeAccountContext(context.Background(), first)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = s.adobeStore.WarmMediaSession(fixed, first.ID, first.Revision)
-			if err == nil || !strings.Contains(adobe.SafeError(err), "session_incomplete [vendors_pending]") {
-				t.Fatalf("background failure concealed: %v", err)
-			}
-			diagnostic, marshalErr := json.Marshal(adobe.MediaDiagnosticFromError(err))
-			if marshalErr != nil || !strings.Contains(string(diagnostic), `"readiness_reason":"vendors_pending"`) || strings.Contains(string(diagnostic), "PRIVATE_TOKEN") {
-				t.Fatalf("unsafe background diagnostic: %s %v", diagnostic, marshalErr)
-			}
 			status, route, detail := adobePreparationRequest(t, s, kind)
-			expected := "Adobe media session is warming"
-			if kind == "video" {
-				expected = "media_session_not_ready"
+			if (status != "error" && status != "failed") || !strings.Contains(detail, "session_incomplete [vendors_pending]") || strings.Contains(detail, "PRIVATE_TOKEN") {
+				t.Fatalf("foreground preparation failure concealed: %s %s", status, detail)
 			}
-			if (status != "error" && status != "failed") || !strings.Contains(detail, expected) || strings.Contains(detail, "PRIVATE_TOKEN") {
-				t.Fatalf("foreground readiness failure concealed: %s %s", status, detail)
-			}
-			if route != nil {
-				t.Fatalf("cold request bound an account: %+v", route)
+			if route == nil || route.AccountID != first.ID {
+				t.Fatalf("request failed on unexpected route: %+v", route)
 			}
 			if kind != "sync_image" {
 				repeatedStatus, repeatedRoute, _ := adobePreparationRequest(t, s, kind)
-				if repeatedRoute != nil || repeatedStatus != status {
-					t.Fatal("duplicate request changed failed selection")
+				if repeatedRoute == nil || *repeatedRoute != *route || repeatedStatus != status {
+					t.Fatal("duplicate request changed failed preparation")
 				}
 			}
 			for _, id := range []string{first.ID, second.ID} {
@@ -167,7 +151,7 @@ func TestAdobeBackgroundPreparationFailureDoesNotTriggerForegroundBrowserOrRepla
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			if prepares.Load() != 1 || fixture.preflights != 0 || fixture.uploads != 0 || fixture.submits != 0 || fixture.polls != 0 {
-				t.Fatalf("cold request started browser or reached upstream: prepares=%d preflight=%d upload=%d submit=%d poll=%d", prepares.Load(), fixture.preflights, fixture.uploads, fixture.submits, fixture.polls)
+				t.Fatalf("failed preparation repeated or reached generation: prepares=%d preflight=%d upload=%d submit=%d poll=%d", prepares.Load(), fixture.preflights, fixture.uploads, fixture.submits, fixture.polls)
 			}
 		})
 	}
