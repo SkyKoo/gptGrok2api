@@ -15,6 +15,8 @@ class LoginControl:
         return True
 
     async def fill(self, value, timeout):
+        if self.name == EMAIL and self.page.state == 2:
+            raise TimeoutError("email is read-only after submitting it")
         self.page.submissions.append((self.name, value))
 
     async def click(self, timeout):
@@ -42,7 +44,7 @@ class LoginPage:
     def url(self):
         if self.outcome == "untrusted" and self.state == 2:
             return "https://accounts.x.ai.example.test/sign-in"
-        if self.outcome == "success" and self.state == 3:
+        if self.outcome in ("success", "readonly_email") and self.state == 3:
             return "https://grok.com/"
         return SIGN_IN
 
@@ -51,7 +53,7 @@ class LoginPage:
         return ({
             0: {"email_entry"},
             1: {EMAIL, "submit"},
-            2: {PASSWORD, "submit"},
+            2: {PASSWORD, "submit", EMAIL} if self.outcome == "readonly_email" else {PASSWORD, "submit"},
             3: {VERIFICATION} if self.outcome == "verification" else set(),
         })[self.state]
 
@@ -106,6 +108,12 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"), {"code": "verification_required"})
         self.assertEqual(len(page.submissions), 2)
         self.assertTrue(page.closed)
+
+    async def test_password_stage_does_not_refill_previously_submitted_email(self):
+        page = LoginPage("readonly_email")
+        result = await relogin(page, "fixture@example.test", "fixture-password")
+        self.assertEqual(result["sso"], "fresh-token")
+        self.assertEqual(page.submissions, [(EMAIL, "fixture@example.test"), (PASSWORD, "fixture-password")])
 
     async def test_untrusted_navigation_never_receives_password(self):
         page = LoginPage("untrusted")

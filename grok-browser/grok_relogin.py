@@ -140,7 +140,10 @@ async def _sign_in(page, email, password, trace):
         email_input = await _single_visible(page.locator(EMAIL))
         password_input = await _single_visible(page.locator(PASSWORD))
         if password_input is not None and not password_submitted and (email_input is not None or email_submitted):
-            if email_input is not None and _on_sign_in(page):
+            # After a separate email submit, xAI can keep the email field on the
+            # password page as a read-only account label. Only fill a combined
+            # form when no email has been submitted yet.
+            if email_input is not None and not email_submitted and _on_sign_in(page):
                 trace.enter("email_fill")
                 await email_input.fill(email, timeout=5000)
             if not _on_sign_in(page):
