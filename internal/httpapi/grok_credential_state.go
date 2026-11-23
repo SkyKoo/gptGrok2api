@@ -31,7 +31,9 @@ func (s *Server) recordGrokCredentialFailure(token string, err error) {
 		if strings.TrimSpace(stringValue(item["sso"])) != token {
 			continue
 		}
-		_, _ = s.registerStore.UpdateRuntime(stringValue(item["id"]), nil, map[string]any{"status": "invalid", "checked_at": stamp}, "invalid", "Grok credentials are invalid")
+		_, _ = s.registerStore.UpdateRuntimeIf(stringValue(item["id"]), nil, map[string]any{"status": "invalid", "checked_at": stamp}, "invalid", "Grok credentials are invalid", func(current map[string]any) bool {
+			return stringValue(current["sso"]) == token && !grokAccountDisabled(current)
+		})
 	}
 }
 
@@ -56,7 +58,9 @@ func (s *Server) restoreVerifiedGrokCredential(token string) {
 		if !boolValue(item["enabled"], true) || stringValue(item["status"]) == "disabled" {
 			continue
 		}
-		_, _ = s.registerStore.UpdateRuntime(stringValue(item["id"]), nil, nil, "active", "")
+		_, _ = s.registerStore.UpdateRuntimeIf(stringValue(item["id"]), nil, nil, "active", "", func(current map[string]any) bool {
+			return stringValue(current["sso"]) == token && !grokAccountDisabled(current)
+		})
 	}
 }
 

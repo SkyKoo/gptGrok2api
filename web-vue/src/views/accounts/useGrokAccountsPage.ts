@@ -7,6 +7,7 @@ import {
   type GrokAccountsSummary,
   type GrokAccountStatusFilter,
   type GrokAccountVerificationStatus,
+  type GrokReloginJob,
 } from '@/api/grokAccounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageDebouncedAction, usePagedQuery } from '@/composables/usePageQuery'
@@ -83,6 +84,8 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
   const snapshotRefreshBusy = ref(false)
   const probePollingEnabled = ref(false)
   const probePollingBusy = ref(false)
+  const relogins = ref<Record<string, GrokReloginJob>>({})
+  const startingRelogins = ref(new Set<string>())
 
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
@@ -362,6 +365,55 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
     }
   }
 
+  async function pollRelogins() {
+    if (!pageRuntime.canRun.value) return
+    const key = 'grok-accounts:relogin'
+    const seq = pageRuntime.nextRequest(key)
+    try {
+      const { items } = await grokAccountsApi.listRelogins()
+      if (!pageRuntime.isLatestRequest(key, seq)) return
+      const next: Record<string, GrokReloginJob> = {}
+      for (const job of items) {
+        const id = job.payload.account_id
+        if (!next[id] || next[id].created_at < job.created_at) next[id] = job
+      }
+      const finished = Object.values(next).some((job) => {
+        const previous = relogins.value[job.payload.account_id]
+        return (previous?.status === 'running' || previous?.status === 'queued') &&
+          job.status !== 'running' && job.status !== 'queued'
+      })
+      relogins.value = next
+      if (finished) void loadData({ silentErrorToast: true, silentLoading: true })
+    } catch {
+      // Keep the last observed progress when one status read fails.
+    } finally {
+      if (pageRuntime.isLatestRequest(key, seq) &&
+          Object.values(relogins.value).some((job) => job.status === 'running' || job.status === 'queued')) {
+        pageRuntime.setTimer(key, 2000, () => void pollRelogins())
+      }
+    }
+  }
+
+  async function reloginAccount(account: GrokAccount) {
+    const id = account.id
+    if (startingRelogins.value.has(id)) return
+    startingRelogins.value.add(id)
+    try {
+      const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
+      const { job } = await grokAccountsApi.relogin(id, requestId)
+      relogins.value[id] = job
+      await pollRelogins()
+    } catch (error) {
+      await pollRelogins()
+      const job = relogins.value[id]
+      if (job?.status !== 'running' && job?.status !== 'queued') {
+        toast.warning(errorMessage(error, '重新登录未确认，请核对任务状态'))
+      }
+    } finally {
+      startingRelogins.value.delete(id)
+    }
+  }
+
   async function setRuntimeDisabled(accountIds: readonly string[], disabled: boolean) {
     if (batchBusy.value) return false
     const ids = uniqueIds(accountIds)
@@ -558,10 +610,12 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
 
   pageRuntime.onActivate(() => {
     void loadWithRuntimeSnapshot()
+    void pollRelogins()
   })
 
   pageRuntime.onShow(() => {
     void loadWithRuntimeSnapshot({ silentErrorToast: true, silentLoading: true })
+    void pollRelogins()
   })
 
   return {
@@ -605,6 +659,9 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
     refreshRuntime,
     testingAccountId,
     testAccountValidity,
+    relogins,
+    startingRelogins,
+    reloginAccount,
     togglingAccountId,
     setRuntimeDisabled,
     removingAccountId,

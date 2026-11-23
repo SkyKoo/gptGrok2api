@@ -399,6 +399,8 @@
               :syncing="grokSyncingAccountId === item.id"
               :refreshing="grokRefreshingAccountId === item.id"
               :testing="grokTestingAccountId === item.id"
+              :relogin="grokRelogins[item.id]"
+              :starting-relogin="grokStartingRelogins.has(item.id)"
               :toggling="grokTogglingAccountId === item.id"
               :deleting="grokRemovingAccountId === item.id"
               :authorizing="grokAuthorizingAccountId === item.id"
@@ -407,6 +409,7 @@
               @sync="syncGrokAccount"
               @refresh="refreshGrokAccount"
               @test="testGrokAccount"
+              @relogin="reloginGrokAccount"
               @toggle-disabled="toggleGrokAccountDisabled"
               @remove="removeGrokAccount"
               @oauth-authorize="authorizeGrokOAuthAccount"
@@ -434,6 +437,8 @@
           :syncing="grokSyncingAccountId === item.id"
           :refreshing="grokRefreshingAccountId === item.id"
           :testing="grokTestingAccountId === item.id"
+          :relogin="grokRelogins[item.id]"
+          :starting-relogin="grokStartingRelogins.has(item.id)"
           :toggling="grokTogglingAccountId === item.id"
           :deleting="grokRemovingAccountId === item.id"
           :authorizing="grokAuthorizingAccountId === item.id"
@@ -442,6 +447,7 @@
           @sync="syncGrokAccount"
           @refresh="refreshGrokAccount"
           @test="testGrokAccount"
+          @relogin="reloginGrokAccount"
           @toggle-disabled="toggleGrokAccountDisabled"
           @remove="removeGrokAccount"
           @oauth-authorize="authorizeGrokOAuthAccount"
@@ -1401,6 +1407,9 @@ const {
   refreshRuntime: refreshGrokRuntime,
   testingAccountId: grokTestingAccountId,
   testAccountValidity: testGrokAccountValidity,
+  relogins: grokRelogins,
+  startingRelogins: grokStartingRelogins,
+  reloginAccount: reloginGrokAccount,
   togglingAccountId: grokTogglingAccountId,
   setRuntimeDisabled: setGrokRuntimeDisabled,
   removingAccountId: grokRemovingAccountId,

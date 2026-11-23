@@ -2,7 +2,7 @@
   <tr
     class="border-t border-border transition-colors"
     :class="grokAccountRowClass(item)"
-    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, toggling, deleting, oauthAction]"
+    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, toggling, deleting, oauthAction, relogin, startingRelogin]"
   >
     <td class="py-4 pr-4 align-middle">
       <Checkbox
@@ -82,6 +82,8 @@
         :syncing="syncing"
         :refreshing="refreshing"
         :testing="testing"
+        :relogin="relogin"
+        :starting-relogin="startingRelogin"
         :toggling="toggling"
         :deleting="deleting"
         :authorizing="authorizing"
@@ -92,6 +94,7 @@
         @sync="emit('sync', item)"
         @refresh="emit('refresh', item)"
         @test="emit('test', item)"
+        @relogin="emit('relogin', item)"
         @toggle-disabled="emit('toggle-disabled', item)"
         @remove="emit('remove', item)"
         @oauth-sync="emit('oauth-sync', item)"
@@ -110,7 +113,7 @@ import { computed } from 'vue'
 import { Checkbox, StatusPill } from 'nanocat-ui'
 
 import GrokAccountActionButtons from '@/components/ai/GrokAccountActionButtons.vue'
-import type { GrokAccount } from '@/api/grokAccounts'
+import type { GrokAccount, GrokReloginJob } from '@/api/grokAccounts'
 import {
   formatGrokAccountDate,
   grokAccountPoolText,
@@ -142,6 +145,8 @@ const props = withDefaults(defineProps<{
   syncing?: boolean
   refreshing?: boolean
   testing?: boolean
+  relogin?: GrokReloginJob
+  startingRelogin?: boolean
   toggling?: boolean
   deleting?: boolean
   authorizing?: boolean
@@ -167,6 +172,7 @@ const emit = defineEmits<{
   (e: 'sync', item: GrokAccount): void
   (e: 'refresh', item: GrokAccount): void
   (e: 'test', item: GrokAccount): void
+  (e: 'relogin', item: GrokAccount): void
   (e: 'toggle-disabled', item: GrokAccount): void
   (e: 'remove', item: GrokAccount): void
   (e: 'oauth-sync', item: GrokAccount): void

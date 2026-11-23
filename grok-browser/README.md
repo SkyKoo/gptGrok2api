@@ -1,6 +1,6 @@
 # CFM Browser Worker
 
-这是 CFM 的共享浏览器 Worker，运行 Grok 原生注册、xAI 授权和 Adobe Firefly 注册/会话维护。Go 主进程负责邮箱收码、任务、日志和账号保存。Compose 服务与容器默认名为 `cfm-browser-worker`；源码目录保留 `grok-browser/`，旧 DNS 名作为兼容别名。
+这是 CFM 的共享浏览器 Worker，运行 Grok 原生注册和重新登录、xAI 授权和 Adobe Firefly 注册/会话维护。Go 主进程负责邮箱收码、任务、日志和账号保存。Compose 服务与容器默认名为 `cfm-browser-worker`；源码目录保留 `grok-browser/`，旧 DNS 名作为兼容别名。
 
 `POST /v1/session/start` 启动持久页面；`/send-email` 点击原生邮箱注册并发起验证码；`/verify-email` 填写验证码；`/signup` 在同一页面完成 Turnstile、Castle 和账号创建并返回 SSO；`/v1/session/close` 释放会话。
 
@@ -45,6 +45,12 @@ Turnstile 状态读取优先使用页面的 `getResponse(widgetId)`；未捕获 
 邮箱注册入口在30秒总窗口内等待页面绑定点击事件，使用正常点击并以邮箱输入框实际出现作为成功条件；延迟出现的隐私弹窗会重新检查，不强制点击穿透。不会为了诊断重新加载页面、提交邮箱或发送验证码。若页面脚本未就绪或入口仍未打开，保留 `email_input_missing`，诊断附带有限的交互状态、点击次数/错误类别，以及第一方脚本的待加载数量和耗时；不保存脚本URL、查询参数、事件函数或输入值。
 
 整页导航和登录提示不再用于判断“邮箱已注册”；仅在提交后依据明确上游业务码或邮箱表单的错误反馈判断。`account:email-already-exists` 仍映射为409，注册不可用仍为422；入口等待超时仍为504，不能据此认定邮箱已使用。
+
+## Grok 重新登录
+
+`POST /v1/grok/relogin` 使用共享队列中的 Grok 浏览器租约，在新的上下文通过官方登录页
+登录已保存的邮箱账号。只返回 Grok 站点会话 Cookie，遇到额外验证时返回固定错误码。
+Go 进程负责保存 SSO、同步调用池和刷新额度。
 
 ## 后台 xAI OAuth
 

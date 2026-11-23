@@ -266,6 +266,7 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 	server.mediaProvider.SetProxyManager(proxyManager)
 	server.deviceOAuth = oauth.NewDeviceService(requestClient, cfg.OAuthDeviceURL, cfg.OAuthTokenURL, server.oauthStore)
 	server.taskQueue.Register("grok_oauth_authorize", server.runGrokOAuthTask)
+	server.taskQueue.Register(grokReloginKind, server.runGrokRelogin)
 	server.taskQueue.Register("grok_oauth_quality", server.runGrokQualityTask)
 	server.PauseDeployment(!startWorkers)
 	if startWorkers {

@@ -2,7 +2,7 @@
   <article
     class="ui-card flex h-full flex-col gap-4 transition-all hover:border-primary/30"
     :class="[grokAccountRowClass(item), selected ? 'ring-2 ring-primary/30' : '']"
-    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, toggling, deleting, oauthAction]"
+    v-memo="[signature, selected, runtimeAvailable, busy, syncing, refreshing, testing, toggling, deleting, oauthAction, relogin, startingRelogin]"
   >
     <div class="flex items-start justify-between gap-3">
       <div class="flex min-w-0 items-start gap-3">
@@ -61,6 +61,8 @@
       :syncing="syncing"
       :refreshing="refreshing"
       :testing="testing"
+      :relogin="relogin"
+      :starting-relogin="startingRelogin"
       :toggling="toggling"
       :deleting="deleting"
       :authorizing="authorizing"
@@ -70,6 +72,7 @@
       @sync="emit('sync', item)"
       @refresh="emit('refresh', item)"
       @test="emit('test', item)"
+      @relogin="emit('relogin', item)"
       @toggle-disabled="emit('toggle-disabled', item)"
       @remove="emit('remove', item)"
       @oauth-sync="emit('oauth-sync', item)"
@@ -87,7 +90,7 @@ import { computed } from 'vue'
 import { Checkbox, KeyValueList, StatusPill } from 'nanocat-ui'
 
 import GrokAccountActionButtons from '@/components/ai/GrokAccountActionButtons.vue'
-import type { GrokAccount } from '@/api/grokAccounts'
+import type { GrokAccount, GrokReloginJob } from '@/api/grokAccounts'
 import {
   grokAccountDetailItems,
   grokAccountPoolText,
@@ -115,6 +118,8 @@ const props = withDefaults(defineProps<{
   syncing?: boolean
   refreshing?: boolean
   testing?: boolean
+  relogin?: GrokReloginJob
+  startingRelogin?: boolean
   toggling?: boolean
   deleting?: boolean
   authorizing?: boolean
@@ -140,6 +145,7 @@ const emit = defineEmits<{
   (e: 'sync', item: GrokAccount): void
   (e: 'refresh', item: GrokAccount): void
   (e: 'test', item: GrokAccount): void
+  (e: 'relogin', item: GrokAccount): void
   (e: 'toggle-disabled', item: GrokAccount): void
   (e: 'remove', item: GrokAccount): void
   (e: 'oauth-sync', item: GrokAccount): void

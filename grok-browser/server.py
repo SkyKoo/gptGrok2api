@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 
 from common.browser import browser_context_kwargs, browser_kwargs, InvalidBrowserProxy, is_proxy_configuration_error
 from signup_errors import signup_error_status
+from grok_relogin import relogin as grok_relogin
 from oauth_device import authorize_device, validate_device_url, FlowDiagnostics, safe_device_result, safe_task_id
 from turnstile.solve import solve_turnstile_realpage_session
 from xai_flow import (
@@ -98,6 +99,23 @@ class NativeStartRequest(BaseModel):
 class NativeEmailRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
     email: str = Field(min_length=3, max_length=320)
+
+
+class GrokReloginRequest(BaseModel):
+    browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+@app.post("/v1/grok/relogin")
+async def relogin_grok(req: GrokReloginRequest, authorization: str | None = Header(default=None)) -> dict:
+    if not _authorized(authorization):
+        raise HTTPException(status_code=401, detail="invalid worker token")
+    try:
+        browser = queue.claim(req.browser_lease)
+    except BrowserQueueError:
+        raise HTTPException(status_code=409, detail="browser_reservation_not_ready") from None
+    return await grok_relogin(browser, req.email, req.password)
 
 
 class NativeVerifyRequest(NativeEmailRequest):

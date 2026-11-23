@@ -97,6 +97,8 @@ func (s *Server) registerAPI(w http.ResponseWriter, r *http.Request) {
 		s.refreshRegisteredGrokRuntime(w, r)
 	case path == "/grok/accounts/runtime/verify" && r.Method == http.MethodPost:
 		s.verifyRegisteredGrokRuntime(w, r)
+	case path == "/grok/accounts/relogin" && (r.Method == http.MethodPost || r.Method == http.MethodGet):
+		s.grokReloginAPI(w, r)
 	case path == "/grok/accounts/runtime/disabled" && r.Method == http.MethodPost:
 		s.disableRegisteredGrokAccounts(w, r)
 	case path == "/grok/accounts" && r.Method == http.MethodDelete:
@@ -695,6 +697,10 @@ func (s *Server) syncRegisteredGrokRuntimeAccount(item map[string]any, token str
 			return 0, 0, err
 		}
 		if len(rows) > 0 {
+			if grokArchivedSSO(rows[0]) != strings.TrimSpace(token) ||
+				mapValue(rows[0][grokReloginCheckpoint])["stage"] == "saved" {
+				return 0, 0, store.ErrAccountChanged
+			}
 			item = rows[0]
 		}
 	}

@@ -4,9 +4,30 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/store"
 )
+
+// WithGrokSessionWrite excludes reservations and quota maintenance during the
+// short persistence step. Browser and HTTP work run outside the pool lock.
+func (p *Pool) WithGrokSessionWrite(fields map[string]any, token string, write func() error) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	a := Account{Token: token, Fields: fields}
+	id := Identity(a)
+	if p.inflight[token] > 0 || p.capabilityActive[id] > 0 || p.refreshing[id] ||
+		timestamp(fields, "media_quota_not_before").After(time.Now()) {
+		return ErrRefreshDeferred
+	}
+	err := write()
+	if err == nil {
+		delete(p.cooldowns, token)
+		delete(p.failures, token)
+		p.signalLocked()
+	}
+	return err
+}
 
 // CheckGrokCredential shares the pool's per-account exclusion with media refresh
 // and generation. Late checks cannot undo a disable or a newer auth failure.

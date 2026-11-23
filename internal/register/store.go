@@ -356,6 +356,10 @@ func (s *Store) AddAccount(account map[string]any) (map[string]any, bool, error)
 // UpdateAccountFields updates private fields in the Grok registration archive
 // while preserving credentials unless the caller explicitly replaces them.
 func (s *Store) UpdateAccountFields(id string, fields map[string]any) (bool, error) {
+	return s.UpdateAccountFieldsIf(id, fields, nil)
+}
+
+func (s *Store) UpdateAccountFieldsIf(id string, fields map[string]any, allow func(map[string]any) bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	items, err := s.loadAccountsLocked()
@@ -365,6 +369,9 @@ func (s *Store) UpdateAccountFields(id string, fields map[string]any) (bool, err
 	for index, item := range items {
 		if stringValue(item["id"]) != strings.TrimSpace(id) {
 			continue
+		}
+		if allow != nil && !allow(item) {
+			return false, nil
 		}
 		for key, value := range fields {
 			item[key] = value
@@ -681,6 +688,7 @@ func stringAnyList(values []string) []any {
 
 func publicAccount(item map[string]any) map[string]any {
 	result := cloneMap(item)
+	delete(result, "sso_relogin_checkpoint")
 	delete(result, "password")
 	delete(result, "sso")
 	delete(result, "access_token")

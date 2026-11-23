@@ -120,22 +120,15 @@ func (s *Server) refreshGrokRuntimeTokens(parent context.Context, tokens []strin
 }
 
 func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.QuotaWindow, status, errorText string) {
-	fields := map[string]any{"access_token": token, "source_type": "grok_protocol", "platform": "grok", "pool": "basic", "enabled": true}
-	if status != "" {
-		fields["status"] = status
-	}
+	quotaFields := map[string]any{}
 	for mode, window := range quotas {
 		if mode == "grok_4_3" {
 			mode = "console"
 		}
-		fields[mode+"_quota"] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
+		quotaFields[mode+"_quota"] = map[string]any{"remaining": window.Remaining, "total": window.Total, "window_seconds": window.WindowSeconds, "reset_at": window.ResetAt}
 	}
-	_, _, _, _ = s.grokRuntimeStore.AddAccounts(nil, []map[string]any{fields})
 	// Quota refresh is not explicit revalidation. Preserve manual disable and
 	// durable abnormal markers even if an older in-flight refresh succeeds.
-	quotaFields := cloneMap(fields)
-	delete(quotaFields, "enabled")
-	delete(quotaFields, "status")
 	_, _, _ = s.grokRuntimeStore.UpdateAccount(token, quotaFields)
 	_, _ = s.grokRuntimeStore.UpdateAccountRuntimeIf(token, map[string]any{"status": status}, func(current map[string]any) bool {
 		return !accounts.IsAbnormal(current) && boolValue(current["enabled"], true) && stringValue(current["status"]) != "disabled"
@@ -154,7 +147,10 @@ func (s *Server) persistRuntimeToken(token string, quotas map[string]provider.Qu
 			savedStatus = stringValue(item["status"])
 		}
 		runtime := map[string]any{"present": true, "status": savedStatus, "quota": quotaMap(quotas), "synced_at": time.Now().UTC().Format(time.RFC3339)}
-		_, _ = s.registerStore.UpdateRuntime(stringValue(item["id"]), runtime, nil, savedStatus, errorText)
+		_, _ = s.registerStore.UpdateRuntimeIf(stringValue(item["id"]), runtime, nil, savedStatus, errorText, func(current map[string]any) bool {
+			return stringValue(current["sso"]) == stringValue(item["sso"]) &&
+				stringValue(current["status"]) == stringValue(item["status"])
+		})
 	}
 }
 

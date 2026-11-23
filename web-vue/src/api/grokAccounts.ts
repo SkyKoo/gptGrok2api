@@ -89,6 +89,15 @@ export type GrokProbeSchedulerStatus = {
   last_error?: string
 }
 
+export type GrokReloginJob = {
+  id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  created_at: number
+  payload: { account_id: string; request_id: string }
+  error?: string
+  result?: { stage?: string; session_updated?: boolean; text_quota?: boolean; image_quota?: boolean; video_quota?: boolean }
+}
+
 export type GrokAccount = {
   id: string
   platform: 'grok'
@@ -298,6 +307,16 @@ export const grokAccountsApi = {
     return apiClient.post<never, GrokRuntimeSnapshotResponse>(
       `${GROK_ACCOUNTS_PATH}/runtime/snapshot`,
     )
+  },
+
+  relogin(accountId: string, requestId: string) {
+    return apiClient.post<{ account_id: string; request_id: string }, { job: GrokReloginJob }>(
+      `${GROK_ACCOUNTS_PATH}/relogin`, { account_id: accountId, request_id: requestId },
+    )
+  },
+
+  listRelogins() {
+    return apiClient.get<never, { items: GrokReloginJob[] }>(`${GROK_ACCOUNTS_PATH}/relogin`)
   },
 
   setProbePolling(enabled: boolean) {

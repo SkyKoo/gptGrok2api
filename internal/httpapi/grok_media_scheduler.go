@@ -57,7 +57,9 @@ func (s *Server) observeGrokMediaQuota(ctx context.Context, token string, fields
 		for _, item := range items {
 			saved := firstNonEmpty(stringValue(item["sso"]), stringValue(item["access_token"]), stringValue(item["token"]))
 			if strings.TrimSpace(saved) == strings.TrimSpace(token) {
-				_, _ = s.registerStore.UpdateAccountFields(stringValue(item["id"]), map[string]any{"media_quota": snapshot})
+				_, _ = s.registerStore.UpdateAccountFieldsIf(stringValue(item["id"]), map[string]any{"media_quota": snapshot}, func(current map[string]any) bool {
+					return stringValue(current["sso"]) == stringValue(item["sso"])
+				})
 			}
 		}
 	}
