@@ -58,6 +58,9 @@ class LoginPage:
     async def goto(self, url, **kwargs):
         self.destination = url
 
+    def on(self, event, handler):
+        pass
+
     def locator(self, selector):
         return LoginControl(self, selector)
 
@@ -76,6 +79,20 @@ class LoginPage:
 
 
 class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
+    async def test_failure_logs_phase_without_exception_text_or_credentials(self):
+        page = LoginPage("success")
+
+        async def timeout(url, **kwargs):
+            raise TimeoutError("private-email@example.test and private-password")
+
+        page.goto = timeout
+        with self.assertLogs("cfm-browser-worker.grok-relogin", level="INFO") as captured:
+            result = await relogin(page, "private-email@example.test", "private-password", "task_diagnostic")
+        self.assertEqual(result, {"code": "login_timeout"})
+        self.assertIn("task=task_diagnostic stage=navigation outcome=login_timeout", captured.output[-1])
+        self.assertIn("password_attempted=false exception=timeout", captured.output[-1])
+        self.assertNotIn("private-", "\n".join(captured.output))
+
     async def test_official_login_returns_only_scoped_session(self):
         page = LoginPage("success")
         result = await relogin(page, "fixture@example.test", "fixture-password")

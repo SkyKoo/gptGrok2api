@@ -102,6 +102,7 @@ class NativeEmailRequest(BaseModel):
 
 
 class GrokReloginRequest(BaseModel):
+    task_id: str = Field(default="", max_length=69, pattern=r"^(?:task_[A-Za-z0-9_.-]{1,64})?$")
     browser_lease: str = Field(min_length=32, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=1, max_length=256)
@@ -115,7 +116,7 @@ async def relogin_grok(req: GrokReloginRequest, authorization: str | None = Head
         browser = queue.claim(req.browser_lease)
     except BrowserQueueError:
         raise HTTPException(status_code=409, detail="browser_reservation_not_ready") from None
-    return await grok_relogin(browser, req.email, req.password)
+    return await grok_relogin(browser, req.email, req.password, req.task_id)
 
 
 class NativeVerifyRequest(NativeEmailRequest):

@@ -124,7 +124,7 @@ func (s *Server) runGrokRelogin(task *tasks.Task) (map[string]any, error) {
 		}
 		account[grokReloginCheckpoint] = running
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		newSession, err := s.fetchGrokBrowserSession(ctx, account, setStage)
+		newSession, err := s.fetchGrokBrowserSession(ctx, task.ID, account, setStage)
 		cancel()
 		if err != nil {
 			return nil, err
@@ -169,7 +169,7 @@ type grokBrowserSession struct {
 	Code  string `json:"code"`
 }
 
-func (s *Server) fetchGrokBrowserSession(ctx context.Context, account map[string]any, stage func(string) error) (grokBrowserSession, error) {
+func (s *Server) fetchGrokBrowserSession(ctx context.Context, taskID string, account map[string]any, stage func(string) error) (grokBrowserSession, error) {
 	var result grokBrowserSession
 	proxyURL := ""
 	if s.proxyManager != nil {
@@ -201,7 +201,7 @@ func (s *Server) fetchGrokBrowserSession(ctx context.Context, account map[string
 		return result, errors.New("grok_relogin_account_changed")
 	}
 	payload, _ := json.Marshal(map[string]string{
-		"browser_lease": lease.ID, "email": stringValue(account["email"]), "password": stringValue(account["password"]),
+		"task_id": taskID, "browser_lease": lease.ID, "email": stringValue(account["email"]), "password": stringValue(account["password"]),
 	})
 	req, err := http.NewRequestWithContext(proxyruntime.WithURL(ctx, ""), http.MethodPost, base+"/v1/grok/relogin", bytes.NewReader(payload))
 	if err != nil {
