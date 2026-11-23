@@ -224,7 +224,7 @@ func (s *Server) fetchGrokBrowserSession(ctx context.Context, taskID string, acc
 		return result, errors.New("grok_relogin_browser_failed")
 	}
 	switch result.Code {
-	case "verification_required", "login_timeout", "login_page_unrecognized", "login_failed", "credentials_rejected", "upstream_rate_limited":
+	case "verification_required", "login_timeout", "login_page_unrecognized", "login_failed", "credentials_rejected", "upstream_rate_limited", "password_input_unconfirmed":
 		return result, errors.New("grok_relogin_" + result.Code)
 	case "":
 		if validGrokSessionCookie(result.SSO) && (result.SSORW == "" || validGrokSessionCookie(result.SSORW)) {

@@ -21,6 +21,7 @@ VERIFICATION = ('input[autocomplete="one-time-code"], input[name="otp"], input[n
                 'input[name="verificationCode"], input[name="emailCode"], input[type="tel"], '
                 'iframe[src*="challenges.cloudflare.com"]')
 ALERTS = '[role="alert"], [aria-live="assertive"]'
+FORM_SUBMIT = 'button[type="submit"], input[type="submit"], button:not([type])'
 EMAIL_ENTRY = re.compile(r"^(?:log ?in|sign ?in|continue) with email$|^使用邮箱(?:登录|继续)$", re.I)
 SUBMIT = re.compile(r"^(?:log ?in|sign ?in|continue|next|登录|继续|下一步)$", re.I)
 log = logging.getLogger("cfm-browser-worker.grok-relogin")
@@ -54,6 +55,8 @@ class ReloginTrace:
         self.navigation_status = 0
         self.auth_status = 0
         self.password_posts = 0
+        self.password_requests = 0
+        self.submit_kind = "none"
         self.page_kind = "none"
         self.form = "unknown"
         self.network = NetworkDiagnostics()
@@ -74,14 +77,24 @@ class ReloginTrace:
         except (AttributeError, ValueError):
             pass
 
+    def observe_request(self, request):
+        try:
+            if self.password_attempted and request.method == "POST" and urlsplit(request.url).hostname in AUTH_HOSTS:
+                self.password_requests += 1
+        except (AttributeError, ValueError):
+            pass
+
     def write(self, outcome, exception="none"):
         faults = self.network.snapshot()
         last = faults[-1] if faults else {}
+        network_host = last.get("host", "")
+        network_scope = "xai_auth" if network_host in AUTH_HOSTS else "verification_service" if network_host else "none"
         log.info(
-            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d page=%s form=%s password_posts=%d",
+            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d page=%s form=%s password_posts=%d password_requests=%d submit=%s network_scope=%s",
             self.task, self.stage, outcome, int((time.monotonic() - self.started) * 1000),
             str(self.password_attempted).lower(), exception, self.navigation_status, self.auth_status,
             last.get("kind", "none"), last.get("status", 0), self.page_kind, self.form, self.password_posts,
+            self.password_requests, self.submit_kind, network_scope,
         )
 
 
@@ -113,13 +126,19 @@ async def _single_visible(locator):
     return matches[0] if len(matches) == 1 else None
 
 
-async def _submit(page, trace, password):
+async def _submit(page, trace, password, field):
     trace.enter("password_submit_control" if password else "email_submit_control")
-    button = await _single_visible(page.get_by_role("button", name=SUBMIT))
+    form = field.locator("xpath=ancestor::form[1]")
+    owns_form = await form.count() == 1
+    button = await _single_visible(form.locator(FORM_SUBMIT)) if owns_form else None
+    if button is None:
+        actions = form if owns_form else page
+        button = await _single_visible(actions.get_by_role("button", name=SUBMIT))
     if button is None or not _on_sign_in(page):
         return False
     trace.enter("password_submit" if password else "email_submit")
     trace.password_attempted = password
+    trace.submit_kind = "form" if owns_form else "page_button"
     await button.click(timeout=5000)
     return True
 
@@ -215,7 +234,9 @@ async def _sign_in(page, email, password, trace):
                 return {"code": "login_page_unrecognized"}
             trace.enter("password_fill")
             await password_input.fill(password, timeout=5000)
-            if not await _submit(page, trace, password=True):
+            if await password_input.input_value(timeout=1000) != password:
+                return {"code": "password_input_unconfirmed"}
+            if not await _submit(page, trace, password=True, field=password_input):
                 return {"code": "login_page_unrecognized"}
             password_submitted = True
         elif email_input is not None and not email_submitted and not password_submitted:
@@ -223,7 +244,7 @@ async def _sign_in(page, email, password, trace):
                 return {"code": "login_page_unrecognized"}
             trace.enter("email_fill")
             await email_input.fill(email, timeout=5000)
-            if not await _submit(page, trace, password=False):
+            if not await _submit(page, trace, password=False, field=email_input):
                 return {"code": "login_page_unrecognized"}
             email_submitted = True
         elif not entry_clicked and not email_submitted and not password_submitted:
@@ -246,6 +267,7 @@ async def relogin(browser, email, password, task_id=""):
             context = await browser.new_context(**native_browser_context_kwargs())
             trace.enter("browser_page")
             page = await context.new_page()
+            page.on("request", trace.observe_request)
             page.on("requestfailed", trace.network.failed)
             page.on("response", trace.observe_response)
             result = await _sign_in(page, email, password, trace)

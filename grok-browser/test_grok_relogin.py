@@ -2,7 +2,7 @@ import base64
 import json
 import unittest
 
-from grok_relogin import EMAIL, EMAIL_ENTRY, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, _session, relogin
+from grok_relogin import EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, _session, relogin
 
 
 def fixture_token(claims):
@@ -25,12 +25,27 @@ class LoginControl:
     async def is_visible(self):
         return True
 
+    async def count(self):
+        return int(self.name in self.page.controls)
+
+    def locator(self, selector):
+        if selector == FORM_SUBMIT and self.name == "owning_form":
+            return LoginControl(self.page, "native_submit")
+        return LoginControl(self.page, "owning_form" if self.name == PASSWORD else "absent")
+
+    async def input_value(self, timeout):
+        if self.page.outcome == "lost_input":
+            return ""
+        return self.page.submissions[-1][1]
+
     async def fill(self, value, timeout):
         if self.name == EMAIL and self.page.state == 2:
             raise TimeoutError("email is read-only after submitting it")
         self.page.submissions.append((self.name, value))
 
     async def click(self, timeout):
+        if self.page.outcome == "form_owned" and self.page.state == 2 and self.name != "native_submit":
+            raise AssertionError("password must be submitted through its owning form")
         self.page.state += 1
 
 
@@ -55,7 +70,7 @@ class LoginPage:
     def url(self):
         if self.outcome == "untrusted" and self.state == 2:
             return "https://accounts.x.ai.example.test/sign-in"
-        if self.outcome in ("success", "readonly_email") and self.state == 3:
+        if self.outcome in ("success", "readonly_email", "form_owned") and self.state == 3:
             return "https://grok.com/"
         if self.outcome == "xai_account" and self.state == 3:
             return "https://accounts.x.ai/account/profile"
@@ -63,12 +78,15 @@ class LoginPage:
 
     @property
     def controls(self):
-        return ({
+        controls = ({
             0: {"email_entry"},
             1: {EMAIL, "submit"},
             2: {PASSWORD, "submit", EMAIL} if self.outcome == "readonly_email" else {PASSWORD, "submit"},
             3: {VERIFICATION} if self.outcome == "verification" else set(),
         })[self.state]
+        if self.outcome == "form_owned" and self.state == 2:
+            controls |= {"owning_form", "native_submit"}
+        return controls
 
     async def goto(self, url, **kwargs):
         self.destination = url
@@ -141,3 +159,14 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
 
     async def test_session_rejects_intermediate_wrapper(self):
         self.assertIsNone(await _session(LoginPage("wrapper"), "grok"))
+
+    async def test_uses_the_password_forms_submit_control(self):
+        page = LoginPage("form_owned")
+        result = await relogin(page, "fixture@example.test", "fixture-password")
+        self.assertEqual(result["sso"], FRESH)
+
+    async def test_does_not_submit_a_password_the_page_did_not_keep(self):
+        page = LoginPage("lost_input")
+        result = await relogin(page, "fixture@example.test", "fixture-password")
+        self.assertEqual(result, {"code": "password_input_unconfirmed"})
+        self.assertEqual(page.state, 2)
