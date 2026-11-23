@@ -120,6 +120,17 @@ func (s *Store) QueryQuota(ctx context.Context, c *Client, id string) (Account, 
 	return s.queryQuota(ctx, c, id, nil)
 }
 
+// QueryReloginQuota uses the credential revision and egress saved by the login.
+func (s *Store) QueryReloginQuota(ctx context.Context, c *Client, expected Account) (Account, error) {
+	fingerprint, fixed := mediaContextFingerprint(ctx, expected)
+	return s.queryQuota(ctx, c, expected.ID, func(a Account) bool {
+		current, selected := mediaContextFingerprint(ctx, a)
+		return fixed && selected && current == fingerprint &&
+			a.QuotaRevision == expected.QuotaRevision && a.InFlight == expected.InFlight &&
+			a.SettlementUntil == expected.SettlementUntil && a.Enabled == expected.Enabled
+	})
+}
+
 // QuerySubmittedQuota observes the same account after Adobe accepts the job.
 // The reservation remains pinned even if Adobe has already debited the quota.
 func (s *Store) QuerySubmittedQuota(ctx context.Context, c *Client, id, taskKey string, revision uint64) (Account, error) {

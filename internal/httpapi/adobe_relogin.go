@@ -87,6 +87,12 @@ func (s *Server) runAdobeRelogins() {
 			account, failure = s.adobeStore.ReloginRevision(ctx, task.AccountRef, task.CredentialRevision)
 		}
 		cancel()
+		if failure == nil {
+			// Quota uses the new credentials and pinned egress after the browser lease ends.
+			quotaCtx, cancelQuota := context.WithTimeout(context.WithoutCancel(ctx), 40*time.Second)
+			_, _ = s.adobeStore.QueryReloginQuota(quotaCtx, s.adobeClient, account)
+			cancelQuota()
+		}
 		if err = s.adobeReloginJobs.Finish(task.ProgressID, account, failure); err != nil {
 			s.adobeReloginMu.Lock()
 			s.adobeReloginRunning = false

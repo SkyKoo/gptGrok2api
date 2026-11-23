@@ -50,6 +50,8 @@ func TestAdobeReloginAdminIsolationAndUnknownRetention(t *testing.T) {
 	s := imageTaskTestServer(t)
 	a := adobeFixtureAccount(t, s)
 	var calls atomic.Int32
+	var quotaReads atomic.Int32
+	s.adobeClient = adobeReconciliationQuotaClient(t, &quotaReads, true)
 	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
 		calls.Add(1)
 		current.MediaSessionRefreshed = true
@@ -108,6 +110,11 @@ func TestAdobeReloginAdminIsolationAndUnknownRetention(t *testing.T) {
 	if saved.Status != "submission_unknown" || saved.InFlight != "original-task" {
 		t.Fatal("background login released unknown task")
 	}
+	if quotaReads.Load() != 2 || saved.Quota.Status != "error" ||
+		saved.Quota.Generation == nil || saved.Quota.Generation.Status != "error" ||
+		saved.Quota.Available == nil || *saved.Quota.Available != 10 {
+		t.Fatal("failed quota query did not preserve the previous balance and record both failures")
+	}
 	if _, err := s.adobeStore.Reserve("new-task"); !errors.Is(err, adobe.ErrNoAccount) {
 		t.Fatal("API relogin released held task")
 	}
@@ -120,6 +127,11 @@ func TestAdobeReloginHTTPPreparesReusableSessionWithPinnedEgress(t *testing.T) {
 			a := adobeFixtureAccount(t, s)
 			s.proxyManager.SetDefault(endpoint, nil)
 			var calls atomic.Int32
+			var quotaReads atomic.Int32
+			s.adobeClient = adobeReconciliationQuotaClient(t, &quotaReads, false)
+			if _, err := s.store.UpdateConfig("adobe_maintenance", map[string]any{"enabled": false}); err != nil {
+				t.Fatal(err)
+			}
 			s.adobeStore.SetBrowserRefresher(func(ctx context.Context, current adobe.Account) (adobe.Account, error) {
 				calls.Add(1)
 				actual, selected := proxyruntime.URLSelectionFromContext(ctx)
@@ -139,6 +151,11 @@ func TestAdobeReloginHTTPPreparesReusableSessionWithPinnedEgress(t *testing.T) {
 			current, err := s.adobeStore.Get(a.ID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if quotaReads.Load() != 2 || current.QuotaRevision <= a.QuotaRevision+1 ||
+				current.Quota.Status != "known" || current.Quota.Generation == nil ||
+				current.Quota.Generation.Status != "known" {
+				t.Fatal("login completion did not include a fresh balance and model quota")
 			}
 			fixed, err := s.adobeAccountContext(context.Background(), current)
 			if err != nil || !s.adobeStore.MediaSessionReady(fixed, current, 0) {
@@ -187,6 +204,7 @@ func TestAdobeReloginHTTPRoutingFailureDoesNotLaunchOrReplaceSession(t *testing.
 func TestAdobeReloginAcceptsQuicklyAndSurvivesRequestCancellation(t *testing.T) {
 	s := imageTaskTestServer(t)
 	a := adobeFixtureAccount(t, s)
+	s.adobeClient = adobeReconciliationQuotaClient(t, &atomic.Int32{}, false)
 	entered, release := make(chan struct{}), make(chan struct{})
 	defer func() {
 		select {
@@ -376,6 +394,7 @@ func TestAdobeBrowserReloginWorkerContract(t *testing.T) {
 
 func TestAdobeReloginBatchRunsSeriallyAndMaintenanceFileRejectsAdmission(t *testing.T) {
 	s := imageTaskTestServer(t)
+	s.adobeClient = adobeReconciliationQuotaClient(t, &atomic.Int32{}, false)
 	first := adobeFixtureAccount(t, s)
 	second := first
 	second.ID = ""
