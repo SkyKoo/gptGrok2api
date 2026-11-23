@@ -1,6 +1,17 @@
+import base64
+import json
 import unittest
 
-from grok_relogin import EMAIL, EMAIL_ENTRY, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, relogin
+from grok_relogin import EMAIL, EMAIL_ENTRY, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, _session, relogin
+
+
+def fixture_token(claims):
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return "eyJhbGciOiJIUzI1NiJ9." + payload + ".fixture"
+
+
+FRESH = fixture_token({"sub": "fixture-account"})
+WRAPPER = fixture_token({"config": {"success_url": "https://grok.com/"}})
 
 
 class LoginControl:
@@ -46,6 +57,8 @@ class LoginPage:
             return "https://accounts.x.ai.example.test/sign-in"
         if self.outcome in ("success", "readonly_email") and self.state == 3:
             return "https://grok.com/"
+        if self.outcome == "xai_account" and self.state == 3:
+            return "https://accounts.x.ai/account/profile"
         return SIGN_IN
 
     @property
@@ -71,12 +84,13 @@ class LoginPage:
         return LoginControl(self, control if role == "button" else "unavailable")
 
     async def cookies(self, urls):
-        if urls != ["https://grok.com/"]:
-            raise AssertionError("session lookup was not scoped to Grok")
+        expected = ["https://accounts.x.ai/account/profile"] if self.outcome == "xai_account" else ["https://grok.com/"]
+        if urls != expected:
+            raise AssertionError("session lookup was not scoped to the signed-in first-party page")
+        domain = ".x.ai" if self.outcome == "xai_account" else ".grok.com"
         return [
-            {"name": "sso", "value": "not-grok", "domain": ".x.ai", "secure": True},
-            {"name": "sso", "value": "fresh-token", "domain": ".grok.com", "secure": True},
-            {"name": "sso-rw", "value": "fresh-rw", "domain": ".grok.com", "secure": True},
+            {"name": "sso", "value": FRESH, "domain": ".example.test", "secure": True},
+            {"name": "sso", "value": WRAPPER if self.outcome == "wrapper" else FRESH, "domain": domain, "secure": True},
         ]
 
 
@@ -100,7 +114,7 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         result = await relogin(page, "fixture@example.test", "fixture-password")
         self.assertEqual(page.destination, SIGN_IN)
         self.assertEqual(page.submissions, [(EMAIL, "fixture@example.test"), (PASSWORD, "fixture-password")])
-        self.assertEqual(result, {"sso": "fresh-token", "sso_rw": "fresh-rw"})
+        self.assertEqual(result, {"sso": FRESH, "sso_rw": ""})
         self.assertTrue(page.closed)
 
     async def test_extra_verification_leaves_without_submitting_again(self):
@@ -112,7 +126,7 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
     async def test_password_stage_does_not_refill_previously_submitted_email(self):
         page = LoginPage("readonly_email")
         result = await relogin(page, "fixture@example.test", "fixture-password")
-        self.assertEqual(result["sso"], "fresh-token")
+        self.assertEqual(result["sso"], FRESH)
         self.assertEqual(page.submissions, [(EMAIL, "fixture@example.test"), (PASSWORD, "fixture-password")])
 
     async def test_untrusted_navigation_never_receives_password(self):
@@ -120,3 +134,10 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"), {"code": "login_page_unrecognized"})
         self.assertEqual(page.submissions, [(EMAIL, "fixture@example.test")])
         self.assertTrue(page.closed)
+
+    async def test_password_can_complete_on_official_account_page(self):
+        page = LoginPage("xai_account")
+        self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"), {"sso": FRESH, "sso_rw": ""})
+
+    async def test_session_rejects_intermediate_wrapper(self):
+        self.assertIsNone(await _session(LoginPage("wrapper"), "grok"))

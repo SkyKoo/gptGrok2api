@@ -1,5 +1,7 @@
 """Sign into an existing Grok account in a fresh, reserved browser context."""
 import asyncio
+import base64
+import json
 import logging
 import re
 import time
@@ -11,11 +13,14 @@ from network_diagnostics import NetworkDiagnostics
 
 SIGN_IN = "https://accounts.x.ai/sign-in?redirect=grok-com"
 AUTH_HOSTS = {"accounts.x.ai", "auth.x.ai"}
+HANDOFF_HOSTS = {"auth.grokusercontent.com"}
 APP_HOSTS = {"grok.com", "www.grok.com"}
 EMAIL = 'input[type="email"], input[autocomplete="username"], input[name="email"]'
 PASSWORD = 'input[type="password"]:not([autocomplete="new-password"])'
 VERIFICATION = ('input[autocomplete="one-time-code"], input[name="otp"], input[name="code"], '
-                'input[type="tel"], iframe[src*="challenges.cloudflare.com"]')
+                'input[name="verificationCode"], input[name="emailCode"], input[type="tel"], '
+                'iframe[src*="challenges.cloudflare.com"]')
+ALERTS = '[role="alert"], [aria-live="assertive"]'
 EMAIL_ENTRY = re.compile(r"^(?:log ?in|sign ?in|continue) with email$|^使用邮箱(?:登录|继续)$", re.I)
 SUBMIT = re.compile(r"^(?:log ?in|sign ?in|continue|next|登录|继续|下一步)$", re.I)
 log = logging.getLogger("cfm-browser-worker.grok-relogin")
@@ -48,6 +53,9 @@ class ReloginTrace:
         self.password_attempted = False
         self.navigation_status = 0
         self.auth_status = 0
+        self.password_posts = 0
+        self.page_kind = "none"
+        self.form = "unknown"
         self.network = NetworkDiagnostics()
 
     def enter(self, stage):
@@ -61,6 +69,8 @@ class ReloginTrace:
             if (urlsplit(response.url).hostname in AUTH_HOSTS and response.request.method == "POST"
                     and 100 <= response.status <= 599):
                 self.auth_status = response.status
+                if self.password_attempted:
+                    self.password_posts += 1
         except (AttributeError, ValueError):
             pass
 
@@ -68,10 +78,10 @@ class ReloginTrace:
         faults = self.network.snapshot()
         last = faults[-1] if faults else {}
         log.info(
-            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d",
+            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d page=%s form=%s password_posts=%d",
             self.task, self.stage, outcome, int((time.monotonic() - self.started) * 1000),
             str(self.password_attempted).lower(), exception, self.navigation_status, self.auth_status,
-            last.get("kind", "none"), last.get("status", 0),
+            last.get("kind", "none"), last.get("status", 0), self.page_kind, self.form, self.password_posts,
         )
 
 
@@ -83,6 +93,19 @@ def _trusted(page, hosts):
 
 def _on_sign_in(page):
     return _trusted(page, AUTH_HOSTS) and not re.search(r"(?:sign-up|signup|register|reset|recover)", urlsplit(page.url).path, re.I)
+
+
+def _page_kind(page):
+    path = urlsplit(page.url).path
+    if _trusted(page, APP_HOSTS):
+        return "grok_sign_in" if re.match(r"^/(?:sign-in|sign-up|login|auth)(?:/|$)", path) else "grok"
+    if _trusted(page, HANDOFF_HOSTS):
+        return "handoff"
+    if _trusted(page, AUTH_HOSTS):
+        if re.match(r"^/accounts?(?:/|$)", path) and _on_sign_in(page):
+            return "xai_account"
+        return "xai_auth"
+    return "other"
 
 
 async def _single_visible(locator):
@@ -101,22 +124,51 @@ async def _submit(page, trace, password):
     return True
 
 
-async def _session(page):
-    if not _trusted(page, APP_HOSTS) or urlsplit(page.url).path not in ("", "/"):
+def _session_cookie(value):
+    if not re.fullmatch(r"eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value) or len(value) > 8192:
+        return False
+    payload = value.split(".")[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, UnicodeError):
+        return False
+    if not isinstance(claims, dict) or "success_url" in claims:
+        return False
+    config = claims.get("config")
+    return not isinstance(config, dict) or not ({"success_url", "token"} & config.keys())
+
+
+async def _session(page, page_kind):
+    if page_kind not in ("grok", "xai_account"):
         return None
-    items = await page.context.cookies(["https://grok.com/"])
+    scope = "https://grok.com/" if page_kind == "grok" else page.url
+    host = urlsplit(scope).hostname
+    allowed_domains = {"grok.com"} if page_kind == "grok" else {host, "x.ai"}
+    items = await page.context.cookies([scope])
     cookies = {}
     for item in items:
         name, value = item.get("name"), item.get("value", "")
-        if (name in {"sso", "sso-rw"} and item.get("secure")
-                and item.get("domain", "").lstrip(".") == "grok.com"
-                and re.fullmatch(r"[\x21-\x2b\x2d-\x3a\x3c-\x7e]{1,8192}", value)):
+        if (name in {"sso", "sso-rw", "sso_jwt"} and item.get("secure")
+                and item.get("domain", "").lstrip(".").lower() in allowed_domains
+                and _session_cookie(value)):
             if name in cookies and cookies[name] != value:
                 return None
             cookies[name] = value
-    if cookies.get("sso"):
-        return {"sso": cookies["sso"], "sso_rw": cookies.get("sso-rw", "")}
+    token = cookies.get("sso") or cookies.get("sso_jwt") or cookies.get("sso-rw")
+    if token:
+        return {"sso": token, "sso_rw": cookies.get("sso-rw", "")}
     return None
+
+
+async def _password_error(page, trace):
+    if trace.password_posts and trace.auth_status == 429:
+        return "upstream_rate_limited"
+    for alert in (await page.locator(ALERTS).all())[:5]:
+        if await alert.is_visible():
+            text = await alert.inner_text(timeout=1000)
+            if re.search(r"\b(?:invalid|incorrect|wrong) (?:email or )?password\b|\bpassword (?:is )?(?:invalid|incorrect|wrong)\b", text, re.I):
+                return "credentials_rejected"
+    return ""
 
 
 async def _sign_in(page, email, password, trace):
@@ -126,19 +178,32 @@ async def _sign_in(page, email, password, trace):
         trace.navigation_status = response.status
     entry_clicked = email_submitted = password_submitted = False
     while True:
+        trace.page_kind = _page_kind(page)
         trace.enter("session_wait" if password_submitted else "password_wait" if email_submitted else "email_form_wait" if entry_clicked else "email_entry_wait")
-        if password_submitted and (session := await _session(page)):
-            return session
+        if password_submitted and trace.page_kind == "handoff":
+            trace.form = "none"
+            await asyncio.sleep(.25)
+            continue
+        if trace.page_kind != "other":
+            for verification in await page.locator(VERIFICATION).all():
+                if await verification.is_visible():
+                    trace.form = "verification"
+                    return {"code": "verification_required"}
+        if password_submitted and trace.page_kind in ("grok", "xai_account"):
+            password_controls = await page.locator(PASSWORD).all()
+            if not any([await field.is_visible() for field in password_controls]) and (session := await _session(page, trace.page_kind)):
+                trace.form = "none"
+                return session
         if not _on_sign_in(page):
             if not password_submitted or not _trusted(page, APP_HOSTS):
                 return {"code": "login_page_unrecognized"}
             await asyncio.sleep(.25)
             continue
-        for verification in await page.locator(VERIFICATION).all():
-            if await verification.is_visible():
-                return {"code": "verification_required"}
         email_input = await _single_visible(page.locator(EMAIL))
         password_input = await _single_visible(page.locator(PASSWORD))
+        trace.form = "password" if password_input is not None else "email" if email_input is not None else "none"
+        if password_submitted and (error := await _password_error(page, trace)):
+            return {"code": error}
         if password_input is not None and not password_submitted and (email_input is not None or email_submitted):
             # After a separate email submit, xAI can keep the email field on the
             # password page as a read-only account label. Only fill a combined
