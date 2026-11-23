@@ -750,29 +750,100 @@ type maintenanceDueGuard struct {
 	now       time.Time
 	attempted bool
 	model     string
+	quotaOnly bool
+	loginOnly bool
 }
 
 func MaintenanceDue(a Account, now time.Time) bool {
-	if !a.Enabled || a.InFlight != "" || a.SettlementUntil > now.Unix() || (a.NextRefreshAt > now.Unix() && a.LastError != "") {
+	return maintenanceDue(a, now, false)
+}
+
+func PeriodicQuotaDue(a Account, now time.Time) bool {
+	return maintenanceDue(a, now, true)
+}
+
+func AutomaticReloginDue(a Account, now time.Time) bool {
+	if !a.Enabled || a.InFlight != "" || a.SettlementUntil > now.Unix() {
 		return false
 	}
-	return !QuotaRefreshDueAt(a, now).After(now)
+	if a.LastError != "" && a.LastError != a.Quota.Error && a.NextRefreshAt > now.Unix() {
+		return false
+	}
+	unauthorized := strings.HasSuffix(a.Quota.Error, " (HTTP 401)")
+	if e := a.Quota.Generation; e != nil {
+		unauthorized = unauthorized || strings.HasSuffix(e.Error, " (HTTP 401)")
+	}
+	if unauthorized && a.LastRefreshAt <= now.Add(-15*time.Minute).Unix() {
+		return true
+	}
+	return !automaticQuotaCooling(a, now) && (a.Status == "invalid" || a.ExpiresAt <= now.Add(5*time.Minute).Unix())
+}
+
+func maintenanceDue(a Account, now time.Time, quotaOnly bool) bool {
+	if !a.Enabled || a.InFlight != "" || a.SettlementUntil > now.Unix() || automaticQuotaCooling(a, now) {
+		return false
+	}
+	if quotaOnly && (a.Status == "invalid" || a.ExpiresAt <= now.Unix()) {
+		return false
+	}
+	return !quotaRefreshDueAt(a, now, quotaOnly).After(now)
+}
+
+const automaticQuotaFailureBackoff = 5 * time.Minute
+
+func automaticQuotaCooling(a Account, now time.Time) bool {
+	if a.LastError != "" && a.NextRefreshAt > now.Unix() {
+		return true
+	}
+	recentFailure := func(status, checked string) bool {
+		at, err := time.Parse(time.RFC3339Nano, checked)
+		return (status == "error" || status == "unknown") && err == nil &&
+			now.Before(at.Add(automaticQuotaFailureBackoff))
+	}
+	if recentFailure(a.Quota.Status, a.Quota.CheckedAt) {
+		return true
+	}
+	e := a.Quota.Generation
+	return e != nil && recentFailure(e.Status, e.CheckedAt)
+}
+
+// SettledQuotaDue uses the persisted release fence so a restart or deployment
+// cannot lose a needed quota refresh.
+func SettledQuotaDue(a Account, now time.Time) bool {
+	if !a.Enabled || a.Status == "invalid" || a.InFlight != "" || a.ExpiresAt <= now.Unix() ||
+		a.SettlementUntil == 0 || a.LastUsedAt > a.SettlementUntil || a.SettlementUntil > now.Unix() ||
+		automaticQuotaCooling(a, now) {
+		return false
+	}
+	checkedAfterSettlement := func(status, checked string) bool {
+		at, err := time.Parse(time.RFC3339Nano, checked)
+		return status == "known" && err == nil && at.Unix() >= a.SettlementUntil
+	}
+	e := a.Quota.Generation
+	return !checkedAfterSettlement(a.Quota.Status, a.Quota.CheckedAt) ||
+		e == nil || !checkedAfterSettlement(e.Status, e.CheckedAt)
 }
 
 // QuotaRefreshDueAt orders maintenance fairly; the caller still checks enabled,
 // in-flight and settlement state through MaintenanceDue before starting work.
 func QuotaRefreshDueAt(a Account, now time.Time) time.Time {
+	return quotaRefreshDueAt(a, now, false)
+}
+
+func quotaRefreshDueAt(a Account, now time.Time, quotaOnly bool) time.Time {
 	at, _ := time.Parse(time.RFC3339Nano, a.Quota.CheckedAt)
 	interval := time.Hour
 	if a.LastUsedAt > now.Add(-time.Hour).Unix() {
 		interval = 5 * time.Minute
 	}
 	due := at.Add(interval)
-	if a.Quota.Status == "stale" || at.IsZero() {
+	if a.Quota.Status == "stale" || at.IsZero() || a.Status == "invalid" {
 		due = time.Time{}
 	}
-	if tokenDue := time.Unix(a.ExpiresAt, 0).Add(-5 * time.Minute); tokenDue.Before(due) {
-		due = tokenDue
+	if !quotaOnly {
+		if tokenDue := time.Unix(a.ExpiresAt, 0).Add(-5 * time.Minute); tokenDue.Before(due) {
+			due = tokenDue
+		}
 	}
 	// Even idle accounts need fresh model permissions before foreground
 	// admission. Leave one minute for the bounded background scan to refresh.
@@ -799,7 +870,7 @@ func generationPermissionsRefreshDueAt(generation *GenerationEntitlements, now t
 	case "error", "unknown":
 		// Persisted unsuccessful observations retain their short retry window
 		// across restarts instead of becoming immediately due on every scan.
-		return checked.Add(modelPermissionFailureBackoff)
+		return checked.Add(automaticQuotaFailureBackoff)
 	default:
 		return time.Time{}
 	}
@@ -808,8 +879,21 @@ func generationPermissionsRefreshDueAt(generation *GenerationEntitlements, now t
 // RefreshDueWithPermissions rechecks the scheduler's due decision while holding
 // the same account gate as requests, and reports whether network work began.
 func (s *Store) RefreshDueWithPermissions(ctx context.Context, c *Client, id string, now time.Time) (Account, bool, error) {
-	guard := &maintenanceDueGuard{now: now}
-	a, err := s.refresh(ctx, c, id, false, true, guard)
+	return s.refreshDue(ctx, c, id, maintenanceDueGuard{now: now})
+}
+
+// RefreshDueQuota checks an already authenticated account while automatic
+// login is disabled, including when a quota endpoint returns unauthorized.
+func (s *Store) RefreshDueQuota(ctx context.Context, c *Client, id string, now time.Time) (Account, bool, error) {
+	return s.refreshDue(ctx, c, id, maintenanceDueGuard{now: now, quotaOnly: true})
+}
+
+func (s *Store) RefreshDueLogin(ctx context.Context, c *Client, id string, now time.Time) (Account, bool, error) {
+	return s.refreshDue(ctx, c, id, maintenanceDueGuard{now: now, loginOnly: true})
+}
+
+func (s *Store) refreshDue(ctx context.Context, c *Client, id string, guard maintenanceDueGuard) (Account, bool, error) {
+	a, err := s.refresh(ctx, c, id, guard.loginOnly, true, &guard)
 	return a, guard.attempted, err
 }
 
@@ -841,6 +925,7 @@ func (s *Store) RefreshModelPermissions(ctx context.Context, c *Client, id, mode
 
 func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, includePermissions bool, due *maintenanceDueGuard) (Account, error) {
 	modelCheck := due != nil && due.model != ""
+	quotaOnly := due != nil && (due.quotaOnly || modelCheck)
 	s.mu.Lock()
 	d, err := s.load()
 	if err != nil {
@@ -863,15 +948,17 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 		return a, ErrBusy
 	}
 	if due != nil {
-		needed := MaintenanceDue(a, due.now)
-		if modelCheck {
+		needed := maintenanceDue(a, due.now, quotaOnly)
+		if due.loginOnly {
+			needed = AutomaticReloginDue(a, due.now)
+		} else if modelCheck {
 			if !Eligible(a, time.Now()) || strings.TrimSpace(a.ProfileID) == "" {
 				s.mu.Unlock()
 				return a, ErrBusy
 			}
 			needed = a.Quota.Generation.ModelSelectionState(due.model, time.Now()) == ModelNeedsRefresh
 		}
-		if needed && includePermissions && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
+		if needed && includePermissions && !due.loginOnly && s.modelPermissionsCoolingLocked(ctx, a, time.Now()) {
 			s.mu.Unlock()
 			if due.model != "" {
 				return a, &Error{Stage: "entitlements", Code: "observation_incomplete"}
@@ -918,14 +1005,14 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 		}
 		return e
 	}
-	if !modelCheck && (credentials || a.ExpiresAt <= time.Now().Add(5*time.Minute).Unix()) {
+	if !quotaOnly && (credentials || (due != nil && a.Status == "invalid") || a.ExpiresAt <= time.Now().Add(5*time.Minute).Unix()) {
 		if err = refreshCredentials(); err != nil {
 			return a, err
 		}
 	}
 	q, e := c.Balance(ctx, a)
 	var upstream *Error
-	if !modelCheck && e != nil && !refreshedOnce && errors.As(e, &upstream) && upstream.Status == http.StatusUnauthorized {
+	if !quotaOnly && e != nil && !refreshedOnce && errors.As(e, &upstream) && upstream.Status == http.StatusUnauthorized {
 		if refreshErr := refreshCredentials(); refreshErr != nil {
 			return a, refreshErr
 		}
@@ -950,6 +1037,12 @@ func (s *Store) refresh(ctx context.Context, c *Client, id string, credentials, 
 	a.Quota = q
 	if e == nil && includePermissions {
 		generation, generationErr := c.GenerationPermissions(ctx, a)
+		if due != nil && !quotaOnly && !refreshedOnce && errors.As(generationErr, &upstream) && upstream.Status == http.StatusUnauthorized {
+			if refreshErr := refreshCredentials(); refreshErr != nil {
+				return a, refreshErr
+			}
+			generation, generationErr = c.GenerationPermissions(ctx, a)
+		}
 		if modelCheck && ctx.Err() != nil {
 			return a, ctx.Err()
 		}

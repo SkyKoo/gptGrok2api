@@ -14,6 +14,42 @@ import (
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
 
+const adobeAutoReloginSetting = "adobe_auto_relogin_enabled"
+
+func (s *Server) adobeAutoRelogin(w http.ResponseWriter, r *http.Request) {
+	var cfg map[string]any
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		cfg, err = s.store.Config()
+	case http.MethodPost:
+		var request struct {
+			Enabled *bool `json:"enabled"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		if request.Enabled == nil {
+			writeError(w, http.StatusBadRequest, "请选择是否开启 Adobe 自动登录", "invalid_request_error")
+			return
+		}
+		cfg, err = s.store.UpdateConfig(adobeAutoReloginSetting, *request.Enabled)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "Adobe 自动登录设置暂不可用", "storage_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": boolValue(cfg[adobeAutoReloginSetting], true)})
+}
+
+func (s *Server) adobeAutoReloginEnabled() bool {
+	cfg, err := s.store.Config()
+	return err == nil && boolValue(cfg[adobeAutoReloginSetting], true)
+}
+
 func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -24,6 +60,8 @@ func (s *Server) adobeAccountsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/adobe/accounts"), "/")
 	switch {
+	case path == "auto-relogin":
+		s.adobeAutoRelogin(w, r)
 	case path == "" && r.Method == http.MethodGet:
 		items, err := s.adobeStore.PublicList()
 		if err != nil {
@@ -413,6 +451,21 @@ func (s *Server) adobeAccountContext(ctx context.Context, a adobe.Account) (cont
 	return proxyruntime.WithURL(ctx, s.proxyManager.Resolve(fields, false)), nil
 }
 func (s *Server) adobeMaintenanceScheduler() {
+	s.runAdobeMaintenance(2*time.Minute, s.refreshDueAdobeAccounts)
+}
+
+func (s *Server) adobeLoginScheduler() {
+	var nextWarm time.Time
+	s.runAdobeMaintenance(10*time.Minute, func(ctx context.Context) {
+		s.refreshDueAdobeLogin(ctx)
+		if ctx.Err() == nil && !time.Now().Before(nextWarm) && s.adobeAutoReloginEnabled() {
+			s.refreshAllAdobeMediaSessions(ctx)
+			nextWarm = time.Now().Add(time.Hour)
+		}
+	})
+}
+
+func (s *Server) runAdobeMaintenance(timeout time.Duration, refresh func(context.Context)) {
 	timer := time.NewTimer(time.Minute)
 	defer timer.Stop()
 	select {
@@ -420,13 +473,12 @@ func (s *Server) adobeMaintenanceScheduler() {
 		return
 	case <-timer.C:
 	}
-	// Background warming is opportunistic. Requests can prepare their own sessions.
-	ticker := time.NewTicker(time.Hour)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		if s.beginDeploymentBackground() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			s.refreshDueAdobeAccounts(ctx)
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			refresh(ctx)
 			cancel()
 			s.endDeploymentBackground()
 		}
@@ -443,14 +495,32 @@ func (s *Server) refreshDueAdobeAccounts(ctx context.Context) {
 	}
 	s.reconcileAdobeMediaReservations()
 	s.reconcileAdobeSubmissions(ctx, time.Now())
-	cfg, err := s.store.Config()
-	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
-		return
-	}
 	items, err := s.adobeStore.List()
 	if err != nil {
 		return
 	}
+	s.refreshAdobeSettledQuotas(ctx, items, time.Now())
+	cfg, err := s.store.Config()
+	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
+		return
+	}
+	items, err = s.adobeStore.List()
+	if err != nil {
+		return
+	}
 	s.refreshAdobeMaintenanceSnapshot(ctx, items, time.Now())
-	s.refreshAllAdobeMediaSessions(ctx)
+}
+
+func (s *Server) refreshDueAdobeLogin(ctx context.Context) {
+	if !s.adobeReconciliationAllowed() {
+		return
+	}
+	cfg, err := s.store.Config()
+	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) || !boolValue(cfg[adobeAutoReloginSetting], true) {
+		return
+	}
+	items, err := s.adobeStore.List()
+	if err == nil {
+		s.refreshAdobeLoginSnapshot(ctx, items, time.Now())
+	}
 }

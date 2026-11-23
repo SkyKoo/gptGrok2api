@@ -124,30 +124,6 @@ func (s *Server) reconcileAdobeSubmissions(ctx context.Context, now time.Time) {
 			return
 		}
 		if a.InFlight == "" {
-			// Auto-release keeps the normal settlement fence. Once it ends,
-			// refresh invalidated quota even when credential maintenance is off.
-			checkedAt, _ := time.Parse(time.RFC3339Nano, a.Quota.CheckedAt)
-			// A routing failure prevented both reads. An older generation error
-			// must not bypass that shared, persisted five-minute cooldown.
-			if a.Quota.Status == "error" && a.Quota.Error == "adobe_routing_proxy_unavailable" && !checkedAt.IsZero() && now.Sub(checkedAt) < 5*time.Minute {
-				continue
-			}
-			quotaDue := a.Quota.Status == "stale" || (a.Quota.Status == "error" && (checkedAt.IsZero() || now.Sub(checkedAt) >= 5*time.Minute))
-			if generation := a.Quota.Generation; generation != nil && generation.Status == "error" {
-				checkedGeneration, _ := time.Parse(time.RFC3339Nano, generation.CheckedAt)
-				quotaDue = quotaDue || checkedGeneration.IsZero() || now.Sub(checkedGeneration) >= 5*time.Minute
-			}
-			if a.SettlementUntil <= now.Unix() && quotaDue {
-				records, readErr := s.adobeStore.SubmissionResolutions(a.ID)
-				var releasedAt time.Time
-				if len(records) > 0 {
-					releasedAt, _ = time.Parse(time.RFC3339Nano, records[0].ResolvedAt)
-				}
-				if readErr == nil && len(records) > 0 && records[0].ReviewedBy == "system" && !releasedAt.IsZero() && releasedAt.Unix() >= a.LastUsedAt {
-					_, _ = s.queryAdobeReconciliationQuota(ctx, a.ID)
-					processed++
-				}
-			}
 			continue
 		}
 		if s.reconcileAdobeSubmission(ctx, a, now) {

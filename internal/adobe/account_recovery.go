@@ -2,6 +2,7 @@ package adobe
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -116,6 +117,30 @@ func (s *Store) ResolveSubmission(id, taskKey string, revision uint64, confirmed
 // A quota read may coexist with a pinned generation; its result is discarded if
 // that reservation changes while the upstream reads are in progress.
 func (s *Store) QueryQuota(ctx context.Context, c *Client, id string) (Account, error) {
+	return s.queryQuota(ctx, c, id, nil)
+}
+
+// QuerySubmittedQuota observes the same account after Adobe accepts the job.
+// The reservation remains pinned even if Adobe has already debited the quota.
+func (s *Store) QuerySubmittedQuota(ctx context.Context, c *Client, id, taskKey string, revision uint64) (Account, error) {
+	return s.queryQuota(ctx, c, id, func(a Account) bool {
+		return a.Enabled && taskKey != "" && a.InFlight == taskKey && a.Revision == revision &&
+			a.Status != "submission_unknown" && !automaticQuotaCooling(a, time.Now())
+	})
+}
+
+// QuerySettledQuota rechecks the durable settlement fence before issuing reads.
+func (s *Store) QuerySettledQuota(ctx context.Context, c *Client, expected Account) (Account, error) {
+	return s.queryQuota(ctx, c, expected.ID, func(a Account) bool {
+		return a.Revision == expected.Revision && a.SettlementUntil == expected.SettlementUntil &&
+			SettledQuotaDue(a, time.Now())
+	})
+}
+
+func (s *Store) queryQuota(ctx context.Context, c *Client, id string, allowed func(Account) bool) (Account, error) {
+	if err := ctx.Err(); err != nil {
+		return Account{}, err
+	}
 	s.mu.Lock()
 	d, err := s.load()
 	if err != nil {
@@ -136,6 +161,10 @@ func (s *Store) QueryQuota(ctx context.Context, c *Client, id string) (Account, 
 	if s.maintenance[id] || s.quotaQueries[id] {
 		s.mu.Unlock()
 		return before, ErrBusy
+	}
+	if allowed != nil && !allowed(before) {
+		s.mu.Unlock()
+		return before, ErrResolutionConflict
 	}
 	s.quotaQueries[id] = true
 	s.mu.Unlock()
@@ -159,6 +188,9 @@ func (s *Store) QueryQuota(ctx context.Context, c *Client, id string) (Account, 
 		generation.CheckedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	quota.Generation = &generation
+	if err := ctx.Err(); err != nil && (allowed == nil || !errors.Is(err, context.DeadlineExceeded)) {
+		return before, err
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -171,7 +203,8 @@ func (s *Store) QueryQuota(ctx context.Context, c *Client, id string) (Account, 
 		if a.ID != id {
 			continue
 		}
-		if s.maintenance[id] || a.Revision != before.Revision || a.QuotaRevision != before.QuotaRevision || a.InFlight != before.InFlight || a.Status != before.Status || a.SettlementUntil != before.SettlementUntil {
+		if s.maintenance[id] || a.Revision != before.Revision || a.QuotaRevision != before.QuotaRevision || a.InFlight != before.InFlight || a.Status != before.Status || a.SettlementUntil != before.SettlementUntil ||
+			(allowed != nil && (a.Enabled != before.Enabled || a.Proxy != before.Proxy || a.ProxyPolicy != before.ProxyPolicy || !reflect.DeepEqual(a.ProxyBinding, before.ProxyBinding))) {
 			return *a, ErrResolutionConflict
 		}
 		a.Quota = quota
@@ -210,7 +243,7 @@ func (s *Store) RecordQuotaQueryFailure(expected Account, code string, checkedAt
 		if s.maintenance[a.ID] || s.quotaQueries[a.ID] {
 			return *a, ErrBusy
 		}
-		if a.Revision != expected.Revision || a.QuotaRevision != expected.QuotaRevision || a.InFlight != expected.InFlight || a.Status != expected.Status || a.SettlementUntil != expected.SettlementUntil || a.LastUsedAt != expected.LastUsedAt || a.CreatedAt != expected.CreatedAt || a.Proxy != expected.Proxy || a.ProxyPolicy != expected.ProxyPolicy || !reflect.DeepEqual(a.ProxyBinding, expected.ProxyBinding) {
+		if a.Revision != expected.Revision || a.QuotaRevision != expected.QuotaRevision || a.InFlight != expected.InFlight || a.Status != expected.Status || a.Enabled != expected.Enabled || a.SettlementUntil != expected.SettlementUntil || a.LastUsedAt != expected.LastUsedAt || a.CreatedAt != expected.CreatedAt || a.Proxy != expected.Proxy || a.ProxyPolicy != expected.ProxyPolicy || !reflect.DeepEqual(a.ProxyBinding, expected.ProxyBinding) {
 			return *a, ErrResolutionConflict
 		}
 		stamp := checkedAt.UTC().Format(time.RFC3339Nano)

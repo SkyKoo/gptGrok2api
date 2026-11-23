@@ -262,6 +262,55 @@ func TestAdobeMediaSchedulerHonorsSessionFailureBackoff(t *testing.T) {
 	}
 }
 
+func TestAdobeAutoReloginSwitchKeepsScheduledQuotaReads(t *testing.T) {
+	s := imageTaskTestServer(t)
+	const path = "/api/adobe/accounts/auto-relogin"
+	check := func(method, body string, enabled bool) {
+		t.Helper()
+		w := imageTaskCall(s, method, path, "admin-secret", body)
+		var result struct{ Enabled *bool }
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Enabled == nil || *result.Enabled != enabled {
+			t.Fatalf("unexpected auto-login response: %d %s", w.Code, w.Body.String())
+		}
+	}
+	check("GET", "", true)
+	check("POST", `{"enabled":false}`, false)
+	check("GET", "", false)
+
+	expired := adobeSchedulingAccount(t, s, "expired-login", time.Now())
+	valid := adobeSchedulingAccount(t, s, "quota-only", time.Now())
+	claims, _ := json.Marshal(map[string]any{"user_id": expired.AccountID, "exp": time.Now().Add(-time.Minute).Unix()})
+	expired.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".fixture"
+	if _, err := s.adobeStore.Import([]adobe.Account{expired}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.adobeStore.UpdateQuota(valid.ID, valid.Revision, adobe.Quota{Status: "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	var reads, browsers atomic.Int32
+	s.adobeClient = adobeReconciliationQuotaClient(t, &reads, false)
+	s.adobeStore.SetBrowserRefresher(func(ctx context.Context, a adobe.Account) (adobe.Account, error) {
+		browsers.Add(1)
+		if a.ID != expired.ID {
+			t.Error("browser used for an account that only needed quota")
+		}
+		claims, _ := json.Marshal(map[string]any{"user_id": a.AccountID, "exp": time.Now().Add(time.Hour).Unix()})
+		a.Token = "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".fixture"
+		return adobeFixtureMediaRefresh(ctx, a)
+	})
+	s.refreshDueAdobeAccounts(context.Background())
+	s.refreshDueAdobeLogin(context.Background())
+	s.refreshAllAdobeMediaSessions(context.Background())
+	if reads.Load() != 2 || browsers.Load() != 0 {
+		t.Fatalf("switch affected quota reads or allowed background browser use: reads=%d browser=%d", reads.Load(), browsers.Load())
+	}
+	check("POST", `{"enabled":true}`, true)
+	s.refreshDueAdobeLogin(context.Background())
+	if reads.Load() != 4 || browsers.Load() != 1 {
+		t.Fatalf("expired account recovery not resumed: reads=%d browser=%d", reads.Load(), browsers.Load())
+	}
+}
+
 func TestAdobeMaintenanceRefreshesPermissionsBeforeWarming(t *testing.T) {
 	s := imageTaskTestServer(t)
 	a := adobeSchedulingAccount(t, s, "recent", time.Now().Add(-time.Minute))
@@ -278,6 +327,7 @@ func TestAdobeMaintenanceRefreshesPermissionsBeforeWarming(t *testing.T) {
 		return adobeFixtureMediaRefresh(ctx, current)
 	})
 	s.refreshDueAdobeAccounts(context.Background())
+	s.refreshAllAdobeMediaSessions(context.Background())
 	if reads.Load() != 2 || prepares.Load() != 1 {
 		t.Fatalf("maintenance reads=%d prepares=%d", reads.Load(), prepares.Load())
 	}
@@ -527,6 +577,7 @@ func TestAdobeMaintenanceRefreshesExpiredPermissionsBeforeUsingBrowser(t *testin
 				t.Fatal("media-only scan refreshed an account with stale model permissions")
 			}
 			s.refreshDueAdobeAccounts(context.Background())
+			s.refreshAllAdobeMediaSessions(context.Background())
 			if reads.Load() != 2 || prepares.Load() != 1 {
 				t.Fatalf("maintenance did not prepare model-eligible account: quota=%d browser=%d", reads.Load(), prepares.Load())
 			}

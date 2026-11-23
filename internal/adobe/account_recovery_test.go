@@ -37,6 +37,63 @@ func queryFixtureClient(t *testing.T, beforeResponse func()) *Client {
 	})})
 }
 
+func TestAutomaticQuotaObservesSubmittedAndSettledGeneration(t *testing.T) {
+	s, a := idleMediaStore(t)
+	ctx := mediaTestContext()
+	const task = "quota-after-generation"
+	a, err := s.Reserve(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	client := queryFixtureClient(t, func() { reads++ })
+	if _, err = s.QuerySubmittedQuota(ctx, client, a.ID, "another-task", a.Revision); !errors.Is(err, ErrResolutionConflict) {
+		t.Fatal("quota read accepted the wrong task", err)
+	}
+	during, err := s.QuerySubmittedQuota(ctx, client, a.ID, task, a.Revision)
+	if err != nil || reads != 1 || during.InFlight != task || during.Quota.Status != "known" {
+		t.Fatalf("submitted quota result lost its reservation: reads=%d error=%v", reads, err)
+	}
+	if err = s.Release(task); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.Get(a.ID)
+	if _, err = s.QuerySettledQuota(ctx, client, after); !errors.Is(err, ErrResolutionConflict) || reads != 1 {
+		t.Fatal("quota queried before settlement", err)
+	}
+	if err = s.update(a.ID, a.Revision, func(a *Account) {
+		a.SettlementUntil = time.Now().Add(-time.Second).Unix()
+		a.LastUsedAt = a.SettlementUntil - 30
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewStore(s.path, s.secret)
+	after, _ = restarted.Get(a.ID)
+	failedClient := NewClient(&http.Client{Transport: roundTripper(func(*http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusServiceUnavailable, `{"error_code":"unavailable"}`), nil
+	})})
+	if _, err = restarted.QuerySettledQuota(ctx, failedClient, after); err == nil {
+		t.Fatal("expected failed post-settlement refresh")
+	}
+	restarted = NewStore(s.path, s.secret)
+	after, _ = restarted.Get(a.ID)
+	if _, err = restarted.QuerySettledQuota(ctx, client, after); !errors.Is(err, ErrResolutionConflict) || reads != 1 {
+		t.Fatal("restart bypassed quota backoff", err)
+	}
+	if err = restarted.update(a.ID, a.Revision, func(a *Account) {
+		stamp := time.Now().Add(-automaticQuotaFailureBackoff - time.Second).Format(time.RFC3339Nano)
+		a.Quota.CheckedAt = stamp
+		a.Quota.Generation.CheckedAt = stamp
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ = restarted.Get(a.ID)
+	final, err := restarted.QuerySettledQuota(ctx, client, after)
+	if err != nil || reads != 2 || final.Quota.Generation.Status != "known" || SettledQuotaDue(final, time.Now()) {
+		t.Fatalf("settled quota did not recover: reads=%d error=%v", reads, err)
+	}
+}
+
 func TestQueryQuotaPreservesUnknownAccountAndNoCredentialRefresh(t *testing.T) {
 	s, a := readyStore(t)
 	_, _ = s.Reserve("existing-task")

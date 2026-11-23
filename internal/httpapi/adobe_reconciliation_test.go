@@ -402,7 +402,9 @@ func TestAdobeAutomaticReconciliationQuotaRetryAfterReleaseIsBoundedAndIndepende
 		t.Fatal("retried failed quota before persisted backoff")
 	}
 	editAdobeReconciliationFixture(t, s, a.ID, func(a *adobe.Account) {
-		a.Quota.CheckedAt = time.Now().Add(-6 * time.Minute).UTC().Format(time.RFC3339Nano)
+		stamp := time.Now().Add(-6 * time.Minute).UTC().Format(time.RFC3339Nano)
+		a.Quota.CheckedAt = stamp
+		a.Quota.Generation.CheckedAt = stamp
 	})
 	s.adobeClient = adobeReconciliationQuotaClient(t, &calls, false)
 	s.refreshDueAdobeAccounts(context.Background())
@@ -435,6 +437,13 @@ func TestAdobeAutomaticReconciliationRetriesFailedGenerationPermissionsAfterRele
 		t.Fatal("generation-permission error blocked local cleanup or was discarded")
 	}
 	editAdobeReconciliationFixture(t, s, a.ID, func(a *adobe.Account) { a.SettlementUntil = time.Now().Add(-time.Second).Unix() })
+	s.refreshDueAdobeAccounts(context.Background())
+	if calls.Load() != 2 {
+		t.Fatal("settlement bypassed the previous failed quota observation")
+	}
+	editAdobeReconciliationFixture(t, s, a.ID, func(a *adobe.Account) {
+		a.Quota.Generation.CheckedAt = time.Now().Add(-6 * time.Minute).UTC().Format(time.RFC3339Nano)
+	})
 	s.refreshDueAdobeAccounts(context.Background())
 	got, _ = s.adobeStore.Get(a.ID)
 	if got.Quota.Status != "known" || got.Quota.Generation.Status != "error" || calls.Load() != 4 {
@@ -484,7 +493,7 @@ func TestAdobeAutomaticReconciliationProxyFailurePersistsSharedQuotaBackoff(t *t
 	restarted := NewWithWorkers(s.cfg, false)
 	restarted.PauseDeployment(false)
 	restarted.adobeClient = adobeReconciliationQuotaClient(t, &calls, false)
-	restarted.reconcileAdobeSubmissions(context.Background(), time.Now().Add(30*time.Second))
+	restarted.refreshDueAdobeAccounts(context.Background())
 	unchanged, _ := restarted.adobeStore.Get(a.ID)
 	if unchanged.QuotaRevision != failed.QuotaRevision || unchanged.Quota.CheckedAt != failed.Quota.CheckedAt || calls.Load() != 2 {
 		t.Fatal("restart or older generation error bypassed routing cooldown")

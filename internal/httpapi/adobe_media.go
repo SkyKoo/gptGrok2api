@@ -231,6 +231,7 @@ func (s *Server) generateAdobeImageData(r *http.Request, ctx context.Context, se
 		s.adobeStore.MarkUnknown(selected.Key)
 		return nil, fmt.Errorf("could not save upstream task handle; automatic resubmission disabled")
 	}
+	s.queueAdobeSubmittedQuota(ctx, selected.Adobe, selected.Key)
 	if err = s.imageRouteStage(ctx, "polling"); err != nil {
 		return nil, err
 	}
@@ -590,6 +591,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		s.setVideoStatus(job, "failed", 0, map[string]any{"code": "storage_failed", "message": "upstream task handle could not be saved; automatic resubmission disabled"})
 		return
 	}
+	s.queueAdobeSubmittedQuota(ctx, a, key)
 	s.videoMu.Lock()
 	job.Route.Stage = "polling"
 	err = s.saveVideoCheckpointLocked(job)

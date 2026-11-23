@@ -43,6 +43,7 @@ type Server struct {
 	adobeStore                *adobe.Store
 	adobeReloginJobs          *adobe.ReloginJobs
 	adobeReloginMu            sync.Mutex
+	adobeSubmittedQuotas      adobeSubmittedQuotaQueue
 	adobeReloginRunning       bool
 	adobeClient               *adobe.Client
 	adobeRegister             *registerruntime.AdobeEngine
@@ -176,8 +177,12 @@ func NewWithWorkers(cfg config.Config, startWorkers bool) *Server {
 		}
 	}
 	server := &Server{
-		adobeStore:         adobe.NewStore(filepath.Join(cfg.DataDir, "adobe_accounts.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
-		adobeReloginJobs:   adobe.NewReloginJobs(filepath.Join(cfg.DataDir, "adobe_relogin_tasks.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
+		adobeStore:       adobe.NewStore(filepath.Join(cfg.DataDir, "adobe_accounts.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
+		adobeReloginJobs: adobe.NewReloginJobs(filepath.Join(cfg.DataDir, "adobe_relogin_tasks.json.enc"), firstNonEmpty(cfg.AdminKey, cfg.APIKey, "gptgrok2api")),
+		adobeSubmittedQuotas: adobeSubmittedQuotaQueue{
+			pending: make(map[string]adobeSubmittedQuota),
+			wake:    make(chan struct{}, 1),
+		},
 		adobeClient:        adobe.NewClient(requestClient),
 		cfg:                cfg,
 		deployPaused:       !startWorkers,
@@ -2182,9 +2187,10 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 			}
 			updates["image_task_timeout_secs"] = seconds
 		}
-		// This setting has its own validated endpoint. Ignore an old UI snapshot
-		// so saving general settings cannot revert a concurrent model choice.
+		// These settings have their own endpoints. An older general settings
+		// snapshot must not undo concurrent updates.
 		delete(updates, "openai_routing")
+		delete(updates, adobeAutoReloginSetting)
 		current, err := s.store.MergeConfig(updates)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
@@ -2827,6 +2833,8 @@ func (s *Server) StartWorkers() {
 		go s.modelCapabilityScheduler()
 		go s.grokMediaQuotaScheduler()
 		go s.adobeMaintenanceScheduler()
+		go s.adobeLoginScheduler()
+		go s.adobeSubmittedQuotaScheduler()
 		go s.registrationScheduler()
 	})
 }

@@ -37,7 +37,7 @@ async function clearSelection() {
   // Teleported bars remain in the document until Vue's exit transition ends.
   await page.locator('.selection-bulk-bar-host').waitFor({state:'detached'})
 }
-let priorities=['chatgpt','adobe'], multi=false
+let priorities=['chatgpt','adobe'], multi=false, automaticAdobeLogin=true
 const deletedAccounts=new Set(), disabledAccounts=new Map(), linkedAccounts=new Set(), grokDisabledAccounts=new Set()
 const grokFixtures=['one','two'].map(id=>({id:`grok:${id}`,platform:'grok',email:`grok-${id}@example.test`,has_password:true,has_sso:true,source_type:'fixture',status:'active',created_at:new Date().toISOString(),updated_at:new Date().toISOString(),sync_state:'synced',runtime_status:'active'}))
 const generation={status:'known',checked_at:new Date().toISOString(),models:[],pools:[
@@ -55,6 +55,14 @@ await context.route('**/*',async route=>{
   if(pathname==='/auth/status')data={authenticated:true,role:'admin',name:'Fixture'}
   else if(pathname==='/api/settings')data={config:{}}
   else if(pathname==='/api/model-catalog')data=catalog
+  else if(pathname==='/api/adobe/accounts/auto-relogin'){
+    if(req.method()==='POST'){
+      const body=JSON.parse(req.postData())
+      assert.equal(typeof body.enabled,'boolean')
+      automaticAdobeLogin=body.enabled
+    }
+    data={enabled:automaticAdobeLogin}
+  }
   else if(pathname==='/api/adobe/accounts'&&req.method()==='DELETE'){
     const ids=JSON.parse(req.postData()).ids;ids.forEach(id=>deletedAccounts.add(id));data={deleted:ids.length}
   }
@@ -95,6 +103,9 @@ await context.route('**/*',async route=>{
 try {
   await page.goto(origin+'/#/accounts?platform=adobe')
   await page.getByRole('heading',{name:'Adobe 账号',exact:true}).waitFor()
+  await page.getByRole('button',{name:'关闭自动登录',exact:true}).click()
+  await page.getByRole('button',{name:'开启自动登录',exact:true}).waitFor()
+  assert.equal(automaticAdobeLogin,false)
   const accountRow=page.getByRole('row').filter({hasText:'fixture@example.test'})
   for(const label of ['每日图片','每日视频','图片体验','2 / 3','1 / 1','3 / 3','通用积分 10']) await accountRow.getByText(label,{exact:true}).waitFor()
   await page.getByRole('row').filter({hasText:'zero@example.test'}).getByText('0 / 1',{exact:true}).waitFor()
@@ -126,6 +137,9 @@ try {
   await page.setViewportSize({width:1440,height:1100})
   await page.reload()
   await accountCard.waitFor()
+  await page.getByRole('button',{name:'开启自动登录',exact:true}).click()
+  await page.getByRole('button',{name:'关闭自动登录',exact:true}).waitFor()
+  assert.equal(automaticAdobeLogin,true)
   assert.equal(await accountCard.getByRole('checkbox',{name:'选择 fixture@example.test'}).isChecked(),false)
   await page.getByRole('button',{name:'列表视图',exact:true}).click()
   await accountRow.waitFor()
@@ -258,7 +272,7 @@ try {
   await screenshot('model-priority')
   assert.deepEqual(errors,[])
   assert.deepEqual(unknown,[], 'Unexpected API fixture path')
-  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts','/api/adobe/accounts/disabled','/api/adobe/accounts/refresh','/api/adobe/accounts/link-mailboxes','/api/register/grok/accounts/runtime/disabled','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
+  assert.deepEqual(requests.filter(req=>req.method!=='GET'&&!['/api/adobe/accounts','/api/adobe/accounts/auto-relogin','/api/adobe/accounts/disabled','/api/adobe/accounts/refresh','/api/adobe/accounts/link-mailboxes','/api/register/grok/accounts/runtime/disabled','/api/model-routing','/api/register/grok/accounts/runtime/snapshot'].includes(req.path)),[], 'Unexpected mutation')
   console.log(JSON.stringify({ok:true,checks:['adobe-media-session-status','adobe-account-quota','adobe-account-refresh','adobe-stale-history','adobe-row-target-isolation','adobe-delete-confirmation','adobe-selection-bulk-bar','adobe-toolbar-selection','adobe-card-view-persistence','adobe-mobile-cards','adobe-mailbox-link-targets','adobe-mailbox-link-partial-results','grok-toolbar-bulk-targets','adobe-hme-source-selectable','third-registration-tab','adobe-schedule','veo-free-parameters','gemini-free-parameters','single-channel-empty-state','multi-channel-admin-priority'],fixtureEndpoints:[...new Set(unknown)].sort()}))
 } catch(error){console.log(JSON.stringify({errors,body:(await page.locator('body').innerText()).slice(-6000),fixtureEndpoints:[...new Set(unknown)].sort()}));throw error}
 finally{await browser.close();await new Promise(resolve=>server.close(resolve))}

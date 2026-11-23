@@ -2,7 +2,23 @@
   <PagePanel class="space-y-5">
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div><h2 class="font-semibold">Adobe 账号</h2><p class="text-xs text-muted-foreground">免费生成次数按额度池共享；图片、视频和体验次数分别显示。通用积分不代表生成次数。</p></div>
-      <Button variant="outline" size="sm" :disabled="loading || operationLocked" @click="load">刷新列表</Button>
+      <div class="flex flex-wrap items-center justify-end gap-2">
+        <Button
+          size="sm"
+          :variant="autoReloginEnabled === false ? 'primary' : 'outline'"
+          :disabled="autoReloginBusy || autoReloginEnabled === null || operationLocked"
+          title="控制后台续登和会话预热。刷新额度使用 Adobe 接口。"
+          @click="toggleAutoRelogin"
+        >
+          <Icon
+            :icon="autoReloginBusy ? 'lucide:loader-circle' : autoReloginEnabled ? 'lucide:circle-pause' : 'lucide:circle-play'"
+            class="h-3.5 w-3.5"
+            :class="{ 'animate-spin': autoReloginBusy }"
+          />
+          {{ autoReloginBusy ? '更新中…' : autoReloginEnabled === null ? '自动登录' : autoReloginEnabled ? '关闭自动登录' : '开启自动登录' }}
+        </Button>
+        <Button variant="outline" size="sm" :disabled="loading || operationLocked" @click="refreshList">刷新列表</Button>
+      </div>
     </div>
     <div class="space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
@@ -126,6 +142,7 @@
 </template>
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { Icon } from '@iconify/vue'
 import { Button, Checkbox, Input, type ActionMenuItem } from 'nanocat-ui'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import AccountBulkBar from '@/components/ai/AccountBulkBar.vue'
@@ -162,9 +179,48 @@ function savedViewMode(): ViewMode { try { return localStorage.getItem(viewModeK
 const viewMode = ref<ViewMode>(savedViewMode())
 function setViewMode(mode: ViewMode) { viewMode.value = mode; try { localStorage.setItem(viewModeKey, mode) } catch { /* 当前会话仍可切换视图。 */ } }
 const error = ref(''), message = ref(''), showImport = ref(false), importText = ref('')
+const autoReloginEnabled = ref<boolean | null>(null)
+const autoReloginBusy = ref(false)
 const confirming = ref(false), operationIds = ref<string[]>([]), operation = ref<Action | ''>('')
 const confirmDialog = useConfirmDialog()
 let mounted = true
+
+async function loadAutoRelogin() {
+  if (autoReloginBusy.value) return
+  autoReloginBusy.value = true
+  try {
+    const result = await adobeAccountsApi.autoRelogin()
+    if (mounted) autoReloginEnabled.value = result.enabled
+  } catch {
+    if (mounted) error.value = '读取 Adobe 自动登录设置失败'
+  } finally {
+    autoReloginBusy.value = false
+  }
+}
+
+async function toggleAutoRelogin() {
+  if (autoReloginBusy.value || autoReloginEnabled.value === null) return
+  autoReloginBusy.value = true
+  error.value = ''
+  message.value = ''
+  try {
+    const result = await adobeAccountsApi.setAutoRelogin(!autoReloginEnabled.value)
+    if (mounted) {
+      autoReloginEnabled.value = result.enabled
+      message.value = result.enabled ? 'Adobe 自动登录已开启' : 'Adobe 自动登录已关闭'
+    }
+  } catch {
+    if (mounted) error.value = '保存 Adobe 自动登录设置失败'
+  } finally {
+    autoReloginBusy.value = false
+  }
+}
+
+function refreshList() {
+  void load()
+  void loadAutoRelogin()
+}
+
 const historyTarget = ref<AdobeAccount | null>(null)
 const historyAccount = computed(() => historyTarget.value ? accounts.value.find(account => account.id === historyTarget.value?.id) || historyTarget.value : null)
 const operationLocked = computed(() => busy.value || confirming.value)
@@ -276,7 +332,7 @@ watch(page, () => { selected.value = []; void load() })
 watch([keyword, status], () => { selected.value = []; clearTimeout(searchTimer); searchTimer = setTimeout(() => { if (page.value !== 1) page.value = 1; else void load() }, 250) })
 let stopAutomaticRefresh: (() => void) | undefined
 onMounted(() => {
-  void load()
+  refreshList()
   stopAutomaticRefresh = startAdobeAccountAutoRefresh(load, () => !loading.value && !busy.value && !confirming.value && accounts.value.some(adobeAutomaticProcessing))
 })
 onBeforeUnmount(() => { mounted = false; stopAutomaticRefresh?.(); if (confirming.value) confirmDialog.cancel(); sequence++; clearTimeout(searchTimer); importText.value = '' })

@@ -225,6 +225,13 @@ func TestAdobeMediaEntrypointsRefreshStaleEntitlementsWithMaintenanceDisabled(t 
 			if status != want || route == nil || route.AccountID != a.ID {
 				t.Fatalf("request did not finish on the checked account: status=%s route=%+v detail=%s", status, route, detail)
 			}
+			check, ok := s.adobeSubmittedQuotas.next()
+			if !ok || check.accountID != a.ID || check.taskKey != route.JobKey || check.revision <= a.Revision {
+				t.Fatal("accepted generation did not schedule a pinned quota observation")
+			}
+			if _, ok = s.adobeSubmittedQuotas.next(); ok {
+				t.Fatal("accepted generation scheduled more than one initial quota observation")
+			}
 			fixture.mu.Lock()
 			defer fixture.mu.Unlock()
 			if browserCalls != 1 || fixture.balanceChecks != 1 || fixture.modelChecks != 1 || fixture.preflights != 1 || fixture.submits != 1 {

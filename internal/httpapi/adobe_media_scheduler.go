@@ -2,12 +2,109 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/auucoder/gptgrok2api-go/internal/adobe"
+	proxyruntime "github.com/auucoder/gptgrok2api-go/internal/proxy"
 )
+
+type adobeSubmittedQuota struct {
+	accountID, taskKey, endpoint string
+	revision                     uint64
+}
+
+type adobeSubmittedQuotaQueue struct {
+	mu      sync.Mutex
+	pending map[string]adobeSubmittedQuota
+	wake    chan struct{}
+}
+
+func (q *adobeSubmittedQuotaQueue) enqueue(job adobeSubmittedQuota) {
+	q.mu.Lock()
+	q.pending[job.accountID] = job
+	q.mu.Unlock()
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (q *adobeSubmittedQuotaQueue) next() (adobeSubmittedQuota, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for id, job := range q.pending {
+		delete(q.pending, id)
+		return job, true
+	}
+	return adobeSubmittedQuota{}, false
+}
+
+func (s *Server) queueAdobeSubmittedQuota(ctx context.Context, a adobe.Account, key string) {
+	if endpoint, ok := proxyruntime.URLSelectionFromContext(ctx); ok {
+		s.adobeSubmittedQuotas.enqueue(adobeSubmittedQuota{a.ID, key, endpoint, a.Revision})
+	}
+}
+
+func (s *Server) runAdobeSubmittedQuota(job adobeSubmittedQuota) {
+	if !s.adobeReconciliationAllowed() || !s.beginDeploymentBackground() {
+		return
+	}
+	defer s.endDeploymentBackground()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	ctx = proxyruntime.WithURL(ctx, job.endpoint)
+	_, _ = s.adobeStore.QuerySubmittedQuota(ctx, s.adobeClient, job.accountID, job.taskKey, job.revision)
+}
+
+func (s *Server) adobeSubmittedQuotaScheduler() {
+	for {
+		select {
+		case <-s.probeStop:
+			return
+		case <-s.adobeSubmittedQuotas.wake:
+		}
+		for {
+			job, ok := s.adobeSubmittedQuotas.next()
+			if !ok {
+				break
+			}
+			select {
+			case <-s.probeStop:
+				return
+			default:
+				s.runAdobeSubmittedQuota(job)
+			}
+		}
+	}
+}
+
+func (s *Server) refreshAdobeSettledQuotas(ctx context.Context, items []adobe.Account, now time.Time) {
+	sort.SliceStable(items, func(i, j int) bool { return items[i].SettlementUntil < items[j].SettlementUntil })
+	reads := 0
+	for _, a := range items {
+		if ctx.Err() != nil || !s.adobeReconciliationAllowed() || reads >= 4 {
+			return
+		}
+		if !adobe.SettledQuotaDue(a, now) {
+			continue
+		}
+		fixed, err := s.adobeAccountContext(ctx, a)
+		if err != nil {
+			if _, saveErr := s.adobeStore.RecordQuotaQueryFailure(a, "proxy_unavailable", time.Now()); saveErr == nil {
+				reads++
+			}
+			continue
+		}
+		_, err = s.adobeStore.QuerySettledQuota(fixed, s.adobeClient, a)
+		if !errors.Is(err, adobe.ErrBusy) && !errors.Is(err, adobe.ErrResolutionConflict) {
+			reads++
+		}
+	}
+}
 
 func (s *Server) refreshAdobeMaintenanceSnapshot(ctx context.Context, items []adobe.Account, now time.Time) {
 	items = append([]adobe.Account(nil), items...)
@@ -19,18 +116,44 @@ func (s *Server) refreshAdobeMaintenanceSnapshot(ctx context.Context, items []ad
 		if ctx.Err() != nil || !s.adobeReconciliationAllowed() {
 			return
 		}
-		if !adobe.MaintenanceDue(a, now) {
+		if !adobe.PeriodicQuotaDue(a, now) {
 			continue
 		}
 		fixed, err := s.adobeAccountContext(ctx, a)
 		if err != nil {
-			continue
-		}
-		_, attempted, _ := s.adobeStore.RefreshDueWithPermissions(fixed, s.adobeClient, a.ID, time.Now())
-		if attempted {
-			attempts++
+			if _, saveErr := s.adobeStore.RecordQuotaQueryFailure(a, "proxy_unavailable", time.Now()); saveErr == nil {
+				attempts++
+			}
+		} else {
+			_, attempted, _ := s.adobeStore.RefreshDueQuota(fixed, s.adobeClient, a.ID, time.Now())
+			if attempted {
+				attempts++
+			}
 		}
 		if attempts >= 4 {
+			return
+		}
+	}
+}
+
+func (s *Server) refreshAdobeLoginSnapshot(ctx context.Context, items []adobe.Account, now time.Time) {
+	sort.SliceStable(items, func(i, j int) bool { return items[i].ExpiresAt < items[j].ExpiresAt })
+	for _, a := range items {
+		if ctx.Err() != nil || !s.adobeReconciliationAllowed() {
+			return
+		}
+		if !adobe.AutomaticReloginDue(a, now) {
+			continue
+		}
+		if !s.adobeAutoReloginEnabled() {
+			return
+		}
+		fixed, err := s.adobeAccountContext(ctx, a)
+		if err != nil {
+			_, _ = s.adobeStore.RecordQuotaQueryFailure(a, "proxy_unavailable", time.Now())
+			continue
+		}
+		if _, attempted, _ := s.adobeStore.RefreshDueLogin(fixed, s.adobeClient, a.ID, time.Now()); attempted {
 			return
 		}
 	}
@@ -43,7 +166,7 @@ func (s *Server) warmRecentAdobeMediaSessions(ctx context.Context) {
 		return
 	}
 	cfg, err := s.store.Config()
-	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
+	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) || !boolValue(cfg[adobeAutoReloginSetting], true) {
 		return
 	}
 	items, err := s.adobeStore.List()
@@ -99,7 +222,7 @@ func (s *Server) refreshAllAdobeMediaSessions(ctx context.Context) {
 		return
 	}
 	cfg, err := s.store.Config()
-	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) {
+	if err != nil || !boolValue(mapValue(cfg["adobe_maintenance"])["enabled"], true) || !boolValue(cfg[adobeAutoReloginSetting], true) {
 		return
 	}
 	items, err := s.adobeStore.List()

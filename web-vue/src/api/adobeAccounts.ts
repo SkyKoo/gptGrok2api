@@ -116,6 +116,8 @@ export interface AdobeMailboxLinkResponse {
 const path = '/api/adobe/accounts'
 export const adobeAccountsApi = {
   list: (params: { page: number; page_size: number; keyword?: string; status?: string }) => apiClient.get<never, AdobeAccountsResponse>(path, { params }),
+  autoRelogin: () => apiClient.get<never, { enabled: boolean }>(`${path}/auto-relogin`),
+  setAutoRelogin: (enabled: boolean) => apiClient.post<unknown, { enabled: boolean }>(`${path}/auto-relogin`, { enabled }),
   import: (accounts: unknown[]) => apiClient.post<unknown, AdobeMutationResponse>(`${path}/import`, { accounts }),
   async refresh(ids: string[], credentials = false): Promise<AdobeMutationResponse> {
     const results: NonNullable<AdobeMutationResponse['results']> = []

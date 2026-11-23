@@ -9,6 +9,64 @@ import (
 	"time"
 )
 
+func TestExpiredAdobeLoginFallsBackToBrowserAndPersistsBackoff(t *testing.T) {
+	s, a := idleMediaStore(t)
+	if err := s.update(a.ID, a.Revision, func(current *Account) {
+		current.ExpiresAt = time.Now().Add(-time.Minute).Unix()
+		current.RefreshCookie = ""
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls, reads := 0, 0
+	refresher := func(_ context.Context, current Account) (Account, error) {
+		calls++
+		if calls == 1 {
+			return Account{}, &Error{Stage: "relogin", Code: "browser_unavailable"}
+		}
+		return freshMediaAccount(current), nil
+	}
+	s.SetBrowserRefresher(refresher)
+	client := queryFixtureClient(t, func() { reads++ })
+	if _, attempted, err := s.RefreshDueLogin(mediaTestContext(), client, a.ID, time.Now()); !attempted || err == nil || calls != 1 || reads != 0 {
+		t.Fatalf("expired login did not attempt browser recovery: attempted=%v calls=%d reads=%d err=%v", attempted, calls, reads, err)
+	}
+	restarted := NewStore(s.path, s.secret)
+	restarted.SetBrowserRefresher(refresher)
+	if _, attempted, err := restarted.RefreshDueLogin(mediaTestContext(), client, a.ID, time.Now()); attempted || err != nil || calls != 1 {
+		t.Fatalf("restart bypassed relogin backoff: attempted=%v calls=%d err=%v", attempted, calls, err)
+	}
+	if err := restarted.update(a.ID, a.Revision, func(current *Account) { current.NextRefreshAt = time.Now().Unix() - 1 }); err != nil {
+		t.Fatal(err)
+	}
+	got, attempted, err := restarted.RefreshDueLogin(mediaTestContext(), client, a.ID, time.Now())
+	if err != nil || !attempted || calls != 2 || reads != 1 || got.Revision <= a.Revision || got.LastError != "" {
+		t.Fatalf("login did not recover after backoff: attempted=%v calls=%d reads=%d err=%v", attempted, calls, reads, err)
+	}
+}
+
+func TestAdobeQuotaOnly401LeavesRecoveryToLoginScheduler(t *testing.T) {
+	s, a := idleMediaStore(t)
+	if err := s.update(a.ID, a.Revision, func(current *Account) { current.Quota.Status = "stale" }); err != nil {
+		t.Fatal(err)
+	}
+	browser, requests := 0, 0
+	s.SetBrowserRefresher(func(_ context.Context, a Account) (Account, error) {
+		browser++
+		return freshMediaAccount(a), nil
+	})
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.URL.Path != "/v1/credits/balance" {
+			t.Errorf("quota polling attempted %s", r.URL.Path)
+		}
+		return jsonResponse(http.StatusUnauthorized, `{}`), nil
+	})})
+	got, attempted, err := s.RefreshDueQuota(mediaTestContext(), client, a.ID, time.Now())
+	if !attempted || err == nil || requests != 1 || browser != 0 || !AutomaticReloginDue(got, time.Now()) {
+		t.Fatalf("401 did not hand off to independent login recovery: attempted=%v requests=%d browser=%d err=%v", attempted, requests, browser, err)
+	}
+}
+
 func TestQuotaMaintenanceIncludesIdleGenerationExpiry(t *testing.T) {
 	now := time.Now().UTC()
 	base := Account{Enabled: true, ExpiresAt: now.Add(2 * time.Hour).Unix(), LastUsedAt: now.Add(-2 * time.Hour).Unix(), Quota: Quota{Status: "known", CheckedAt: now.Format(time.RFC3339Nano)}}
@@ -25,7 +83,7 @@ func TestQuotaMaintenanceIncludesIdleGenerationExpiry(t *testing.T) {
 		{"invalid_time", &GenerationEntitlements{Status: "known", CheckedAt: "invalid"}, true},
 		{"future_time", &GenerationEntitlements{Status: "known", CheckedAt: now.Add(time.Minute).Format(time.RFC3339Nano)}, true},
 		{"failed_observation_cooling", &GenerationEntitlements{Status: "error", CheckedAt: now.Format(time.RFC3339Nano)}, false},
-		{"failed_observation_due", &GenerationEntitlements{Status: "error", CheckedAt: now.Add(-modelPermissionFailureBackoff).Format(time.RFC3339Nano)}, true},
+		{"failed_observation_due", &GenerationEntitlements{Status: "error", CheckedAt: now.Add(-automaticQuotaFailureBackoff).Format(time.RFC3339Nano)}, true},
 		{"unknown_observation_cooling", &GenerationEntitlements{Status: "unknown", CheckedAt: now.Format(time.RFC3339Nano)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -147,6 +205,11 @@ func TestGenerationMaintenancePreservesFailureBackoff(t *testing.T) {
 	failure.RetryAfter = time.Now().Add(-time.Second)
 	s.modelFailures[a.ID] = failure
 	s.mu.Unlock()
+	if err = s.update(a.ID, a.Revision, func(current *Account) {
+		current.Quota.Generation.CheckedAt = time.Now().Add(-automaticQuotaFailureBackoff - time.Second).Format(time.RFC3339Nano)
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, attempted, err = s.RefreshDueWithPermissions(mediaTestContext(), client, a.ID, time.Now()); err != nil || !attempted || reads != 4 {
 		t.Fatalf("expired failure backoff blocked background recovery: attempted=%v reads=%d err=%v", attempted, reads, err)
 	}
