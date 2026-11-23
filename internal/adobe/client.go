@@ -20,7 +20,8 @@ const defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 const refreshURL = "https://adobeid-na1.services.adobe.com/ims/check/v6/token?jslVersion=v2-v0.48.0-1-g1e322cb"
 const refreshScope = "AdobeID,firefly_api,openid,pps.read,pps.write,additional_info.projectedProductContext,additional_info.ownerOrg,uds_read,uds_write,ab.manage,read_organizations,additional_info.roles,account_cluster.read,creative_production,profile"
 
-var pollHost = regexp.MustCompile(`^bks-epo[0-9]+\.adobe\.io$`)
+var bksPollHost = regexp.MustCompile(`^bks-epo[0-9]+\.adobe\.io$`)
+var fireflyPollHost = regexp.MustCompile(`^firefly-epo[0-9]+\.adobe\.io$`)
 var responseRequestID = regexp.MustCompile(`^[A-Za-z0-9_-]{16,80}$`)
 var generationTraceID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
@@ -55,11 +56,17 @@ func trustedURL(raw, kind string) bool {
 	case "refresh":
 		return u.Hostname() == "adobeid-na1.services.adobe.com" && u.Path == "/ims/check/v6/token"
 	case "poll":
-		id, ok := strings.CutPrefix(u.Path, "/v2/jobs/result/")
-		if !ok || id == "" || id == "." || id == ".." || strings.ContainsAny(id, "/%\\?#\x00\r\n") || !strings.HasPrefix(u.EscapedPath(), "/v2/jobs/result/") {
+		host := u.Hostname()
+		prefix := "/v2/jobs/result/"
+		switch {
+		case fireflyPollHost.MatchString(host):
+			prefix = "/jobs/result/"
+		case host != "firefly-3p.ff.adobe.io" && !bksPollHost.MatchString(host):
 			return false
 		}
-		return pollHost.MatchString(u.Hostname()) || u.Hostname() == "firefly-3p.ff.adobe.io"
+		id, ok := strings.CutPrefix(u.Path, prefix)
+		return ok && id != "" && id != "." && id != ".." &&
+			!strings.ContainsAny(id, "/%\\?#\x00\r\n") && strings.HasPrefix(u.EscapedPath(), prefix)
 	case "download":
 		return u.Hostname() == "pre-signed-firefly-prod.s3-accelerate.amazonaws.com"
 	}

@@ -144,9 +144,23 @@ func TestTimeoutReceiptDistinguishesMissingAndUnreadableBody(t *testing.T) {
 
 func TestPollLinkIdentifiesOneTask(t *testing.T) {
 	const base = "https://bks-epo1234.adobe.io/v2/jobs/result/"
-	for _, suffix := range []string{"", ".", "..", "a/b", "a%2fb", "%2e%2e", "a%5cb", "a%252fb"} {
-		if trustedURL(base+suffix, "poll") {
-			t.Errorf("accepted non-task path %q", suffix)
+	const fireflyBase = "https://firefly-epo852232.adobe.io/jobs/result/"
+	for _, prefix := range []string{base, fireflyBase} {
+		for _, suffix := range []string{"", ".", "..", "a/b", "a%2fb", "%2e%2e", "a%5cb", "a%252fb"} {
+			if trustedURL(prefix+suffix, "poll") {
+				t.Errorf("accepted non-task URL %q", prefix+suffix)
+			}
+		}
+	}
+	for _, link := range []string{
+		"https://firefly-epo852232.adobe.io/jobs/cancel/fixture",
+		"https://firefly-epo852232.adobe.io/v2/jobs/result/fixture",
+		"https://bks-epo1234.adobe.io/jobs/result/fixture",
+		"https://firefly-epo852232.adobe.io.example.test/jobs/result/fixture",
+		"https://firefly-epo852232.adobe.io:8443/jobs/result/fixture",
+	} {
+		if trustedURL(link, "poll") {
+			t.Errorf("accepted URL outside the expected result endpoints: %q", link)
 		}
 	}
 	want := base + "fixture%3Aid?version=2"
@@ -154,6 +168,39 @@ func TestPollLinkIdentifiesOneTask(t *testing.T) {
 	headers.Set("x-override-status-link", base+"../other")
 	if got, status := responsePollURL(headers, map[string]any{"links": map[string]any{"result": want}}); got != want || status != "trusted" {
 		t.Fatalf("valid body receipt was lost: %q", got)
+	}
+}
+
+func TestFireflyStudioImageReceiptUsesResultGET(t *testing.T) {
+	const resultURL = "https://firefly-epo852232.adobe.io/jobs/result/fixture"
+	const cancelURL = "https://firefly-epo852232.adobe.io/jobs/cancel/fixture"
+	var calls []string
+	client := NewClient(&http.Client{Transport: roundTripper(func(r *http.Request) (*http.Response, error) {
+		calls = append(calls, r.Method)
+		switch len(calls) {
+		case 1:
+			if r.Method != http.MethodPost || r.URL.Path != "/v2/3p-images/generate-async" {
+				t.Fatalf("unexpected submission request: %s %s", r.Method, r.URL)
+			}
+			return jsonResponse(http.StatusOK, `{"links":{"cancel":{"href":"`+cancelURL+`"},"result":{"href":"`+resultURL+`"}}}`), nil
+		case 2:
+			if r.Method != http.MethodGet || r.URL.String() != resultURL {
+				t.Fatalf("unexpected result request: %s %s", r.Method, r.URL)
+			}
+			return jsonResponse(http.StatusOK, `{"status":"IN_PROGRESS","progress":50}`), nil
+		default:
+			t.Fatal("unexpected additional upstream request")
+			return nil, nil
+		}
+	})})
+	ctx, account := context.Background(), fixtureAccount(t)
+	job, err := client.SubmitImage(ctx, account, ImageRequest{Model: "gemini-3.1-flash-image-2.1", Prompt: "fixture", Width: 1024, Height: 1024, N: 1})
+	if err != nil || job.Status != "SUBMITTED" || job.PollURL != resultURL || job.PollLinkStatus != "trusted" {
+		t.Fatalf("Firefly Studio receipt was not accepted: status=%s link_status=%s err=%v", job.Status, job.PollLinkStatus, err)
+	}
+	job, err = client.Poll(ctx, account, job)
+	if err != nil || job.Status != "IN_PROGRESS" || job.Progress != 50 || len(calls) != 2 {
+		t.Fatalf("result query failed: calls=%v job=%+v err=%v", calls, job, err)
 	}
 }
 

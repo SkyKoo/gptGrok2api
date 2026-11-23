@@ -32,6 +32,8 @@ export function isCompleteMediaSession(media) {
 // never the sole proof that an otherwise valid media session is unusable.
 export function runtimeARPInPage({timeoutMs, cancelEvent}) {
   return new Promise(resolve => {
+    const stableTokenMs = 250;
+    const activeVendorGraceMs = 8000;
     let finished = false, tick, deadline, inspectionQueued = false;
     let authentication, source, stop, subscribed = false, emitted = false, value;
     let stableCandidate = '', stableCandidateMode = '', stableSince = 0;
@@ -248,10 +250,13 @@ export function runtimeARPInPage({timeoutMs, cancelEvent}) {
             candidateSeen=true;timing.last_candidate_ms=elapsed();
             stableCandidate=candidate;stableCandidateMode=candidateMode;stableSince=Date.now();
           }
-          // First vendor callbacks can be followed immediately by richer
-          // official updates. Require a short unchanged observation window,
-          // within the existing deadline, without reading token internals.
-          if (Date.now()-stableSince < 250) {
+          // A known active vendor cycle can deliver a newer official value
+          // seconds after the first one. Give it bounded time within the existing
+          // deadline. Missing completion marks cannot gate readiness forever.
+          const vendorsStillRunning = readiness.readiness_reason === 'vendors_pending' &&
+            readiness.vendors_started > readiness.vendors_complete;
+          const settleMs = vendorsStillRunning ? activeVendorGraceMs : stableTokenMs;
+          if (Date.now()-stableSince < settleMs) {
             observation={state:'pending',source:'spl_runtime',readiness_reason:'token_settling',
               ...(runtimeDiagnostic?.vendors_started !== undefined ? {vendors_started:runtimeDiagnostic.vendors_started} : {}),
               ...(runtimeDiagnostic?.vendors_complete !== undefined ? {vendors_complete:runtimeDiagnostic.vendors_complete} : {})};return;

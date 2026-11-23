@@ -349,6 +349,54 @@ test('missing performance evidence or vendor participation remains usable with a
   assert.equal(source.active,0);assert.equal(h.listeners,0);
  }
 });
+test('an active vendor cycle can publish a later official token after the short stable window', async () => {
+  const performance = performanceFixture({complete: false});
+  const source = observable('first-official-value');
+  const h = pageHarness(source, {performance});
+  let now = 0;
+  h.globals.Date = {now: () => now};
+  const pending = h.page.evaluate(runtimeARPInPage, {timeoutMs: 700, cancelEvent: 'cancel-test'});
+  await Promise.resolve();
+
+  now = 1000;
+  source.emit('first-official-value');
+  await Promise.resolve();
+  assert.equal(source.active, 1);
+
+  for (const [vendor, startedAt] of [['arkose', 2], ['bfp', 3], ['forter', 4]]) {
+    performance.measure(`sherlock:fixture-sdk:${vendor}:start:duration`, startedAt);
+  }
+  source.emit('later-official-value');
+  await Promise.resolve();
+  now += 300;
+  source.emit('later-official-value');
+
+  const result = await pending;
+  assert.equal(result.token, 'later-official-value');
+  assert.equal(source.active, 0);
+});
+
+test('an active vendor cycle with missing completion marks has a bounded grace period', async () => {
+  const source = observable('official-opaque-value');
+  const h = pageHarness(source, {performance: performanceFixture({complete: false})});
+  let now = 0;
+  h.globals.Date = {now: () => now};
+  const pending = h.page.evaluate(runtimeARPInPage, {timeoutMs: 10000, cancelEvent: 'cancel-test'});
+  await Promise.resolve();
+
+  now = 7000;
+  source.emit('official-opaque-value');
+  await Promise.resolve();
+  assert.equal(source.active, 1);
+
+  now = 8100;
+  source.emit('official-opaque-value');
+  const result = await pending;
+  assert.equal(result.token, 'official-opaque-value');
+  assert.equal(result.runtime_diagnostic.readiness_reason, 'vendors_pending');
+  assert.equal(source.active, 0);
+});
+
 test('a vendor restart needs its own new token measurement',async()=>{
  const perf=performanceFixture();perf.mark('sherlock:fixture-sdk:arkose:start',20);
  const source=observable('old-composite'),h=pageHarness(source,{performance:perf});
