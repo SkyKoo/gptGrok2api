@@ -128,8 +128,8 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
             trace.observe_failure(ignored)
             trace.observe_response(turnstile)
         self.assertEqual(len(captured.output), 3)
-        self.assertIn("stage=password_fill target=brunhild kind=network_unreachable http=0", captured.output[1])
-        self.assertIn("stage=password_fill target=turnstile kind=http_error http=403", captured.output[2])
+        self.assertIn("stage=password_fill target=brunhild kind=network_unreachable chromium=net::ERR_ADDRESS_UNREACHABLE http=0", captured.output[1])
+        self.assertIn("stage=password_fill target=turnstile kind=http_error chromium=none http=403", captured.output[2])
         self.assertNotIn("private", "\n".join(captured.output))
         self.assertNotIn("secret", "\n".join(captured.output))
 

@@ -88,12 +88,12 @@ class ReloginTrace:
     def _report_verification(self, event):
         if event is None or (target := VERIFICATION_TARGETS.get(event["host"])) is None:
             return
-        key = (target, event["kind"], event["status"])
+        key = (target, self.stage, event["kind"], event.get("error"), event["status"])
         if key in self._logged_verification or len(self._logged_verification) >= 12:
             return
         self._logged_verification.add(key)
-        log.info("grok_relogin_verification task=%s stage=%s target=%s kind=%s http=%d",
-                 self.task, self.stage, target, event["kind"], event["status"])
+        log.info("grok_relogin_verification task=%s stage=%s target=%s kind=%s chromium=%s http=%d",
+                 self.task, self.stage, target, event["kind"], event.get("error", "unknown"), event["status"])
 
     def observe_request(self, request):
         try:
@@ -108,10 +108,10 @@ class ReloginTrace:
         network_host = last.get("host", "")
         network_scope = "xai_auth" if network_host in AUTH_HOSTS else "verification_service" if network_host else "none"
         log.info(
-            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d page=%s form=%s password_posts=%d password_requests=%d submit=%s network_scope=%s",
+            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d network_chromium=%s page=%s form=%s password_posts=%d password_requests=%d submit=%s network_scope=%s",
             self.task, self.stage, outcome, int((time.monotonic() - self.started) * 1000),
             str(self.password_attempted).lower(), exception, self.navigation_status, self.auth_status,
-            last.get("kind", "none"), last.get("status", 0), self.page_kind, self.form, self.password_posts,
+            last.get("kind", "none"), last.get("status", 0), last.get("error", "none"), self.page_kind, self.form, self.password_posts,
             self.password_requests, self.submit_kind, network_scope,
         )
 

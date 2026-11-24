@@ -23,7 +23,7 @@ class SignupDiagnosticsTests(unittest.TestCase):
         for i in range(20):
             d.failed(SimpleNamespace(url="https://user:password@brunhild.challenges.cloudflare.com/path?token=SECRET", failure="net::ERR_TUNNEL_CONNECTION_FAILED"))
         self.assertEqual(len(d.snapshot()), 8)
-        self.assertEqual(d.snapshot()[0], {"host": "brunhild.challenges.cloudflare.com", "kind": "proxy_tunnel_failed", "status": 0})
+        self.assertEqual(d.snapshot()[0], {"host": "brunhild.challenges.cloudflare.com", "kind": "proxy_tunnel_failed", "status": 0, "error": "net::ERR_TUNNEL_CONNECTION_FAILED"})
         text=json.dumps(d.snapshot())
         for secret in ("password", "SECRET", "/path", "token="):
             self.assertNotIn(secret, text)
@@ -38,10 +38,20 @@ class SignupDiagnosticsTests(unittest.TestCase):
         d.response(SimpleNamespace(url="https://accounts.x.ai/",status=200))
         self.assertEqual(d.snapshot(), [])
         d.response(SimpleNamespace(url="https://accounts.x.ai/private?email=PRIVATE",status=400))
-        self.assertEqual(d.snapshot(), [{"host":"accounts.x.ai","kind":"http_error","status":400}])
+        self.assertEqual(d.snapshot(), [{"host":"accounts.x.ai","kind":"http_error","status":400,"error":"none"}])
 
     def test_unknown_transport_error_never_leaks_exception_text(self):
         d=NetworkDiagnostics()
         d.failed(SimpleNamespace(url="https://accounts.x.ai/",failure="secret proxy password"))
         self.assertEqual(d.snapshot()[0]['kind'], 'network_failed')
+        self.assertEqual(d.snapshot()[0]['error'], 'unknown')
         self.assertNotIn('secret',json.dumps(d.snapshot()))
+
+    def test_only_known_chromium_errors_can_enter_logs(self):
+        d = NetworkDiagnostics()
+        for failure, expected in (("net::ERR_FAILED", "net::ERR_FAILED"),
+                                  ("net::ERR_PRIVATE_TOKEN", "unknown")):
+            with self.subTest(failure=failure):
+                event = d.failed(SimpleNamespace(url="https://accounts.x.ai/", failure=failure))
+                self.assertEqual(event["error"], expected)
+        self.assertNotIn("PRIVATE_TOKEN", json.dumps(d.snapshot()))

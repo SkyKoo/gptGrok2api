@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 _TARGETS = {"accounts.x.ai", "auth.x.ai", "challenges.cloudflare.com", "brunhild.challenges.cloudflare.com"}
 _ERRORS = {
+    "net::ERR_FAILED": "network_failed",
     "net::ERR_TUNNEL_CONNECTION_FAILED": "proxy_tunnel_failed",
     "net::ERR_PROXY_CONNECTION_FAILED": "proxy_connection_failed",
     "net::ERR_PROXY_AUTH_UNSUPPORTED": "proxy_auth_failed",
@@ -13,13 +14,19 @@ _ERRORS = {
     "net::ERR_NAME_NOT_RESOLVED": "dns_failed",
     "net::ERR_CONNECTION_RESET": "connection_reset",
     "net::ERR_CONNECTION_CLOSED": "connection_closed",
+    "net::ERR_CONNECTION_REFUSED": "connection_refused",
+    "net::ERR_CONNECTION_ABORTED": "connection_aborted",
+    "net::ERR_INTERNET_DISCONNECTED": "network_disconnected",
+    "net::ERR_NETWORK_CHANGED": "network_changed",
     "net::ERR_ADDRESS_UNREACHABLE": "network_unreachable",
     "net::ERR_NETWORK_UNREACHABLE": "network_unreachable",
     "net::ERR_BLOCKED_BY_CLIENT": "blocked_by_client",
     "net::ERR_BLOCKED_BY_RESPONSE": "blocked_by_response",
     "net::ERR_HTTP2_PROTOCOL_ERROR": "http2_failed",
+    "net::ERR_QUIC_PROTOCOL_ERROR": "http3_failed",
     "net::ERR_CERT_AUTHORITY_INVALID": "tls_failed",
     "net::ERR_SSL_PROTOCOL_ERROR": "tls_failed",
+    "net::ERR_SSL_VERSION_OR_CIPHER_MISMATCH": "tls_failed",
 }
 
 
@@ -68,7 +75,8 @@ class NetworkDiagnostics:
             failure = str(request.failure or "")
             if failure == "net::ERR_ABORTED":
                 return
-            event = {"host": host, "kind": _ERRORS.get(failure, "network_failed"), "status": 0}
+            error = failure if failure in _ERRORS else "unknown"
+            event = {"host": host, "kind": _ERRORS.get(failure, "network_failed"), "status": 0, "error": error}
             self._events.append(event)
             return event
         except Exception:
@@ -79,7 +87,7 @@ class NetworkDiagnostics:
             host = (urlparse(str(response.url)).hostname or "").lower()
             status = int(response.status)
             if host in _TARGETS and 400 <= status <= 599:
-                event = {"host": host, "kind": "http_error", "status": status}
+                event = {"host": host, "kind": "http_error", "status": status, "error": "none"}
                 self._events.append(event)
                 return event
         except Exception:
