@@ -1,8 +1,9 @@
 import base64
 import json
 import unittest
+from types import SimpleNamespace
 
-from grok_relogin import EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, _session, relogin
+from grok_relogin import EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, ReloginTrace, _session, relogin
 
 
 def fixture_token(claims):
@@ -113,6 +114,25 @@ class LoginPage:
 
 
 class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
+    def test_verification_target_is_recorded_without_request_url(self):
+        trace = ReloginTrace("task_verification")
+        brunhild = SimpleNamespace(url="https://brunhild.challenges.cloudflare.com/private?k=secret",
+                                  failure="net::ERR_ADDRESS_UNREACHABLE")
+        turnstile = SimpleNamespace(url="https://challenges.cloudflare.com/private?k=secret", status=403)
+        ignored = SimpleNamespace(url="https://brunhild.challenges.cloudflare.com.example.test/private",
+                                  failure="raw failure secret")
+        with self.assertLogs("cfm-browser-worker.grok-relogin", level="INFO") as captured:
+            trace.enter("password_fill")
+            trace.observe_failure(brunhild)
+            trace.observe_failure(brunhild)
+            trace.observe_failure(ignored)
+            trace.observe_response(turnstile)
+        self.assertEqual(len(captured.output), 3)
+        self.assertIn("stage=password_fill target=brunhild kind=network_unreachable http=0", captured.output[1])
+        self.assertIn("stage=password_fill target=turnstile kind=http_error http=403", captured.output[2])
+        self.assertNotIn("private", "\n".join(captured.output))
+        self.assertNotIn("secret", "\n".join(captured.output))
+
     async def test_failure_logs_phase_without_exception_text_or_credentials(self):
         page = LoginPage("success")
 

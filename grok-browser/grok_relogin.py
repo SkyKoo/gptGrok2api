@@ -15,6 +15,10 @@ SIGN_IN = "https://accounts.x.ai/sign-in?redirect=grok-com"
 AUTH_HOSTS = {"accounts.x.ai", "auth.x.ai"}
 HANDOFF_HOSTS = {"auth.grokusercontent.com"}
 APP_HOSTS = {"grok.com", "www.grok.com"}
+VERIFICATION_TARGETS = {
+    "brunhild.challenges.cloudflare.com": "brunhild",
+    "challenges.cloudflare.com": "turnstile",
+}
 EMAIL = 'input[type="email"], input[autocomplete="username"], input[name="email"]'
 PASSWORD = 'input[type="password"]:not([autocomplete="new-password"])'
 VERIFICATION = ('input[autocomplete="one-time-code"], input[name="otp"], input[name="code"], '
@@ -60,6 +64,7 @@ class ReloginTrace:
         self.page_kind = "none"
         self.form = "unknown"
         self.network = NetworkDiagnostics()
+        self._logged_verification = set()
 
     def enter(self, stage):
         if stage != self.stage:
@@ -67,7 +72,7 @@ class ReloginTrace:
             self.write("started")
 
     def observe_response(self, response):
-        self.network.response(response)
+        self._report_verification(self.network.response(response))
         try:
             if (urlsplit(response.url).hostname in AUTH_HOSTS and response.request.method == "POST"
                     and 100 <= response.status <= 599):
@@ -76,6 +81,19 @@ class ReloginTrace:
                     self.password_posts += 1
         except (AttributeError, ValueError):
             pass
+
+    def observe_failure(self, request):
+        self._report_verification(self.network.failed(request))
+
+    def _report_verification(self, event):
+        if event is None or (target := VERIFICATION_TARGETS.get(event["host"])) is None:
+            return
+        key = (target, event["kind"], event["status"])
+        if key in self._logged_verification or len(self._logged_verification) >= 12:
+            return
+        self._logged_verification.add(key)
+        log.info("grok_relogin_verification task=%s stage=%s target=%s kind=%s http=%d",
+                 self.task, self.stage, target, event["kind"], event["status"])
 
     def observe_request(self, request):
         try:
@@ -268,7 +286,7 @@ async def relogin(browser, email, password, task_id=""):
             trace.enter("browser_page")
             page = await context.new_page()
             page.on("request", trace.observe_request)
-            page.on("requestfailed", trace.network.failed)
+            page.on("requestfailed", trace.observe_failure)
             page.on("response", trace.observe_response)
             result = await _sign_in(page, email, password, trace)
             trace.write(result.get("code", "success"))

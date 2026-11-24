@@ -13,6 +13,11 @@ _ERRORS = {
     "net::ERR_NAME_NOT_RESOLVED": "dns_failed",
     "net::ERR_CONNECTION_RESET": "connection_reset",
     "net::ERR_CONNECTION_CLOSED": "connection_closed",
+    "net::ERR_ADDRESS_UNREACHABLE": "network_unreachable",
+    "net::ERR_NETWORK_UNREACHABLE": "network_unreachable",
+    "net::ERR_BLOCKED_BY_CLIENT": "blocked_by_client",
+    "net::ERR_BLOCKED_BY_RESPONSE": "blocked_by_response",
+    "net::ERR_HTTP2_PROTOCOL_ERROR": "http2_failed",
     "net::ERR_CERT_AUTHORITY_INVALID": "tls_failed",
     "net::ERR_SSL_PROTOCOL_ERROR": "tls_failed",
 }
@@ -63,7 +68,9 @@ class NetworkDiagnostics:
             failure = str(request.failure or "")
             if failure == "net::ERR_ABORTED":
                 return
-            self._events.append({"host": host, "kind": _ERRORS.get(failure, "network_failed"), "status": 0})
+            event = {"host": host, "kind": _ERRORS.get(failure, "network_failed"), "status": 0}
+            self._events.append(event)
+            return event
         except Exception:
             return
 
@@ -72,7 +79,9 @@ class NetworkDiagnostics:
             host = (urlparse(str(response.url)).hostname or "").lower()
             status = int(response.status)
             if host in _TARGETS and 400 <= status <= 599:
-                self._events.append({"host": host, "kind": "http_error", "status": status})
+                event = {"host": host, "kind": "http_error", "status": status}
+                self._events.append(event)
+                return event
         except Exception:
             return
 
