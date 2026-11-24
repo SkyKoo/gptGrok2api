@@ -15,11 +15,11 @@ import (
 )
 
 func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
-	for _, scenario := range []string{"success", "quota_failure", "wrong_identity", "verification_required"} {
+	for _, scenario := range []string{"success", "quota_failure", "wrong_identity", "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous"} {
 		t.Run(scenario, func(t *testing.T) {
 			s := New(adminTestConfig(t.TempDir()))
 			const email = "grok-relogin@example.test"
-			const password = "fixture-password"
+			const password = " \tfixture-password\u00a0"
 			token := func(subject, marker string) string {
 				raw, _ := json.Marshal(map[string]string{"sub": subject, "email": email})
 				return "e30." + base64.RawURLEncoding.EncodeToString(raw) + "." + marker
@@ -73,8 +73,9 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 					if !reserved.Load() || payload["browser_lease"] != lease || payload["email"] != email || payload["password"] != password {
 						t.Error("login did not use the reserved browser and saved account")
 					}
-					if scenario == "verification_required" {
-						return answer(req, 200, map[string]any{"code": "verification_required"})
+					switch scenario {
+					case "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
+						return answer(req, 200, map[string]any{"code": scenario})
 					}
 					return answer(req, 200, map[string]any{"sso": newToken, "sso_rw": "new-rw-fixture"})
 				case req.Method == http.MethodDelete && req.URL.Path == "/v1/browser/reservations/"+lease:
@@ -132,13 +133,24 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 				t.Fatal("unexpected account or browser task count")
 			}
 			progress := imageTaskCall(s, "GET", path, "admin-secret", "")
+			var history struct {
+				Items []struct{ ID, Email string }
+			}
+			if progress.Code != 200 || json.Unmarshal(progress.Body.Bytes(), &history) != nil || len(history.Items) != 1 ||
+				history.Items[0].ID != job.ID || history.Items[0].Email != email {
+				t.Fatal("progress did not identify the archived account and its task")
+			}
 			for _, secret := range []string{password, oldToken, newToken, "new-rw-fixture", lease} {
 				if strings.Contains(progress.Body.String(), secret) {
 					t.Fatal("progress contains a private value")
 				}
 			}
-			if scenario == "wrong_identity" || scenario == "verification_required" {
-				want := map[string]string{"wrong_identity": "grok_relogin_identity_mismatch", "verification_required": "grok_relogin_verification_required"}[scenario]
+			switch scenario {
+			case "wrong_identity", "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
+				want := "grok_relogin_" + scenario
+				if scenario == "wrong_identity" {
+					want = "grok_relogin_identity_mismatch"
+				}
 				if job.Status != "failed" || job.Error != want || quotaCalls.Load() != 0 || archive[0]["sso"] != oldToken || accountToken(current[0]) != oldToken {
 					t.Fatalf("failed login changed existing credentials: %s %s", job.Status, job.Error)
 				}

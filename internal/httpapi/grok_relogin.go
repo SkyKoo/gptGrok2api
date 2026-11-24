@@ -28,10 +28,39 @@ const grokReloginCheckpoint = "sso_relogin_checkpoint"
 func (s *Server) grokReloginAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		id := r.URL.Query().Get("account_id")
-		items := []tasks.Task{}
-		for _, task := range s.taskQueue.List() {
+		type progress struct {
+			tasks.Task
+			Email string `json:"email,omitempty"`
+		}
+		items := []progress{}
+		var ids []string
+		var jobs []tasks.Task
+		if queue, ok := s.taskQueue.(interface{ ListWithError() ([]tasks.Task, error) }); ok {
+			var err error
+			jobs, err = queue.ListWithError()
+			if err != nil {
+				writeError(w, http.StatusServiceUnavailable, "暂时无法读取重新登录进度", "grok_relogin_progress_unavailable")
+				return
+			}
+		} else {
+			jobs = s.taskQueue.List()
+		}
+		for _, task := range jobs {
 			if task.Kind == grokReloginKind && (id == "" || task.Payload["account_id"] == id) {
-				items = append(items, task)
+				items = append(items, progress{Task: task})
+				ids = append(ids, stringValue(task.Payload["account_id"]))
+			}
+		}
+		if len(items) > 0 {
+			accounts, err := s.registerStore.GetAccounts(ids)
+			if err == nil {
+				emails := make(map[string]string, len(accounts))
+				for _, account := range accounts {
+					emails[stringValue(account["id"])] = stringValue(account["email"])
+				}
+				for i := range items {
+					items[i].Email = emails[stringValue(items[i].Payload["account_id"])]
+				}
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -90,7 +119,11 @@ func (s *Server) grokReloginSource(id string) (map[string]any, error) {
 	if err != nil {
 		return nil, errors.New("grok_relogin_storage_failed")
 	}
-	if len(rows) != 1 || grokAccountDisabled(rows[0]) || stringValue(rows[0]["email"]) == "" || stringValue(rows[0]["password"]) == "" {
+	if len(rows) != 1 {
+		return nil, errors.New("grok_relogin_account_unavailable")
+	}
+	password, _ := rows[0]["password"].(string)
+	if grokAccountDisabled(rows[0]) || stringValue(rows[0]["email"]) == "" || strings.TrimSpace(password) == "" {
 		return nil, errors.New("grok_relogin_account_unavailable")
 	}
 	return rows[0], nil
@@ -200,8 +233,9 @@ func (s *Server) fetchGrokBrowserSession(ctx context.Context, taskID string, acc
 	if err != nil || !sameGrokReloginAccount(account, current) {
 		return result, errors.New("grok_relogin_account_changed")
 	}
+	password, _ := current["password"].(string)
 	payload, _ := json.Marshal(map[string]string{
-		"task_id": taskID, "browser_lease": lease.ID, "email": stringValue(account["email"]), "password": stringValue(account["password"]),
+		"task_id": taskID, "browser_lease": lease.ID, "email": stringValue(current["email"]), "password": password,
 	})
 	req, err := http.NewRequestWithContext(proxyruntime.WithURL(ctx, ""), http.MethodPost, base+"/v1/grok/relogin", bytes.NewReader(payload))
 	if err != nil {
@@ -224,7 +258,7 @@ func (s *Server) fetchGrokBrowserSession(ctx context.Context, taskID string, acc
 		return result, errors.New("grok_relogin_browser_failed")
 	}
 	switch result.Code {
-	case "verification_required", "login_timeout", "login_page_unrecognized", "login_failed", "credentials_rejected", "upstream_rate_limited", "password_input_unconfirmed":
+	case "verification_required", "age_confirmation_required", "login_timeout", "session_wait_timeout", "password_request_unobserved", "login_entry_forbidden", "login_page_unrecognized", "login_action_ambiguous", "login_failed", "credentials_rejected", "upstream_rate_limited", "password_input_unconfirmed":
 		return result, errors.New("grok_relogin_" + result.Code)
 	case "":
 		if validGrokSessionCookie(result.SSO) && (result.SSORW == "" || validGrokSessionCookie(result.SSORW)) {

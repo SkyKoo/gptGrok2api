@@ -91,6 +91,8 @@ export type GrokProbeSchedulerStatus = {
 
 export type GrokReloginJob = {
   id: string
+  email?: string
+  updated_at: number
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   created_at: number
   payload: { account_id: string; request_id: string }

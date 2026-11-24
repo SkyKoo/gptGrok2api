@@ -21,6 +21,8 @@ VERIFICATION_TARGETS = {
 }
 EMAIL = 'input[type="email"], input[autocomplete="username"], input[name="email"]'
 PASSWORD = 'input[type="password"]:not([autocomplete="new-password"])'
+AGE_PROMPT = re.compile(r"^(?:how old are you|您多大年纪|你多大年纪)[?？]?$", re.I)
+AGE_LABEL = re.compile(r"^(?:age|your age|年龄)$", re.I)
 VERIFICATION = ('input[autocomplete="one-time-code"], input[name="otp"], input[name="code"], '
                 'input[name="verificationCode"], input[name="emailCode"], input[type="tel"], '
                 'iframe[src*="challenges.cloudflare.com"]')
@@ -58,8 +60,10 @@ class ReloginTrace:
         self.password_attempted = False
         self.navigation_status = 0
         self.auth_status = 0
+        self.password_status = 0
         self.password_posts = 0
         self.password_requests = 0
+        self._pending_password_posts = set()
         self.submit_kind = "none"
         self.page_kind = "none"
         self.form = "unknown"
@@ -71,18 +75,29 @@ class ReloginTrace:
             self.stage = stage
             self.write("started")
 
+    def timeout_code(self):
+        if self.stage != "session_wait":
+            return "login_timeout"
+        if (self.page_kind == "xai_auth" and self.form == "password"
+                and self.password_requests == 0 and self.password_posts == 0):
+            return "password_request_unobserved"
+        return "session_wait_timeout"
+
     def observe_response(self, response):
         self._report_verification(self.network.response(response))
         try:
             if (urlsplit(response.url).hostname in AUTH_HOSTS and response.request.method == "POST"
                     and 100 <= response.status <= 599):
                 self.auth_status = response.status
-                if self.password_attempted:
+                if response.request in self._pending_password_posts:
+                    self._pending_password_posts.remove(response.request)
+                    self.password_status = response.status
                     self.password_posts += 1
         except (AttributeError, ValueError):
             pass
 
     def observe_failure(self, request):
+        self._pending_password_posts.discard(request)
         self._report_verification(self.network.failed(request))
 
     def _report_verification(self, event):
@@ -99,6 +114,7 @@ class ReloginTrace:
         try:
             if self.password_attempted and request.method == "POST" and urlsplit(request.url).hostname in AUTH_HOSTS:
                 self.password_requests += 1
+                self._pending_password_posts.add(request)
         except (AttributeError, ValueError):
             pass
 
@@ -108,11 +124,11 @@ class ReloginTrace:
         network_host = last.get("host", "")
         network_scope = "xai_auth" if network_host in AUTH_HOSTS else "verification_service" if network_host else "none"
         log.info(
-            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d network_chromium=%s page=%s form=%s password_posts=%d password_requests=%d submit=%s network_scope=%s",
+            "grok_relogin task=%s stage=%s outcome=%s elapsed_ms=%d password_attempted=%s exception=%s nav_http=%d auth_http=%d network=%s network_http=%d network_chromium=%s page=%s form=%s password_posts=%d password_requests=%d submit=%s network_scope=%s password_http=%d",
             self.task, self.stage, outcome, int((time.monotonic() - self.started) * 1000),
             str(self.password_attempted).lower(), exception, self.navigation_status, self.auth_status,
             last.get("kind", "none"), last.get("status", 0), last.get("error", "none"), self.page_kind, self.form, self.password_posts,
-            self.password_requests, self.submit_kind, network_scope,
+            self.password_requests, self.submit_kind, network_scope, self.password_status,
         )
 
 
@@ -144,21 +160,34 @@ async def _single_visible(locator):
     return matches[0] if len(matches) == 1 else None
 
 
+async def _age_confirmation_visible(page):
+    if not await _single_visible(page.get_by_role("heading", name=AGE_PROMPT)):
+        return False
+    for role in ("textbox", "spinbutton"):
+        if await _single_visible(page.get_by_role(role, name=AGE_LABEL)):
+            return True
+    return False
+
+
 async def _submit(page, trace, password, field):
     trace.enter("password_submit_control" if password else "email_submit_control")
     form = field.locator("xpath=ancestor::form[1]")
     owns_form = await form.count() == 1
     button = await _single_visible(form.locator(FORM_SUBMIT)) if owns_form else None
+    actions = form if owns_form else page
+    named = actions.get_by_role("button", name=SUBMIT)
     if button is None:
-        actions = form if owns_form else page
-        button = await _single_visible(actions.get_by_role("button", name=SUBMIT))
+        button = await _single_visible(named)
+    elif await named.count() and not await button.and_(named).count():
+        trace.submit_kind = "form_conflict"
+        return "login_action_ambiguous"
     if button is None or not _on_sign_in(page):
-        return False
+        return "login_page_unrecognized"
     trace.enter("password_submit" if password else "email_submit")
     trace.password_attempted = password
     trace.submit_kind = "form" if owns_form else "page_button"
     await button.click(timeout=5000)
-    return True
+    return None
 
 
 def _session_cookie(value):
@@ -197,9 +226,7 @@ async def _session(page, page_kind):
     return None
 
 
-async def _password_error(page, trace):
-    if trace.password_posts and trace.auth_status == 429:
-        return "upstream_rate_limited"
+async def _password_error(page):
     for alert in (await page.locator(ALERTS).all())[:5]:
         if await alert.is_visible():
             text = await alert.inner_text(timeout=1000)
@@ -215,17 +242,27 @@ async def _sign_in(page, email, password, trace):
         trace.navigation_status = response.status
     entry_clicked = email_submitted = password_submitted = False
     while True:
-        trace.page_kind = _page_kind(page)
+        page_kind = _page_kind(page)
+        if trace.page_kind != page_kind:
+            trace.form = "unknown"
+        trace.page_kind = page_kind
         trace.enter("session_wait" if password_submitted else "password_wait" if email_submitted else "email_form_wait" if entry_clicked else "email_entry_wait")
         if password_submitted and trace.page_kind == "handoff":
             trace.form = "none"
             await asyncio.sleep(.25)
             continue
+        if password_submitted and trace.page_kind in ("grok", "xai_account") and await _age_confirmation_visible(page):
+            trace.form = "age_confirmation"
+            return {"code": "age_confirmation_required"}
         if trace.page_kind != "other":
             for verification in await page.locator(VERIFICATION).all():
                 if await verification.is_visible():
                     trace.form = "verification"
                     return {"code": "verification_required"}
+        if trace.navigation_status == 403:
+            return {"code": "login_entry_forbidden"}
+        if trace.navigation_status == 429 or trace.password_status == 429:
+            return {"code": "upstream_rate_limited"}
         if password_submitted and trace.page_kind in ("grok", "xai_account"):
             password_controls = await page.locator(PASSWORD).all()
             if not any([await field.is_visible() for field in password_controls]) and (session := await _session(page, trace.page_kind)):
@@ -239,7 +276,7 @@ async def _sign_in(page, email, password, trace):
         email_input = await _single_visible(page.locator(EMAIL))
         password_input = await _single_visible(page.locator(PASSWORD))
         trace.form = "password" if password_input is not None else "email" if email_input is not None else "none"
-        if password_submitted and (error := await _password_error(page, trace)):
+        if password_submitted and (error := await _password_error(page)):
             return {"code": error}
         if password_input is not None and not password_submitted and (email_input is not None or email_submitted):
             # After a separate email submit, xAI can keep the email field on the
@@ -254,16 +291,18 @@ async def _sign_in(page, email, password, trace):
             await password_input.fill(password, timeout=5000)
             if await password_input.input_value(timeout=1000) != password:
                 return {"code": "password_input_unconfirmed"}
-            if not await _submit(page, trace, password=True, field=password_input):
-                return {"code": "login_page_unrecognized"}
+            if error := await _submit(page, trace, password=True, field=password_input):
+                return {"code": error}
+            # Classify a stalled password form only after observing it again after the click.
+            trace.form = "unknown"
             password_submitted = True
         elif email_input is not None and not email_submitted and not password_submitted:
             if not _on_sign_in(page):
                 return {"code": "login_page_unrecognized"}
             trace.enter("email_fill")
             await email_input.fill(email, timeout=5000)
-            if not await _submit(page, trace, password=False, field=email_input):
-                return {"code": "login_page_unrecognized"}
+            if error := await _submit(page, trace, password=False, field=email_input):
+                return {"code": error}
             email_submitted = True
         elif not entry_clicked and not email_submitted and not password_submitted:
             entry = await _single_visible(page.get_by_role("button", name=EMAIL_ENTRY))
@@ -293,7 +332,9 @@ async def relogin(browser, email, password, task_id=""):
             return result
     except Exception as exc:
         category = _exception_category(exc)
-        code = "login_timeout" if category == "timeout" else "login_failed"
+        code = "login_failed"
+        if category == "timeout":
+            code = trace.timeout_code()
         trace.write(code, category)
         return {"code": code}
     finally:

@@ -2,8 +2,12 @@ import base64
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
-from grok_relogin import EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION, ReloginTrace, _session, relogin
+from grok_relogin import (
+    AGE_LABEL, AGE_PROMPT, EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION,
+    ReloginTrace, _session, relogin,
+)
 
 
 def fixture_token(claims):
@@ -33,6 +37,12 @@ class LoginControl:
         if selector == FORM_SUBMIT and self.name == "owning_form":
             return LoginControl(self.page, "native_submit")
         return LoginControl(self.page, "owning_form" if self.name == PASSWORD else "absent")
+
+    def get_by_role(self, role, name):
+        return LoginControl(self.page, "named_form_action")
+
+    def and_(self, other):
+        return LoginControl(self.page, self.name if self.name == other.name else "absent")
 
     async def input_value(self, timeout):
         if self.page.outcome == "lost_input":
@@ -85,8 +95,10 @@ class LoginPage:
             2: {PASSWORD, "submit", EMAIL} if self.outcome == "readonly_email" else {PASSWORD, "submit"},
             3: {VERIFICATION} if self.outcome == "verification" else set(),
         })[self.state]
-        if self.outcome == "form_owned" and self.state == 2:
+        if self.outcome in ("form_owned", "conflicting_actions") and self.state == 2:
             controls |= {"owning_form", "native_submit"}
+            if self.outcome == "conflicting_actions":
+                controls.add("named_form_action")
         return controls
 
     async def goto(self, url, **kwargs):
@@ -99,6 +111,8 @@ class LoginPage:
         return LoginControl(self, selector)
 
     def get_by_role(self, role, name):
+        if name in (AGE_PROMPT, AGE_LABEL):
+            return LoginControl(self, (role, name))
         control = {EMAIL_ENTRY: "email_entry", SUBMIT: "submit"}[name]
         return LoginControl(self, control if role == "button" else "unavailable")
 
@@ -114,12 +128,26 @@ class LoginPage:
 
 
 class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
+    def test_password_response_count_follows_request_start(self):
+        trace = ReloginTrace("task_response_order")
+        email_post = Mock(method="POST", url=SIGN_IN)
+        password_post = Mock(method="POST", url=SIGN_IN)
+        trace.observe_request(email_post)
+        trace.password_attempted = True
+        trace.observe_request(password_post)
+        trace.observe_response(SimpleNamespace(request=email_post, url=SIGN_IN, status=200))
+        self.assertEqual((trace.password_requests, trace.password_posts), (1, 0))
+        self.assertEqual(trace.password_status, 0)
+        trace.observe_response(SimpleNamespace(request=password_post, url=SIGN_IN, status=429))
+        self.assertEqual((trace.password_requests, trace.password_posts), (1, 1))
+        self.assertEqual(trace.password_status, 429)
+
     def test_verification_target_is_recorded_without_request_url(self):
         trace = ReloginTrace("task_verification")
-        brunhild = SimpleNamespace(url="https://brunhild.challenges.cloudflare.com/private?k=secret",
+        brunhild = Mock(url="https://brunhild.challenges.cloudflare.com/private?k=secret",
                                   failure="net::ERR_ADDRESS_UNREACHABLE")
         turnstile = SimpleNamespace(url="https://challenges.cloudflare.com/private?k=secret", status=403)
-        ignored = SimpleNamespace(url="https://brunhild.challenges.cloudflare.com.example.test/private",
+        ignored = Mock(url="https://brunhild.challenges.cloudflare.com.example.test/private",
                                   failure="raw failure secret")
         with self.assertLogs("cfm-browser-worker.grok-relogin", level="INFO") as captured:
             trace.enter("password_fill")
@@ -147,6 +175,72 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         self.assertIn("password_attempted=false exception=timeout", captured.output[-1])
         self.assertNotIn("private-", "\n".join(captured.output))
 
+    async def test_rejected_entry_releases_browser_without_submitting(self):
+        for status, expected in [(403, "login_entry_forbidden"), (429, "upstream_rate_limited")]:
+            with self.subTest(status=status):
+                page = LoginPage("success")
+                page.goto = AsyncMock(return_value=SimpleNamespace(status=status))
+                result = await relogin(page, "fixture@example.test", "fixture-password")
+                self.assertEqual(result, {"code": expected})
+                self.assertEqual(page.submissions, [])
+                self.assertTrue(page.closed)
+
+    async def test_forbidden_page_with_visible_verification_requests_manual_action(self):
+        class VerificationPage(LoginPage):
+            @property
+            def controls(self):
+                return {VERIFICATION}
+
+        page = VerificationPage("verification")
+        page.goto = AsyncMock(return_value=SimpleNamespace(status=403))
+        self.assertEqual(await relogin(page, "", ""), {"code": "verification_required"})
+        self.assertTrue(page.closed)
+
+    async def test_timeout_after_password_click_reports_unconfirmed_session(self):
+        class WaitPage(LoginPage):
+            def locator(self, selector):
+                if self.state == 3:
+                    raise TimeoutError("fixture session deadline")
+                return super().locator(selector)
+
+        page = WaitPage("form_owned")
+        self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"),
+                         {"code": "session_wait_timeout"})
+        self.assertEqual(page.state, 3)
+        self.assertTrue(page.closed)
+
+    async def test_password_page_timeout_distinguishes_observed_requests(self):
+        class StalledPage(LoginPage):
+            def on(self, event, handler):
+                if event == "request":
+                    self.observe_request = handler
+
+            @property
+            def controls(self):
+                return {PASSWORD} if self.state == 3 else super().controls
+
+        for observed, expected in [(False, "password_request_unobserved"), (True, "session_wait_timeout")]:
+            with self.subTest(observed=observed):
+                page = StalledPage("stalled")
+                page.cookies = AsyncMock()
+                waits_after_click = 0
+
+                async def tick(_):
+                    nonlocal waits_after_click
+                    if page.state == 3:
+                        waits_after_click += 1
+                        if waits_after_click == 1 and observed:
+                            page.observe_request(Mock(method="POST", url=SIGN_IN))
+                        if waits_after_click == 2:
+                            raise TimeoutError()
+
+                with patch("grok_relogin.asyncio.sleep", tick):
+                    result = await relogin(page, "fixture@example.test", "fixture-password")
+                self.assertEqual(result, {"code": expected})
+                page.cookies.assert_not_awaited()
+                self.assertEqual(page.state, 3)
+                self.assertTrue(page.closed)
+
     async def test_official_login_returns_only_scoped_session(self):
         page = LoginPage("success")
         result = await relogin(page, "fixture@example.test", "fixture-password")
@@ -160,6 +254,33 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"), {"code": "verification_required"})
         self.assertEqual(len(page.submissions), 2)
         self.assertTrue(page.closed)
+
+    async def test_age_form_stops_before_session_lookup(self):
+        class AgePage(LoginPage):
+            @property
+            def controls(self):
+                return self.age_controls if self.state == 3 else super().controls
+
+        heading = ("heading", AGE_PROMPT)
+        for age_controls, requires_age in [
+            ({heading, ("textbox", AGE_LABEL)}, True),
+            ({heading, ("spinbutton", AGE_LABEL)}, True),
+            ({heading}, False),
+            ({("textbox", AGE_LABEL)}, False),
+        ]:
+            with self.subTest(age_controls=age_controls):
+                page = AgePage("success")
+                page.age_controls = age_controls
+                page.cookies = AsyncMock(wraps=page.cookies)
+                result = await relogin(page, "fixture@example.test", "fixture-password")
+                if requires_age:
+                    self.assertEqual(result, {"code": "age_confirmation_required"})
+                    page.cookies.assert_not_awaited()
+                else:
+                    self.assertEqual(result, {"sso": FRESH, "sso_rw": ""})
+                self.assertEqual(len(page.submissions), 2)
+                self.assertEqual(page.state, 3)
+                self.assertTrue(page.closed)
 
     async def test_password_stage_does_not_refill_previously_submitted_email(self):
         page = LoginPage("readonly_email")
@@ -184,6 +305,13 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         page = LoginPage("form_owned")
         result = await relogin(page, "fixture@example.test", "fixture-password")
         self.assertEqual(result["sso"], FRESH)
+
+    async def test_conflicting_form_actions_stop_before_password_click(self):
+        page = LoginPage("conflicting_actions")
+        self.assertEqual(await relogin(page, "fixture@example.test", "fixture-password"),
+                         {"code": "login_action_ambiguous"})
+        self.assertEqual(page.state, 2)
+        self.assertTrue(page.closed)
 
     async def test_does_not_submit_a_password_the_page_did_not_keep(self):
         page = LoginPage("lost_input")

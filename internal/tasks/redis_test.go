@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,49 @@ func TestRedisPingHasTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 3*time.Second {
 		t.Fatalf("ping exceeded timeout: %s", elapsed)
+	}
+}
+
+func TestRedisQueueReloginProgress(t *testing.T) {
+	addr := os.Getenv("CFM_TEST_REDIS_ADDR")
+	if addr == "" {
+		addr = newFakeRedis(t).addr()
+	}
+	q := NewRedis(addr, "", 0, taskID())
+	task := q.Submit("grok_sso_relogin", map[string]any{"account_id": "fixture"})
+	q.SetStage(task.ID, "signing_in")
+	stored, ok := q.Get(task.ID)
+	if !ok || stored.Status != "queued" || stored.Result != nil {
+		t.Fatal("queued task was changed")
+	}
+	stored.Status = "running"
+	if err := q.save(&stored); err != nil {
+		t.Fatal(err)
+	}
+	q.SetStage(task.ID, "signing_in")
+	stored, ok = q.Get(task.ID)
+	if !ok || stored.Status != "running" || stored.Result["stage"] != "signing_in" || stored.Payload["account_id"] != "fixture" {
+		t.Fatal("running task did not preserve its identity and stage")
+	}
+	if !q.Cancel(task.ID) {
+		t.Fatal("cancel failed")
+	}
+	q.SetStage(task.ID, "syncing")
+	stored, ok = q.Get(task.ID)
+	if !ok || stored.Status != "cancelled" || stored.Result["stage"] != "signing_in" {
+		t.Fatal("late progress changed a cancelled task")
+	}
+	if _, err := q.command(context.Background(), "SADD", q.indexKey(), "expired"); err != nil {
+		t.Fatal(err)
+	}
+	if jobs, err := q.ListWithError(); err != nil || len(jobs) != 1 || jobs[0].ID != task.ID {
+		t.Fatal("expired index member hid a task")
+	}
+	if _, err := q.command(context.Background(), "SET", q.taskKey(task.ID), "unreadable"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ListWithError(); err == nil {
+		t.Fatal("unreadable progress reported an empty list")
 	}
 }
 
@@ -170,6 +214,22 @@ func (s *fakeRedis) handle(conn net.Conn) {
 		s.values[args[1]] = args[2]
 		s.mu.Unlock()
 		writeRESP(conn, "+OK\r\n")
+	case "EVAL":
+		if len(args) != 6 || args[2] != "1" {
+			writeRESP(conn, "-ERR unsupported test script\r\n")
+			return
+		}
+		s.mu.Lock()
+		matches := s.values[args[3]] == args[4]
+		if matches {
+			s.values[args[3]] = args[5]
+		}
+		s.mu.Unlock()
+		if matches {
+			writeRESP(conn, "+OK\r\n")
+		} else {
+			writeRESP(conn, "$-1\r\n")
+		}
 	case "GET":
 		s.mu.Lock()
 		value, ok := s.values[args[1]]

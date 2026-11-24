@@ -49,6 +49,7 @@ import { computed } from 'vue'
 import { Button } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
 
+import { grokReloginDetail, grokReloginLabel } from '@/lib/grokReloginProgress'
 import type { GrokAccount, GrokReloginJob } from '@/api/grokAccounts'
 import type { GrokOAuthAccount } from '@/api/grokOAuthAccounts'
 import FloatingActionMenu from './FloatingActionMenu.vue'
@@ -103,48 +104,8 @@ const isRuntimeDisabled = computed(() => String(props.item.runtime_status || '')
 const canManageRuntime = computed(() => props.runtimeAvailable && props.item.sync_state === 'synced')
 const oauthActionBusy = computed(() => Boolean(props.oauthAction))
 const reloginActive = computed(() => props.startingRelogin || props.relogin?.status === 'queued' || props.relogin?.status === 'running')
-const reloginDetail = computed(() => {
-  const job = props.relogin
-  if (job?.status === 'completed') {
-    const quotas = [
-      ['文字', job.result?.text_quota], ['图片', job.result?.image_quota], ['视频', job.result?.video_quota],
-    ]
-    const missing = quotas.filter(([, refreshed]) => !refreshed).map(([label]) => label)
-    return missing.length ? '额度尚未确认：' + missing.join('、') : '文字、图片和视频额度已刷新'
-  }
-  const details: Record<string, string> = {
-    grok_relogin_verification_required: 'Grok 要求额外验证，请在官网完成',
-    grok_relogin_login_page_unrecognized: '未识别当前 Grok 登录页面',
-    grok_relogin_login_timeout: '等待 Grok 登录完成超时',
-    grok_relogin_identity_mismatch: '新会话与所选账号身份不一致',
-    grok_relogin_proxy_unavailable: '账号绑定的代理出口不可用',
-    grok_relogin_browser_unavailable: '共享浏览器暂不可用',
-    grok_relogin_account_busy: '账号正在运行请求或等待额度结算',
-    grok_relogin_account_changed: '账号或登录凭据已变化',
-    grok_relogin_sync_failed: '调用池同步未完成，再次点击将继续同步已保存的会话',
-    grok_relogin_interrupted: '任务中断，请核对登录状态后重试',
-    grok_relogin_result_unknown: '浏览器登录结果未知',
-  }
-  return (job?.error && details[job.error]) || ''
-})
-const reloginLabel = computed(() => {
-  if (props.startingRelogin) return '正在提交'
-  const job = props.relogin
-  if (job?.status === 'completed') {
-    return job.result?.text_quota && job.result.image_quota && job.result.video_quota ? '已重新登录' : '已登录，待确认额度'
-  }
-  if (job?.status === 'failed' || job?.status === 'cancelled') return '重新登录未完成'
-  if (job?.status === 'queued') return '等待浏览器'
-  if (job?.status !== 'running') return ''
-  const stages: Record<string, string> = {
-    waiting_browser: '等待浏览器',
-    starting_browser: '启动浏览器',
-    signing_in: '正在登录',
-    syncing: '同步调用池',
-    refreshing_quota: '刷新额度',
-  }
-  return stages[job.result?.stage || ''] || '重新登录中'
-})
+const reloginDetail = computed(() => grokReloginDetail(props.relogin))
+const reloginLabel = computed(() => props.startingRelogin ? '正在提交' : grokReloginLabel(props.relogin))
 
 const menuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
   [

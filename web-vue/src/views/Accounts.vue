@@ -350,6 +350,12 @@
         </div>
       </div>
 
+      <GrokReloginPanel
+        :jobs="grokReloginJobs"
+        :starting="grokStartingRelogins"
+        :poll-error="grokReloginPollError"
+      />
+
       <PageLoadingState
         v-if="grokLoading && grokAccounts.length === 0"
         title="正在加载 Grok 账号"
@@ -1168,6 +1174,7 @@ import {
 import AccountGridCard from './accounts/AccountGridCard.vue'
 import AccountTableRow from './accounts/AccountTableRow.vue'
 import AccountTwoFAPanel from './accounts/AccountTwoFAPanel.vue'
+import GrokReloginPanel from './accounts/GrokReloginPanel.vue'
 import AccountReloginPanel from './accounts/AccountReloginPanel.vue'
 import AccountHistoryModal from './accounts/AccountHistoryModal.vue'
 import GrokAccountGridCard from './accounts/GrokAccountGridCard.vue'
@@ -1408,6 +1415,9 @@ const {
   testingAccountId: grokTestingAccountId,
   testAccountValidity: testGrokAccountValidity,
   relogins: grokRelogins,
+  reloginJobs: grokReloginJobs,
+  reloginPollError: grokReloginPollError,
+  pollRelogins: pollGrokRelogins,
   startingRelogins: grokStartingRelogins,
   reloginAccount: reloginGrokAccount,
   togglingAccountId: grokTogglingAccountId,
@@ -1574,6 +1584,7 @@ function applyActiveAccountPlatform(value: AccountPlatformView) {
   activeAccountPlatform.value = value
   if (value !== 'grok') grokCredentialsAccount.value = null
   if (value !== 'grok') showGrokOAuthAccess.value = false
+  if (value === 'grok') void pollGrokRelogins()
   if (value === 'grok' && !grokLoading.value && grokAccounts.value.length === 0) {
     void loadGrokAccounts({ silentErrorToast: true })
   }

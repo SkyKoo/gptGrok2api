@@ -13,6 +13,7 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { usePageDebouncedAction, usePagedQuery } from '@/composables/usePageQuery'
 import { usePageRuntime } from '@/composables/usePageRuntime'
 import { useToast } from '@/composables/useToast'
+import { grokReloginActive } from '@/lib/grokReloginProgress'
 import { saveBlob } from '@/lib/downloads'
 import { errorMessage } from '@/lib/errorMessage'
 
@@ -84,7 +85,16 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
   const snapshotRefreshBusy = ref(false)
   const probePollingEnabled = ref(false)
   const probePollingBusy = ref(false)
-  const relogins = ref<Record<string, GrokReloginJob>>({})
+  const reloginJobs = ref<GrokReloginJob[]>([])
+  const reloginPollError = ref(false)
+  const relogins = computed(() => {
+    const latest: Record<string, GrokReloginJob> = {}
+    for (const job of reloginJobs.value) {
+      const id = job.payload.account_id
+      if (!latest[id]) latest[id] = job
+    }
+    return latest
+  })
   const startingRelogins = ref(new Set<string>())
 
   const toast = useToast()
@@ -372,23 +382,19 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
     try {
       const { items } = await grokAccountsApi.listRelogins()
       if (!pageRuntime.isLatestRequest(key, seq)) return
-      const next: Record<string, GrokReloginJob> = {}
-      for (const job of items) {
-        const id = job.payload.account_id
-        if (!next[id] || next[id].created_at < job.created_at) next[id] = job
-      }
-      const finished = Object.values(next).some((job) => {
-        const previous = relogins.value[job.payload.account_id]
-        return (previous?.status === 'running' || previous?.status === 'queued') &&
-          job.status !== 'running' && job.status !== 'queued'
-      })
-      relogins.value = next
+      const running = new Set(reloginJobs.value.filter(grokReloginActive).map(job => job.id))
+      const finished = items.some(job => running.has(job.id) && !grokReloginActive(job))
+      reloginJobs.value = items.sort((a, b) =>
+        Number(grokReloginActive(b)) - Number(grokReloginActive(a)) ||
+        b.created_at - a.created_at || b.updated_at - a.updated_at || b.id.localeCompare(a.id),
+      )
+      reloginPollError.value = false
       if (finished) void loadData({ silentErrorToast: true, silentLoading: true })
     } catch {
-      // Keep the last observed progress when one status read fails.
+      if (pageRuntime.isLatestRequest(key, seq)) reloginPollError.value = true
     } finally {
       if (pageRuntime.isLatestRequest(key, seq) &&
-          Object.values(relogins.value).some((job) => job.status === 'running' || job.status === 'queued')) {
+          (reloginPollError.value || reloginJobs.value.some(grokReloginActive))) {
         pageRuntime.setTimer(key, 2000, () => void pollRelogins())
       }
     }
@@ -401,7 +407,7 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
     try {
       const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('')
       const { job } = await grokAccountsApi.relogin(id, requestId)
-      relogins.value[id] = job
+      reloginJobs.value = [{ ...job, email: account.email }, ...reloginJobs.value.filter(item => item.id !== job.id)]
       await pollRelogins()
     } catch (error) {
       await pollRelogins()
@@ -660,6 +666,9 @@ export function useGrokAccountsPage(options: { onOpenOAuth?: (ids: string[]) => 
     testingAccountId,
     testAccountValidity,
     relogins,
+    reloginJobs,
+    reloginPollError,
+    pollRelogins,
     startingRelogins,
     reloginAccount,
     togglingAccountId,

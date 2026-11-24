@@ -100,15 +100,20 @@ func (q *RedisQueue) Submit(kind string, payload map[string]any) *Task {
 }
 
 func (q *RedisQueue) Get(id string) (Task, bool) {
+	task, ok, _ := q.readTask(id)
+	return task, ok
+}
+
+func (q *RedisQueue) readTask(id string) (Task, bool, error) {
 	raw, err := q.command(context.Background(), "GET", q.taskKey(id))
 	if err != nil || raw == nil {
-		return Task{}, false
+		return Task{}, false, err
 	}
 	var task Task
-	if json.Unmarshal(rawBytes(raw), &task) != nil {
-		return Task{}, false
+	if err := json.Unmarshal(rawBytes(raw), &task); err != nil {
+		return Task{}, false, err
 	}
-	return *clone(&task), true
+	return task, true, nil
 }
 
 func (q *RedisQueue) Cancel(id string) bool {
@@ -121,19 +126,66 @@ func (q *RedisQueue) Cancel(id string) bool {
 	return q.save(&task) == nil
 }
 
+// SetStage only changes the observed running record. A concurrent cancellation
+// or completion wins if it updates the task between the read and write.
+func (q *RedisQueue) SetStage(id, stage string) {
+	ctx := context.Background()
+	key := q.taskKey(id)
+	raw, err := q.command(ctx, "GET", key)
+	if err != nil || raw == nil {
+		return
+	}
+	original := rawBytes(raw)
+	var task struct {
+		Status string
+		Result struct{ Stage string }
+	}
+	if json.Unmarshal(original, &task) != nil || task.Status != "running" || task.Result.Stage == stage {
+		return
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(original, &fields) != nil {
+		return
+	}
+	fields["result"], _ = json.Marshal(map[string]string{"stage": stage})
+	fields["updated_at"], _ = json.Marshal(time.Now().Unix())
+	updated, err := json.Marshal(fields)
+	if err != nil {
+		return
+	}
+	const compareAndSet = `if redis.call('GET', KEYS[1]) == ARGV[1] then
+		return redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+	end`
+	_, _ = q.command(ctx, "EVAL", compareAndSet, "1", key, string(original), string(updated))
+}
+
 func (q *RedisQueue) List() []Task {
+	items, _ := q.ListWithError()
+	return items
+}
+
+// ListWithError lets progress readers distinguish an unreadable queue from an
+// empty one. Expired task keys can still appear in the Redis index.
+func (q *RedisQueue) ListWithError() ([]Task, error) {
 	raw, err := q.command(context.Background(), "SMEMBERS", q.indexKey())
 	if err != nil {
-		return []Task{}
+		return []Task{}, err
 	}
-	items, _ := raw.([]any)
+	items, ok := raw.([]any)
+	if !ok {
+		return []Task{}, errors.New("unexpected Redis task index")
+	}
 	result := make([]Task, 0, len(items))
+	var readErr error
 	for _, value := range items {
-		if task, ok := q.Get(stringValue(rawBytes(value))); ok {
+		task, found, err := q.readTask(stringValue(rawBytes(value)))
+		if err != nil {
+			readErr = err
+		} else if found {
 			result = append(result, task)
 		}
 	}
-	return result
+	return result, readErr
 }
 
 func (q *RedisQueue) worker() {
