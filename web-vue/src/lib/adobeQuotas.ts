@@ -17,9 +17,17 @@ function hasQueryTime(value: string | number | undefined) {
   return Number.isFinite(new Date(value).getTime())
 }
 
+function queryTime(value: string | number | undefined) {
+  if (!hasQueryTime(value)) return ''
+  return new Date(value as string | number).toLocaleString()
+}
+
 export function adobeGenerationQuotaNotice(quota?: AdobeQuota) {
   const generation = quota?.generation
-  if (generation?.status === 'stale') return hasQueryTime(generation.checked_at) ? '待刷新 · 上次查询结果' : '待查询'
+  if (generation?.status === 'stale') {
+    const lastRefresh = queryTime(generation.checked_at)
+    return lastRefresh ? `上次刷新：${lastRefresh}` : '待查询'
+  }
   if (generation?.status === 'error') return '查询失败'
   if (generation?.status !== 'known') return '待查询'
   return ''
@@ -51,7 +59,10 @@ export function adobeGenerationQuotaItems(quota?: AdobeQuota): AdobeGenerationQu
 
 export function adobeCreditLabel(quota?: AdobeQuota) {
   if (!quota || !knownNumber(quota.available)) return '通用积分未知'
-  if (quota.status === 'stale' && hasQueryTime(quota.last_success_at || quota.checked_at)) return `通用积分 ${quota.available}（待刷新）`
+  if (quota.status === 'stale') {
+    const lastRefresh = queryTime(quota.last_success_at || quota.checked_at)
+    if (lastRefresh) return `通用积分 ${quota.available}（上次刷新：${lastRefresh}）`
+  }
   if (!['known', 'success'].includes(quota.status)) return '通用积分未知'
   return `通用积分 ${quota.available}`
 }
