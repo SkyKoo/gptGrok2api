@@ -114,7 +114,7 @@ test('Adobe actions require both the server capability and matching creation out
   const { registrationRecoveryAction } = await import('../src/lib/registrationCompensation.ts')
   assert.equal(registrationRecoveryAction({ recovery_mode: 'resume_session' }, 'adobe'), '')
   assert.equal(registrationRecoveryAction({ can_resume_registration: true, recovery_mode: 'resume_session' }, 'adobe'), '继续验证')
-  assert.equal(registrationRecoveryAction({ can_resume_registration: true, creation_outcome: 'accepted', recovery_mode: 'resume_session' }, 'adobe'), '继续验证')
+  assert.equal(registrationRecoveryAction({ can_resume_registration: true, creation_outcome: 'accepted', recovery_mode: 'resume_session' }, 'adobe'), '')
   assert.equal(registrationRecoveryAction({ can_resume_registration: false, creation_outcome: 'accepted', recovery_mode: 'resume_session' }, 'adobe'), '')
   assert.equal(registrationRecoveryAction({ can_reregister: true, status: 'registration_pending', creation_outcome: 'accepted', recovery_mode: 'manual_reregistration' }, 'adobe'), '手动重新注册')
   assert.equal(registrationRecoveryAction({ can_retry_registration: true, recovery_mode: 'retry_registration' }, 'adobe'), '重新注册')
@@ -229,6 +229,6 @@ test('Adobe recovery-page failures describe page restoration without claiming ac
     assert.doesNotMatch(text, /创建失败|注册失败|重新注册|adobe:/)
   }
   assert.equal(registrationJobStatusText('registration_pending', undefined, undefined, 'adobe', 'resume_session'), '注册未完成')
-  assert.equal(registrationRecoveryAction({ status: 'registration_pending', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' }, 'adobe'), '继续验证')
+  assert.equal(registrationRecoveryAction({ status: 'registration_pending', can_resume_registration: true, recovery_mode: 'resume_session', creation_outcome: 'accepted' }, 'adobe'), '')
   assert.equal(registrationFailureText('mail: timeout', 'adobe'), '未在规定时间内收到 Adobe 邮件验证码。')
 })

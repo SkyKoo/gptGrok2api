@@ -38,8 +38,9 @@ test('Adobe stale snapshots retain historical counts without claiming current av
  const items=adobeGenerationQuotaItems(quota)
  assert.deepEqual(items.map(item=>item.text),['2 / 3','1 / 1','3 / 3'])
  assert.ok(items.every(item=>item.tone==='muted'))
- assert.equal(adobeGenerationQuotaNotice(quota),'待刷新 · 上次查询结果')
- assert.equal(adobeCreditLabel(quota),'通用积分 10（待刷新）')
+ const lastRefresh = new Date(checked_at).toLocaleString()
+ assert.equal(adobeGenerationQuotaNotice(quota),`上次刷新：${lastRefresh}`)
+ assert.equal(adobeCreditLabel(quota),`通用积分 10（上次刷新：${lastRefresh}）`)
  const zero=adobeGenerationQuotaItems({...quota,generation:{...quota.generation,pools:[{...pools[1],available:0}]}})[0]
  assert.equal(zero.text,'0 / 1'); assert.equal(zero.tone,'muted')
 })

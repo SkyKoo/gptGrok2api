@@ -57,7 +57,7 @@ export function registrationRecoveryAction(job: RegistrationRecoveryActions, tar
   // Do not offer the old-session continuation for an accepted registration
   // that was never saved.  The server may be upgraded independently from the
   // UI, so guard the legacy response here as well.
-  if (job.recovery_mode === 'manual_reregistration') return ''
+  if (job.recovery_mode === 'manual_reregistration' || job.creation_outcome === 'accepted') return ''
   if (job.recovery_mode === 'resume_session' && job.can_resume_registration) return '继续验证'
   return job.recovery_mode === 'retry_registration' && job.can_retry_registration ? '重新注册' : ''
 }

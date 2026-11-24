@@ -6,7 +6,7 @@
       <span class="whitespace-nowrap font-medium" :class="item.tone === 'danger' ? 'text-rose-500' : item.tone === 'muted' ? 'text-muted-foreground' : ''">{{ item.text }}</span>
     </div>
     <div class="mt-1 text-xs text-muted-foreground">{{ adobeCreditLabel(quota) }}</div>
-    <p class="mt-1 text-xs text-muted-foreground">查询：{{ time(quota?.generation?.checked_at) }}</p>
+    <p v-if="!adobeGenerationQuotaNotice(quota)" class="mt-1 text-xs text-muted-foreground">查询：{{ time(quota?.generation?.checked_at) }}</p>
     <p v-if="quota?.generation?.error" class="mt-1 text-xs text-rose-500">{{ quota.generation.error }}</p>
   </div>
 </template>
