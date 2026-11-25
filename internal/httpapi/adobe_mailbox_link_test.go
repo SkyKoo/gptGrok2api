@@ -32,6 +32,52 @@ func callAdobeMailboxLink(t *testing.T, s *Server, ids ...string) adobeMailboxLi
 	return result
 }
 
+func TestValidateAdobeMailboxMetadataAcceptsEmailFallbackAndRejectsForeignAlias(t *testing.T) {
+	box := mailboxstore.Mailbox{
+		ID:              "mbx_canonical",
+		Email:           "alias@example.test",
+		SourceID:        "hme-main",
+		SourceType:      "hme",
+		SourceAccountID: "acc-1",
+		SourceMailboxID: "hme-anon-id",
+	}
+	for _, tc := range []struct {
+		name     string
+		metadata map[string]any
+		wantErr  error
+	}{
+		{
+			name:     "exact_upstream_alias",
+			metadata: map[string]any{"provider": "icloud_hme", "platform": "adobe", "email": "alias@example.test", "source_id": "hme-main", "account_id": "acc-1", "id": "mbx_canonical", "source_mailbox_id": "hme-anon-id"},
+		},
+		{
+			name:     "creation_time_email_placeholder",
+			metadata: map[string]any{"provider": "icloud_hme", "platform": "adobe", "email": "alias@example.test", "source_id": "hme-main", "account_id": "acc-1", "id": "mbx_canonical", "source_mailbox_id": "ALIAS@Example.Test"},
+		},
+		{
+			name:     "canonical_asset_id_placeholder",
+			metadata: map[string]any{"provider": "icloud_hme", "platform": "adobe", "email": "alias@example.test", "source_id": "hme-main", "account_id": "acc-1", "id": "ALIAS@Example.Test", "source_mailbox_id": "mbx_canonical"},
+		},
+		{
+			name:     "foreign_upstream_alias_rejected",
+			metadata: map[string]any{"provider": "icloud_hme", "platform": "adobe", "email": "alias@example.test", "source_id": "hme-main", "account_id": "acc-1", "id": "mbx_canonical", "source_mailbox_id": "different-anon-id"},
+			wantErr:  errAdobeMailboxMetadataMismatch,
+		},
+		{
+			name:     "foreign_id_rejected",
+			metadata: map[string]any{"provider": "icloud_hme", "platform": "adobe", "email": "alias@example.test", "source_id": "hme-main", "account_id": "acc-1", "id": "different-id", "source_mailbox_id": "hme-anon-id"},
+			wantErr:  errAdobeMailboxMetadataMismatch,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAdobeMailboxMetadata(tc.metadata, box)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got err=%v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAdobeMailboxLinkRequiresAdminAndDatabase(t *testing.T) {
 	s := imageTaskTestServer(t)
 	rec := imageTaskCall(s, "POST", "/api/adobe/accounts/link-mailboxes", "api-secret", `{"ids":["adobe:any"]}`)

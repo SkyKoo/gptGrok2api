@@ -128,13 +128,25 @@ func validateAdobeMailboxMetadata(metadata map[string]any, box mailboxstore.Mail
 	if platform := strings.TrimSpace(stringValue(metadata["platform"])); platform != "" && !strings.EqualFold(platform, "adobe") {
 		return errAdobeMailboxMetadataMismatch
 	}
-	for key, expected := range map[string]string{"source_id": box.SourceID, "source_mailbox_id": box.SourceMailboxID, "account_id": box.SourceAccountID} {
+	for key, expected := range map[string]string{"source_id": box.SourceID, "account_id": box.SourceAccountID} {
 		if actual := strings.TrimSpace(stringValue(metadata[key])); actual != "" && actual != expected {
 			return errAdobeMailboxMetadataMismatch
 		}
 	}
-	// Older registration results stored the upstream alias ID in id.
-	if id := strings.TrimSpace(stringValue(metadata["id"])); id != "" && id != box.ID && id != box.SourceMailboxID {
+	// Newly created HME aliases store the email (or canonical asset ID) before
+	// upstream listing exposes anonymousId; accept those placeholders when the
+	// asset is later synced with its real upstream alias ID.
+	if actual := strings.TrimSpace(stringValue(metadata["source_mailbox_id"])); actual != "" &&
+		actual != box.SourceMailboxID &&
+		actual != box.ID &&
+		!strings.EqualFold(actual, box.Email) {
+		return errAdobeMailboxMetadataMismatch
+	}
+	// Older registration results stored the upstream alias ID or email fallback in id.
+	if id := strings.TrimSpace(stringValue(metadata["id"])); id != "" &&
+		id != box.ID &&
+		id != box.SourceMailboxID &&
+		!strings.EqualFold(id, box.Email) {
 		return errAdobeMailboxMetadataMismatch
 	}
 	if kind := strings.ToLower(strings.TrimSpace(stringValue(metadata["source_type"]))); kind != "" && kind != "hme" && kind != "icloud_hme" {

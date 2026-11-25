@@ -19,18 +19,37 @@ func adobeReconcileMetadata(box mailboxstore.Mailbox) map[string]any {
 }
 func reconcileAdobeFixture(t *testing.T, s *Server) (int, []string) {
 	t.Helper()
+	result := mailboxReconcileFixture(t, s)
+	return result.Claims, result.Errors
+}
+
+type mailboxReconcileFixtureResult struct {
+	Success bool     `json:"success"`
+	Outcome string   `json:"outcome"`
+	Claims  int      `json:"adobe_claims"`
+	Errors  []string `json:"errors"`
+}
+
+func mailboxReconcileFixture(t *testing.T, s *Server) mailboxReconcileFixtureResult {
+	t.Helper()
 	rec := adminRequest(s.Handler(), http.MethodPost, "/api/icloud/reconcile", strings.NewReader(`{}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reconcile=%d %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Claims int      `json:"adobe_claims"`
-		Errors []string `json:"errors"`
-	}
+	var out mailboxReconcileFixtureResult
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatal(err)
 	}
-	return out.Claims, out.Errors
+	return out
+}
+
+func TestMailboxReconcileReportsFailureWhenNoStageMakesProgress(t *testing.T) {
+	s, _ := mailboxHTTPTestServer(t)
+	out := mailboxReconcileFixture(t, s)
+	if out.Success || out.Outcome != "failed" || out.Claims != 0 ||
+		len(out.Errors) != 1 || out.Errors[0] != "邮箱上游未配置" {
+		t.Fatalf("unexpected reconcile result: %+v", out)
+	}
 }
 
 func TestAdobeReconcileNeverStealsOtherAccountOrTask(t *testing.T) {
@@ -181,5 +200,126 @@ func TestAdobeReconcileKeepsManualOwnerWhenDuplicateEmailImported(t *testing.T) 
 	var owner string
 	if err := db.QueryRow(`SELECT account_id FROM mailbox_claims WHERE mailbox_id=$1 AND platform='adobe' AND status='active'`, box.ID).Scan(&owner); err != nil || owner != original.ID {
 		t.Fatalf("owner=%s err=%v", owner, err)
+	}
+}
+
+func TestAdobeReconcileUpgradesEmailPlaceholderAndPreservesUpstreamAliasAcrossPlatforms(t *testing.T) {
+	s, _ := mailboxHTTPTestServer(t)
+	ctx := context.Background()
+
+	// Mailbox 1: Adobe-only alias created before upstream anonymousId sync, then
+	// updated by provider reconciliation.
+	adobeOnlyBox, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{
+		SourceID:        "fixture",
+		SourceType:      "hme",
+		SourceAccountID: "hme-account",
+		SourceMailboxID: "adobe-only@example.test",
+		Email:           "adobe-only@example.test",
+	}, "mailbox_created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adobeOnly := adobeFixtureAccount(t, s)
+	adobeOnly.AccountID = "ADOBE_ONLY_USER"
+	adobeOnly.ID = "adobe:" + adobeOnly.AccountID
+	adobeOnly.Email = adobeOnlyBox.Email
+	adobeOnly.RegistrationJobID = "job-adobe-only"
+	adobeOnly.RegistrationMailbox = adobeReconcileMetadata(adobeOnlyBox)
+	claimsRaw, _ := json.Marshal(map[string]any{"user_id": adobeOnly.AccountID, "exp": time.Now().Add(time.Hour).Unix()})
+	adobeOnly.Token = "e30." + base64.RawURLEncoding.EncodeToString(claimsRaw) + ".signature"
+	if _, err := s.adobeStore.Import([]adobe.Account{adobeOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.mailboxStore.EnsureRegistrationClaim(ctx, "adobe", adobeOnly.RegistrationJobID, adobeOnlyBox); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.mailboxStore.CommitRegistration(ctx, "adobe", adobeOnly.RegistrationJobID, adobeOnly.ID, adobeOnlyBox); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{
+		SourceID:        "fixture",
+		SourceType:      "hme",
+		SourceAccountID: "hme-account",
+		SourceMailboxID: "anon-adobe-only",
+		Email:           adobeOnlyBox.Email,
+	}, "provider_reconciled"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Mailbox 2: Shared with OpenAI (storing only email placeholder) + Adobe
+	// (storing email placeholder), while asset holds real upstream anonymousId.
+	sharedBox, err := s.mailboxStore.Upsert(ctx, mailboxstore.Mailbox{
+		SourceID:        "fixture",
+		SourceType:      "hme",
+		SourceAccountID: "hme-account",
+		SourceMailboxID: "anon-shared",
+		Email:           "shared-adobe@example.test",
+	}, "provider_reconciled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.store.AddAccounts(nil, []map[string]any{{
+		"id":           "openai-shared-1",
+		"access_token": "token-openai-shared-1",
+		"email":        sharedBox.Email,
+		"registration_mailbox": map[string]any{
+			"provider":          "icloud_hme",
+			"email":             sharedBox.Email,
+			"source_id":         "fixture",
+			"source_mailbox_id": sharedBox.Email,
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	sharedAdobe := adobeFixtureAccount(t, s)
+	sharedAdobe.AccountID = "ADOBE_SHARED_USER"
+	sharedAdobe.ID = "adobe:" + sharedAdobe.AccountID
+	sharedAdobe.Email = sharedBox.Email
+	sharedAdobe.RegistrationJobID = "job-adobe-shared"
+	sharedMetadata := adobeReconcileMetadata(sharedBox)
+	sharedMetadata["source_mailbox_id"] = sharedBox.Email
+	sharedAdobe.RegistrationMailbox = sharedMetadata
+	sharedClaimsRaw, _ := json.Marshal(map[string]any{"user_id": sharedAdobe.AccountID, "exp": time.Now().Add(time.Hour).Unix()})
+	sharedAdobe.Token = "e30." + base64.RawURLEncoding.EncodeToString(sharedClaimsRaw) + ".signature"
+	if _, err := s.adobeStore.Import([]adobe.Account{sharedAdobe}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := mailboxReconcileFixture(t, s)
+	if result.Success || result.Outcome != "partial" {
+		t.Fatalf("expected partial result with unavailable upstream: %+v", result)
+	}
+	// Filter out the expected "邮箱上游未配置" message in unit fixture without live HME source.
+	var unexpected []string
+	for _, item := range result.Errors {
+		if item != "邮箱上游未配置" {
+			unexpected = append(unexpected, item)
+		}
+	}
+	if result.Claims != 2 || len(unexpected) != 0 {
+		t.Fatalf("adobe_claims=%d unexpected_errors=%v", result.Claims, unexpected)
+	}
+	for _, check := range []struct {
+		accountID string
+		boxID     string
+		wantAlias string
+	}{
+		{adobeOnly.ID, adobeOnlyBox.ID, "anon-adobe-only"},
+		{sharedAdobe.ID, sharedBox.ID, "anon-shared"},
+	} {
+		freshBox, err := s.mailboxStore.Get(ctx, check.boxID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if freshBox.SourceMailboxID != check.wantAlias || freshBox.SourceAccountID != "hme-account" {
+			t.Fatalf("box %s degraded: %+v", check.boxID, freshBox)
+		}
+		savedAccount, err := s.adobeStore.Get(check.accountID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stringValue(savedAccount.RegistrationMailbox["source_mailbox_id"]) != check.wantAlias {
+			t.Fatalf("account %s source_mailbox_id not upgraded: %v", check.accountID, savedAccount.RegistrationMailbox)
+		}
 	}
 }

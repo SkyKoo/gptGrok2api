@@ -19,10 +19,19 @@ func (s *Store) registrationAsset(ctx context.Context, tx *sql.Tx, wanted Mailbo
 	if err != nil {
 		return item, err
 	}
-	for _, pair := range [][2]string{{wanted.ID, item.ID}, {wanted.SourceID, item.SourceID}, {wanted.SourceType, item.SourceType}, {wanted.SourceAccountID, item.SourceAccountID}, {wanted.SourceMailboxID, item.SourceMailboxID}} {
+	for _, pair := range [][2]string{{wanted.SourceID, item.SourceID}, {wanted.SourceType, item.SourceType}, {wanted.SourceAccountID, item.SourceAccountID}} {
 		if pair[0] != "" && pair[0] != pair[1] {
 			return item, ErrMailboxInUse
 		}
+	}
+	if id := strings.TrimSpace(wanted.ID); id != "" && id != item.ID && id != item.SourceMailboxID && !strings.EqualFold(id, item.Email) {
+		return item, ErrMailboxInUse
+	}
+	if sourceMailboxID := strings.TrimSpace(wanted.SourceMailboxID); sourceMailboxID != "" &&
+		sourceMailboxID != item.SourceMailboxID &&
+		sourceMailboxID != item.ID &&
+		!strings.EqualFold(sourceMailboxID, item.Email) {
+		return item, ErrMailboxInUse
 	}
 	if item.Status == "cleanup_pending" || item.Status == "deleted" {
 		return item, ErrMailboxStateImmutable

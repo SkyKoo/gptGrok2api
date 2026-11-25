@@ -107,6 +107,7 @@ var (
 	ErrInvalidMailboxStatus        = errors.New("mailbox status must be available or disabled")
 	ErrMailboxStateImmutable       = errors.New("mailbox is pending cleanup or deleted")
 	ErrMailboxInUse                = errors.New("邮箱仍被平台占用，请先删除关联账号或结束注册任务")
+	ErrMailboxSourceMismatch       = errors.New("邮箱来源与现有资产不一致，未改写")
 	ErrMailboxBusy                 = errors.New("邮箱正在执行删除，请稍后刷新状态")
 	ErrProviderMailboxNotFound     = errors.New("upstream mailbox not found")
 )
@@ -312,7 +313,7 @@ func normalizeSource(sourceType, sourceAccountID, sourceMailboxID, email string)
 	return sourceType, sourceAccountID, sourceMailboxID, email, nil
 }
 
-func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox, error) {
+func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox, fromAccountReconcile bool) (Mailbox, error) {
 	sourceType, sourceAccountID, sourceMailboxID, email, err := normalizeSource(item.SourceType, item.SourceAccountID, item.SourceMailboxID, item.Email)
 	if err != nil {
 		return Mailbox{}, err
@@ -321,12 +322,39 @@ func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox
 	// aliases may expose an anonymousId that must remain in source_mailbox_id;
 	// it must never replace the canonical database id or make reconciliation
 	// collide with the case-insensitive email index.
-	var id string
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM mailboxes WHERE lower(email)=lower($1) LIMIT 1`, email).Scan(&id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	sourceID := strings.TrimSpace(item.SourceID)
+	var existing Mailbox
+	err = tx.QueryRowContext(ctx, `SELECT id,source_id,source_type,source_account_id,source_mailbox_id FROM mailboxes WHERE lower(email)=lower($1) FOR UPDATE`, email).Scan(
+		&existing.ID, &existing.SourceID, &existing.SourceType, &existing.SourceAccountID, &existing.SourceMailboxID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Mailbox{}, fmt.Errorf("find mailbox by email: %w", err)
 	}
+	id := existing.ID
 	if id == "" {
 		id = newID("mbx")
+	} else {
+		sameType := sourceType == existing.SourceType ||
+			(sourceType == "hme" || sourceType == "icloud_hme") &&
+				(existing.SourceType == "hme" || existing.SourceType == "icloud_hme")
+		sourceConflict := !sameType ||
+			sourceID != "" && existing.SourceID != "" && sourceID != existing.SourceID ||
+			sourceAccountID != "" && existing.SourceAccountID != "" && sourceAccountID != existing.SourceAccountID
+		placeholder := sourceMailboxID == id || strings.EqualFold(sourceMailboxID, email)
+		existingAlias := existing.SourceMailboxID != "" && existing.SourceMailboxID != id &&
+			!strings.EqualFold(existing.SourceMailboxID, email)
+		if fromAccountReconcile && (sourceConflict || existingAlias && !placeholder && sourceMailboxID != existing.SourceMailboxID) {
+			return Mailbox{}, ErrMailboxSourceMismatch
+		}
+		if sourceConflict && (placeholder || sourceID == "" || sourceAccountID == "") {
+			return Mailbox{}, ErrMailboxSourceMismatch
+		}
+		// Only combine fields from compatible sources. A provider can replace
+		// a different source by supplying the complete new identity.
+		sourceID = firstNonEmpty(sourceID, existing.SourceID)
+		sourceAccountID = firstNonEmpty(sourceAccountID, existing.SourceAccountID)
+		if placeholder && existing.SourceMailboxID != "" {
+			sourceMailboxID = existing.SourceMailboxID
+		}
 	}
 	status := strings.TrimSpace(item.Status)
 	if status == "" {
@@ -337,7 +365,7 @@ func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox
 		INSERT INTO mailboxes(id, source_id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
 		ON CONFLICT (id) DO UPDATE SET
-			source_id=CASE WHEN EXCLUDED.source_id <> '' THEN EXCLUDED.source_id ELSE mailboxes.source_id END,
+			source_id=EXCLUDED.source_id,
 			source_type=EXCLUDED.source_type,
 			source_account_id=EXCLUDED.source_account_id,
 			source_mailbox_id=EXCLUDED.source_mailbox_id,
@@ -346,7 +374,7 @@ func (s *Store) upsertTx(ctx context.Context, tx *sql.Tx, item Mailbox) (Mailbox
 			last_error=CASE WHEN EXCLUDED.last_error <> '' THEN EXCLUDED.last_error ELSE mailboxes.last_error END,
 			updated_at=now()
 		RETURNING id, source_id, source_type, source_account_id, source_mailbox_id, email, status, last_error, created_at, updated_at`,
-		id, strings.TrimSpace(item.SourceID), sourceType, sourceAccountID, sourceMailboxID, email, status, strings.TrimSpace(item.LastError)).Scan(
+		id, sourceID, sourceType, sourceAccountID, sourceMailboxID, email, status, strings.TrimSpace(item.LastError)).Scan(
 		&out.ID, &out.SourceID, &out.SourceType, &out.SourceAccountID, &out.SourceMailboxID, &out.Email, &out.Status, &out.LastError, &out.CreatedAt, &out.UpdatedAt)
 	if err != nil {
 		return Mailbox{}, fmt.Errorf("upsert mailbox: %w", err)
@@ -386,7 +414,7 @@ func (s *Store) Upsert(ctx context.Context, item Mailbox, eventType string) (Mai
 	if err != nil {
 		return Mailbox{}, err
 	}
-	item, err = s.upsertTx(ctx, tx, item)
+	item, err = s.upsertTx(ctx, tx, item, eventType == "account_reconciled")
 	if err != nil {
 		tx.Rollback()
 		return Mailbox{}, err
@@ -512,7 +540,7 @@ func (s *Store) ReserveExcluding(ctx context.Context, platform, jobID, sourceID 
 	if err != nil {
 		return Mailbox{}, err
 	}
-	item, err := s.upsertTx(ctx, tx, created)
+	item, err := s.upsertTx(ctx, tx, created, false)
 	if err != nil {
 		tx.Rollback()
 		return Mailbox{}, err
@@ -579,7 +607,7 @@ func (s *Store) ensureClaim(ctx context.Context, platform, jobID string, item Ma
 	if err != nil {
 		return err
 	}
-	item, err = s.upsertTx(ctx, tx, item)
+	item, err = s.upsertTx(ctx, tx, item, !registration)
 	if err != nil {
 		tx.Rollback()
 		return err

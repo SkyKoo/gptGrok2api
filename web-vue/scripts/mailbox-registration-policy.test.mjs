@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mailboxOccupancyLabel, mailboxHasReservation, mailboxDeletionBlocked, mailboxRegistrationDisabled, mailboxRegistrationRetired, mailboxRegistrationLabel } from '../src/views/mailboxRegistrationPolicy.ts'
+import {
+  mailboxOccupancyLabel,
+  mailboxHasReservation,
+  mailboxDeletionBlocked,
+  mailboxRegistrationDisabled,
+  mailboxRegistrationRetired,
+  mailboxRegistrationLabel,
+  formatMailboxReconcileFeedback,
+  mailboxStateBlockTitle,
+} from '../src/views/mailboxRegistrationPolicy.ts'
 
 test('legacy disabled assets disable both registration channels', () => {
   for (const platform of ['openai', 'grok']) assert.equal(mailboxRegistrationDisabled({ status: 'disabled' }, platform), true)
@@ -36,4 +45,50 @@ test('registration reservation is separate from an account and protects deletion
  assert.equal(mailboxDeletionBlocked({grok_claimed:true}), true)
  assert.equal(mailboxDeletionBlocked({grok_reserved:false, grok_claimed:false}), false)
  assert.equal(mailboxDeletionBlocked({openai_claimed:true, grok_reserved:false}), true)
+})
+
+test('reconcile feedback separates partial warnings from module unavailability', () => {
+  const clean = formatMailboxReconcileFeedback({
+    success: true,
+    outcome: 'success',
+    aliases: 603,
+    openai_claims: 460,
+    grok_claims: 227,
+    adobe_claims: 132,
+    released_claims: 0,
+    errors: [],
+  })
+  assert.equal(clean.warning, '')
+  assert.equal(clean.error, '')
+  assert.equal(clean.notice, '核对完成：发现 603 个上游邮箱，关联 GPT 460 个、Grok 227 个、Adobe 132 个，修复历史占用 0 个。')
+
+  const partial = formatMailboxReconcileFeedback({
+    success: false,
+    outcome: 'partial',
+    aliases: 603,
+    openai_claims: 460,
+    grok_claims: 227,
+    adobe_claims: 91,
+    released_claims: 0,
+    errors: ['adobe:u1：Adobe 账号邮箱来源与现有资产不一致，未改写', 'adobe:u2：Adobe 邮箱资产未匹配，请先核对该邮箱来源，再关联账号'],
+  })
+  assert.equal(partial.notice, '核对部分完成：发现 603 个上游邮箱，关联 GPT 460 个、Grok 227 个、Adobe 91 个，修复历史占用 0 个。')
+  assert.equal(partial.warning, 'adobe:u1：Adobe 账号邮箱来源与现有资产不一致，未改写；adobe:u2：Adobe 邮箱资产未匹配，请先核对该邮箱来源，再关联账号')
+  assert.equal(partial.error, '')
+
+  assert.equal(mailboxStateBlockTitle(null), '邮箱管理模块暂不可用')
+  assert.equal(mailboxStateBlockTitle({ reachable: false }), '邮箱管理模块暂不可用')
+  assert.equal(mailboxStateBlockTitle({ reachable: true }), '操作未完成')
+})
+
+test('failed reconcile displays no completion notice for both API versions', () => {
+  const failed = { success: false, aliases: 0, openai_claims: 0, grok_claims: 0, adobe_claims: 0,
+    released_claims: 0, errors: ['context deadline exceeded'] }
+  const expected = { notice: '', warning: '', error: '邮箱核对失败：context deadline exceeded' }
+  assert.deepEqual(formatMailboxReconcileFeedback({ ...failed, outcome: 'failed' }), expected)
+  assert.deepEqual(formatMailboxReconcileFeedback(failed), expected)
+  const legacyPartial = formatMailboxReconcileFeedback({ ...failed, adobe_claims: 1 })
+  assert.match(legacyPartial.notice, /^核对部分完成/)
+  assert.equal(legacyPartial.error, '')
+  assert.match(formatMailboxReconcileFeedback({ success: true }).notice, /^核对完成/)
 })

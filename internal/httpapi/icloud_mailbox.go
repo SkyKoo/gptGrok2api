@@ -434,6 +434,7 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			box.ID = canonical.ID
+			box.SourceID = canonical.SourceID
 			box.SourceMailboxID = canonical.SourceMailboxID
 			box.AccountID = canonical.SourceAccountID
 			jobID := firstNonEmpty(stringValue(account["registration_job_id"]), ref)
@@ -503,7 +504,16 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 			result["errors"] = append(result["errors"].([]string), "Adobe 失败注册预留清理未完成")
 		}
 	}
-	result["success"] = len(result["errors"].([]string)) == 0
+	success := len(result["errors"].([]string)) == 0
+	result["success"] = success
+	switch {
+	case success:
+		result["outcome"] = "success"
+	case result["aliases"].(int)+result["openai_claims"].(int)+result["grok_claims"].(int)+result["adobe_claims"].(int)+released > 0:
+		result["outcome"] = "partial"
+	default:
+		result["outcome"] = "failed"
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

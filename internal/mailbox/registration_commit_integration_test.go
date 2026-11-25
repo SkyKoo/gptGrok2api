@@ -104,3 +104,95 @@ func TestAdobeRegistrationClaimRejectsStaleAssetSourceWithoutRewriting(t *testin
 		t.Fatal(current, err)
 	}
 }
+
+func TestAdobeRegistrationClaimAcceptsEmailPlaceholderAfterUpstreamAliasSync(t *testing.T) {
+	s := isolatedMailboxStore(t)
+	ctx := context.Background()
+	created, err := s.Upsert(ctx, Mailbox{
+		SourceID:        "source-test",
+		SourceType:      "hme",
+		SourceAccountID: "upstream-test",
+		Email:           "placeholder-alias@example.test",
+	}, "test_create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SourceMailboxID != created.Email {
+		t.Fatalf("expected email placeholder, got %q", created.SourceMailboxID)
+	}
+	if err := s.EnsureRegistrationClaim(ctx, "adobe", "root", created); err != nil {
+		t.Fatal(err)
+	}
+	// Provider reconciliation populates the real upstream anonymousId while the
+	// registration journal still carries the creation-time email fallback.
+	synced, err := s.Upsert(ctx, Mailbox{
+		SourceID:        "source-test",
+		SourceType:      "hme",
+		SourceAccountID: "upstream-test",
+		SourceMailboxID: "hme-anon-123",
+		Email:           created.Email,
+	}, "provider_reconciled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if synced.SourceMailboxID != "hme-anon-123" {
+		t.Fatalf("expected synced upstream alias id, got %q", synced.SourceMailboxID)
+	}
+	// A subsequent account-level upsert with email/canonical fallback must not
+	// overwrite the synced upstream anonymousId.
+	afterFallback, err := s.Upsert(ctx, Mailbox{
+		SourceID:        "source-test",
+		SourceType:      "hme",
+		SourceMailboxID: created.Email,
+		Email:           created.Email,
+	}, "account_reconciled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFallback.SourceMailboxID != "hme-anon-123" || afterFallback.SourceAccountID != "upstream-test" {
+		t.Fatalf("fallback upsert degraded canonical source metadata: %+v", afterFallback)
+	}
+	if err := s.PrepareRegistrationClaim(ctx, "adobe", "root", "", created); err != nil {
+		t.Fatalf("prepare rejected email placeholder after sync: %v", err)
+	}
+	if err := s.CommitRegistration(ctx, "adobe", "root", "adobe:account", created); err != nil {
+		t.Fatalf("commit rejected email placeholder after sync: %v", err)
+	}
+}
+
+func TestAccountReconcileRejectsConflictingMailboxSourceWithoutMixingIDs(t *testing.T) {
+	s := isolatedMailboxStore(t)
+	ctx := context.Background()
+	current, err := s.Upsert(ctx, Mailbox{
+		SourceID: "current-source", SourceType: "hme", SourceAccountID: "current-account",
+		SourceMailboxID: "current-anonymous-id", Email: "source-conflict@example.test",
+	}, "provider_reconciled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, sourceID, accountID, aliasID string
+	}{
+		{"different source with email placeholder", "stale-source", "stale-account", current.Email},
+		{"different account with canonical placeholder", current.SourceID, "stale-account", current.ID},
+		{"different real alias from the same source", current.SourceID, current.SourceAccountID, "stale-alias"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := s.Upsert(ctx, Mailbox{
+				SourceID: tc.sourceID, SourceType: current.SourceType, SourceAccountID: tc.accountID,
+				SourceMailboxID: tc.aliasID, Email: current.Email,
+			}, "account_reconciled")
+			if !errors.Is(err, ErrMailboxSourceMismatch) {
+				t.Fatalf("expected source mismatch, got %v", err)
+			}
+			saved, err := s.Get(ctx, current.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.SourceID != current.SourceID || saved.SourceAccountID != current.SourceAccountID ||
+				saved.SourceMailboxID != current.SourceMailboxID {
+				t.Fatalf("source identity changed: %+v", saved)
+			}
+		})
+	}
+}

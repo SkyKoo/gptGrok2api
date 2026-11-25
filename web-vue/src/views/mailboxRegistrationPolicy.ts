@@ -1,3 +1,5 @@
+import type { ICloudMailboxReconcileResult } from '../api/icloud'
+
 export type RegistrationChannel = 'openai' | 'grok' | 'adobe'
 export const registrationChannels: { value: RegistrationChannel; label: string }[] = [
   { value: 'openai', label: 'GPT' },
@@ -48,4 +50,53 @@ export function mailboxHasReservation(mailbox: MailboxClaimState): boolean {
 
 export function mailboxDeletionBlocked(mailbox: MailboxClaimState): boolean {
   return Boolean(mailbox.openai_claimed || mailbox.grok_claimed || mailbox.adobe_claimed || mailboxHasReservation(mailbox))
+}
+
+export type MailboxReconcileFeedback = {
+  notice: string
+  warning: string
+  error: string
+}
+
+export function formatMailboxReconcileFeedback(result: ICloudMailboxReconcileResult): MailboxReconcileFeedback {
+  const claimCounts: Record<RegistrationChannel, number> = {
+    openai: Number(result.openai_claims || 0),
+    grok: Number(result.grok_claims || 0),
+    adobe: Number(result.adobe_claims || 0),
+  }
+  const claimsSummary = registrationChannels
+    .map(channel => `${channel.label} ${claimCounts[channel.value]} 个`)
+    .join('、')
+  const aliases = Number(result.aliases || 0)
+  const releasedClaims = Number(result.released_claims || 0)
+  const summary = `发现 ${aliases} 个上游邮箱，关联 ${claimsSummary}，修复历史占用 ${releasedClaims} 个。`
+  const errors = (result.errors || []).map(item => String(item || '').trim()).filter(Boolean)
+  // Older servers return success, counts and errors without an explicit outcome.
+  const hasProgress = aliases > 0 || releasedClaims > 0 || Object.values(claimCounts).some(count => count > 0)
+  const outcome = result.outcome ?? (result.success === true && errors.length === 0
+    ? 'success'
+    : hasProgress ? 'partial' : 'failed')
+  if (outcome === 'failed') {
+    return {
+      notice: '',
+      warning: '',
+      error: errors.length ? `邮箱核对失败：${errors.join('；')}` : '邮箱核对失败',
+    }
+  }
+  if (outcome === 'partial') {
+    return {
+      notice: `核对部分完成：${summary}`,
+      warning: errors.join('；') || '部分项目未通过核对',
+      error: '',
+    }
+  }
+  return {
+    notice: `核对完成：${summary}`,
+    warning: '',
+    error: '',
+  }
+}
+
+export function mailboxStateBlockTitle(bridge: { reachable?: boolean } | null | undefined): string {
+  return bridge?.reachable ? '操作未完成' : '邮箱管理模块暂不可用'
 }

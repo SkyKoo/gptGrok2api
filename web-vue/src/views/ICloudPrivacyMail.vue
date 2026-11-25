@@ -7,14 +7,22 @@
         </template>
         <template #actions>
           <StateBadge :tone="bridgeTone" shape="rounded">{{ bridgeLabel }}</StateBadge>
-          <Button size="sm" variant="outline" :disabled="loading" @click="refreshAll">{{ loading ? '刷新中...' : '刷新' }}</Button>
-          <Button size="sm" variant="primary" :disabled="reconciling || !bridge?.reachable" @click="reconcile">
+          <Button size="sm" variant="outline" :disabled="loading || reconciling" @click="refreshAll">{{ loading ? '刷新中...' : '刷新' }}</Button>
+          <Button size="sm" variant="primary" :disabled="loading || reconciling || !bridge?.reachable" @click="reconcile">
             {{ reconciling ? '核对中...' : '核对现有邮箱' }}
           </Button>
         </template>
       </PanelHeader>
 
-      <StateBlock v-if="pageError" compact dashed title="邮箱管理模块暂不可用" :description="pageError" />
+      <StateBlock v-if="pageError" compact dashed :title="mailboxStateBlockTitle(bridge)" :description="pageError" />
+
+      <div
+        v-if="reconcileWarning"
+        class="rounded-lg border border-amber-300/70 bg-amber-50/80 px-3 py-2.5 text-xs leading-5 text-amber-900 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-amber-200"
+      >
+        <p class="font-medium">部分邮箱核对存在告警</p>
+        <p class="mt-1 break-words">{{ reconcileWarning }}</p>
+      </div>
 
       <template v-if="bridge?.reachable">
         <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
@@ -179,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { mailboxOccupancyLabel, mailboxHasReservation, mailboxDeletionBlocked, mailboxRegistrationLabel, mailboxRegistrationRetired, mailboxRegistrationDisabled, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
+import { mailboxOccupancyLabel, mailboxHasReservation, mailboxDeletionBlocked, mailboxRegistrationLabel, mailboxRegistrationRetired, mailboxRegistrationDisabled, formatMailboxReconcileFeedback, mailboxStateBlockTitle, registrationChannels, type RegistrationChannel } from './mailboxRegistrationPolicy'
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { icloudApi, type ICloudBridgeStatus, type ICloudMailbox, type ICloudMailboxEvent, type ICloudMailboxSource } from '@/api/icloud'
@@ -197,6 +205,7 @@ defineOptions({ name: 'ICloudPrivacyMail' })
 const loading = ref(false)
 const reconciling = ref(false)
 const pageError = ref('')
+const reconcileWarning = ref('')
 const notice = ref('')
 const bridge = ref<ICloudBridgeStatus | null>(null)
 const counts = ref<Record<string, number>>({})
@@ -434,6 +443,7 @@ async function refreshAll() {
   if (loading.value) return
   loading.value = true
   pageError.value = ''
+  reconcileWarning.value = ''
   try {
     bridge.value = await icloudApi.bridgeStatus()
     if (!bridge.value.reachable) {
@@ -453,13 +463,14 @@ async function reconcile() {
   reconciling.value = true
   notice.value = ''
   pageError.value = ''
+  reconcileWarning.value = ''
   try {
     const result = await icloudApi.reconcile()
-    if (!result.success) throw new Error((result.errors || []).join('；') || '邮箱核对失败')
-    const claimCounts = { openai: result.openai_claims, grok: result.grok_claims, adobe: result.adobe_claims }
-    const claimsSummary = registrationChannels.map(channel => `${channel.label} ${claimCounts[channel.value] || 0} 个`).join('、')
-    notice.value = `核对完成：发现 ${result.aliases || 0} 个上游邮箱，关联 ${claimsSummary}，修复历史占用 ${result.released_claims || 0} 个。`
+    const feedback = formatMailboxReconcileFeedback(result)
     await refreshAll()
+    notice.value = feedback.notice
+    reconcileWarning.value = feedback.warning
+    if (feedback.error) pageError.value = [feedback.error, pageError.value].filter(Boolean).join('；')
   } catch (error) {
     pageError.value = error instanceof Error ? error.message : String(error || '核对失败')
   } finally {
