@@ -14,6 +14,8 @@ export function grokReloginActive(job: GrokReloginJob) {
 
 const details: Record<string, string> = {
   grok_relogin_verification_required: 'Grok 要求额外验证，请在官网完成',
+  grok_relogin_verification_widget_visible: '登录页显示安全验证组件，自动重登已停止，请在 Grok 官网查看',
+  grok_relogin_password_submit_disabled: '点击密码提交按钮超时，复查时按钮处于禁用状态',
   grok_relogin_age_confirmation_required: '请用该账号在 Grok 官网完成年龄确认，再回到这里重新登录',
   grok_relogin_login_page_unrecognized: '未识别当前 Grok 登录页面',
   grok_relogin_login_action_ambiguous: '登录表单中的按钮用途不明确，本次已停止',
@@ -25,6 +27,8 @@ const details: Record<string, string> = {
   grok_relogin_session_wait_timeout: '已点击密码提交，等待新会话超时，原会话仍保留',
   grok_relogin_login_timeout: '等待 Grok 登录完成超时',
   grok_relogin_identity_mismatch: '新会话与所选账号身份不一致',
+  grok_relogin_identity_unconfirmed: '会话缺少可核对的账号信息，无法确认属于所选账号',
+  grok_relogin_session_unchanged: '返回的登录凭据与原来相同，未取得新会话',
   grok_relogin_proxy_unavailable: '账号绑定的代理出口不可用',
   grok_relogin_browser_unavailable: '共享浏览器暂不可用',
   grok_relogin_account_busy: '账号正在运行请求或等待额度结算',
@@ -50,6 +54,7 @@ export function grokReloginDetail(job?: GrokReloginJob) {
 export function grokReloginLabel(job?: GrokReloginJob) {
   if (!job) return ''
   if (job.status === 'failed' && job.error === 'grok_relogin_age_confirmation_required') return '需确认年龄'
+  if (job.status === 'failed' && job.error === 'grok_relogin_verification_required') return '需人工验证'
   if (job.status === 'completed') {
     if (!job.result?.session_updated) return '已结束，待确认会话'
     return job.result.text_quota && job.result.image_quota && job.result.video_quota ? '已重新登录' : '已登录，待确认额度'

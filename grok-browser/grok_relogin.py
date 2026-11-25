@@ -24,8 +24,9 @@ PASSWORD = 'input[type="password"]:not([autocomplete="new-password"])'
 AGE_PROMPT = re.compile(r"^(?:how old are you|您多大年纪|你多大年纪)[?？]?$", re.I)
 AGE_LABEL = re.compile(r"^(?:age|your age|年龄)$", re.I)
 VERIFICATION = ('input[autocomplete="one-time-code"], input[name="otp"], input[name="code"], '
-                'input[name="verificationCode"], input[name="emailCode"], input[type="tel"], '
-                'iframe[src*="challenges.cloudflare.com"]')
+                'input[name="verificationCode"], input[name="emailCode"], input[type="tel"]')
+VERIFICATION_IFRAME = 'iframe[src^="https://challenges.cloudflare.com/"]'
+HUMAN_PROMPT = re.compile(r"^(?:verify (?:that )?you are human|请验证您是真人|验证您是真人)[.!。！]?$", re.I)
 ALERTS = '[role="alert"], [aria-live="assertive"]'
 FORM_SUBMIT = 'button[type="submit"], input[type="submit"], button:not([type])'
 EMAIL_ENTRY = re.compile(r"^(?:log ?in|sign ?in|continue) with email$|^使用邮箱(?:登录|继续)$", re.I)
@@ -58,6 +59,7 @@ class ReloginTrace:
         self.stage = ""
         self.started = time.monotonic()
         self.password_attempted = False
+        self.page_error_after_password_attempt = False
         self.navigation_status = 0
         self.auth_status = 0
         self.password_status = 0
@@ -118,6 +120,27 @@ class ReloginTrace:
         except (AttributeError, ValueError):
             pass
 
+    def observe_page_error(self, _error):
+        if self.password_attempted:
+            self.page_error_after_password_attempt = True
+
+    async def log_stalled_form(self, page):
+        validity = "unknown"
+        try:
+            async with asyncio.timeout(.5):
+                if _on_sign_in(page):
+                    invalid = await page.locator(PASSWORD + ":visible").evaluate_all(
+                        """fields => fields.length === 1 && fields[0].form
+                            ? fields[0].form.matches(':invalid') : null"""
+                    )
+                    if _on_sign_in(page) and type(invalid) is bool:
+                        validity = "invalid" if invalid else "valid"
+        except Exception:
+            # The page may have closed or navigated after the task timed out.
+            pass
+        log.info("grok_relogin_stall task=%s native_form_at_timeout=%s page_error_after_password_attempt=%s",
+                 self.task, validity, str(self.page_error_after_password_attempt).lower())
+
     def write(self, outcome, exception="none"):
         faults = self.network.snapshot()
         last = faults[-1] if faults else {}
@@ -169,6 +192,37 @@ async def _age_confirmation_visible(page):
     return False
 
 
+async def _verification_code(page):
+    for control in await page.locator(VERIFICATION).all():
+        if await control.is_visible():
+            return "verification_required"
+    widget_visible = False
+    for frame in page.frames:
+        if frame.parent_frame is None or not _trusted(frame, {"challenges.cloudflare.com"}):
+            continue
+        # A background challenge frame alone does not ask the user to do anything.
+        try:
+            owner = await frame.frame_element()
+            try:
+                visible = await owner.is_visible()
+            finally:
+                await owner.dispose()
+            if visible:
+                widget_visible = True
+                for prompt in await frame.get_by_text(HUMAN_PROMPT).all():
+                    if await prompt.is_visible():
+                        return "verification_required"
+        except Exception:
+            if not frame.is_detached():
+                raise
+    if widget_visible:
+        return "verification_widget_visible"
+    for widget in await page.locator(VERIFICATION_IFRAME).all():
+        if await widget.is_visible():
+            return "verification_widget_visible"
+    return ""
+
+
 async def _submit(page, trace, password, field):
     trace.enter("password_submit_control" if password else "email_submit_control")
     form = field.locator("xpath=ancestor::form[1]")
@@ -183,10 +237,27 @@ async def _submit(page, trace, password, field):
         return "login_action_ambiguous"
     if button is None or not _on_sign_in(page):
         return "login_page_unrecognized"
+    if password:
+        code = await _verification_code(page)
+        if not _on_sign_in(page):
+            return "login_page_unrecognized"
+        if code:
+            trace.form = "verification"
+            return code
     trace.enter("password_submit" if password else "email_submit")
     trace.password_attempted = password
     trace.submit_kind = "form" if owns_form else "page_button"
-    await button.click(timeout=5000)
+    try:
+        await button.click(timeout=5000)
+    except Exception as exc:
+        if not password or _exception_category(exc) != "timeout" or not _on_sign_in(page):
+            raise
+        if code := await _verification_code(page):
+            trace.form = "verification"
+            return code
+        if not trace.password_requests and await button.count() == 1 and await button.is_disabled(timeout=250):
+            return "password_submit_disabled"
+        raise
     return None
 
 
@@ -254,11 +325,9 @@ async def _sign_in(page, email, password, trace):
         if password_submitted and trace.page_kind in ("grok", "xai_account") and await _age_confirmation_visible(page):
             trace.form = "age_confirmation"
             return {"code": "age_confirmation_required"}
-        if trace.page_kind != "other":
-            for verification in await page.locator(VERIFICATION).all():
-                if await verification.is_visible():
-                    trace.form = "verification"
-                    return {"code": "verification_required"}
+        if trace.page_kind != "other" and (code := await _verification_code(page)):
+            trace.form = "verification"
+            return {"code": code}
         if trace.navigation_status == 403:
             return {"code": "login_entry_forbidden"}
         if trace.navigation_status == 429 or trace.password_status == 429:
@@ -327,6 +396,7 @@ async def relogin(browser, email, password, task_id=""):
             page.on("request", trace.observe_request)
             page.on("requestfailed", trace.observe_failure)
             page.on("response", trace.observe_response)
+            page.on("pageerror", trace.observe_page_error)
             result = await _sign_in(page, email, password, trace)
             trace.write(result.get("code", "success"))
             return result
@@ -335,6 +405,8 @@ async def relogin(browser, email, password, task_id=""):
         code = "login_failed"
         if category == "timeout":
             code = trace.timeout_code()
+            if code == "password_request_unobserved":
+                await trace.log_stalled_form(page)
         trace.write(code, category)
         return {"code": code}
     finally:

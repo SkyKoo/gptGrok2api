@@ -13,7 +13,10 @@ try {
   const account = { id: 'first', email: 'first@example.test', status: 'active', has_password: true, has_sso: true }
   const previous = { id: 'old', payload: { account_id: account.id }, email: account.email, created_at: now - 90, updated_at: now - 30, status: 'failed', error: 'grok_relogin_password_request_unobserved' }
   const other = { ...previous, id: 'other', email: 'other@example.test', payload: { account_id: 'other' }, error: 'grok_relogin_age_confirmation_required' }
-  const jobs = [previous, other]
+  const diagnostics = ['verification_required', 'verification_widget_visible', 'password_submit_disabled'].map(code => ({
+    ...previous, id: code, email: code + '@example.test', payload: { account_id: code }, error: 'grok_relogin_' + code,
+  }))
+  const jobs = [previous, other, ...diagnostics]
   let submits = 0
   let rejectNextList = false
   await page.route('**/*', async route => {
@@ -54,11 +57,14 @@ try {
   await toggle.waitFor()
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
   await page.getByRole('button', { name: '重新登录', exact: true }).click()
-  await panel.getByText('1 个进行中 · 2 个已结束').waitFor()
+  await panel.getByText('1 个进行中 · 5 个已结束').waitFor()
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
   await toggle.click()
   await panel.getByText('点击提交后仍停在密码页，未观察到发往认证服务的 POST 请求').waitFor()
   await panel.getByText('需确认年龄', { exact: true }).waitFor()
+  await panel.getByText('需人工验证', { exact: true }).waitFor()
+  await panel.getByText('登录页显示安全验证组件，自动重登已停止，请在 Grok 官网查看').waitFor()
+  await panel.getByText('点击密码提交按钮超时，复查时按钮处于禁用状态').waitFor()
   await panel.getByText('请用该账号在 Grok 官网完成年龄确认，再回到这里重新登录').waitFor()
   assert.equal(await panel.getByRole('article', { name: account.email, exact: true }).count(), 2)
   await panel.locator('[aria-current="step"]').filter({ hasText: '正在登录' }).waitFor()
@@ -66,10 +72,10 @@ try {
   await panel.getByText('进度暂时无法更新，正在重新连接。').waitFor()
   Object.assign(jobs.at(-1), { status: 'completed', result: { session_updated: true, text_quota: true, image_quota: true, video_quota: true } })
   await panel.getByText('会话已更新，文字、图片和视频额度已刷新').waitFor()
-  await panel.getByText('0 个进行中 · 3 个已结束').waitFor()
+  await panel.getByText('0 个进行中 · 6 个已结束').waitFor()
   await panel.getByRole('button', { name: '收起 other@example.test 的登录记录' }).click()
   await page.reload()
-  await panel.getByText('0 个进行中 · 2 个已结束').waitFor()
+  await panel.getByText('0 个进行中 · 5 个已结束').waitFor()
   assert.equal(await toggle.getAttribute('aria-expanded'), 'false')
   assert.equal(submits, 1)
   assert.deepEqual(errors, [])

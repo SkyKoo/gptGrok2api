@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from grok_relogin import (
     AGE_LABEL, AGE_PROMPT, EMAIL, EMAIL_ENTRY, FORM_SUBMIT, PASSWORD, SIGN_IN, SUBMIT, VERIFICATION,
-    ReloginTrace, _session, relogin,
+    VERIFICATION_IFRAME, ReloginTrace, _session, _verification_code, relogin,
 )
 
 
@@ -55,9 +55,14 @@ class LoginControl:
         self.page.submissions.append((self.name, value))
 
     async def click(self, timeout):
+        if self.page.state == 2 and self.page.outcome in ("disabled", "click_timeout"):
+            raise TimeoutError()
         if self.page.outcome == "form_owned" and self.page.state == 2 and self.name != "native_submit":
             raise AssertionError("password must be submitted through its owning form")
         self.page.state += 1
+
+    async def is_disabled(self, timeout):
+        return self.page.outcome == "disabled"
 
 
 class LoginPage:
@@ -65,6 +70,7 @@ class LoginPage:
         self.state = 0
         self.outcome = outcome
         self.context = self
+        self.frames = []
         self.submissions = []
         self.closed = False
 
@@ -209,20 +215,90 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page.state, 3)
         self.assertTrue(page.closed)
 
+    async def test_disabled_submit_requires_timeout_and_observed_disabled_button(self):
+        for outcome, code in [("disabled", "password_submit_disabled"), ("click_timeout", "login_timeout")]:
+            with self.subTest(outcome=outcome):
+                page = LoginPage(outcome)
+                result = await relogin(page, "fixture@example.test", "fixture-password")
+                self.assertEqual(result, {"code": code})
+                self.assertEqual(page.state, 2)
+                self.assertTrue(page.closed)
+
+    async def test_only_visible_verification_signals_stop_login(self):
+        page = LoginPage("success")
+        owner = AsyncMock()
+        prompt = AsyncMock()
+        frame = Mock(url="https://challenges.cloudflare.com/fixture", frame_element=AsyncMock(return_value=owner))
+        frame.get_by_text.return_value.all = AsyncMock(return_value=[prompt])
+        page.frames = [frame]
+        for prompt_visible, owner_visible, code in [
+            (True, True, "verification_required"), (False, True, "verification_widget_visible"), (True, False, ""),
+        ]:
+            with self.subTest(prompt_visible=prompt_visible, owner_visible=owner_visible):
+                prompt.is_visible.return_value = prompt_visible
+                owner.is_visible.return_value = owner_visible
+                self.assertEqual(await _verification_code(page), code)
+        frame.url = "https://challenges.cloudflare.com.example.test/fixture"
+        owner.is_visible.return_value = True
+        self.assertEqual(await _verification_code(page), "")
+
+    async def test_widget_appearing_during_password_fill_stops_before_click(self):
+        class WidgetPage(LoginPage):
+            @property
+            def controls(self):
+                controls = super().controls
+                if self.submissions and self.submissions[-1][0] == PASSWORD:
+                    controls.add(VERIFICATION_IFRAME)
+                return controls
+
+        page = WidgetPage("success")
+        result = await relogin(page, "fixture@example.test", "fixture-password")
+        self.assertEqual(result, {"code": "verification_widget_visible"})
+        self.assertEqual(page.state, 2)
+        self.assertTrue(page.closed)
+
+    async def test_navigation_during_verification_check_stops_password_submit(self):
+        page = LoginPage("success")
+
+        async def check_verification(current):
+            if current.submissions and current.submissions[-1][0] == PASSWORD:
+                current.outcome = "untrusted"
+            return ""
+
+        with patch("grok_relogin._verification_code", check_verification):
+            result = await relogin(page, "fixture@example.test", "fixture-password")
+        self.assertEqual(result, {"code": "login_page_unrecognized"})
+        self.assertEqual(page.state, 2)
+        self.assertTrue(page.closed)
+
     async def test_password_page_timeout_distinguishes_observed_requests(self):
         class StalledPage(LoginPage):
             def on(self, event, handler):
                 if event == "request":
                     self.observe_request = handler
+                if event == "pageerror":
+                    self.observe_page_error = handler
+                    handler(ValueError("private error before the password action"))
+
+            def locator(self, selector):
+                if selector == PASSWORD + ":visible":
+                    return SimpleNamespace(evaluate_all=self.read_validity)
+                return super().locator(selector)
 
             @property
             def controls(self):
                 return {PASSWORD} if self.state == 3 else super().controls
 
-        for observed, expected in [(False, "password_request_unobserved"), (True, "session_wait_timeout")]:
-            with self.subTest(observed=observed):
+        for observed, invalid, page_error, native_form in [
+            (False, True, False, "invalid"),
+            (False, False, True, "valid"),
+            (False, RuntimeError("private diagnostic failure"), False, "unknown"),
+            (True, None, False, None),
+        ]:
+            with self.subTest(observed=observed, native_form=native_form):
                 page = StalledPage("stalled")
                 page.cookies = AsyncMock()
+                page.read_validity = AsyncMock(side_effect=[invalid])
                 waits_after_click = 0
 
                 async def tick(_):
@@ -231,12 +307,22 @@ class TestGrokRelogin(unittest.IsolatedAsyncioTestCase):
                         waits_after_click += 1
                         if waits_after_click == 1 and observed:
                             page.observe_request(Mock(method="POST", url=SIGN_IN))
+                        if waits_after_click == 1 and page_error:
+                            page.observe_page_error(ValueError("private page exception"))
                         if waits_after_click == 2:
                             raise TimeoutError()
 
-                with patch("grok_relogin.asyncio.sleep", tick):
+                with patch("grok_relogin.asyncio.sleep", tick), self.assertLogs("cfm-browser-worker.grok-relogin", level="INFO") as captured:
                     result = await relogin(page, "fixture@example.test", "fixture-password")
-                self.assertEqual(result, {"code": expected})
+                self.assertEqual(result, {"code": "session_wait_timeout" if observed else "password_request_unobserved"})
+                messages = "\n".join(captured.output)
+                if observed:
+                    page.read_validity.assert_not_awaited()
+                    self.assertNotIn("grok_relogin_stall", messages)
+                else:
+                    page.read_validity.assert_awaited_once()
+                    self.assertIn(f"native_form_at_timeout={native_form} page_error_after_password_attempt={str(page_error).lower()}", messages)
+                self.assertNotIn("private", messages)
                 page.cookies.assert_not_awaited()
                 self.assertEqual(page.state, 3)
                 self.assertTrue(page.closed)

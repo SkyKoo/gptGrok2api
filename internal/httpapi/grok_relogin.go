@@ -162,8 +162,8 @@ func (s *Server) runGrokRelogin(task *tasks.Task) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !sameGrokReloginIdentity(account, newSession) {
-			return nil, errors.New("grok_relogin_identity_mismatch")
+		if err := validateGrokReloginSession(account, newSession); err != nil {
+			return nil, err
 		}
 		session = &newSession
 	}
@@ -258,7 +258,9 @@ func (s *Server) fetchGrokBrowserSession(ctx context.Context, taskID string, acc
 		return result, errors.New("grok_relogin_browser_failed")
 	}
 	switch result.Code {
-	case "verification_required", "age_confirmation_required", "login_timeout", "session_wait_timeout", "password_request_unobserved", "login_entry_forbidden", "login_page_unrecognized", "login_action_ambiguous", "login_failed", "credentials_rejected", "upstream_rate_limited", "password_input_unconfirmed":
+	case "verification_required", "verification_widget_visible", "password_submit_disabled", "age_confirmation_required",
+		"login_timeout", "session_wait_timeout", "password_request_unobserved", "login_entry_forbidden",
+		"login_page_unrecognized", "login_action_ambiguous", "login_failed", "credentials_rejected", "upstream_rate_limited", "password_input_unconfirmed":
 		return result, errors.New("grok_relogin_" + result.Code)
 	case "":
 		if validGrokSessionCookie(result.SSO) && (result.SSORW == "" || validGrokSessionCookie(result.SSORW)) {
@@ -286,26 +288,60 @@ func grokTokenClaims(token string) map[string]any {
 		return nil
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
+	if err != nil || !json.Valid(raw) {
 		return nil
 	}
 	var claims map[string]any
-	_ = json.Unmarshal(raw, &claims)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&claims); err != nil {
+		return nil
+	}
 	return claims
 }
 
-func sameGrokReloginIdentity(account map[string]any, session grokBrowserSession) bool {
-	previous := grokTokenClaims(grokArchivedSSO(account))
+func grokIdentityID(value any) string {
+	switch id := value.(type) {
+	case string:
+		return strings.TrimSpace(id)
+	case json.Number:
+		return id.String()
+	}
+	return ""
+}
+
+func validateGrokReloginSession(account map[string]any, session grokBrowserSession) error {
+	oldToken := grokArchivedSSO(account)
+	if session.SSO == oldToken {
+		return errors.New("grok_relogin_session_unchanged")
+	}
+	previous := grokTokenClaims(oldToken)
 	next := grokTokenClaims(session.SSO)
-	if email := stringValue(next["email"]); email != "" && !strings.EqualFold(email, stringValue(account["email"])) {
-		return false
+	matched := false
+	if email, ok := next["email"].(string); ok && strings.TrimSpace(email) != "" {
+		if !strings.EqualFold(strings.TrimSpace(email), stringValue(account["email"])) {
+			return errors.New("grok_relogin_identity_mismatch")
+		}
+		matched = true
 	}
 	for _, key := range []string{"sub", "user_id"} {
-		if old, new := stringValue(previous[key]), stringValue(next[key]); old != "" && new != old {
-			return false
+		old := grokIdentityID(previous[key])
+		if old == "" {
+			continue
 		}
+		current := grokIdentityID(next[key])
+		if current == "" {
+			return errors.New("grok_relogin_identity_unconfirmed")
+		}
+		if current != old {
+			return errors.New("grok_relogin_identity_mismatch")
+		}
+		matched = true
 	}
-	return true
+	if !matched {
+		return errors.New("grok_relogin_identity_unconfirmed")
+	}
+	return nil
 }
 
 func grokArchivedSSO(account map[string]any) string {

@@ -15,7 +15,11 @@ import (
 )
 
 func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
-	for _, scenario := range []string{"success", "quota_failure", "wrong_identity", "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous"} {
+	for _, scenario := range []string{
+		"success", "quota_failure", "identity_mismatch", "identity_unconfirmed", "session_unchanged", "runtime_conflict",
+		"verification_required", "verification_widget_visible", "password_submit_disabled", "age_confirmation_required",
+		"login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous",
+	} {
 		t.Run(scenario, func(t *testing.T) {
 			s := New(adminTestConfig(t.TempDir()))
 			const email = "grok-relogin@example.test"
@@ -25,8 +29,13 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 				return "e30." + base64.RawURLEncoding.EncodeToString(raw) + "." + marker
 			}
 			oldToken, newToken := token("fixture-user", "old"), token("fixture-user", "new")
-			if scenario == "wrong_identity" {
+			switch scenario {
+			case "identity_mismatch":
 				newToken = token("another-user", "new")
+			case "identity_unconfirmed":
+				oldToken, newToken = "old-opaque-fixture", "e30.e30.new"
+			case "session_unchanged":
+				newToken = oldToken
 			}
 			answer := func(req *http.Request, status int, raw any) (*http.Response, error) {
 				data, _ := json.Marshal(raw)
@@ -40,7 +49,11 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 			if _, _, err = s.syncRegisteredGrokRuntimeAccount(account, oldToken); err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err = s.grokRuntimeStore.UpdateAccount(oldToken, map[string]any{"pool": "paid", "use_count": 8, "status": "invalid"}); err != nil {
+			runtimeFields := map[string]any{"pool": "paid", "use_count": 8, "status": "invalid"}
+			if scenario == "runtime_conflict" {
+				runtimeFields["grok_account_id"] = "another-fixture-account"
+			}
+			if _, _, err = s.grokRuntimeStore.UpdateAccount(oldToken, runtimeFields); err != nil {
 				t.Fatal(err)
 			}
 			if _, err = s.registerStore.UpdateAccountFields(id, map[string]any{"status": "invalid"}); err != nil {
@@ -74,7 +87,7 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 						t.Error("login did not use the reserved browser and saved account")
 					}
 					switch scenario {
-					case "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
+					case "verification_required", "verification_widget_visible", "password_submit_disabled", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
 						return answer(req, 200, map[string]any{"code": scenario})
 					}
 					return answer(req, 200, map[string]any{"sso": newToken, "sso_rw": "new-rw-fixture"})
@@ -146,11 +159,8 @@ func TestGrokReloginSharedQueueRotatesSSOAndRefreshesQuota(t *testing.T) {
 				}
 			}
 			switch scenario {
-			case "wrong_identity", "verification_required", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
+			case "identity_mismatch", "identity_unconfirmed", "session_unchanged", "runtime_conflict", "verification_required", "verification_widget_visible", "password_submit_disabled", "age_confirmation_required", "login_entry_forbidden", "session_wait_timeout", "password_request_unobserved", "login_action_ambiguous":
 				want := "grok_relogin_" + scenario
-				if scenario == "wrong_identity" {
-					want = "grok_relogin_identity_mismatch"
-				}
 				if job.Status != "failed" || job.Error != want || quotaCalls.Load() != 0 || archive[0]["sso"] != oldToken || accountToken(current[0]) != oldToken {
 					t.Fatalf("failed login changed existing credentials: %s %s", job.Status, job.Error)
 				}
