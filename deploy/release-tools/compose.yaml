@@ -1,0 +1,193 @@
+name: gptgrok2api
+
+services:
+  grok-browser:
+    container_name: cfm-browser-worker
+    image: ${GPTGROK2API_GROK_BROWSER_IMAGE:?请设置已核对的 Grok browser 镜像}
+    platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      TURNSTILE_HEADLESS: "0"
+      GROK_BROWSER_CONCURRENCY: "1"
+      CLOAKBROWSER_RELEASE_CHANNEL: stable
+    volumes:
+      - type: bind
+        source: ${GPTGROK2API_CLOAKBROWSER_LICENSE_FILE:-./secrets/cloakbrowser-license.key}
+        target: /root/.cloakbrowser/license.key
+        read_only: true
+        bind:
+          create_host_path: false
+    expose:
+      - "8899"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8899/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      default:
+        aliases: [grok-browser, cfm-browser-worker]
+      cfm_warp: {}
+      resin_proxy:
+        gw_priority: -1
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: ${GPTGROK2API_REDIS_IMAGE:?请设置已核对的 Redis 镜像摘要}
+    platform: linux/arm64
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - type: bind
+        source: ./redis-data
+        target: /data
+        bind:
+          create_host_path: false
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  postgres:
+    image: ${GPTGROK2API_POSTGRES_IMAGE:?请设置已核对的 PostgreSQL 镜像摘要}
+    platform: linux/arm64
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${CFM_POSTGRES_DB:?请设置 PostgreSQL 数据库名}
+      POSTGRES_USER: ${CFM_POSTGRES_USER:?请设置 PostgreSQL 用户名}
+      POSTGRES_PASSWORD: ${CFM_POSTGRES_PASSWORD:?请设置 PostgreSQL 密码}
+    volumes:
+      - type: bind
+        source: ./postgres-data
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    image: ${GPTGROK2API_IMAGE:?请先构建固定提交的 ARM64 镜像}
+    platform: linux/arm64
+    restart: unless-stopped
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:8000:8080"
+    networks:
+      default:
+        gw_priority: 100
+      cfm_link:
+        aliases: [cfm]
+      hme_link: {}
+      cpa_link:
+        aliases: [cfm-cpa]
+      cfm_warp: {}
+      resin_proxy: {}
+    environment:
+      CFM_ROLLING_CONTROL_ADDR: "127.0.0.1:9091"
+      CFM_WRITER_LEASE_FILE: /app/data/.cfm-writer.lock
+      CFM_ROLLING_STATE_FILE: /app/data/.cfm-legacy-instance.json
+      CFM_ROLLING_BOOTSTRAP_ACTIVE: "true"
+      CFM_GATEWAY_STATE_FILE: /app/data/.cfm-gateway.json
+      GO_LISTEN_ADDR: ":8080"
+      GO_STATIC_DIR: /app/web_dist
+      GROK_DATA_DIR: /app/data
+      GO_CONFIG_PATH: /app/data/config.json
+      GO_ACCOUNTS_PATH: /app/data/accounts.json
+      GO_AUTH_KEYS_PATH: /app/data/auth_keys.json
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:?请生成独立 API 密钥}
+      CHATGPT2API_ADMIN_KEY: ${CHATGPT2API_ADMIN_KEY:?请生成独立管理密钥}
+      GO_PUBLIC_BASE_URL: ${GO_PUBLIC_BASE_URL:?请设置实际访问地址}
+      GO_HME_INTERNAL_BASE_URL: ${GO_HME_INTERNAL_BASE_URL:-http://hme:8081}
+      GO_TRUST_REQUEST_PUBLIC_BASE: "false"
+      GO_ALLOW_ANONYMOUS: "false"
+      GO_ALLOW_PRIVATE_IMAGE_URLS: "false"
+      GO_QUEUE_BACKEND: redis
+      GO_REDIS_ADDR: redis:6379
+      GO_REQUEST_TIMEOUT_SECONDS: "300"
+      GO_IMAGE_ACCOUNT_CONCURRENCY: "1"
+      GO_IMAGE_MAX_CONCURRENCY: ${GO_IMAGE_MAX_CONCURRENCY:-4}
+      GO_IMAGE_RETENTION_DAYS: ${GO_IMAGE_RETENTION_DAYS:-1}
+      GO_PROXY_URL: ${GO_PROXY_URL:-}
+      CFM_GROK_BROWSER_URL: ${CFM_GROK_BROWSER_URL:?请设置 Grok browser 地址}
+      GO_DATABASE_URL: ${GO_DATABASE_URL:?请设置邮箱协调 PostgreSQL 地址}
+    volumes:
+      - type: bind
+        source: ./data
+        target: /app/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./logs
+        target: /app/logs
+        bind:
+          create_host_path: false
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      grok-browser:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 7s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  default: {}
+  cfm_link:
+    external: true
+    name: new-api-cfm
+  hme_link:
+    external: true
+    name: cfm-hme
+  cpa_link:
+    external: true
+    name: new-api-cpa
+  cfm_warp:
+    external: true
+    name: cfm-warp
+  resin_proxy:
+    external: true
+    name: resin-proxy

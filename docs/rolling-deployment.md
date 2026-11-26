@@ -7,12 +7,15 @@ CFM 可配合稳定入口与蓝绿部署工具进行有界排队交接，保留�
 在 O 机器上，从 CFM 的干净检出目录运行，其中 `HEAD` 须与已审阅计划中的 `candidate_commit` 一致。
 
 ```sh
-python3 deploy/release-oracle.py /path/to/reviewed.json
+python3 deploy/release.py --root "$CFM_RUNTIME_ROOT" /path/to/reviewed.json
 ```
 
-也可以用 `-` 从标准输入读取计划。入口先交给 O 机已安装的配套工具固定计划，再用 systemd 后台启动 App 与 Worker 的配套发布。启动命令成功后，按输出中的批次名查看 `journalctl`，以最终验收和运行镜像的提交号确认发布完成。启动或连接中断后先查看原批次状态。
+`CFM_RUNTIME_ROOT` 由部署环境提供，值为服务运行目录的绝对路径。也可以用 `-` 从标准输入读取计划。入口先交给 O 机已安装的配套工具固定计划，再用 systemd 后台启动 App 与 Worker 的配套发布。启动命令成功后，按输出中的批次名查看 `journalctl`，以最终验收和运行镜像的提交号确认发布完成。启动或连接中断后先查看原批次状态。
 
-计划格式、工具安装、备份、切流和回退见 `ogg/deploy/gptgrok2api/PAIRED.md`，O 机运维记录见 `ogg/OPERATIONS_LOG.md`。普通运行不设置控制变量时仍使用原启动方式。没有交接协议的旧版本，首次协议升级需要维护窗口；不能直接以两个旧程序共享目录来实现蓝绿。
+安装器、配套发布、蓝绿工具和发布测试维护在本仓库的 [deploy/release-tools](../deploy/release-tools/PAIRED.md)。
+计划、备份和配套回退见[配套发布](../deploy/release-tools/PAIRED.md)，纯 App 发布见[蓝绿发布](../deploy/release-tools/ROLLING.md)。
+O 机的实际配置和变更记录见 `ogg/deploy/gptgrok2api/README.md` 与 `ogg/OPERATIONS_LOG.md`。
+历史入口 `deploy/release-oracle.py` 仍可调用，参数与 `deploy/release.py` 一致。普通运行不设置控制变量时仍使用原启动方式。没有交接协议的旧版本，首次协议升级需要维护窗口；不能直接以两个旧程序共享目录来实现蓝绿。
 
 ## 运行时控制协议
 
