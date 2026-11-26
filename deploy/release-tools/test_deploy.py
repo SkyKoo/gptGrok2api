@@ -221,8 +221,8 @@ class MaintenanceTests(unittest.TestCase):
 
 class WorkerLicenseMountTests(unittest.TestCase):
     def setUp(self):
-        self.app = Deployment(Path('/opt/gptgrok2api'))
-        self.mount = {'Type': 'bind', 'Source': '/opt/gptgrok2api/secrets/cloakbrowser-license.key',
+        self.app = Deployment(Path('/fixture/service'))
+        self.mount = {'Type': 'bind', 'Source': str(self.app.root / 'secrets/cloakbrowser-license.key'),
                       'Destination': '/root/.cloakbrowser/license.key', 'RW': False,
                       'Mode': 'ro', 'Propagation': 'rprivate'}
         self.other = {'Type': 'bind', 'Source': '/cache', 'Destination': '/cache', 'RW': True}

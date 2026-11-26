@@ -28,6 +28,7 @@ class BundleTests(unittest.TestCase):
             'schema_migration': False,
             'worker_change': 'image_only',
             'backup_policy_package': 'a' * 64,
+            'backup_maintenance_lock': '/run/lock/fixture-backup.lock',
             'compatible_contract': {
                 'previous': {'state': 'b' * 64, 'browser': 'c' * 64},
                 'candidate': {'state': 'd' * 64, 'browser': 'e' * 64},
@@ -87,6 +88,18 @@ class BundleTests(unittest.TestCase):
         self.plan_path.write_text(json.dumps(self.plan))
         with self.assertRaises(ValueError):
             init.initialize(self.plan_path, self.root / 'wrong')
+
+    def test_new_bundle_requires_host_backup_lock_and_keeps_legacy_plan_validation(self):
+        plan = dict(self.plan)
+        del plan['backup_maintenance_lock']
+        init.validate_plan(plan, require_backup_lock=False)
+        for value in (None, 'relative.lock', '/', '/run/../tmp/backup.lock'):
+            if value is not None:
+                plan['backup_maintenance_lock'] = value
+            self.plan_path.write_text(json.dumps(plan))
+            with self.subTest(lock=value), self.assertRaisesRegex(ValueError, 'host backup maintenance lock'):
+                init.initialize(self.plan_path, self.bundle)
+            self.assertFalse(self.bundle.exists())
 
     def test_same_app_commit_worker_catchup_requires_worker_to_advance(self):
         catchup = json.loads(json.dumps(self.plan))

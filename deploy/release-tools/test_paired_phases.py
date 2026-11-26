@@ -640,6 +640,7 @@ class CoordinatorResumeTests(unittest.TestCase):
             baseline = {'helpers': {}, 'backup_policy': {}}
             atomic_json(op / 'baseline.json', baseline)
             common = SimpleNamespace(require=require, COMMIT='commit', host_required=lambda: None,
+                                     PLAN={'backup_maintenance_lock': str(root / 'host-backup.lock')},
                                      load=load_json, helper_hashes=lambda _: {}, backup_policy_identity=lambda _: {})
             module = load_template('coordinator', common)
             calls = []

@@ -67,7 +67,7 @@ def bounded_subprocess_timeout(operation, requested):
     return max(0.001, min(float(requested), pipeline_remaining(operation)))
 
 
-def validate_plan(plan):
+def validate_plan(plan, *, require_backup_lock=True):
     for key in ('base_commit', 'candidate_commit'):
         require(isinstance(plan.get(key), str) and re.fullmatch('[0-9a-f]{40}', plan[key]),
                 'Both commits must be full reviewed Git identities')
@@ -84,6 +84,12 @@ def validate_plan(plan):
         require(set(value) == {'state', 'browser'} and all(
             isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in value.values()),
             'Pin both complete compatibility contracts')
+    if require_backup_lock or 'backup_maintenance_lock' in plan:
+        lock = plan.get('backup_maintenance_lock')
+        require(isinstance(lock, str) and Path(lock).is_absolute()
+                and Path(lock) != Path('/') and '..' not in Path(lock).parts
+                and not any(character in lock for character in '\0\n\r'),
+                'Pin the absolute host backup maintenance lock path')
     inputs = plan.get('state_contract_inputs')
     require(isinstance(inputs, list) and inputs and len(inputs) == len(set(inputs)),
             'Review the state contract input list')
@@ -170,7 +176,8 @@ def run_release(operation, root, source, *, build_timeout=900, drain_timeout=600
             and (operation / 'bundle-manifest.json').is_file(),
             'Operation bundle is incomplete; run init first')
     plan = json.loads(checked_file(operation / 'release-plan.json'))
-    validate_plan(plan)
+    # An existing batch executes its own immutable coordinator and lock policy.
+    validate_plan(plan, require_backup_lock=False)
     require(operation.name == plan['operation'], 'Operation directory differs from the reviewed plan')
     verified_bundle_hashes(operation, plan, (*TEMPLATES, *MODULES, 'release-plan.json'))
     verify_rolling_helper(root, plan['rolling_sha256'])

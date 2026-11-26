@@ -205,9 +205,13 @@ def main():
         common.require(common.helper_hashes(op) == baseline['helpers'], 'Frozen helpers changed')
         # This matches installed project coordinators: global -> project policy ->
         # release.py acquires the existing application maintenance lock itself.
+        shared_lock = Path(common.PLAN['backup_maintenance_lock'])
+        project_lock = root / 'backup-policy/maintenance.lock'
+        common.require(shared_lock.resolve() not in (project_lock.resolve(), (root / 'maintenance.lock').resolve()),
+                       'Host backup lock must be distinct from the project and application locks')
         with ExitStack() as stack:
-            stack.enter_context(exclusive(Path('/run/lock/ogg-backup-maintenance.lock')))
-            stack.enter_context(exclusive(root / 'backup-policy/maintenance.lock'))
+            stack.enter_context(exclusive(shared_lock))
+            stack.enter_context(exclusive(project_lock))
             common.require(common.backup_policy_identity(root) == baseline['backup_policy'], 'Backup policy changed')
             if args.action == 'apply-and-verify':
                 common.require(not (op / 'release-state.json').exists(), 'Prior apply exists; inspect status before finalizing')

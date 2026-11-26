@@ -376,6 +376,22 @@ Grok 图片和视频的内容核对共用“系统设置 → 基础配置 → Gr
 
 ## 双实例发布交接
 
+App 与共享 Worker 使用 [配套发布入口](deploy/release.py)。命令、计划和故障处理见
+[发布工具](deploy/release-tools/PAIRED.md)，仅更新 App 时可使用[蓝绿发布工具](deploy/release-tools/ROLLING.md)。
+
+```sh
+# 从已审阅的 CFM 检出安装工具，目标主机和运行根目录由部署环境提供。
+./deploy/release-tools/install.sh "$CFM_DEPLOY_HOST" "$CFM_RUNTIME_ROOT"
+./deploy/release-tools/install-paired.sh "$CFM_DEPLOY_HOST" "$CFM_RUNTIME_ROOT"
+
+# 在部署主机的候选检出中，传入本批已审阅的发布计划。
+python3 deploy/release.py --root "$CFM_RUNTIME_ROOT" reviewed.json
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" status
+```
+
+安装器可选第三个参数叠加宿主机的 Compose 网络配置。重新安装工具后，从部署主机采集
+`rolling-deploy.py` 的 SHA-256，并在计划中填入宿主机共用的备份锁路径。
+
 支持稳定入口后的蓝绿槽位与 JSON 单写入租约：旧业务自然排空，新请求在交接时有限排队，候选取得租约后加载最终数据，发布不会改写用户调度开关。首次从无协议版本迁移仍需一次维护升级；默认启动方式保持兼容。环境变量、状态与失败边界见 [发布交接协议](docs/rolling-deployment.md)。
 
 

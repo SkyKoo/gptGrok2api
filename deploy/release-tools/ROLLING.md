@@ -1,16 +1,13 @@
 # CFM 双实例切换
 
-2026-11-04：本地实现及演练完成，main `7a99dce` 已在 O 机器完成协议维护升级和同镜像 bootstrap；原 app 为稳定入口，blue 为唯一业务写入者。执行结果与验证边界见运维仓库的 `operations/cfm-rolling-deployment-20261104/README.md`。
-
 CFM 保留 JSON、PostgreSQL 邮箱库和 Redis 队列。双实例是蓝绿程序槽位，业务状态始终只有一个写入者。用户已接受交接时新请求短暂排队；已有业务请求、生成流、异步任务和未完成授权先自然结束。长任务或持续请求无法排空时延期发布，旧服务继续处理请求。
 
-2026-11-13：日常发布默认源码目录为`~/projects/gptGrok2api-publish`，支持用
-`GPTGROK2API_SOURCE_DIR`显式指定独立、干净的固定版本源码。旧`~/projects/gptGrok2api`
-是9月的补丁工作副本，已在解除共享Git依赖后删除；不得将它作为当前发布基线或重新套用旧补丁。
+日常发布通过 `GPTGROK2API_SOURCE_DIR` 指定独立、干净的源码检出，通过
+`GPTGROK2API_EXPECTED_ORIGIN` 指定已审阅的 Git 远端。
 
 ## 运行方式
 
-原 `gptgrok2api-app-1` 在首次交接后成为稳定入口，保留回环 8000 端口、Docker 网络和 `cfm` / `cfm-cpa` 地址。蓝绿实例不发布宿主机端口、不领取这两个共享别名；后台浏览器、PostgreSQL、Redis、Caddy 和其他服务不随普通发布重建。控制接口仅绑定容器自身的 `127.0.0.1:9091`。
+原 `gptgrok2api-app-1` 在首次交接后成为稳定入口，保留回环 8000 端口、Docker 网络和宿主机覆盖配置中的共享别名。蓝绿实例不发布宿主机端口、不领取共享别名；后台浏览器、PostgreSQL、Redis、反向代理和其他服务不随普通发布重建。控制接口仅绑定容器自身的 `127.0.0.1:9091`。
 
 2026-11-11，共享浏览器容器已更名为 `cfm-browser-worker`，Compose 服务仍为 `grok-browser`，
 两个 DNS 别名均保留。发布工具依据 `current.json` 的 `grok_browser_container` 检查实际容器；
@@ -29,19 +26,19 @@ CFM 保留 JSON、PostgreSQL 邮箱库和 Redis 队列。双实例是蓝绿程�
 
 ## 首次迁移前提
 
-迁移前的线上版本 `21af195` 没有写入租约/交接协议。**首次升级到支持协议的镜像仍需一次旧机制的维护发布**，不能凭脚本消除旧进程原本不具备交接能力造成的维护窗口。O 机器已于 2026-11-04 完成该步骤；其他旧布局仍须满足这些前提。`compose.yaml` 已添加协议启动环境；首次升级时原容器仍作为业务实例，启动成功会创建精确校验的私有协议标记。
+迁移前的线上版本 `21af195` 没有写入租约/交接协议。**首次升级到支持协议的镜像仍需一次旧机制的维护发布**，不能凭脚本消除旧进程原本不具备交接能力造成的维护窗口。旧布局仍须满足这些前提。`compose.yaml` 已添加协议启动环境；首次升级时原容器仍作为业务实例，启动成功会创建精确校验的私有协议标记。
 
 正式执行前应另行登记 `OPERATIONS_LOG.md` 计划，确认发布版本、活动任务、备份、资源、维护窗口及回退条件。首次协议升级和同镜像 bootstrap 是两步独立操作；协议升级未通过时不运行 bootstrap。工具安装本身不会重启服务。
 
 在支持协议的同一提交/同一镜像已完成维护升级并健康运行后：
 
 ```bash
-# O 机器普通用户；所有占位值都需替换为已核对的实际值。
-/opt/gptgrok2api/tools/deploy.sh rolling prepare \
-  --source "$HOME/projects/gptGrok2api-publish" --image '已运行的固定镜像tag' \
+# 部署主机普通用户；所有占位值都需替换为已核对的实际值。
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" rolling prepare \
+  --source "$GPTGROK2API_SOURCE_DIR" --image '已运行的固定镜像tag' \
   --output /tmp/cfm-bootstrap.json
-/opt/gptgrok2api/tools/deploy.sh rolling bootstrap --release /tmp/cfm-bootstrap.json
-/opt/gptgrok2api/tools/deploy.sh status
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" rolling bootstrap --release /tmp/cfm-bootstrap.json
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" status
 ```
 
 bootstrap 用当前版本启动 blue，在原地址排队并交接；原进程从此只转发请求，重启也不会加载旧业务缓存或取得写入租约。业务槽位和入口的角色/路由均通过落盘、fsync 的状态恢复；中断的初始化不会自动重试。
@@ -49,17 +46,18 @@ bootstrap 用当前版本启动 blue，在原地址排队并交接；原进程�
 ## 日常发布与兼容性
 
 CFM 核心备份脚本由业务仓库 `deploy/backup/cfm_core_backup.py` 维护，1Panel 固定调用
-`/opt/gptgrok2api/tools/backup-core.py`。prepare 将脚本的固定提交摘要加入发布清单；
+`$CFM_RUNTIME_ROOT/tools/backup-core.py`。prepare 将脚本的固定提交摘要加入发布清单；
 deploy 在切换前从该提交读回校验，成功后原子安装。已有备份入口而新提交缺失脚本时拒绝
 发布。修改持久化布局时须同时更新该脚本及恢复测试，面板中的调用命令无需改动。
 
-bootstrap 成功后原命令自动采用双实例：
+bootstrap 成功后，以下命令采用双实例布局。执行 `deploy` 或 `start` 前，先将已审阅的
+检出路径和远端分别设置为环境变量 `GPTGROK2API_SOURCE_DIR` 和 `GPTGROK2API_EXPECTED_ORIGIN`。
 
 ```bash
-/opt/gptgrok2api/tools/deploy.sh deploy
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" deploy
 # 或后台启动及查询
-/opt/gptgrok2api/tools/deploy.sh start
-/opt/gptgrok2api/tools/deploy.sh status
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" start
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" status
 ```
 
 普通发布只构建 app；不重建共享 Grok Worker。源码必须是干净 main，固定 commit 与本次镜像标签一致。状态/浏览器源码指纹变化会拒绝自动切换：先审查新旧 JSON、邮箱 schema、Redis 任务及浏览器接口的双向兼容性。兼容改动可提供只包含下列两个精确指纹对象的私有 JSON，使用显式入口：
@@ -69,9 +67,9 @@ bootstrap 成功后原命令自动采用双实例：
 ```
 
 ```bash
-/opt/gptgrok2api/tools/deploy.sh rolling prepare \
-  --source "$HOME/projects/gptGrok2api-publish" --image '已构建的固定镜像tag' --output /tmp/cfm-release.json
-/opt/gptgrok2api/tools/deploy.sh rolling deploy --release /tmp/cfm-release.json \
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" rolling prepare \
+  --source "$GPTGROK2API_SOURCE_DIR" --image '已构建的固定镜像tag' --output /tmp/cfm-release.json
+"$CFM_RUNTIME_ROOT/tools/deploy.sh" rolling deploy --release /tmp/cfm-release.json \
   --compatible-contract /tmp/cfm-reviewed-compatibility.json
 ```
 
@@ -94,10 +92,10 @@ CFM 源码维护 `deploy/backup/local/` 中的四个 Python 模块及 `manifest.
 语法，并将清单摘要写入 release。执行发布时重新从同一 commit 核对；已有本机保留包而
 候选提交缺少包时拒绝发布。旧维护发布入口由 `deploy.sh` 传递 `--source` 完成同样校验。
 
-成功发布把代码保存到 `/opt/gptgrok2api/tools/backup-local/versions/<清单摘要>/`，
+成功发布把代码保存到 `$CFM_RUNTIME_ROOT/tools/backup-local/versions/<清单摘要>/`，
 通过 `current` 符号链接原子切换；`dependencies.json` 是维护锁内生成的部署配置，
 绑定本次已同步的核心备份脚本摘要和实际协调锁。运行清单与审计另存
-`/opt/gptgrok2api/backup-policy/`，不修改历史冻结的一次性发布脚本。
+`$CFM_RUNTIME_ROOT/backup-policy/`，不修改历史冻结的一次性发布脚本。
 
 启用此包的新发布先写 `retention_requires_final_verification`。滚动入口在维护锁内
 再次核对当前 commit/镜像、活动写入租约、路由、readyz 和共享依赖健康，随后写入本批
@@ -114,9 +112,9 @@ CFM 源码维护 `deploy/backup/local/` 中的四个 Python 模块及 `manifest.
 ## 本机验证
 
 ```bash
-python3 -m unittest discover -s deploy/gptgrok2api -p 'test_*.py'
+python3 -m unittest discover -s deploy/release-tools -p 'test_*.py'
 # 仅在已有本机 postgres:17-alpine、redis:7-alpine 镜像时显式启用：
-CFM_BACKUP_DOCKER=1 python3 -m unittest discover -s deploy/gptgrok2api -p test_backup_docker.py
+CFM_BACKUP_DOCKER=1 python3 -m unittest discover -s deploy/release-tools -p test_backup_docker.py
 # 在 CFM 源仓库编译后，使用本机临时回环端口及虚构配置：
 python3 deploy/release-tools/rehearse-local.py /path/to/gptgrok2api
 ```

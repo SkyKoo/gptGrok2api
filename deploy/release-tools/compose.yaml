@@ -28,9 +28,6 @@ services:
     networks:
       default:
         aliases: [grok-browser, cfm-browser-worker]
-      cfm_warp: {}
-      resin_proxy:
-        gw_priority: -1
     security_opt: [no-new-privileges:true]
     logging:
       driver: json-file
@@ -109,13 +106,6 @@ services:
     networks:
       default:
         gw_priority: 100
-      cfm_link:
-        aliases: [cfm]
-      hme_link: {}
-      cpa_link:
-        aliases: [cfm-cpa]
-      cfm_warp: {}
-      resin_proxy: {}
     environment:
       CFM_ROLLING_CONTROL_ADDR: "127.0.0.1:9091"
       CFM_WRITER_LEASE_FILE: /app/data/.cfm-writer.lock
@@ -176,18 +166,3 @@ services:
 
 networks:
   default: {}
-  cfm_link:
-    external: true
-    name: new-api-cfm
-  hme_link:
-    external: true
-    name: cfm-hme
-  cpa_link:
-    external: true
-    name: new-api-cpa
-  cfm_warp:
-    external: true
-    name: cfm-warp
-  resin_proxy:
-    external: true
-    name: resin-proxy

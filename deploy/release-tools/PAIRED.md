@@ -10,7 +10,7 @@
 
 ## 适用边界
 
-- 当前仅支持 O 机器上既有 `/opt/gptgrok2api` 拓扑、Linux ARM64、root 运维执行，以及
+- 当前支持既有配套发布拓扑、Linux ARM64、root 运维执行，以及
   `cfm-single-writer-v1`。源码必须为干净、固定的 `main` 或 detached HEAD，候选是基线后继（或 App 已先行 rolling 至该提交、仅将旧 Worker 追平至同一提交）。
 - app 与共享 `cfm-browser-worker` 使用同一候选 commit；旧 Worker commit 可以与旧 app 不同，
   必须分别读取并固定。Worker Compose service 保持 `grok-browser`，容量保持 1。
@@ -37,6 +37,7 @@
   "schema_migration": false,
   "worker_change": "image_only",
   "rolling_sha256": "<已安装rolling-deploy.py的64位小写SHA256>",
+  "backup_maintenance_lock": "<宿主机共享备份锁的绝对路径>",
   "backup_policy_package": "<已安装且候选携带的backup-local包64位标识>",
   "compatible_contract": {
     "previous": {"state": "<64位SHA256>", "browser": "<64位SHA256>"},
@@ -70,7 +71,8 @@
 | `operation` | `cfm-` 开头，后接小写字母/数字/连字符；对应生成目录名。 |
 | `base_commit` / `candidate_commit` | 完整 40 位小写提交；基线来自当前线上 App，候选来自本次审阅后的源码。当 App 已先行 rolling 至候选提交时允许两者相等，此时 `previous_worker.commit` 必须仍异于 `candidate_commit`。 |
 | `branch` / `schema_migration` / `worker_change` | 分别固定为 `main`、布尔值 `false`、`image_only`。 |
-| `rolling_sha256` | `/opt/gptgrok2api/tools/rolling-deploy.py` 的完整 SHA-256；不把模板摘要误当成安装文件摘要。 |
+| `rolling_sha256` | `$CFM_RUNTIME_ROOT/tools/rolling-deploy.py` 的完整 SHA-256；不把模板摘要误当成安装文件摘要。 |
+| `backup_maintenance_lock` | 新计划必填。使用宿主机备份作业共用的绝对锁路径，apply 和 finalize 都读取操作包内的同一值。 |
 | `backup_policy_package` | 已安装 backup-local 版本目录的 64 位包标识；候选镜像携带的包须精确一致。 |
 | `compatible_contract` | `previous` 与 `candidate` 各恰有 `state`、`browser` 两个 64 位摘要；分别与 current/release 中的契约一致，兼容关系须有源码审阅依据。 |
 | `state_contract_inputs` | 非空、无重复的源码相对路径列表；不得绝对路径、反斜杠或 `..`。路径须存在，应完整覆盖本批状态及浏览器变更，不能缩小列表规避差异。 |
@@ -95,10 +97,11 @@
 
 安装器固定生成器、`paired/` 模板、`snapshot_integrity.py`、`paired_phases.py` 和本说明的内容清单。
 远端先在普通用户的私有临时目录按固定成员名单解析归档、逐项验证摘要，再由 root 重新读取校验，
-写入 `/opt/gptgrok2api/tools/paired-deploy/versions/<内容SHA>`。完整验证后原子更新 `current`
+写入 `$CFM_RUNTIME_ROOT/tools/paired-deploy/versions/<内容SHA>`。完整验证后原子更新 `current`
 相对符号链接；旧版本保留。当前版本或目标版本校验失败时拒绝切换，不覆盖损坏版本。
 rolling 工具从同一个 CFM 检出执行 `./deploy/release-tools/install.sh "$CFM_DEPLOY_HOST" "$CFM_RUNTIME_ROOT"` 安装。
-首次用迁移后的工具发布前，重新采集已安装 rolling 文件的 SHA-256 并填写发布计划。
+多服务宿主机可将 Compose 覆盖文件作为 rolling 安装器的第三个参数。
+每次安装 rolling 新版后，重新采集已安装文件的 SHA-256 并填写发布计划。
 离线检查可运行 `install-paired.sh --package /private/tmp/cfm-paired-tools.tar.gz`；输出文件必须不存在，
 该模式不连接服务器。内容版本标识覆盖全部工具及说明，安装输出会给出精确 SHA。
 
@@ -110,7 +113,7 @@ python3 deploy/release-tools/paired-deploy.py init \
   --output operations/cfm-paired-release-20261115
 ```
 
-生产批次直接在 O 上生成。先读取已安装 rolling 脚本的摘要，与本次审阅的工具版本核对后填写计划中的 `rolling_sha256`。
+生产批次直接在部署主机生成。先读取已安装 rolling 脚本的摘要，与本次审阅的工具版本核对后填写计划中的 `rolling_sha256`。
 从候选 CFM 检出启动并传入这份计划。生成器读完 JSON 并核对主机工具摘要后，在目标文件系统的临时目录生成工具包，逐项复核清单和文件摘要，再原子改名为正式批次。
 
 ```sh
@@ -120,7 +123,7 @@ python3 deploy/release.py --root "$CFM_RUNTIME_ROOT" reviewed.json
 
 旧批次保留原有文件和时间记录。使用连续入口运行已有批次时，发布器会在执行其中的脚本前复核完整清单和主机工具摘要。构建入口也会检查当前批次的文件。新修订应生成新批次。
 
-下列命令在 O 的 root 运维 shell 中执行。源码目录先固定到计划中的候选提交；此处不执行
+下列命令在部署主机的 root 运维 shell 中执行。源码目录先固定到计划中的候选提交；此处不执行
 `git pull`，以免构建时改变已经审阅的身份。构建至少要求 12 GiB 可用空间；发布预检使用流式 direct 快照，按业务目录大小加 4 GiB 归档余量和历史最大数据库导出预留计算空间；发布预检还要求
 至少 `3 × 当前 data/logs 字节数 + 2 GiB`。不能自动清理未知备份来满足条件。
 

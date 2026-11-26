@@ -25,7 +25,7 @@ def info(name,image='old:image'):
         'Config':{'Image':image,'User':'10001:10001','Env':['GO_LISTEN_ADDR=:8080','GROK_DATA_DIR=/app/data'],
             'Labels':{'io.cfm.rolling.instance':'owned','io.cfm.rolling.slot':'blue'}},
         'Mounts':[{'Destination':'/app/'+n,'Source':'/fixture/'+n,'Type':'bind','RW':True} for n in ('data','logs')],
-        'NetworkSettings':{'Networks':{'gptgrok2api_default':{},'new-api-cfm':{},'new-api-cpa':{}}}}
+        'NetworkSettings':{'Networks':{'gptgrok2api_default':{},'fixture-api':{},'fixture-auth':{}}}}
 
 
 class FakeHost(r.Host):

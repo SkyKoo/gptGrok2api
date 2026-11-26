@@ -2,15 +2,15 @@
 
 CFM 可配合稳定入口与蓝绿部署工具进行有界排队交接，保留现有 JSON、邮箱 PostgreSQL 与 Redis。候选实例不会在取得独占写入租约前加载配置或业务存储。旧实例先暂停自动调度的新工作，继续提供业务 HTTP；自然排空已有请求、生成流、后台任务及未完成授权，再不可逆封存写入能力、刷新延迟账号反馈并释放租约。新实例读取最终数据后才切流。用户保存的调度开关和下一次执行时间不因发布暂停而改写。
 
-## O 机器发布入口
+## 配套发布入口
 
-在 O 机器上，从 CFM 的干净检出目录运行，其中 `HEAD` 须与已审阅计划中的 `candidate_commit` 一致。
+在部署主机上，从 CFM 的干净检出目录运行，其中 `HEAD` 须与已审阅计划中的 `candidate_commit` 一致。
 
 ```sh
 python3 deploy/release.py --root "$CFM_RUNTIME_ROOT" /path/to/reviewed.json
 ```
 
-`CFM_RUNTIME_ROOT` 由部署环境提供，值为服务运行目录的绝对路径。也可以用 `-` 从标准输入读取计划。入口先交给 O 机已安装的配套工具固定计划，再用 systemd 后台启动 App 与 Worker 的配套发布。启动命令成功后，按输出中的批次名查看 `journalctl`，以最终验收和运行镜像的提交号确认发布完成。启动或连接中断后先查看原批次状态。
+`CFM_RUNTIME_ROOT` 由部署环境提供，值为服务运行目录的绝对路径。也可以用 `-` 从标准输入读取计划。入口先交给已安装的配套工具固定计划，再用 systemd 后台启动 App 与 Worker 的配套发布。启动命令成功后，按输出中的批次名查看 `journalctl`，以最终验收和运行镜像的提交号确认发布完成。启动或连接中断后先查看原批次状态。
 
 安装器、配套发布、蓝绿工具和发布测试维护在本仓库的 [deploy/release-tools](../deploy/release-tools/PAIRED.md)。
 计划、备份和配套回退见[配套发布](../deploy/release-tools/PAIRED.md)，纯 App 发布见[蓝绿发布](../deploy/release-tools/ROLLING.md)。

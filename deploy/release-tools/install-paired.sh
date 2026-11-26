@@ -2,7 +2,7 @@
 # 独立安装配套发布模板；不调用旧安装器、不发布或重启业务。
 set -euo pipefail
 
-if [[ ${1:-} == --help || ${1:-} == -h ]]; then
+if [[ $# == 0 || $1 == help || $1 == --help || $1 == -h ]]; then
   cat <<'HELP'
 用法：./deploy/release-tools/install-paired.sh SSH别名 运行根目录
       ./deploy/release-tools/install-paired.sh --package OUTPUT.tar.gz

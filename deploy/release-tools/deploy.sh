@@ -4,7 +4,7 @@ set -euo pipefail
 
 usage() {
   cat <<'HELP'
-用法：deploy.sh [deploy|start|apply|rollback|rolling|status|--help]
+用法：deploy.sh [deploy|start|apply|rollback|rolling|status|help]
   deploy    前台执行：快进拉取 origin/main，构建 ARM64 镜像，备份并发布（默认全链路预算 1200 秒）
   start     后台启动一次 deploy，SSH 断开后仍可用 status 查询
   apply     使用当前镜像重新应用工具模板，执行同样的备份和验收
@@ -14,14 +14,15 @@ usage() {
 
 在部署主机上以普通用户运行，不要 sudo 运行整个脚本。
 发布失败会优先恢复旧镜像和配置；若新版本已经产生业务写入，则保护性延后自动回滚。
-可用 `GPTGROK2API_TOTAL_TIMEOUT_SECONDS` 调整预算，但不能超过 1200 秒。
+通过 GPTGROK2API_SOURCE_DIR 指定源码检出，通过 GPTGROK2API_EXPECTED_ORIGIN 固定 deploy/start 的 Git 远端。
+可用 GPTGROK2API_TOTAL_TIMEOUT_SECONDS 调整预算，但不能超过 1200 秒。
 默认前台发布会把完整输出交给当前终端；长发布建议使用 start，再用 status 查询。
 HELP
 }
 
-action="${1:-deploy}"
+action="${1:-help}"
 case "$action" in
-  -h|--help) usage; exit 0 ;;
+  help|-h|--help) usage; exit 0 ;;
   deploy|start|apply|rollback|rolling|status) ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -32,7 +33,6 @@ esac
 }
 
 tools_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo="${GPTGROK2API_SOURCE_DIR:-$HOME/projects/gptGrok2api-publish}"
 runtime_root="${GPTGROK2API_RUNTIME_DIR:-}"
 if [[ -z "$runtime_root" && ${tools_dir##*/} == tools ]]; then
   runtime_root="${tools_dir%/tools}"
@@ -125,7 +125,22 @@ if [[ "$action" == status ]]; then
   exec sudo -n python3 "$tools_dir/deploy.py" --root "$runtime_root" status
 fi
 
+repo="${GPTGROK2API_SOURCE_DIR:-}"
+[[ "$repo" == /* && -d "$repo" ]] || {
+  echo '请将 GPTGROK2API_SOURCE_DIR 设置为源码检出的绝对路径。' >&2; exit 2
+}
 cd "$repo"
+if [[ "$action" == deploy || "$action" == start ]]; then
+  [[ $(uname -m) == aarch64 ]] || { echo '本工具仅用于 ARM64 部署主机。' >&2; exit 1; }
+  origin="$(git remote get-url origin)"
+  [[ -n "${GPTGROK2API_EXPECTED_ORIGIN:-}" && "$origin" == "$GPTGROK2API_EXPECTED_ORIGIN" ]] || {
+    echo '请设置 GPTGROK2API_EXPECTED_ORIGIN，使其与已审阅的 Git origin 一致。' >&2; exit 1
+  }
+  case "$origin" in
+    http://*@*|https://*@*|*\?*|*\#*)
+      echo 'Git origin 必须使用不含凭据或 URL 参数的地址。' >&2; exit 1 ;;
+  esac
+fi
 lock_path="$(git rev-parse --git-path gptgrok2api-deploy.lock)"
 exec 9>"$lock_path"
 flock -n 9 || { echo '已有 GPTGrok2API 操作正在执行。' >&2; exit 1; }
@@ -150,12 +165,6 @@ if [[ "$action" == start ]]; then
 fi
 
 if [[ "$action" == deploy ]]; then
-  [[ $(uname -m) == aarch64 ]] || { echo '本工具仅用于 ARM64 O 机器。' >&2; exit 1; }
-  origin="$(git remote get-url origin)"
-  case "$origin" in
-    git@github.com:SkyKoo/gptGrok2api.git|https://github.com/SkyKoo/gptGrok2api.git) ;;
-    *) echo "origin 与预期仓库不一致：$origin" >&2; exit 1 ;;
-  esac
   [[ $(git branch --show-current) == main && -z $(git status --porcelain) ]] || {
     echo '需要干净的 main 工作树，工具不会覆盖本地修改。' >&2
     exit 1

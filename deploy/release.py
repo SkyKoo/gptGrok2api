@@ -13,6 +13,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True, help='absolute CFM runtime directory')
     parser.add_argument('plan', help='reviewed paired release plan, or - to read it from stdin')
+    if len(sys.argv) == 1 or sys.argv[1:] == ['help']:
+        parser.print_help()
+        return
     args = parser.parse_args()
     if not args.root.is_absolute() or '..' in args.root.parts or args.root == Path('/'):
         parser.error('--root must be an absolute CFM runtime directory')
