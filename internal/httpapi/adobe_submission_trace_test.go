@@ -147,12 +147,20 @@ func TestAdobeFailedSubmissionRetainsTraceWithoutMakingItResumable(t *testing.T)
 					if detail["upstream_request_id"] != requestID.Load() || metrics["video_upload_completed"] != wantReferences || metrics["video_reference_count"] != wantReferences || metrics["adobe_submit_ms"] == nil {
 						t.Fatalf("video diagnostics missing from call log: %#v", detail)
 					}
+					videoParameters := mapValue(metrics["adobe_video_submit_parameters"])
+					if videoParameters["model_version"] != "3.1-lite-generate" || videoParameters["width"] != float64(1920) || videoParameters["height"] != float64(1080) || videoParameters["generate_audio"] != true {
+						t.Fatalf("unexpected submitted parameters: %#v", videoParameters)
+					}
+					session := mapValue(metrics["adobe_video_submit_session"])
+					if session["credential_revision"] != float64(a.Revision) || session["arp_mode"] != "present" || session["preflight_resource"] != "firefly_complimentary_generations" || session["age_seconds"] == nil {
+						t.Fatalf("unexpected submit session diagnostic: %#v", session)
+					}
 					wantStatus := map[string]float64{"upstream_timeout": 408, "rejected": 403}[failure]
 					if wantStatus > 0 && detail["upstream_status"] != wantStatus {
 						t.Fatalf("video upstream status missing from call log: %#v", detail)
 					}
 					rawLog, _ := json.Marshal(entry)
-					if strings.Contains(string(rawLog), "PRIVATE_CONTEXT") || strings.Contains(string(rawLog), "sherlockToken") {
+					if strings.Contains(string(rawLog), "PRIVATE_CONTEXT") || strings.Contains(string(rawLog), "sherlockToken") || strings.Contains(string(rawLog), "fixture-fresh-media-session") {
 						t.Fatalf("video diagnostics leaked upstream credentials: %s", rawLog)
 					}
 				}

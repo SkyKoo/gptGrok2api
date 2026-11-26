@@ -69,6 +69,7 @@ const detailTimelineSteps: DetailTimelineStepConfig[] = [
   { key: 'requirements_ms', label: '获取请求令牌', group: '上游准备', hint: 'requirements / token' },
   { key: 'prepare_conversation_ms', label: '准备会话', group: '上游准备', hint: '图片会话上下文' },
   { key: 'generation_start_ms', label: '启动生成', group: '上游准备', hint: '提交上游请求' },
+  { key: 'media_session_prepare_ms', label: 'Adobe 媒体会话准备', group: '上游准备' },
   { key: 'adobe_preflight_ms', label: 'Adobe 权限预检', group: '上游准备', hint: 'generation-preflight' },
   { key: 'adobe_reference_upload_ms', label: 'Adobe 参考图上传', group: '上游准备', hint: '参考图上传总耗时' },
   { key: 'adobe_submit_ms', label: 'Adobe 提交任务', group: '上游准备', hint: 'generate-async' },
@@ -498,6 +499,10 @@ export function buildDiagnosticDetailFields(item: SystemLogRow | null): DetailFi
     stream ? { label: '上游拒绝标记', value: stream.rejected ? '已拒绝' : '未报告拒绝' } : null,
     item.endpoint === '/v1/videos' ? { label: '参考图上传', value: `${metrics.video_upload_completed || 0} / ${metrics.video_reference_count || 0}` } : null,
     item.endpoint === '/v1/videos' ? { label: 'Adobe 提交状态', value: formatInlineValue(metrics.adobe_submission_status) } : null,
+    metrics.adobe_video_submit_parameters ? { label: 'Adobe 视频提交参数', value: formatInlineValue(metrics.adobe_video_submit_parameters), wide: true } : null,
+    metrics.adobe_video_submit_session ? { label: 'Adobe 提交时的媒体会话', value: formatInlineValue(metrics.adobe_video_submit_session), wide: true } : null,
+    metrics.adobe_submission_status === 'SUBMISSION_UNKNOWN' && detail.adobe_poll_link_status === 'missing'
+      ? { label: 'Adobe 任务查询', value: 'Adobe 未返回查询地址，是否受理待确认' } : null,
     item.endpoint === '/v1/videos' && detail.upstream_status ? { label: 'Adobe 上游状态码', value: formatInlineValue(detail.upstream_status) } : null,
     submissionDiagnostic ? { label: 'Adobe 提交诊断', value: formatInlineValue(submissionDiagnostic), wide: true } : null,
     { label: '状态码', value: item.statusCode },

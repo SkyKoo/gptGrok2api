@@ -62,6 +62,9 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false, 0},
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 0},
 		{"veo-3.1-lite", "size=1080x1920&generate_audio=true", "1080x1920", "1080p", "9:16", 8, true, 0},
+		{"veo-3.1-lite", "size=720x1280&generate_audio=false", "720x1280", "720p", "9:16", 8, false, 1},
+		{"veo-3.1-lite", "size=1080x1920&generate_audio=false", "1080x1920", "1080p", "9:16", 8, false, 1},
+		{"veo-3.1-lite", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 1},
 		{"veo-3.1-lite", "size=1920x1080&generate_audio=true", "1920x1080", "1080p", "16:9", 8, true, 2},
 		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6, false, 0},
 		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8, false, 2},
@@ -136,6 +139,15 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			}
 			if tc.model != "ray-3.14" && p["generateAudio"] != tc.audio {
 				t.Fatal("upstream audio differs from the resolved request")
+			}
+			if tc.model == "veo-3.1-lite" {
+				width, height, _ := adobePixelSize(tc.size)
+				for _, stage := range []map[string]any{preflight, p} {
+					size := mapValue(stage["size"])
+					if size["width"] != float64(width) || size["height"] != float64(height) {
+						t.Fatalf("Veo canvas size changed: %v", size)
+					}
+				}
 			}
 			if refs, exists := p["referenceBlobs"]; exists {
 				if tc.references == 0 {

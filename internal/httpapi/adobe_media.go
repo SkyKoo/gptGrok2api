@@ -81,6 +81,13 @@ func adobeSubmissionMetrics(job adobe.Job) map[string]any {
 		metrics["video_reference_count"] = job.ReferenceCount
 		metrics["adobe_reference_upload_ms"] = job.ReferenceUploadElapsedMS
 		metrics["adobe_submit_ms"] = job.SubmitElapsedMS
+		if job.RequestID != "" && job.ModelID == "veo" {
+			metrics["adobe_video_submit_parameters"] = map[string]any{
+				"model_version": job.ModelVersion, "width": job.Width, "height": job.Height,
+				"resolution": job.Resolution, "aspect_ratio": job.AspectRatio, "duration_seconds": job.Duration,
+				"generate_audio": job.GenerateAudio, "reference_count": job.ReferenceCount,
+			}
+		}
 	}
 	if job.ResponseRequestID != "" {
 		metrics["adobe_response_request_id"] = job.ResponseRequestID
@@ -544,7 +551,7 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		return
 	}
 	preflightStarted := time.Now()
-	_, preflightErr := s.adobeClient.PreflightVideo(ctx, a, request)
+	permission, preflightErr := s.adobeClient.PreflightVideo(ctx, a, request)
 	preflightMS := time.Since(preflightStarted).Milliseconds()
 	s.monitor.enrich(job.ID, map[string]any{"metrics": map[string]any{"adobe_preflight_ms": preflightMS}})
 	if preflightErr != nil {
@@ -567,7 +574,15 @@ func (s *Server) runAdobeVideoJob(job *videoJob, prompt string, options videoOpt
 		return
 	}
 	s.monitor.enrich(job.ID, map[string]any{"media_channel": "adobe", "upstream_model": m.ModelID + "/" + m.ModelVersion, "generate_audio": options.GenerateAudio, "reference_count": len(inputs)})
-	if !s.videoStage(job, "adobe_submit", nil) {
+	session := map[string]any{"credential_revision": a.Revision, "preflight_resource": permission.ResourceType}
+	switch a.MediaSessionARPMode {
+	case "present", "omitted":
+		session["arp_mode"] = a.MediaSessionARPMode
+	}
+	if age := time.Now().Unix() - a.MediaSessionUpdatedAt; a.MediaSessionUpdatedAt > 0 && age >= 0 {
+		session["age_seconds"] = age
+	}
+	if !s.videoStage(job, "adobe_submit", map[string]any{"adobe_video_submit_session": session}) {
 		return
 	}
 	s.setVideoStatus(job, "in_progress", 1, nil)

@@ -381,7 +381,7 @@ func TestAdobeVideoAudioReferencesAndIdempotency(t *testing.T) {
 	a := adobeFixtureAccount(t, s)
 	fixture := &adobeMediaCapture{video: true, output: videoTestMP4("adobe-video", "fixture"), expectedProxy: "http://daily-default.invalid:8080"}
 	s.proxyManager.SetDefault(fixture.expectedProxy, nil)
-	warmAdobeFixtureAccount(t, s, a)
+	warmed := warmAdobeFixtureAccount(t, s, a)
 	fixture.afterSubmit = func() { s.proxyManager.SetDefault("http://next-default.invalid:8080", nil) }
 	s.adobeClient = fixture.client(t)
 	refs := [][]byte{adobeMediaPNG(t, 40, 30)}
@@ -400,8 +400,13 @@ func TestAdobeVideoAudioReferencesAndIdempotency(t *testing.T) {
 	}
 	fresh := NewWithWorkers(s.cfg, false)
 	saved := fresh.videoJobs[created.ID]
-	if saved == nil || !saved.GenerateAudio || saved.ReferenceCount != 1 {
+	if saved == nil || !saved.GenerateAudio || saved.ReferenceCount != 1 || saved.savedRecord == nil {
 		t.Fatal("audio/reference settings not persisted")
+	}
+	parameters := mapValue(saved.savedRecord.Metrics["adobe_video_submit_parameters"])
+	session := mapValue(saved.savedRecord.Metrics["adobe_video_submit_session"])
+	if parameters["generate_audio"] != true || parameters["reference_count"] != float64(1) || session["credential_revision"] != float64(warmed.Revision) {
+		t.Fatalf("successful video lost its submit diagnostics: parameters=%v session=%v", parameters, session)
 	}
 	for _, server := range []*Server{s, fresh} {
 		duplicate := httptest.NewRecorder()
