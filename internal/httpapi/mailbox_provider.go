@@ -164,6 +164,13 @@ func (s *mailboxResourceSource) Release(ctx context.Context, box registerruntime
 	return s.session.Release(ctx, s.platform, jobID, mailboxFromRegister(box), reason)
 }
 
+func (s *mailboxResourceSource) SourceID() string {
+	if s == nil || s.session == nil {
+		return ""
+	}
+	return s.session.Source().ID
+}
+
 func (s *mailboxResourceSource) Close() {
 	if s != nil && s.session != nil {
 		s.session.Close()
@@ -177,6 +184,18 @@ func mailboxFromRegister(box registerruntime.Mailbox) mailboxstore.Mailbox {
 func mailboxSourceIDFromAccount(account map[string]any, fallback string) string {
 	mailbox := mapValue(account["registration_mailbox"])
 	return firstNonEmpty(stringValue(mailbox["source_id"]), stringValue(mailbox["source"]), fallback)
+}
+
+func (s *Server) resolveAccountMailboxSourceID(ctx context.Context, box registerruntime.Mailbox, fallback string) string {
+	if id := strings.TrimSpace(box.SourceID); id != "" {
+		return id
+	}
+	if s.mailboxManager != nil && strings.TrimSpace(box.AccountID) != "" {
+		if source, err := s.mailboxManager.SourceForMailbox(ctx, mailboxFromRegister(box)); err == nil && strings.TrimSpace(source.ID) != "" {
+			return source.ID
+		}
+	}
+	return strings.TrimSpace(fallback)
 }
 
 func mailboxFromAccount(account map[string]any, fallbackAccountID, fallbackSourceID string) registerruntime.Mailbox {

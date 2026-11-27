@@ -287,7 +287,9 @@ func (s *Server) reloginConfig(account map[string]any) (registerruntime.FreeConf
 	if profile != nil {
 		profiles = append(profiles, *profile)
 	}
-	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", mailboxSourceIDFromAccount(account, cfg.MailboxSourceID), cfg.PollInterval)
+	accountBox := mailboxFromAccount(account, "", "")
+	sourceID := s.resolveAccountMailboxSourceID(context.Background(), accountBox, mailboxSourceIDFromAccount(account, cfg.MailboxSourceID))
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", sourceID, cfg.PollInterval)
 	if err != nil {
 		return cfg, nil, nil, err
 	}
@@ -338,7 +340,7 @@ func (s *Server) runAccountRelogin(progressID, ref string) {
 	defer flow.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
-	box := mailboxFromAccount(account, cfg.HME.AccountID, cfg.MailboxSourceID)
+	box := mailboxFromAccount(account, cfg.HME.AccountID, firstNonEmpty(mail.SourceID(), cfg.MailboxSourceID))
 	s.updateAccountReloginStage(progressID, "mailbox")
 	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
 		if err := preparer.Prepare(ctx, box); err != nil {

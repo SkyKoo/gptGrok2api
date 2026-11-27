@@ -2,16 +2,18 @@ package httpapi
 
 import (
 	"context"
-	"database/sql"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/auucoder/gptgrok2api-go/internal/adobe"
 	mailboxstore "github.com/auucoder/gptgrok2api-go/internal/mailbox"
 	registerruntime "github.com/auucoder/gptgrok2api-go/internal/register"
 )
@@ -61,6 +63,7 @@ func (s *Server) syncMailboxSources(ctx context.Context) error {
 	}
 	mail := cloneMap(mapValue(s.registerStore.Get()["mail"]))
 	providers, _ := mail["providers"].([]any)
+	migratedIDs := make([]string, 0, len(providers))
 	configChanged := false
 	for index, raw := range providers {
 		provider := mapValue(raw)
@@ -69,18 +72,23 @@ func (s *Server) syncMailboxSources(ctx context.Context) error {
 			provider["id"] = source.ID
 			configChanged = true
 		}
-		if known[source.ID] {
-			_, _ = s.mailboxStore.BackfillSourceID(ctx, source.ID, source.Type, stringValue(source.Config["account_id"]))
-			continue
+		if !known[source.ID] {
+			if _, err := s.mailboxStore.UpsertSource(ctx, source); err != nil {
+				return err
+			}
+			known[source.ID] = true
 		}
-		if _, err := s.mailboxStore.UpsertSource(ctx, source); err != nil {
-			return err
-		}
-		_, _ = s.mailboxStore.BackfillSourceID(ctx, source.ID, source.Type, stringValue(source.Config["account_id"]))
+		migratedIDs = append(migratedIDs, source.ID)
 	}
 	if configChanged {
 		mail["providers"] = providers
 		if _, err := s.registerStore.Update(map[string]any{"mail": mail}); err != nil {
+			return err
+		}
+	}
+	// 导入完整来源目录后再判断历史账号是否唯一。
+	for _, id := range migratedIDs {
+		if _, err := s.mailboxStore.BackfillSourceID(ctx, id); err != nil {
 			return err
 		}
 	}
@@ -101,6 +109,47 @@ func mailboxSourcePublic(source mailboxstore.Source) map[string]any {
 	}
 }
 
+func newMailboxSourceID(sourceType string, taken map[string]bool) string {
+	prefix := strings.ToLower(strings.TrimSpace(sourceType))
+	if prefix == "" {
+		prefix = "source"
+	}
+	for attempt := 0; attempt < 8; attempt++ {
+		var raw [6]byte
+		if _, err := rand.Read(raw[:]); err == nil {
+			candidate := prefix + "-" + hex.EncodeToString(raw[:])
+			if !taken[candidate] {
+				return candidate
+			}
+		}
+	}
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+func validateHMESourceConfig(apiBase, accountID, password string, requireComplete bool) string {
+	if apiBase == "" && accountID == "" && password == "" && !requireComplete {
+		return ""
+	}
+	if apiBase != "" || requireComplete {
+		u, err := url.Parse(apiBase)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return "API Base 无效，请填写 http:// 或 https:// 地址"
+		}
+	}
+	if requireComplete {
+		if accountID == "" {
+			return "请填写上游账号 ID"
+		}
+		if password == "" {
+			return "请填写管理员密码"
+		}
+		if err := (registerruntime.HMEConfig{BaseURL: apiBase, Password: password, AccountID: accountID}).Validate(); err != nil {
+			return "iCloud 邮箱上游配置无效"
+		}
+	}
+	return ""
+}
+
 func (s *Server) iCloudMailboxSources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
 		return
@@ -118,60 +167,207 @@ func (s *Server) iCloudMailboxSources(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sources": items})
 	case http.MethodPost:
+		const conflictMessage = "相同 API Base 和上游账号 ID 的邮箱来源已存在"
 		var request struct {
 			Source map[string]any `json:"source"`
 		}
-		if !decodeJSON(w, r, &request) || request.Source == nil {
+		if !decodeJSON(w, r, &request) {
 			return
 		}
-		id := strings.TrimSpace(stringValue(request.Source["id"]))
-		if id == "" {
-			writeError(w, http.StatusBadRequest, "source id is required", "invalid_request_error")
+		if request.Source == nil {
+			writeError(w, http.StatusBadRequest, "缺少邮箱来源配置", "invalid_request_error")
 			return
 		}
-		existing, err := s.mailboxStore.GetSource(r.Context(), id)
-		if err != nil && err != sql.ErrNoRows {
+		s.registrationMu.Lock()
+		defer s.registrationMu.Unlock()
+		existingSources, err := s.mailboxStore.ListSources(r.Context())
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
 			return
 		}
-		config := cloneMap(existing.Config)
-		for key, value := range mapValue(request.Source["config"]) {
-			if key == "admin_password" && strings.TrimSpace(stringValue(value)) == "" {
+		takenIDs := make(map[string]bool, len(existingSources))
+		var existing mailboxstore.Source
+		found := false
+		id := strings.TrimSpace(stringValue(request.Source["id"]))
+		if len(id) > 128 {
+			writeError(w, http.StatusBadRequest, "来源 ID 过长", "invalid_request_error")
+			return
+		}
+		for _, item := range existingSources {
+			takenIDs[item.ID] = true
+			if id != "" && item.ID == id {
+				existing = item
+				found = true
+			}
+		}
+		creating := !found
+		rawConfig := mapValue(request.Source["config"])
+		var sourceType string
+		if creating {
+			sourceType = strings.ToLower(strings.TrimSpace(firstNonEmpty(stringValue(request.Source["type"]), stringValue(rawConfig["type"]), "icloud_hme")))
+			if sourceType != "icloud_hme" {
+				writeError(w, http.StatusBadRequest, "当前仅支持新增 iCloud 邮箱上游来源", "invalid_request_error")
+				return
+			}
+		} else {
+			sourceType = strings.ToLower(strings.TrimSpace(firstNonEmpty(stringValue(request.Source["type"]), existing.Type, stringValue(existing.Config["type"]))))
+			if sourceType == "" {
+				sourceType = "unknown"
+			}
+		}
+
+		config := map[string]any{}
+		if !creating {
+			config = cloneMap(existing.Config)
+		}
+		delete(config, "admin_password_set")
+		oldAPIBase := strings.TrimRight(strings.TrimSpace(stringValue(existing.Config["api_base"])), "/")
+		oldPassword, _ := existing.Config["admin_password"].(string)
+		passwordProvided := false
+		for key, value := range rawConfig {
+			if key == "admin_password_set" {
+				continue
+			}
+			if key == "admin_password" {
+				rawPassword, _ := value.(string)
+				if rawPassword == "" {
+					continue
+				}
+				passwordProvided = true
+				config[key] = rawPassword
 				continue
 			}
 			config[key] = value
 		}
-		config["id"] = id
-		config["type"] = firstNonEmpty(stringValue(request.Source["type"]), stringValue(existing.Type), stringValue(config["type"]))
-		config["label"] = firstNonEmpty(stringValue(request.Source["label"]), stringValue(existing.Label), stringValue(config["label"]))
-		config["enable"] = boolValue(request.Source["enable"], existing.Enabled)
-		source := mailboxSourceFromProvider(config, 0)
-		source.ID = id
-		if _, err := s.mailboxStore.UpsertSource(r.Context(), source); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
-			return
+
+		enabledDefault := true
+		if !creating {
+			enabledDefault = existing.Enabled
 		}
+		enabled := boolValue(request.Source["enable"], enabledDefault)
+		label := strings.TrimSpace(firstNonEmpty(stringValue(request.Source["label"]), existing.Label, stringValue(config["label"])))
+
+		var replay mailboxstore.Source
+		if sourceType == "icloud_hme" {
+			apiBase := strings.TrimRight(strings.TrimSpace(stringValue(config["api_base"])), "/")
+			accountID := strings.TrimSpace(stringValue(config["account_id"]))
+			config["api_base"] = apiBase
+			config["account_id"] = accountID
+			config["delete_hme_mailbox_on_account_delete"] = boolValue(config["delete_hme_mailbox_on_account_delete"], false)
+			if !creating && !passwordProvided && oldPassword != "" && oldAPIBase != "" && apiBase != oldAPIBase {
+				writeError(w, http.StatusBadRequest, "修改 API Base 时请重新填写管理员密码", "invalid_request_error")
+				return
+			}
+			password, _ := config["admin_password"].(string)
+			if msg := validateHMESourceConfig(apiBase, accountID, password, creating || enabled); msg != "" {
+				writeError(w, http.StatusBadRequest, msg, "invalid_request_error")
+				return
+			}
+			if apiBase != "" && accountID != "" {
+				for _, other := range existingSources {
+					if other.ID == id || !strings.EqualFold(other.Type, "icloud_hme") {
+						continue
+					}
+					otherBase := strings.TrimRight(strings.TrimSpace(stringValue(other.Config["api_base"])), "/")
+					otherAccount := strings.TrimSpace(stringValue(other.Config["account_id"]))
+					if !strings.EqualFold(otherBase, apiBase) || otherAccount != accountID {
+						continue
+					}
+					if !creating || id != "" || replay.ID != "" {
+						writeError(w, http.StatusConflict, conflictMessage, "mailbox_source_conflict")
+						return
+					}
+					replay = other
+				}
+			}
+		}
+
+		if replay.ID != "" {
+			id = replay.ID
+			if label == "" {
+				label = replay.Label
+			}
+		} else if id == "" {
+			id = newMailboxSourceID(sourceType, takenIDs)
+		}
+		if label == "" {
+			label = fmt.Sprintf("邮箱来源 %d", len(existingSources)+1)
+		}
+		config["id"] = id
+		config["type"] = sourceType
+		config["label"] = label
+		config["enable"] = enabled
+		delete(config, "admin_password_set")
+		saved := replay
+		if replay.ID != "" {
+			// 仅相同的创建请求可以沿用已保存的来源并补写注册配置。
+			if !reflect.DeepEqual(config, replay.Config) {
+				writeError(w, http.StatusConflict, conflictMessage, "mailbox_source_conflict")
+				return
+			}
+		} else {
+			source := mailboxSourceFromProvider(config, len(existingSources))
+			saved, err = s.mailboxStore.UpsertSource(r.Context(), source)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
+				return
+			}
+		}
+
 		current := s.registerStore.Get()
 		mail := cloneMap(mapValue(current["mail"]))
+		delete(mail, "source_id")
 		providers, _ := mail["providers"].([]any)
 		updated := false
+		wasEnabled := false
 		for index, raw := range providers {
 			provider := mapValue(raw)
 			if strings.TrimSpace(stringValue(provider["id"])) != id {
 				continue
 			}
-			mail["providers"] = append(append([]any{}, providers[:index]...), append([]any{source.Config}, providers[index+1:]...)...)
+			wasEnabled = strings.EqualFold(stringValue(provider["type"]), "icloud_hme") && boolValue(provider["enable"], true)
+			mail["providers"] = append(append([]any{}, providers[:index]...), append([]any{saved.Config}, providers[index+1:]...)...)
 			updated = true
 			break
 		}
 		if !updated {
-			mail["providers"] = append(providers, source.Config)
+			mail["providers"] = append(providers, saved.Config)
 		}
-		if _, err := s.registerStore.Update(map[string]any{"mail": mail}); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		// 按注册配置判断是否首次启用，重试也能固定原来隐式使用的来源。
+		previousSingleHMEID := ""
+		if sourceType == "icloud_hme" && enabled && !wasEnabled {
+			enabledOthers := make([]string, 0, 2)
+			for _, other := range existingSources {
+				if other.ID != id && other.Enabled && strings.EqualFold(other.Type, "icloud_hme") {
+					enabledOthers = append(enabledOthers, other.ID)
+				}
+			}
+			if len(enabledOthers) == 1 {
+				previousSingleHMEID = enabledOthers[0]
+			}
+		}
+		updates := map[string]any{"mail": mail}
+		if previousSingleHMEID != "" {
+			profiles := mapValue(current["target_settings"])
+			targetUpdates := map[string]any{}
+			for _, target := range []string{"openai", "grok", "adobe"} {
+				if strings.TrimSpace(stringValue(mapValue(profiles[target])["mail_source_id"])) == "" {
+					targetUpdates[target] = map[string]any{"mail_source_id": previousSingleHMEID}
+				}
+			}
+			if len(targetUpdates) > 0 {
+				updates["target_settings"] = targetUpdates
+			}
+		}
+		if _, updateErr := s.registerStore.Update(updates); updateErr != nil {
+			writeError(w, http.StatusInternalServerError, updateErr.Error(), "server_error")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"source": mailboxSourcePublic(source)})
+		if _, err := s.mailboxStore.BackfillSourceID(r.Context(), saved.ID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error(), "mailbox_database_error")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"source": mailboxSourcePublic(saved)})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "invalid_request_error")
 	}
@@ -392,30 +588,44 @@ func (s *Server) iCloudMailboxReconcile(w http.ResponseWriter, r *http.Request) 
 	if !s.requireAdmin(w, r) || !s.mailboxDBReady(w) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	result := map[string]any{"aliases": 0, "openai_claims": 0, "grok_claims": 0, "adobe_claims": 0, "missing": []string{}, "errors": []string{}}
-	if s.mailboxManager != nil && s.mailboxManager.HasEnabledSourceType(ctx, "icloud_hme") {
-		session, err := s.mailboxManager.Open(ctx, "", time.Second)
-		if err != nil {
-			result["errors"] = append(result["errors"].([]string), err.Error())
+	sources, sourcesErr := s.mailboxStore.ListSources(ctx)
+	if sourcesErr != nil {
+		result["errors"] = append(result["errors"].([]string), sourcesErr.Error())
+	} else {
+		hmeSources := make([]mailboxstore.Source, 0, len(sources))
+		for _, source := range sources {
+			if source.Enabled && strings.EqualFold(source.Type, "icloud_hme") {
+				hmeSources = append(hmeSources, source)
+			}
+		}
+		if s.mailboxManager == nil || len(hmeSources) == 0 {
+			result["errors"] = append(result["errors"].([]string), "邮箱上游未配置")
 		} else {
-			aliases, listErr := session.List(ctx)
-			session.Close()
-			if listErr != nil {
-				result["errors"] = append(result["errors"].([]string), listErr.Error())
-			} else {
+			for _, source := range hmeSources {
+				sourceName := firstNonEmpty(source.Label, source.ID)
+				session, err := s.mailboxManager.Open(ctx, source.ID, time.Second)
+				if err != nil {
+					result["errors"] = append(result["errors"].([]string), sourceName+"："+err.Error())
+					continue
+				}
+				aliases, listErr := session.List(ctx)
+				session.Close()
+				if listErr != nil {
+					result["errors"] = append(result["errors"].([]string), sourceName+"："+listErr.Error())
+					continue
+				}
 				for _, alias := range aliases {
 					if _, err := s.mailboxStore.Upsert(ctx, alias, "provider_reconciled"); err != nil {
-						result["errors"] = append(result["errors"].([]string), err.Error())
+						result["errors"] = append(result["errors"].([]string), sourceName+"："+err.Error())
 						continue
 					}
 					result["aliases"] = result["aliases"].(int) + 1
 				}
 			}
 		}
-	} else {
-		result["errors"] = append(result["errors"].([]string), "邮箱上游未配置")
 	}
 	released, repairErr := s.reconcileDeletedMailboxClaims(ctx)
 	result["released_claims"] = released

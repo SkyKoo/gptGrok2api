@@ -336,7 +336,9 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游配置不可用，请手动输入邮箱验证码")
 		return
 	}
-	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", firstNonEmpty(progress.MailboxSourceID, cfg.MailboxSourceID), cfg.PollInterval)
+	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID, SourceID: progress.MailboxSourceID, SourceType: progress.MailboxSourceType, SourceMailboxID: progress.MailboxSourceMailboxID}
+	sourceID := s.resolveAccountMailboxSourceID(context.Background(), box, cfg.MailboxSourceID)
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", sourceID, cfg.PollInterval)
 	if err != nil {
 		s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游连接不可用，请手动输入邮箱验证码")
 		return
@@ -344,7 +346,9 @@ func (s *Server) autoSubmitCodexEmailCode(progress codexOAuthProgress) {
 	defer mail.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.MailTimeout)
 	defer cancel()
-	box := registerruntime.Mailbox{Email: progress.MailboxEmail, AccountID: progress.MailboxAccountID, SourceID: progress.MailboxSourceID, SourceType: progress.MailboxSourceType, SourceMailboxID: progress.MailboxSourceMailboxID}
+	if box.SourceID == "" {
+		box.SourceID = sourceID
+	}
 	if preparer, ok := any(mail).(registerruntime.MailSessionPreparer); ok {
 		if err := preparer.Prepare(ctx, box); err != nil {
 			s.keepCodexEmailManual(progress.SessionID, "iCloud 邮箱上游会话不可用，请手动输入邮箱验证码")

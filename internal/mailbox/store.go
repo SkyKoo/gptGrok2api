@@ -1106,30 +1106,35 @@ func (s *Store) GetSource(ctx context.Context, id string) (Source, error) {
 	return source, nil
 }
 
-// BackfillSourceID associates legacy mailbox rows with a migrated source. It
-// only touches rows that have no source id, so an explicit association made by
-// reconciliation or an administrator is preserved.
-func (s *Store) BackfillSourceID(ctx context.Context, sourceID, sourceType, accountID string) (int64, error) {
+// BackfillSourceID fills an empty source ID only when the mailbox's upstream
+// account identifies exactly one configured source of the same provider type.
+func (s *Store) BackfillSourceID(ctx context.Context, sourceID string) (int64, error) {
 	if !s.Enabled() {
 		return 0, errors.New("mailbox database is not configured")
 	}
 	sourceID = strings.TrimSpace(sourceID)
-	sourceType = strings.TrimSpace(strings.ToLower(sourceType))
-	accountID = strings.TrimSpace(accountID)
 	if sourceID == "" {
 		return 0, errors.New("mailbox source id is required")
 	}
-	args := []any{sourceID}
-	where := "source_id = '' AND lower(source_type) IN ('hme','icloud_hme')"
-	if sourceType != "" && sourceType != "hme" && sourceType != "icloud_hme" {
-		where = "source_id = '' AND lower(source_type) = $2"
-		args = append(args, sourceType)
-	}
-	if accountID != "" {
-		args = append(args, accountID)
-		where += fmt.Sprintf(" AND source_account_id = $%d", len(args))
-	}
-	result, err := s.db.ExecContext(ctx, "UPDATE mailboxes SET source_id=$1, updated_at=updated_at WHERE "+where, args...)
+	result, err := s.db.ExecContext(ctx, `
+		WITH configured_sources AS (
+			SELECT id, CASE WHEN lower(type) = 'icloud_hme' THEN 'hme' ELSE lower(type) END AS kind,
+				btrim(config->>'account_id') AS account_id
+			FROM mailbox_sources
+			WHERE jsonb_typeof(config->'account_id') = 'string'
+		), unique_sources AS (
+			SELECT min(id) AS id, kind, account_id
+			FROM configured_sources
+			WHERE account_id <> ''
+			GROUP BY kind, account_id
+			HAVING count(*) = 1
+		)
+		UPDATE mailboxes AS mailbox SET source_id = source.id
+		FROM unique_sources AS source
+		WHERE source.id = $1 AND mailbox.source_id = ''
+			AND mailbox.source_account_id = source.account_id
+			AND (CASE WHEN lower(mailbox.source_type) = 'icloud_hme' THEN 'hme' ELSE lower(mailbox.source_type) END) = source.kind
+	`, sourceID)
 	if err != nil {
 		return 0, err
 	}

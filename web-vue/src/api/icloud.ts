@@ -218,6 +218,7 @@ export type ICloudStatus = {
 export const icloudApi = {
   bridgeStatus: () => apiClient.get<never, ICloudBridgeStatus>(path('bridge-status'), requestConfig),
   listSources: () => apiClient.get<never, { sources?: ICloudMailboxSource[] }>(path('sources'), requestConfig),
+  createSource: (source: ICloudMailboxSource) => apiClient.post<{ source: ICloudMailboxSource }, { source?: ICloudMailboxSource }>(path('sources'), { source }, requestConfig),
   updateSource: (source: ICloudMailboxSource) => apiClient.post<{ source: ICloudMailboxSource }, { source?: ICloudMailboxSource }>(path('sources'), { source }, requestConfig),
   status: () => apiClient.get<never, ICloudStatus>(path('status'), requestConfig),
   session: () => apiClient.get<never, { sessions?: ICloudSession[]; session?: ICloudSession | null }>(path('session'), requestConfig),

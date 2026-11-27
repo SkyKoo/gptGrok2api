@@ -30,6 +30,9 @@ const mailboxes = [
   { id: 'unused', email: 'unused@example.test', source_id: 'fixture-source', status: 'available' },
   { id: 'retired', email: 'retired@example.test', source_id: 'fixture-source', status: 'available', adobe_retired: true },
 ]
+const sources = [
+  { id: 'fixture-source', type: 'icloud_hme', label: 'Fixture HME', enable: true, status: 'available', capabilities: { openai: true, grok: true, adobe: true }, config: { api_base: 'http://hme:8081', account_id: 'acc_primary', admin_password_set: true } },
+]
 const events = [{ id: 'link-event', email: 'shared@example.test', platform: 'adobe', event_type: 'account_mailbox_linked', result: 'success', created_at: '2026-11-11T11:00:00Z' }]
 await context.route('**/*', async route => {
   const req = route.request(), url = new URL(req.url()), pathname = url.pathname
@@ -45,7 +48,28 @@ await context.route('**/*', async route => {
   else if (pathname === '/version' && req.method() === 'GET') data = { version: 'fixture' }
   else if (pathname === '/api/icloud/bridge-status' && req.method() === 'GET') data = { enabled: true, reachable: true, database_configured: true, hme_configured: true }
   else if (pathname === '/api/icloud/status' && req.method() === 'GET') data = { counts: { mailboxes: 3, active: 1, available: 2, retired: 1, events: events.length } }
-  else if (pathname === '/api/icloud/sources' && req.method() === 'GET') data = { sources: [{ id: 'fixture-source', type: 'icloud_hme', label: 'Fixture HME', enable: true, status: 'available', capabilities: { openai: true, grok: true, adobe: true }, config: {} }] }
+  else if (pathname === '/api/icloud/sources' && req.method() === 'GET') data = { sources }
+  else if (pathname === '/api/icloud/sources' && req.method() === 'POST') {
+    const payload = JSON.parse(req.postData()).source || {}
+    const created = {
+      id: payload.id || 'icloud_hme-second',
+      type: payload.type || 'icloud_hme',
+      label: payload.label || `邮箱来源 ${sources.length + 1}`,
+      enable: payload.enable !== false,
+      status: 'available',
+      capabilities: { openai: true, grok: true, adobe: true },
+      config: {
+        api_base: payload.config?.api_base || '',
+        account_id: payload.config?.account_id || '',
+        admin_password_set: true,
+        delete_hme_mailbox_on_account_delete: Boolean(payload.config?.delete_hme_mailbox_on_account_delete),
+      },
+    }
+    const idx = sources.findIndex(item => item.id === created.id)
+    if (idx >= 0) sources[idx] = created
+    else sources.push(created)
+    data = { source: created }
+  }
   else if (pathname === '/api/icloud/events' && req.method() === 'GET') data = { events }
   else if (pathname === '/api/icloud/mailboxes' && req.method() === 'GET') {
     let items = mailboxes
@@ -124,12 +148,21 @@ try {
   await unused.getByText('Adobe 允许注册', { exact: true }).waitFor()
   await page.getByText('启用 Adobe 注册', { exact: true }).waitFor()
   assert.deepEqual(JSON.parse(requests.filter(req => req.method === 'POST').at(-1).body), { status: 'available', platform: 'adobe' })
+  await page.getByRole('button', { name: '新增邮箱来源', exact: true }).click()
+  const addCard = page.locator('div.rounded-lg').filter({ hasText: '支持为同一 HME 服务配置不同上游账号 ID' }).first()
+  assert.equal(await addCard.getByLabel('API Base').inputValue(), 'http://hme:8081')
+  await addCard.getByLabel('来源名称').fill('iCloud 副号')
+  await addCard.getByLabel('上游账号 ID').fill('acc_secondary')
+  await addCard.getByLabel('管理员密码').fill('fixture-secret')
+  await addCard.getByRole('button', { name: '创建来源', exact: true }).click()
+  await page.getByText('来源“iCloud 副号”已创建，可在“注册账号”页面选择使用。', { exact: true }).waitFor()
+  await page.getByText('iCloud 邮箱上游 · acc_secondary · 可用', { exact: true }).waitFor()
   await page.getByRole('button', { name: '核对现有邮箱', exact: true }).click()
   await page.getByText('核对完成：发现 3 个上游邮箱，关联 GPT 1 个、Grok 0 个、Adobe 2 个，修复历史占用 0 个。', { exact: true }).waitFor()
   assert.deepEqual(errors, [])
   assert.deepEqual(unknown, [], 'Unexpected API or external request')
-  assert.deepEqual(requests.filter(req => req.method !== 'GET').map(req => req.path), ['/api/icloud/mailboxes/unused/status', '/api/icloud/mailboxes/unused/status', '/api/icloud/reconcile'])
-  console.log(JSON.stringify({ ok: true, checks: ['three-platform-occupancy-and-registration-chips', 'adobe-filter-parameters', 'adobe-toggle-notices-and-events', 'adobe-reconcile-count', 'adobe-link-audit-label', 'dark-light-rendering'] }))
+  assert.deepEqual(requests.filter(req => req.method !== 'GET').map(req => req.path), ['/api/icloud/mailboxes/unused/status', '/api/icloud/mailboxes/unused/status', '/api/icloud/sources', '/api/icloud/reconcile'])
+  console.log(JSON.stringify({ ok: true, checks: ['three-platform-occupancy-and-registration-chips', 'adobe-filter-parameters', 'adobe-toggle-notices-and-events', 'create-second-hme-source', 'adobe-reconcile-count', 'adobe-link-audit-label', 'dark-light-rendering'] }))
 } catch (error) {
   console.log(JSON.stringify({ errors, unknown, body: (await page.locator('body').innerText()).slice(-6000) }))
   throw error

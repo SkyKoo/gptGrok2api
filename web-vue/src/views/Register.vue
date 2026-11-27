@@ -55,7 +55,7 @@
                   />
                   <span class="min-w-0">
                     <strong>{{ source.label || source.id || '未命名来源' }}</strong>
-                    <small>{{ sourceTypeLabel(source) }} · {{ sourceStatusLabel(source) }}</small>
+                    <small>{{ sourceMetaLabel(source) }}</small>
                   </span>
                   <MetaChip size="xs" :tone="sourceUsable(source) ? 'success' : 'muted'">
                     {{ sourceUsable(source) ? '可用于注册' : '暂未接入' }}
@@ -301,6 +301,10 @@ const sourceUsable = (source: ICloudMailboxSource) => {
 }
 const sourceTypeLabel = (source: ICloudMailboxSource) => source.type === 'icloud_hme' ? 'iCloud 邮箱上游' : String(source.type || '未接入来源')
 const sourceStatusLabel = (source: ICloudMailboxSource) => source.enable === false ? '已停用' : (source.status === 'available' ? '可用' : '仅已迁移配置')
+const sourceMetaLabel = (source: ICloudMailboxSource) => {
+  const accountID = source.type === 'icloud_hme' ? String(source.config?.account_id || '').trim() : ''
+  return [sourceTypeLabel(source), accountID, sourceStatusLabel(source)].filter(Boolean).join(' · ')
+}
 const mailboxSourceIssue = computed(() => {
   const selected = mailboxSources.value.find(source => source.id === selectedMailboxSourceID.value)
   return !selected || !sourceUsable(selected)
@@ -542,8 +546,12 @@ watch(
 
 function activateRegisterView(refresh = false) {
   startGptMailClock()
-  if (refresh && !registerConfigRuntime.hasUnsavedChanges.value) {
-    void Promise.all([loadRegisterConfig(true), loadProxyGroups(), loadMailboxSources()])
+  if (refresh) {
+    if (!registerConfigRuntime.hasUnsavedChanges.value) {
+      void Promise.all([loadRegisterConfig(true), loadProxyGroups(), loadMailboxSources()])
+    } else {
+      void loadMailboxSources()
+    }
   }
   startLiveUpdates()
 }

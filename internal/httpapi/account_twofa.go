@@ -382,7 +382,8 @@ func (s *Server) twoFAAutoCode(ctx context.Context, t *accountTwoFATask, account
 	if err != nil {
 		return
 	}
-	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", firstNonEmpty(box.SourceID, cfg.MailboxSourceID), cfg.PollInterval)
+	sourceID := s.resolveAccountMailboxSourceID(context.Background(), box, cfg.MailboxSourceID)
+	mail, err := newMailboxResourceSource(context.Background(), s.mailboxManager, "openai", sourceID, cfg.PollInterval)
 	if err != nil {
 		return
 	}
