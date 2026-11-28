@@ -26,11 +26,10 @@ await context.addInitScript(()=>{
 const page=await context.newPage(), errors=[], writes=[]
 page.on('pageerror',error=>errors.push(error.message))
 const lite={kind:'video',max_reference_images:2,variants:[
-  {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
-  {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[4,6],audio:true,max_reference_images:2,max_count:1},
-  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
-  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
-  {sizes:['1080x1920'],aspect_ratios:['9:16'],resolutions:['1080p'],durations:[8],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['1920x1080'],aspect_ratios:['16:9'],resolutions:['1080p'],durations:[8,4,6],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['1280x720'],aspect_ratios:['16:9'],resolutions:['720p'],durations:[8,4,6],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['720x1280'],aspect_ratios:['9:16'],resolutions:['720p'],durations:[8,4,6],audio:true,max_reference_images:2,max_count:1},
+  {sizes:['1080x1920'],aspect_ratios:['9:16'],resolutions:['1080p'],durations:[8,4,6],audio:true,max_reference_images:2,max_count:1},
 ]}
 const fast={...lite,variants:lite.variants.map(v=>({...v,audio:false}))}
 const omni11={kind:'video',max_reference_images:2,audio_required:true,default_audio:true,variants:[
@@ -90,9 +89,20 @@ try{
   await button('9:16 竖屏 · 720×1280').click()
   assert.equal(await button('720p').getAttribute('aria-pressed'),'true')
   assert.equal(await button('8 秒').getAttribute('aria-pressed'),'true')
+  assert.deepEqual(await videoSettings().getByRole('button',{name:/^\d+ 秒$/}).allTextContents(),['4 秒','6 秒','8 秒'])
   assert.match(await button('视频设置').innerText(),/9:16 竖屏/)
+  await button('4 秒').click()
+  assert.equal(await button('4 秒').getAttribute('aria-pressed'),'true')
   await button('9:16 竖屏 · 1080×1920').click()
   assert.equal(await button('1080p').getAttribute('aria-pressed'),'true')
+  assert.equal(await button('4 秒').getAttribute('aria-pressed'),'true')
+  assert.deepEqual(await videoSettings().getByRole('button',{name:/^\d+ 秒$/}).allTextContents(),['4 秒','6 秒','8 秒'])
+  await button('16:9 横屏 · 1280×720').click()
+  assert.equal(await button('720p').getAttribute('aria-pressed'),'true')
+  assert.equal(await button('4 秒').getAttribute('aria-pressed'),'true')
+  assert.deepEqual(await videoSettings().getByRole('button',{name:/^\d+ 秒$/}).allTextContents(),['4 秒','6 秒','8 秒'])
+  await button('8 秒').click()
+  await button('9:16 竖屏 · 1080×1920').click()
   await screenshot('lite-free-portrait-options')
   await button('16:9 横屏 · 1920×1080').click()
   await button('4 秒').waitFor();await button('6 秒').waitFor();await button('8 秒').click()
@@ -120,6 +130,15 @@ try{
   await screenshot('fast-audio-explicit-correction')
   await button('无音频').click()
   assert.equal(await button('提交视频任务').isDisabled(),false)
+  await button('9:16 竖屏 · 1080×1920').click()
+  assert.deepEqual(await videoSettings().getByRole('button',{name:/^\d+ 秒$/}).allTextContents(),['4 秒','6 秒','8 秒'])
+  await button('6 秒').click()
+  assert.equal(await button('6 秒').getAttribute('aria-pressed'),'true')
+  await button('16:9 横屏 · 1280×720').click()
+  assert.deepEqual(await videoSettings().getByRole('button',{name:/^\d+ 秒$/}).allTextContents(),['4 秒','6 秒','8 秒'])
+  assert.equal(await button('6 秒').getAttribute('aria-pressed'),'true')
+  await button('16:9 横屏 · 1920×1080').click()
+  await button('8 秒').click()
   await selectVideoModel('Veo 3.1 Lite')
   await page.locator('input[type=file]').setInputFiles(fixtureFile)
   await page.getByText('参考图 1/2 张',{exact:true}).waitFor()

@@ -51,7 +51,7 @@ func TestAdobePublicVideoVariantsPreservePerTierLimits(t *testing.T) {
 		if cap.Audio != (id == "veo-3.1-lite") || cap.DefaultAudio || cap.AudioRequired {
 			t.Fatalf("%s reports incorrect audio capabilities: %+v", id, cap)
 		}
-		if len(cap.Variants) != 5 || !slices.Contains(cap.Resolutions, "720p") || !slices.Contains(cap.Durations, 4) || !slices.Contains(cap.Durations, 6) {
+		if len(cap.Variants) != 4 || !slices.Equal(cap.Sizes, []string{"1920x1080", "1280x720", "720x1280", "1080x1920"}) || !slices.Contains(cap.Resolutions, "720p") || !slices.Equal(cap.Durations, []int{8, 4, 6}) {
 			t.Fatalf("%s expanded tiers are missing: %+v", id, cap)
 		}
 		for _, v := range cap.Variants {
@@ -61,8 +61,8 @@ func TestAdobePublicVideoVariantsPreservePerTierLimits(t *testing.T) {
 			if v.MaxReferenceImages != 2 || v.Audio != (id == "veo-3.1-lite") || v.AudioRequired || v.DefaultAudio {
 				t.Fatalf("%s tier differs from model-wide frame/audio limits: %+v", id, v)
 			}
-			if v.Sizes[0] != "1920x1080" && !slices.Equal(v.Durations, []int{8}) {
-				t.Fatalf("%s exposed shorter duration at unverified dimensions: %+v", id, v)
+			if !slices.Equal(v.Durations, []int{8, 4, 6}) {
+				t.Fatalf("%s tier missing 4/6/8s durations (with 8s default first): %+v", id, v)
 			}
 		}
 	}

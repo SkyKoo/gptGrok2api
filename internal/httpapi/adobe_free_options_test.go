@@ -59,14 +59,26 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 	}
 	cases := []videoOptionCase{
 		{"veo-3.1-lite", "seconds=4", "1920x1080", "1080p", "16:9", 4, false, 0},
+		{"veo-3.1-lite", "size=1280x720&seconds=4", "1280x720", "720p", "16:9", 4, false, 0},
+		{"veo-3.1-lite", "size=1280x720&seconds=6&generate_audio=true", "1280x720", "720p", "16:9", 6, true, 2},
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16", "720x1280", "720p", "9:16", 8, false, 0},
+		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&seconds=4", "720x1280", "720p", "9:16", 4, false, 0},
 		{"veo-3.1-lite", "resolution_name=720p&aspect_ratio=9:16&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 0},
+		{"veo-3.1-lite", "size=720x1280&seconds=6&generate_audio=true", "720x1280", "720p", "9:16", 6, true, 1},
+		{"veo-3.1-lite", "size=1080x1920&seconds=4&generate_audio=true", "1080x1920", "1080p", "9:16", 4, true, 0},
+		{"veo-3.1-lite", "size=1080x1920&seconds=6&generate_audio=false", "1080x1920", "1080p", "9:16", 6, false, 2},
 		{"veo-3.1-lite", "size=1080x1920&generate_audio=true", "1080x1920", "1080p", "9:16", 8, true, 0},
 		{"veo-3.1-lite", "size=720x1280&generate_audio=false", "720x1280", "720p", "9:16", 8, false, 1},
 		{"veo-3.1-lite", "size=1080x1920&generate_audio=false", "1080x1920", "1080p", "9:16", 8, false, 1},
 		{"veo-3.1-lite", "size=720x1280&generate_audio=true", "720x1280", "720p", "9:16", 8, true, 1},
 		{"veo-3.1-lite", "size=1920x1080&generate_audio=true", "1920x1080", "1080p", "16:9", 8, true, 2},
 		{"veo-3.1-fast", "seconds=6&size=1920x1080", "1920x1080", "1080p", "16:9", 6, false, 0},
+		{"veo-3.1-fast", "seconds=4&size=1280x720", "1280x720", "720p", "16:9", 4, false, 0},
+		{"veo-3.1-fast", "seconds=6&size=1280x720", "1280x720", "720p", "16:9", 6, false, 2},
+		{"veo-3.1-fast", "seconds=4&size=720x1280", "720x1280", "720p", "9:16", 4, false, 1},
+		{"veo-3.1-fast", "seconds=6&size=720x1280", "720x1280", "720p", "9:16", 6, false, 0},
+		{"veo-3.1-fast", "seconds=4&size=1080x1920", "1080x1920", "1080p", "9:16", 4, false, 2},
+		{"veo-3.1-fast", "seconds=6&size=1080x1920", "1080x1920", "1080p", "9:16", 6, false, 0},
 		{"veo-3.1-fast", "size=1080x1920", "1080x1920", "1080p", "9:16", 8, false, 2},
 		{"veo-3.1-fast", "size=1280x720", "1280x720", "720p", "16:9", 8, false, 2},
 		{"ray-3.14", "aspect_ratio=9:16", "720x1280", "720p", "9:16", 5, false, 0},
@@ -140,7 +152,7 @@ func TestAdobeVerifiedVideoOptionsReachUnifiedProtocol(t *testing.T) {
 			if tc.model != "ray-3.14" && p["generateAudio"] != tc.audio {
 				t.Fatal("upstream audio differs from the resolved request")
 			}
-			if tc.model == "veo-3.1-lite" {
+			if tc.model == "veo-3.1-lite" || tc.model == "veo-3.1-fast" {
 				width, height, _ := adobePixelSize(tc.size)
 				for _, stage := range []map[string]any{preflight, p} {
 					size := mapValue(stage["size"])
@@ -181,9 +193,10 @@ func TestAdobeUnverifiedVideoCombinationsFailBeforeQueue(t *testing.T) {
 		{"model=veo-3.1-lite&size=1920x1080&seconds=3", 0},
 		{"model=veo-3.1-lite&size=1920x1080&resolution=720p", 0},
 		{"model=veo-3.1-lite&size=1280x720&resolution=1080p", 0},
-		{"model=veo-3.1-lite&size=720x1280&seconds=4", 0},
-		{"model=veo-3.1-lite&size=1080x1920&seconds=6", 0},
-		{"model=veo-3.1-fast&resolution=720p&seconds=4", 0},
+		{"model=veo-3.1-lite&size=720x1280&seconds=5", 0},
+		{"model=veo-3.1-lite&size=1080x1920&seconds=7", 0},
+		{"model=veo-3.1-fast&resolution=720p&seconds=3", 0},
+		{"model=veo-3.1-fast&size=1080x1920&seconds=4&generate_audio=true", 0},
 		{"model=veo-3.1-fast&size=1920x1080&seconds=5", 0},
 		{"model=veo-3.1-lite&size=1920x1080", 3},
 		{"model=veo-3.1-fast&size=1080x1920", 3},

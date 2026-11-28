@@ -7,34 +7,42 @@ import (
 
 func TestVeoFreeCombinationsPreserveFrameAndAudioCapabilities(t *testing.T) {
 	ref := referenceFixture(t, 2, 2)
+	dimensions := []struct {
+		width, height      int
+		resolution, aspect string
+	}{
+		{1920, 1080, "1080p", "16:9"},
+		{1280, 720, "720p", "16:9"},
+		{720, 1280, "720p", "9:16"},
+		{1080, 1920, "1080p", "9:16"},
+	}
 	for _, id := range []string{"veo-3.1-lite", "veo-3.1-fast"} {
-		for _, tier := range []struct {
-			width, height, duration int
-			resolution, aspect      string
-		}{
-			{1920, 1080, 4, "1080p", "16:9"},
-			{1920, 1080, 6, "1080p", "16:9"},
-			{1280, 720, 8, "720p", "16:9"},
-			{720, 1280, 8, "720p", "9:16"},
-			{1080, 1920, 8, "1080p", "9:16"},
-		} {
-			t.Run(fmt.Sprintf("%s/%dx%d/%ds", id, tier.width, tier.height, tier.duration), func(t *testing.T) {
-				r := VideoRequest{Model: id, Prompt: "a landscape", Width: tier.width, Height: tier.height, Duration: tier.duration, Resolution: tier.resolution, AspectRatio: tier.aspect}
-				if _, _, err := ValidateVideoRequest(r); err != nil {
-					t.Fatalf("verified silent text request rejected: %v", err)
+		for _, dim := range dimensions {
+			for _, duration := range []int{4, 6, 8} {
+				t.Run(fmt.Sprintf("%s/%dx%d/%ds", id, dim.width, dim.height, duration), func(t *testing.T) {
+					r := VideoRequest{Model: id, Prompt: "a landscape", Width: dim.width, Height: dim.height, Duration: duration, Resolution: dim.resolution, AspectRatio: dim.aspect}
+					if _, _, err := ValidateVideoRequest(r); err != nil {
+						t.Fatalf("verified silent text request rejected: %v", err)
+					}
+					withAudio := r
+					withAudio.GenerateAudio = true
+					audioAllowed := id == "veo-3.1-lite"
+					if _, _, err := ValidateVideoRequest(withAudio); (err == nil) != audioAllowed {
+						t.Fatalf("audio allowance differs from the model contract: allowed=%t error=%v", audioAllowed, err)
+					}
+					withFrames := r
+					withFrames.References = []ReferenceImage{ref, ref}
+					if _, _, err := ValidateVideoRequest(withFrames); err != nil {
+						t.Fatalf("first/last frame references rejected: %v", err)
+					}
+				})
+			}
+			for _, invalidDuration := range []int{1, 2, 3, 5, 7, 9} {
+				r := VideoRequest{Model: id, Prompt: "a landscape", Width: dim.width, Height: dim.height, Duration: invalidDuration, Resolution: dim.resolution, AspectRatio: dim.aspect}
+				if _, _, err := ValidateVideoRequest(r); err == nil {
+					t.Fatalf("%s accepted unsupported duration %ds at %dx%d", id, invalidDuration, dim.width, dim.height)
 				}
-				withAudio := r
-				withAudio.GenerateAudio = true
-				audioAllowed := id == "veo-3.1-lite"
-				if _, _, err := ValidateVideoRequest(withAudio); (err == nil) != audioAllowed {
-					t.Fatalf("audio allowance differs from the model contract: allowed=%t error=%v", audioAllowed, err)
-				}
-				withFrames := r
-				withFrames.References = []ReferenceImage{ref, ref}
-				if _, _, err := ValidateVideoRequest(withFrames); err != nil {
-					t.Fatalf("first/last frame references rejected: %v", err)
-				}
-			})
+			}
 		}
 		m, _ := FindModel(id)
 		if m.Size != "1920x1080" || m.Duration != 8 || m.Resolution != "1080p" || m.DefaultAudio {

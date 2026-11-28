@@ -50,11 +50,10 @@ func FreeModels() []Model {
 	return []Model{
 		{ID: "gemini-3.1-flash-image", Name: "Gemini 3.1 Flash Image (Nano Banana 2)", OwnedBy: "google", ModelID: "gemini-flash", ModelVersion: "nano-banana-3", FeatureID: "firefly_3p:external:nano_banana_3", Kind: "image", Size: "1024x1024", AspectRatio: "1:1", Resolution: "1K", Variants: imageVariants, ReferenceUsage: "general", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg", "image/webp"}},
 		{ID: "veo-3.1-lite", Name: "Veo 3.1 Lite", OwnedBy: "google", ModelID: "veo", ModelVersion: "3.1-lite-generate", FeatureID: "firefly_3p:external:veo_3_1_lite", Kind: "video", Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", Duration: 8, Variants: []Variant{
-			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8}, Audio: true},
-			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{4, 6}, Audio: true},
-			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8}, Audio: true},
-			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8}, Audio: true},
-			{Size: "1080x1920", AspectRatio: "9:16", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8}, Audio: true},
+			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}, Audio: true},
+			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}, Audio: true},
+			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}, Audio: true},
+			{Size: "1080x1920", AspectRatio: "9:16", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}, Audio: true},
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "firefly-image-4", Name: "Firefly Image 4", OwnedBy: "adobe", ModelID: "firefly-image", ModelVersion: "image4_standard", FeatureID: "firefly:clio_v4_diffusion", Kind: "image", Size: "2048x2048", AspectRatio: "1:1", Resolution: "2K", Variants: []Variant{{Size: "2048x2048", AspectRatio: "1:1", Resolution: "2K", MaxReferenceImages: 1}}, ReferenceUsage: "style", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "firefly-image-5", Name: "Firefly Image 5", OwnedBy: "adobe", ModelID: "firefly-image", ModelVersion: "image5", FeatureID: "firefly:internal:image5_generate", Kind: "image", Size: "1024x1024", AspectRatio: "1:1", Resolution: "1K", Variants: []Variant{{Size: "1024x1024", AspectRatio: "1:1", Resolution: "1K", MaxReferenceImages: 1}}, ReferenceUsage: "general", MaxReferenceBytes: 10 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
@@ -87,11 +86,10 @@ func FreeModels() []Model {
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "veo-3.1-fast", Name: "Veo 3.1 Fast", OwnedBy: "google", ModelID: "veo", ModelVersion: "3.1-fast-generate", FeatureID: "firefly_3p:external:veo_3_fast", Kind: "video", Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", Duration: 8, Variants: []Variant{
 			// Fast supports first/last frames but has no audio output.
-			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8}},
-			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{4, 6}},
-			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8}},
-			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8}},
-			{Size: "1080x1920", AspectRatio: "9:16", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8}},
+			{Size: "1920x1080", AspectRatio: "16:9", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}},
+			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}},
+			{Size: "720x1280", AspectRatio: "9:16", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}},
+			{Size: "1080x1920", AspectRatio: "9:16", Resolution: "1080p", MaxReferenceImages: 2, Durations: []int{8, 4, 6}},
 		}, ReferenceUsage: "frame", MaxReferenceBytes: 20 * 1024 * 1024, ReferenceMIMEs: []string{"image/png", "image/jpeg"}},
 		{ID: "ray-3.14", Name: "Ray 3.14", OwnedBy: "luma", ModelID: "luma", ModelVersion: "3.14-ray", FeatureID: "firefly_3p:external:luma_ray_3_14", Kind: "video", Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", Duration: 5, Variants: []Variant{
 			{Size: "1280x720", AspectRatio: "16:9", Resolution: "720p", MaxReferenceImages: 2, Durations: []int{5}},
